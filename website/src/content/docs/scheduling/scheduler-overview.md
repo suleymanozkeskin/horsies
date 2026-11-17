@@ -43,7 +43,7 @@ The scheduler:
 
 The app config holds the schedule config: whether the scheduler is enabled, the check interval, and the list of schedules. Each schedule names itself, the task it sends, its pattern, its keyword arguments, an optional queue, its timezone and its catch-up rule.
 
-The API is on the client pages: [Schedule Config](/horsies/scheduling/schedule-config/) and [Schedule Patterns](/horsies/scheduling/schedule-patterns/) (Python). The Rust page is not written yet.
+The API is on the client pages: [Schedule Config](/horsies/scheduling/schedule-config/) and [Schedule Patterns](/horsies/scheduling/schedule-patterns/) (Python), and [Schedule Config](/horsies/rust/scheduling/schedule-config/) (Rust).
 
 ## Running the Scheduler
 

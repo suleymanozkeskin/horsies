@@ -28,9 +28,10 @@ One side of a pair:
    started workflow. Every sent task must be terminal at this point.
 
 The snapshot compares by ``WHOLE_RUN_CATALOG``: the baseline rules, with the
-process ids of a run ignored. The heartbeat and worker-state tables are left
-out of the compare: their row counts follow the run time, not a decision of
-the code. Run times inside the run window compare as ``DuringRun``, the
+process ids of a run ignored (the pid columns, the process names and the pid
+fields of the attempt archive). The heartbeat, worker-state and reaper scan
+cursor tables are left out of the compare: their rows follow the run time,
+not a decision of the code. Run times inside the run window compare as ``DuringRun``, the
 worker id as its label. Speed numbers never come from these pairs.
 
 The reference side starts the Python worker parent and its version-1 child
@@ -74,12 +75,21 @@ from tests.dualrun.capture import (
     capture_snapshot,
     read_database_clock,
 )
-from tests.dualrun.catalog import BASELINE_CATALOG
-from tests.dualrun.clients import open_broker, sqlalchemy_url
+from tests.dualrun.catalog import ATTEMPT_ARCHIVE, BASELINE_CATALOG
+from tests.dualrun.clients import open_broker
 from tests.dualrun.compare import SnapshotDiff, compare_snapshots
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.rules import ColumnSpec, Ignored, SnapshotCatalog, TableRules
+from tests.dualrun.rules import (
+    ColumnSpec,
+    EachItem,
+    Ignored,
+    Index,
+    JsonPath,
+    SnapshotCatalog,
+    StoredJson,
+    TableRules,
+)
 from tests.dualrun.values import RunWindowInvalid, make_run_window
 
 APP_LOCATOR: Final = 'tests.dualrun.apps.whole_run_app:app'
@@ -99,16 +109,44 @@ of every profile of the app (5 s) plus the bounded stop steps."""
 
 KILL_WAIT: Final = timedelta(seconds=10)
 
-UNCOMPARED_TABLES: Final = frozenset({'horsies_heartbeats', 'horsies_worker_states'})
-"""Tables whose row count follows the run time: one heartbeat per interval,
-one state sample per interval."""
+UNCOMPARED_TABLES: Final = frozenset({
+    'horsies_heartbeats',
+    'horsies_worker_states',
+    'horsies_recovery_scan_cursors',
+})
+"""Tables whose rows follow the run time: one heartbeat per interval, one
+state sample per interval, and the scan cursors of the reaper, which move
+once per reaper pass."""
 
-PROCESS_ID_COLUMNS: Final = frozenset({'worker_pid', 'last_worker_pid'})
-"""Columns that hold the process id of a worker child of the run."""
+PROCESS_ID_COLUMNS: Final = frozenset({
+    'worker_pid',
+    'last_worker_pid',
+    'worker_process_name',
+    'last_worker_process_name',
+})
+"""Columns that hold the process id of a worker child of the run, or the
+process name that holds it (``worker-<pid>``)."""
 
 _RUN_PROCESS_ID: Final = Ignored(
     reason='the process id of a worker child; each run starts its own processes',
 )
+
+ARCHIVE_PROCESS_ID_POSITIONS: Final = (10, 11)
+"""The fields of an attempt of the attempt archive (version 1) that hold the
+process id of its worker child: ``worker_pid`` and ``worker_process_name``."""
+
+WHOLE_RUN_ATTEMPT_ARCHIVE: Final = StoredJson(
+    storage=ATTEMPT_ARCHIVE.storage,
+    format=ATTEMPT_ARCHIVE.format,
+    paths=(
+        *ATTEMPT_ARCHIVE.paths,
+        *(
+            JsonPath(steps=(EachItem(), Index(position=position)), rule=_RUN_PROCESS_ID)
+            for position in ARCHIVE_PROCESS_ID_POSITIONS
+        ),
+    ),
+)
+"""The attempt archive with the process id fields of each attempt ignored."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,17 +379,24 @@ def _whole_run_table(table: TableRules) -> TableRules:
         case True:
             return table
         case False:
-            columns = tuple(
-                ColumnSpec(name=column.name, rule=_RUN_PROCESS_ID)
-                if column.name in PROCESS_ID_COLUMNS
-                else column
-                for column in table.columns
-            )
+            columns = tuple(_whole_run_column(column) for column in table.columns)
             return dataclasses.replace(table, columns=columns)
 
 
+def _whole_run_column(column: ColumnSpec) -> ColumnSpec:
+    """``column`` with the process id of a run ignored: a process id
+    column, and the process id fields of the attempt archive. Pure."""
+    match column.name in PROCESS_ID_COLUMNS, column.rule == ATTEMPT_ARCHIVE:
+        case True, _:
+            return ColumnSpec(name=column.name, rule=_RUN_PROCESS_ID)
+        case False, True:
+            return ColumnSpec(name=column.name, rule=WHOLE_RUN_ATTEMPT_ARCHIVE)
+        case False, False:
+            return column
+
+
 def whole_run_catalog(base: SnapshotCatalog) -> SnapshotCatalog:
-    """``base`` with the process id columns of a run ignored. The tables of
+    """``base`` with the process ids of a run ignored. The tables of
     ``UNCOMPARED_TABLES`` keep their rules: they are captured, then left out
     by ``compared_part``. Pure."""
     return SnapshotCatalog(
@@ -610,6 +655,18 @@ def read_task_report(
     return report
 
 
+def worker_environment(database: DualRunDatabase, marker_dir: str) -> dict[str, str]:
+    """The environment of a worker process of one side: this process's
+    environment, the repository on ``PYTHONPATH``, the libpq URL of
+    ``database`` (the URL that ``PostgresConfig`` accepts) and the marker
+    directory of the side."""
+    env = os.environ.copy()
+    env['PYTHONPATH'] = REPO_ROOT
+    env[whole_run_app.DATABASE_URL_ENV] = database.url
+    env[whole_run_app.MARKER_DIR_ENV] = marker_dir
+    return env
+
+
 def _start_worker(
     command: WorkerCommand,
     database: DualRunDatabase,
@@ -617,10 +674,7 @@ def _start_worker(
     log_path: str,
     marker_dir: str,
 ) -> subprocess.Popen[bytes]:
-    env = os.environ.copy()
-    env['PYTHONPATH'] = REPO_ROOT
-    env[whole_run_app.DATABASE_URL_ENV] = sqlalchemy_url(database)
-    env[whole_run_app.MARKER_DIR_ENV] = marker_dir
+    env = worker_environment(database, marker_dir)
     with open(log_path, 'wb') as log:
         return subprocess.Popen(
             [*command.argv, APP_LOCATOR, f'--profile={profile}', '--loglevel=info'],

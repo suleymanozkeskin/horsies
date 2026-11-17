@@ -43,6 +43,7 @@ class SwitchModule(Enum):
     BROKER = 'broker'
     MONITORING_AND_WEB = 'monitoring-and-web'
     WORKFLOW_ENGINE = 'workflow-engine'
+    SCHEDULER = 'scheduler'
 
 
 class Implementation(Enum):

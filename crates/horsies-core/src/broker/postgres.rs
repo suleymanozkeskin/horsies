@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Timelike, Utc};
-use serde::de::DeserializeOwned;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::ConnectOptions;
 use std::str::FromStr;
@@ -23,14 +22,11 @@ use crate::core::history::rerun::operations::{
     rerun_first_statement, rerun_task_in_transaction, RerunEnqueuePolicy, RerunError, RerunOutcome,
     RerunTask,
 };
-use crate::core::{
-    EnqueueRetention, OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult,
-};
+use crate::core::{EnqueueRetention, PostgresConfig, TaskInfo};
 
 use crate::broker::core_rows::{
     column, expired_list_row, listed_worker_state_row, one_row, read_rows, scalar, stale_list_row,
-    stored_worker_state, task_attempt_row, task_info_row, task_result_row, RowDecodeError,
-    StatementLog,
+    stored_worker_state, task_attempt_row, task_info_row, RowDecodeError, StatementLog,
 };
 use crate::broker::enqueue_task::{
     decode_enqueue_outcome, enqueue_result, EnqueueKey, EnqueueStart, EnqueueTaskOutcome, SendKind,
@@ -48,7 +44,7 @@ use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
     StoredEnvelopeText, TaskInfoRead,
 };
-use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskResultRow};
+use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow};
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
 
 use crate::broker::client_family::{
@@ -66,6 +62,7 @@ use crate::broker::wait_limit::WaitLimit;
 use crate::db::{
     PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
 };
+use crate::failure_cause::FailureCause;
 
 use crate::broker::pools::{
     CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
@@ -377,20 +374,10 @@ static REQUEUE: TypedStatement = TypedStatement::new(
 // `python/horsies/core/brokers/postgres.py:942-948`; `get_task_info_async`,
 // `:3659-3672`).
 
-/// The live row of the result wait while the staged result function is not
-/// published.
-const GET_RESULT_SQL: &str = "\
-SELECT id, status, NULL::text AS result, NULL::text AS failed_reason
-FROM horsies_tasks
-WHERE id = $1";
-
 const GET_RAW_RESULT_PROBE_SQL: &str = "\
 SELECT id, task_name, status
 FROM horsies_tasks
 WHERE id = $1";
-
-static GET_RESULT: TypedStatement =
-    TypedStatement::new("get_result", GET_RESULT_SQL, &[ParameterType::Uuid]);
 
 static GET_RAW_RESULT_PROBE: TypedStatement = TypedStatement::new(
     "get_raw_result_probe",
@@ -1919,74 +1906,6 @@ impl PostgresBroker {
     // Result retrieval
     // -----------------------------------------------------------------------
 
-    /// Fetch a typed task result, optionally waiting for completion.
-    ///
-    /// 1. Parses `timeout` into a [`WaitLimit`]. A limit above
-    ///    [`MAX_WAIT_LIMIT_MS`](crate::broker::wait_limit::MAX_WAIT_LIMIT_MS)
-    ///    returns `RetrievalCode::InvalidInput` before any read.
-    /// 2. Quick-checks the database for a terminal status.
-    /// 3. If not done, subscribes a wake for the task id on `task_done` on
-    ///    the broker's listener, reads again, and waits. A listener gap reads
-    ///    at once. A broker with no listener, or a subscription that is
-    ///    refused, makes the wait poll.
-    /// 4. On timeout, returns `TaskResult::Err(TaskError(WaitTimeout))`.
-    ///
-    /// Every concurrent wait shares the broker's one listener connection.
-    pub async fn get_result<T: DeserializeOwned>(
-        &self,
-        task_id: Uuid,
-        timeout: Option<Duration>,
-    ) -> Result<TaskResult<T>, BrokerError> {
-        let start = Instant::now();
-        let limit = match WaitLimit::parse(timeout) {
-            Ok(limit) => limit,
-            Err(refused) => {
-                return Ok(TaskResult::Err(TaskError::builtin(
-                    RetrievalCode::InvalidInput,
-                    refused.to_string(),
-                )));
-            }
-        };
-
-        // Quick check — task may already be done, or may not exist.
-        if let Some(outcome) = Box::pin(self.poll_result::<T>(task_id)).await? {
-            return Ok(outcome);
-        }
-
-        let mut wait_mode = self.result_wait_mode(task_id).await;
-
-        // Re-check after subscribing to avoid a race where the task completes
-        // between our first check and the subscribe.
-        if let Some(outcome) = Box::pin(self.poll_result::<T>(task_id)).await? {
-            return Ok(outcome);
-        }
-
-        let deadline = limit.deadline_from(start);
-
-        loop {
-            // For a timed wait, stop once the deadline has passed (terminal /
-            // not-found / WaitTimeout).
-            if let Some(d) = deadline {
-                if Instant::now() >= d {
-                    let elapsed_ms = start.elapsed().as_millis() as u64;
-                    return Box::pin(self.final_poll_or_timeout::<T>(task_id, elapsed_ms)).await;
-                }
-            }
-
-            // Cap each wait at the repoll interval of the mode, so a lost
-            // NOTIFY costs at most one interval. Never wait past the deadline.
-            let interval = wait_mode.repoll_interval();
-            let wait = match deadline {
-                Some(d) => d.saturating_duration_since(Instant::now()).min(interval),
-                None => interval,
-            };
-            wait_mode.pause(wait).await;
-            if let Some(outcome) = Box::pin(self.poll_result::<T>(task_id)).await? {
-                return Ok(outcome);
-            }
-        }
-    }
-
     /// Fetch the verified outer result envelope without task-specific decoding.
     ///
     /// A terminal history row is resolved through the staged detail reader.
@@ -2128,6 +2047,7 @@ impl PostgresBroker {
                  on {TASK_INFO_READ_PASSES} passes in a row"
             ),
             retryable: true,
+            cause: FailureCause::PreconditionFailed,
         })
     }
 
@@ -2150,6 +2070,7 @@ impl PostgresBroker {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                cause: error.failure_cause(),
             })?
             .into_iter()
             .next();
@@ -2305,6 +2226,7 @@ impl PostgresBroker {
                 code: BrokerErrorCode::DbPingFailed,
                 message: format!("database ping failed: {error}"),
                 retryable: error.is_retryable(),
+                cause: error.failure_cause(),
             }),
         }
     }
@@ -2366,6 +2288,7 @@ impl PostgresBroker {
             code: BrokerErrorCode::WorkerPingFailed,
             message: format!("ping_workers payload encode failed: {}", e),
             retryable: false,
+            cause: FailureCause::ContractViolation,
         })?;
 
         let _notified = self
@@ -2402,6 +2325,7 @@ impl PostgresBroker {
                         code: BrokerErrorCode::WorkerPingFailed,
                         message: "ping_workers reply wait failed: the listener stopped".to_owned(),
                         retryable: true,
+                        cause: FailureCause::Connection,
                     });
                 }
                 Ok(PayloadEvent::Payload(reply)) => {
@@ -2623,65 +2547,6 @@ impl PostgresBroker {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// One statement through the staged result function. While that function
-    /// is not published (an upgraded schema before its next coverage pass),
-    /// falls back to the live read plus the staged detail read. A function
-    /// dropped out of band after this broker saw it fails one call with the
-    /// `42883` refusal that names it; the next call falls back (Python's
-    /// rule, [`read_task_result`]).
-    ///
-    /// An absence from the result reader is confirmed by the detail reader: a
-    /// result reader rendered before a leaf existed does not probe that leaf,
-    /// and only the detail reader's absence is final.
-    async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
-        let open = self.core.pools()?;
-        let read = read_task_result(
-            open.main(),
-            self.statement_log,
-            &self.result_reader,
-            task_id,
-        )
-        .await?;
-        match read {
-            TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
-                id: task_id,
-                status: live.status,
-                result: None,
-                failed_reason: None,
-            })),
-            TaskResultRead::History(history) => Ok(ResultRowProbe::Row(history_task_result_row(
-                task_id, history,
-            )?)),
-            TaskResultRead::Absent => self.confirm_result_absence(task_id).await,
-            TaskResultRead::NotPublished => self.fetch_result_row_unstaged(task_id).await,
-        }
-    }
-
-    /// The detail reader's answer for a task id the result reader did not
-    /// find: absent, live again, or the history row's result.
-    async fn confirm_result_absence(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
-        match self.fetch_history_detail(task_id).await? {
-            TaskDetailResult::Absent { .. } => Ok(ResultRowProbe::Absent),
-            TaskDetailResult::Live { .. } => Ok(ResultRowProbe::Live),
-            TaskDetailResult::History(detail) => {
-                Ok(ResultRowProbe::Row(history_result_row(detail)?))
-            }
-        }
-    }
-
-    async fn fetch_result_row_unstaged(
-        &self,
-        task_id: Uuid,
-    ) -> Result<ResultRowProbe, BrokerError> {
-        let live = self
-            .read_main(&GET_RESULT.bind().value(&task_id).finish(), task_result_row)
-            .await?;
-        if let Some(row) = live.into_iter().next() {
-            return Ok(ResultRowProbe::Row(row));
-        }
-        self.confirm_result_absence(task_id).await
-    }
-
     /// One probe of the raw result wait, as Python's `_probe_result_row`
     /// (the dual-run reference `tests/dualrun/reference/result_caller.py`
     /// runs it): one statement through the staged result function
@@ -2745,50 +2610,6 @@ impl PostgresBroker {
     async fn fetch_history_detail(&self, task_id: Uuid) -> Result<TaskDetailResult, BrokerError> {
         let open = self.core.pools()?;
         read_history_detail(open.main(), self.statement_log, task_id).await
-    }
-
-    /// Poll the result row once for the wait loop.
-    ///
-    /// Returns `Some(outcome)` when the wait should end: the parsed terminal
-    /// result, or a typed `TaskNotFound` outcome for a row that does not exist
-    /// (pruned by retention, or never present) so the caller never blocks
-    /// forever (C3). Returns `None` when the task exists but is not yet terminal.
-    async fn poll_result<T: DeserializeOwned>(
-        &self,
-        task_id: Uuid,
-    ) -> Result<Option<TaskResult<T>>, BrokerError> {
-        match self.fetch_result_row(task_id).await? {
-            ResultRowProbe::Row(row) if is_terminal_status(&row.status) => {
-                parse_task_result_row(row).map(Some)
-            }
-            ResultRowProbe::Row(_) | ResultRowProbe::Live => Ok(None),
-            ResultRowProbe::Absent => Ok(Some(TaskResult::Err(TaskError::builtin(
-                RetrievalCode::TaskNotFound,
-                format!("task {} not found", task_id),
-            )))),
-        }
-    }
-
-    async fn final_poll_or_timeout<T: DeserializeOwned>(
-        &self,
-        task_id: Uuid,
-        elapsed_ms: u64,
-    ) -> Result<TaskResult<T>, BrokerError> {
-        match self.fetch_result_row(task_id).await? {
-            ResultRowProbe::Row(row) if is_terminal_status(&row.status) => {
-                parse_task_result_row(row)
-            }
-            ResultRowProbe::Row(_) | ResultRowProbe::Live => {
-                Ok(TaskResult::Err(TaskError::builtin(
-                    RetrievalCode::WaitTimeout,
-                    format!("task {} not terminal after {}ms", task_id, elapsed_ms),
-                )))
-            }
-            ResultRowProbe::Absent => Ok(TaskResult::Err(TaskError::builtin(
-                RetrievalCode::TaskNotFound,
-                format!("task {} not found", task_id),
-            ))),
-        }
     }
 }
 
@@ -2878,13 +2699,8 @@ fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
         code,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
-}
-
-enum ResultRowProbe {
-    Row(TaskResultRow),
-    Live,
-    Absent,
 }
 
 #[derive(Debug)]
@@ -3035,6 +2851,7 @@ fn invalid_raw_result(message: String) -> BrokerOperationError {
         code: BrokerErrorCode::InvalidJsonPayload,
         message,
         retryable: false,
+        cause: FailureCause::ContractViolation,
     }
 }
 
@@ -3049,6 +2866,7 @@ fn raw_result_operation_error(error: BrokerError) -> BrokerOperationError {
         code,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -3094,42 +2912,6 @@ fn history_result_text(detail: &HistoryTaskDetail) -> Result<Option<String>, Bro
     )
     .map(Some)
     .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))
-}
-
-fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, BrokerError> {
-    let result = history_result_text(&detail)?;
-    Ok(TaskResultRow {
-        id: detail.task_id,
-        status: detail.status.to_string(),
-        result,
-        failed_reason: detail.final_failed_reason,
-    })
-}
-
-fn history_task_result_row(
-    task_id: Uuid,
-    history: HistoryTaskResult,
-) -> Result<TaskResultRow, BrokerError> {
-    let result = match &history.payload {
-        HistoryResultPayload::Absent => None,
-        HistoryResultPayload::Stored { payload, digest } => {
-            let text = decode_result_envelope_text(
-                history.envelope_version,
-                &history.codec,
-                &history.content_type,
-                payload,
-                digest,
-            )
-            .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))?;
-            Some(text)
-        }
-    };
-    Ok(TaskResultRow {
-        id: task_id,
-        status: history.status,
-        result,
-        failed_reason: history.failed_reason,
-    })
 }
 
 /// The task info of a history row (Python `PostgresBroker._history_task_info`).
@@ -3252,10 +3034,6 @@ fn parse_task_attempt_outcome(value: &str) -> Result<crate::core::TaskAttemptOut
 // Free functions
 // ---------------------------------------------------------------------------
 
-fn is_terminal_status(status: &str) -> bool {
-    matches!(status, "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED")
-}
-
 /// A list function's rows that break its contract, as a row decode error.
 fn list_shape_error(statement: &TypedStatement, shape: ListShapeError) -> BrokerError {
     BrokerError::RowDecode(RowDecodeError::Shape {
@@ -3272,6 +3050,7 @@ fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperatio
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -3285,11 +3064,13 @@ fn worker_ping_subscribe_error(error: &ListenError) -> BrokerOperationError {
             code: BrokerErrorCode::ListenerDisabled,
             message: format!("ping_workers needs a listener: {error}"),
             retryable: false,
+            cause: error.failure_cause(),
         },
         ListenError::PlanRefused(_) | ListenError::Subscribe(_) => BrokerOperationError {
             code: BrokerErrorCode::WorkerPingFailed,
             message: format!("ping_workers reply subscribe failed: {error}"),
             retryable: error.is_retryable(),
+            cause: error.failure_cause(),
         },
     }
 }
@@ -3301,6 +3082,7 @@ fn worker_ping_statement_error(operation: &str, error: BrokerError) -> BrokerOpe
         code: BrokerErrorCode::WorkerPingFailed,
         message: format!("ping_workers {operation} failed: {error}"),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -3311,6 +3093,7 @@ fn invalid_input(message: String) -> BrokerOperationError {
         code: BrokerErrorCode::InvalidInput,
         message,
         retryable: false,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -3352,62 +3135,6 @@ fn decode_pong(
         pid: payload.pid,
         round_trip_ms: elapsed.as_secs_f64() * 1000.0,
     })
-}
-
-/// Parse the result row into a `TaskResult<T>`.
-///
-/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED,
-/// FAILED and EXPIRED. Maps database statuses to `TaskResult` variants
-/// (Python `TaskHandle._record_to_task_result`):
-/// - `COMPLETED`/`FAILED`/`EXPIRED` + valid JSON -> decoded `TaskResult<T>`
-/// - `COMPLETED`/`FAILED`/`EXPIRED` + null -> `TaskResult::Err(ResultNotAvailable)`
-///   with `data = {"task_id": "<id>", "status": "<status>"}`
-/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))` with
-///   `data = {"task_id": "<id>"}`
-#[allow(clippy::needless_pass_by_value)]
-fn parse_task_result_row<T: DeserializeOwned>(
-    row: TaskResultRow,
-) -> Result<TaskResult<T>, BrokerError> {
-    match row.status.as_str() {
-        // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`,
-        // so an EXPIRED row decodes like COMPLETED and FAILED.
-        "COMPLETED" | "FAILED" | "EXPIRED" => match row.result {
-            Some(ref result_json) => {
-                let task_result: TaskResult<T> =
-                    serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
-                Ok(task_result)
-            }
-            // Python `TaskHandle._record_to_task_result`: a terminal row
-            // that stored no result is RESULT_NOT_AVAILABLE, with the id and
-            // the status in `data`.
-            None => Ok(TaskResult::Err(TaskError {
-                data: Some(serde_json::json!({
-                    "task_id": row.id.to_string(),
-                    "status": row.status,
-                })),
-                ..TaskError::builtin(
-                    RetrievalCode::ResultNotAvailable,
-                    format!(
-                        "Task {} reached terminal status {} but stored no result payload",
-                        row.id, row.status
-                    ),
-                )
-            })),
-        },
-        // Python `TaskHandle._record_to_task_result`: the code, the message
-        // and the task id in `data`.
-        "CANCELLED" => Ok(TaskResult::Err(TaskError {
-            data: Some(serde_json::json!({ "task_id": row.id.to_string() })),
-            ..TaskError::builtin(
-                OutcomeCode::TaskCancelled,
-                format!("Task {} was cancelled before completion", row.id),
-            )
-        })),
-        other => Err(BrokerError::InvalidStatus(format!(
-            "task {} has non-terminal status {}",
-            row.id, other,
-        ))),
-    }
 }
 
 use crate::worker::retry::stored_max_retries;
@@ -3549,16 +3276,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn terminal_status_check() {
-        assert!(is_terminal_status("COMPLETED"));
-        assert!(is_terminal_status("FAILED"));
-        assert!(is_terminal_status("CANCELLED"));
-        assert!(!is_terminal_status("PENDING"));
-        assert!(!is_terminal_status("CLAIMED"));
-        assert!(!is_terminal_status("RUNNING"));
-    }
-
     /// The list rules (equal deadline is expired; the stale verdict) live in
     /// the baseline functions; the broker calls them.
     #[test]
@@ -3569,398 +3286,6 @@ mod tests {
         assert!(LIST_STALE_TASKS
             .sql()
             .contains("FROM horsies_list_stale_tasks($1)"));
-    }
-
-    #[test]
-    fn parse_completed_result() {
-        let wrapped = TaskResult::Ok(42);
-        let result_json = serde_json::to_string(&wrapped).unwrap();
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "COMPLETED".to_owned(),
-            result: Some(result_json),
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_ok());
-        assert_eq!(task_result.unwrap(), 42);
-    }
-
-    #[test]
-    fn parse_completed_null_result() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "COMPLETED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_err());
-        let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("stored no result payload"));
-    }
-
-    #[test]
-    fn parse_failed_with_task_error() {
-        let err = TaskError::new("VALIDATION", "bad input").unwrap();
-        let wrapped: TaskResult<i32> = TaskResult::Err(err);
-        let err_json = serde_json::to_string(&wrapped).unwrap();
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "FAILED".to_owned(),
-            result: Some(err_json),
-            failed_reason: Some("bad input".to_owned()),
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_err());
-    }
-
-    #[test]
-    fn parse_failed_without_result() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "FAILED".to_owned(),
-            result: None,
-            failed_reason: Some("something broke".to_owned()),
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_err());
-        let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("stored no result payload"));
-    }
-
-    #[test]
-    fn parse_cancelled() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "CANCELLED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_err());
-    }
-
-    #[test]
-    fn parse_non_terminal_status_is_error() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "RUNNING".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let result: Result<TaskResult<i32>, BrokerError> = parse_task_result_row(row);
-        assert!(matches!(result, Err(BrokerError::InvalidStatus(_))));
-    }
-
-    /// C2: an EXPIRED row with a stored `TaskResult::Err(TASK_EXPIRED)` must
-    /// decode that stored outcome, not return a spurious `InvalidStatus` error.
-    #[test]
-    fn parse_expired_with_stored_result() {
-        let wrapped: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OutcomeCode::TaskExpired,
-            "deadline passed",
-        ));
-        let result_json = serde_json::to_string(&wrapped).unwrap();
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "EXPIRED".to_owned(),
-            result: Some(result_json),
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        let err = task_result.unwrap_err();
-        let expected = TaskError::builtin(OutcomeCode::TaskExpired, "").error_code;
-        assert_eq!(err.error_code, expected);
-    }
-
-    /// A terminal row that stored no result reads as `RESULT_NOT_AVAILABLE`
-    /// with Python's message and the id and status in `data`, for each of
-    /// COMPLETED, FAILED and EXPIRED (Python
-    /// `TaskHandle._record_to_task_result`; `test_app_get_result.py::
-    /// TestHorsiesGetResultEnvelopeGuards::
-    /// test_terminal_status_with_none_payload_is_result_not_available`). An
-    /// EXPIRED row with no stored result does not read as `TASK_EXPIRED`,
-    /// and it is no `InvalidStatus` broker error.
-    #[test]
-    fn a_terminal_row_without_a_result_reads_as_result_not_available() {
-        let task_id = Uuid::new_v4();
-        for status in ["COMPLETED", "FAILED", "EXPIRED"] {
-            let row = TaskResultRow {
-                id: task_id,
-                status: status.to_owned(),
-                result: None,
-                failed_reason: None,
-            };
-
-            let task_result: TaskResult<serde_json::Value> =
-                parse_task_result_row(row).expect("a terminal row reads");
-
-            let TaskResult::Err(error) = task_result else {
-                panic!("{status}: a row with no result must read as an error");
-            };
-            assert_eq!(
-                error.error_code,
-                TaskError::builtin(RetrievalCode::ResultNotAvailable, "").error_code,
-                "{status}"
-            );
-            assert_eq!(
-                error.message.as_deref(),
-                Some(
-                    format!(
-                        "Task {task_id} reached terminal status {status} but stored no result payload"
-                    )
-                    .as_str()
-                ),
-                "{status}"
-            );
-            assert_eq!(
-                error.data,
-                Some(serde_json::json!({ "task_id": task_id.to_string(), "status": status })),
-                "{status}"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Additional parse_task_result_row tests
-    // -----------------------------------------------------------------------
-
-    /// PENDING is not terminal; parse_task_result_row should return InvalidStatus.
-    #[test]
-    fn parse_pending_status_is_error() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "PENDING".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let result: Result<TaskResult<i32>, BrokerError> = parse_task_result_row(row);
-        match result {
-            Err(BrokerError::InvalidStatus(msg)) => {
-                assert!(
-                    msg.contains(&Uuid::nil().to_string()),
-                    "expected task id in message: {}",
-                    msg
-                );
-                assert!(
-                    msg.contains("PENDING"),
-                    "expected status in message: {}",
-                    msg,
-                );
-            }
-            other => panic!("expected InvalidStatus, got: {:?}", other),
-        }
-    }
-
-    /// CLAIMED is not terminal; parse_task_result_row should return InvalidStatus.
-    #[test]
-    fn parse_claimed_status_is_error() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "CLAIMED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let result: Result<TaskResult<i32>, BrokerError> = parse_task_result_row(row);
-        assert!(matches!(result, Err(BrokerError::InvalidStatus(_))));
-    }
-
-    /// Cancelled tasks should produce TaskResult::Err with TaskCancelled code.
-    #[test]
-    fn parse_cancelled_produces_err() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "CANCELLED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_err());
-        let err = task_result.unwrap_err();
-        assert!(err
-            .message
-            .as_deref()
-            .unwrap()
-            .contains(&Uuid::nil().to_string()));
-    }
-
-    /// Cancelled with leftover result data should still return TaskCancelled
-    /// (result column is ignored for CANCELLED status).
-    #[test]
-    fn parse_cancelled_ignores_result_column() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "CANCELLED".to_owned(),
-            result: Some(r#"{"__h_task_result__":true,"ok":42,"err":null}"#.to_owned()),
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_err());
-        let err = task_result.unwrap_err();
-        assert!(err
-            .message
-            .as_deref()
-            .unwrap()
-            .contains(&Uuid::nil().to_string()));
-    }
-
-    /// A CANCELLED task reads as `TASK_CANCELLED` with Python's message and
-    /// its task id in `data` (Python `TaskHandle._record_to_task_result`;
-    /// `tests/e2e/test_layer1_tasks.py::test_task_cancelled`:
-    /// `result.err.data['task_id'] == task_id`).
-    #[test]
-    fn parse_cancelled_carries_the_task_id_in_data() {
-        let task_id = Uuid::new_v4();
-        let row = TaskResultRow {
-            id: task_id,
-            status: "CANCELLED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-
-        let task_result: TaskResult<serde_json::Value> =
-            parse_task_result_row(row).expect("a CANCELLED row reads");
-
-        let TaskResult::Err(error) = task_result else {
-            panic!("a CANCELLED task must read as an error");
-        };
-        assert_eq!(
-            error.error_code,
-            TaskError::builtin(OutcomeCode::TaskCancelled, "").error_code
-        );
-        assert_eq!(
-            error.message.as_deref(),
-            Some(format!("Task {task_id} was cancelled before completion").as_str())
-        );
-        assert_eq!(
-            error.data,
-            Some(serde_json::json!({ "task_id": task_id.to_string() }))
-        );
-        assert!(error.exception.is_none());
-    }
-
-    /// Completed task with a string result type.
-    #[test]
-    fn parse_completed_string_result() {
-        let wrapped = TaskResult::Ok("hello world".to_owned());
-        let result_json = serde_json::to_string(&wrapped).unwrap();
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "COMPLETED".to_owned(),
-            result: Some(result_json),
-            failed_reason: None,
-        };
-        let task_result: TaskResult<String> = parse_task_result_row(row).unwrap();
-        assert_eq!(task_result.unwrap(), "hello world");
-    }
-
-    /// Completed task with a complex struct result.
-    #[test]
-    fn parse_completed_struct_result() {
-        use serde::{Deserialize, Serialize};
-
-        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-        struct Output {
-            count: u64,
-            label: String,
-        }
-
-        let value = Output {
-            count: 99,
-            label: "items".to_owned(),
-        };
-        let wrapped = TaskResult::Ok(value.clone());
-        let result_json = serde_json::to_string(&wrapped).unwrap();
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "COMPLETED".to_owned(),
-            result: Some(result_json),
-            failed_reason: None,
-        };
-        let task_result: TaskResult<Output> = parse_task_result_row(row).unwrap();
-        assert_eq!(task_result.unwrap(), value);
-    }
-
-    /// Malformed JSON in result column should produce a Serialization error.
-    #[test]
-    fn parse_completed_with_malformed_json() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "COMPLETED".to_owned(),
-            result: Some("this is not json".to_owned()),
-            failed_reason: None,
-        };
-        let result: Result<TaskResult<i32>, BrokerError> = parse_task_result_row(row);
-        assert!(
-            matches!(result, Err(BrokerError::Serialization(_))),
-            "expected Serialization error for malformed JSON, got: {:?}",
-            result,
-        );
-    }
-
-    /// Failed task with malformed JSON should also produce Serialization error.
-    #[test]
-    fn parse_failed_with_malformed_json() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "FAILED".to_owned(),
-            result: Some("{broken".to_owned()),
-            failed_reason: Some("oops".to_owned()),
-        };
-        let result: Result<TaskResult<i32>, BrokerError> = parse_task_result_row(row);
-        assert!(matches!(result, Err(BrokerError::Serialization(_))));
-    }
-
-    /// Completed with a unit-type result (common for fire-and-forget tasks).
-    #[test]
-    fn parse_completed_unit_result() {
-        let wrapped: TaskResult<()> = TaskResult::Ok(());
-        let result_json = serde_json::to_string(&wrapped).unwrap();
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "COMPLETED".to_owned(),
-            result: Some(result_json),
-            failed_reason: None,
-        };
-        let task_result: TaskResult<()> = parse_task_result_row(row).unwrap();
-        assert!(task_result.is_ok());
-    }
-
-    // -----------------------------------------------------------------------
-    // is_terminal_status edge cases
-    // -----------------------------------------------------------------------
-
-    /// Empty string is not terminal.
-    #[test]
-    fn empty_string_not_terminal() {
-        assert!(!is_terminal_status(""));
-    }
-
-    /// Case sensitivity: lowercase should not match.
-    #[test]
-    fn terminal_status_is_case_sensitive() {
-        assert!(!is_terminal_status("completed"));
-        assert!(!is_terminal_status("failed"));
-        assert!(!is_terminal_status("cancelled"));
-        assert!(!is_terminal_status("Completed"));
-    }
-
-    /// EXPIRED is terminal.
-    #[test]
-    fn expired_is_terminal() {
-        assert!(is_terminal_status("EXPIRED"));
-    }
-
-    /// Verify that get_result returns Result<TaskResult<T>, BrokerError>.
-    #[test]
-    fn get_result_return_type_contract() {
-        #[allow(unused, unreachable_code)]
-        async fn _check(broker: &PostgresBroker) {
-            let _result: Result<TaskResult<i32>, BrokerError> = broker
-                .get_result(Uuid::nil(), Some(Duration::from_secs(5)))
-                .await;
-        }
     }
 
     /// Verify that get_task_info returns BrokerResult<TaskInfoRead>
@@ -4394,10 +3719,10 @@ mod prestart_expiry_tests {
 }
 
 #[cfg(test)]
-mod get_result_wait_tests {
-    //! C3: `get_result` must never block forever. A no-timeout wait on a task
-    //! that does not exist (pruned by retention, or a bogus id) returns a typed
-    //! `TaskNotFound` outcome from the initial poll instead of hanging.
+mod result_wait_tests {
+    //! C3: a result wait must never block forever. A wait with no limit on a
+    //! task that does not exist (pruned by retention, or a bogus id) answers
+    //! its absence from the first probe instead of hanging.
     use super::*;
     use serial_test::serial;
     use std::time::Duration;
@@ -4436,24 +3761,21 @@ mod get_result_wait_tests {
 
     #[tokio::test]
     #[serial]
-    async fn get_result_no_timeout_returns_not_found_for_missing_task() {
+    async fn a_result_wait_with_no_limit_ends_for_a_missing_task() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let broker = PostgresBroker::from_pool(pool);
         let missing = Uuid::new_v4();
 
-        // Wrap in an outer timeout: before the fix, a no-timeout wait on a
-        // missing task hangs here forever, so the expect() below fails fast.
-        let res = tokio::time::timeout(
+        // An outer timeout: a wait with no limit on a missing task that
+        // hangs fails here at once.
+        let read = tokio::time::timeout(
             Duration::from_secs(5),
-            broker.get_result::<i32>(missing, None),
+            broker.get_raw_result_record(missing, None),
         )
         .await
-        .expect("get_result(None) must not hang for a missing task");
-
-        let outcome = res.expect("no broker error");
-        let err = outcome.unwrap_err();
-        let expected = TaskError::builtin(RetrievalCode::TaskNotFound, "").error_code;
-        assert_eq!(err.error_code, expected, "expected a TaskNotFound outcome");
+        .expect("a wait with no limit must not hang for a missing task")
+        .expect("no broker error");
+        assert!(matches!(read, RawResultRead::Absent { .. }), "{read:?}");
     }
 }
 
@@ -5361,23 +4683,6 @@ mod result_wait_tests {
 
     fn refused_limits() -> [Duration; 2] {
         [Duration::from_millis(MAX_WAIT_LIMIT_MS + 1), Duration::MAX]
-    }
-
-    /// Python `test_wait_timeout.py::TestTaskHandle::test_get_refuses_before_any_read`.
-    /// `Duration::MAX` used to panic on `Instant + Duration`.
-    #[tokio::test]
-    async fn get_result_refuses_a_limit_above_the_bound_before_any_read() {
-        let broker = unreachable_broker();
-        let expected = TaskError::builtin(RetrievalCode::InvalidInput, "").error_code;
-
-        for limit in refused_limits() {
-            let outcome = broker
-                .get_result::<i32>(Uuid::new_v4(), Some(limit))
-                .await
-                .expect("a refused limit is an outcome, not a broker error");
-            let error = outcome.unwrap_err();
-            assert_eq!(error.error_code, expected, "{limit:?}");
-        }
     }
 
     #[tokio::test]
@@ -6288,9 +5593,6 @@ mod task_info_code_tests {
 
 mod connectivity;
 pub use connectivity::{ConnectivityRefusal, ListenProbeFailure};
-
-#[cfg(test)]
-mod result_read_spec_tests;
 
 #[cfg(test)]
 mod ping_and_wait_tests;

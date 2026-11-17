@@ -20,6 +20,7 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod failure_cause;
 pub mod handle;
 pub mod log_targets;
 pub mod manifest;
@@ -78,9 +79,9 @@ pub use crate::broker::{
     CheckInterruption, CheckedSend, ConnectivityRefusal, DatabasePing, ExpiredTaskRow,
     HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker,
     RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
-    StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskHandle, TaskInfoRead,
-    TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong, WorkerPongPayload,
-    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow,
+    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
+    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
@@ -227,10 +228,23 @@ pub use crate::workflow_engine::child_spec::{
     ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
     ChildStartSource, ClientChildSpec, ClientSpec,
 };
+
+// The steps that a client's child spec source runs around its own builder:
+// the builder input of a request, and the node failures with Python's error
+// envelopes.
+pub use crate::workflow_engine::args_merge::ChildBuildInput;
+pub use crate::workflow_engine::start::ChildSpecError;
+pub use crate::workflow_engine::start_statement::{
+    build_failed_error, merged_child_input, node_failure_result, params_refused_error,
+    subworkflow_load_failed_error, NodeInput, RefusedMember,
+};
+
 pub use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
 pub use crate::workflow_engine::error::WorkflowError;
+// the cause of a failed operation, which a client names to its user
+pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;

@@ -13,6 +13,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::{mask_database_url, PostgresConfig};
 use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
@@ -257,6 +258,7 @@ impl WholeSeconds {
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PoolRecycle {
     /// A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`).
+    #[serde(deserialize_with = "no_member_after_the_tag")]
     Never,
     /// A connection older than `seconds` is replaced at its next checkout; 0
     /// replaces it at every checkout.

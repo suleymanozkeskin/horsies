@@ -142,6 +142,7 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
         message: e.to_string(),
         retryable,
         workflow_id,
+        cause: e.failure_cause(),
     }
 }
 
@@ -516,6 +517,7 @@ fn resume_recovery_failed(workflow_id: Uuid, error: &WorkflowError) -> HandleOpe
         ),
         retryable: false,
         workflow_id,
+        cause: error.failure_cause(),
     }
 }
 

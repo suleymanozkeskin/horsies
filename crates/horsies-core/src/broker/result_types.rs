@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::core::codec::{check_json_text, StrictJsonError};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::{TaskInfo, TaskStatus};
+use crate::failure_cause::FailureCause;
 
 /// Categorized broker operation failure codes.
 ///
@@ -86,6 +87,9 @@ pub struct BrokerOperationError {
     pub message: String,
     /// Whether the caller can retry this operation.
     pub retryable: bool,
+    /// What the operation met: the server's error, no answer, a broken read
+    /// contract, or a failed precondition (a refused argument included).
+    pub cause: FailureCause,
 }
 
 impl std::fmt::Display for BrokerOperationError {
@@ -232,6 +236,7 @@ mod tests {
             code: BrokerErrorCode::SchemaInitFailed,
             message: "connection refused".to_owned(),
             retryable: true,
+            cause: FailureCause::Connection,
         };
         let s = format!("{}", err);
         assert!(s.contains("SCHEMA_INIT_FAILED"));

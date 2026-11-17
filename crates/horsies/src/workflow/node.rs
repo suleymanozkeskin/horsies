@@ -20,7 +20,10 @@ use serde::Serialize;
 use serde_json::value::RawValue;
 
 use super::input::{InputRefused, NodeInput};
-use crate::task::body::{decode_checked, decode_unit, encode_read_back, DecodeFailure};
+use crate::task::body::{
+    decode_checked, decode_unit, encode_read_back, unread_member, value_free_encode_text,
+    DecodeFailure,
+};
 use crate::{ErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
 
 // ---------------------------------------------------------------------------
@@ -285,17 +288,69 @@ impl NodeLinks {
 }
 
 /// How a node's input is checked when the spec is built: the decode of the
-/// input type of its task or child workflow.
-pub(crate) type InputCheck = fn(&[u8]) -> Result<(), DecodeFailure>;
+/// input text (first argument) with the input type of its task or child
+/// workflow, and the read-back compare of the members named in the second
+/// argument, the node's own members. The other members of the text are the
+/// engine members that the check adds; they are decoded and not compared.
+pub(crate) type InputCheck = fn(&[u8], &[&str]) -> Result<(), DecodeFailure>;
 
 /// The [`InputCheck`] of the input type `A`. A task with no parameters
-/// (`()`) reads `null` and `{}`, as its body does.
-pub(crate) fn decode_check<A: DeserializeOwned + 'static>(
+/// (`()`) reads `null` and `{}`, as its body does, and refuses any member.
+/// Another type decodes the text, and each member named in `compared`
+/// must be held by the encoding of the decoded value at any depth
+/// ([`unread_node_member`]). Pure.
+pub(crate) fn decode_check<A: Serialize + DeserializeOwned + 'static>(
     bytes: &[u8],
+    compared: &[&str],
 ) -> Result<(), DecodeFailure> {
     match TypeId::of::<A>() == TypeId::of::<()>() {
         true => decode_unit(bytes),
-        false => decode_checked::<A>(bytes).map(|_decoded| ()),
+        false => {
+            let decoded = decode_checked::<A>(bytes)?;
+            unread_node_member(bytes, &decoded, compared)
+        }
+    }
+}
+
+/// The read-back compare of a node input (Python's node kwargs check with
+/// `extra='forbid'`): `bytes` is the input text that decoded as `decoded`.
+/// The members of `bytes` named in `compared` are compared with the
+/// encoding of `decoded` ([`unread_member`]). A member that the encoding
+/// does not hold, at any depth, is a [`DecodeFailure`] at its key path and
+/// depth with serde's text for a key that binds to no field (`unknown
+/// field`). Pure.
+///
+/// Errors: that failure; a decoded value that does not encode as JSON (the
+/// value-free text of the encoder). The input text decoded, so it reads as
+/// a JSON value.
+fn unread_node_member<A: Serialize>(
+    bytes: &[u8],
+    decoded: &A,
+    compared: &[&str],
+) -> Result<(), DecodeFailure> {
+    let encoded = to_json_bytes_strict(decoded).map_err(|error| DecodeFailure {
+        path: ".".to_owned(),
+        depth: 0,
+        text: format!(
+            "the decoded value does not encode as JSON: {}",
+            value_free_encode_text(&error)
+        ),
+    })?;
+    let given = match decode_checked::<serde_json::Value>(bytes)? {
+        serde_json::Value::Object(mut members) => {
+            members.retain(|key, _value| compared.contains(&key.as_str()));
+            serde_json::Value::Object(members)
+        }
+        other => other,
+    };
+    let read = decode_checked::<serde_json::Value>(&encoded)?;
+    match unread_member(&given, &read) {
+        None => Ok(()),
+        Some(member) => Err(DecodeFailure {
+            path: member.path,
+            depth: member.depth,
+            text: format!("unknown field `{}`", member.key),
+        }),
     }
 }
 
@@ -686,7 +741,7 @@ pub(crate) mod tests {
     /// node of a registered task on queue `default`.
     pub(crate) fn task_node<T, I>(task_name: &str) -> TaskNode<T, I>
     where
-        I: DeserializeOwned + 'static,
+        I: Serialize + DeserializeOwned + 'static,
     {
         TaskNode::new(TaskNodeParts {
             task_name: task_name.to_owned(),
@@ -782,10 +837,14 @@ pub(crate) mod tests {
 
     #[test]
     fn the_unit_check_reads_null_and_an_empty_object() {
-        assert!(decode_check::<()>(b"{}").is_ok());
-        assert!(decode_check::<()>(b"null").is_ok());
-        assert!(decode_check::<()>(br#"{"a": 1}"#).is_err());
-        assert!(decode_check::<ChargeInput>(br#"{"order_id": 1, "amount": 2}"#).is_ok());
+        assert!(decode_check::<()>(b"{}", &[]).is_ok());
+        assert!(decode_check::<()>(b"null", &[]).is_ok());
+        assert!(decode_check::<()>(br#"{"a": 1}"#, &["a"]).is_err());
+        assert!(decode_check::<ChargeInput>(
+            br#"{"order_id": 1, "amount": 2}"#,
+            &["order_id", "amount"]
+        )
+        .is_ok());
     }
 
     #[test]

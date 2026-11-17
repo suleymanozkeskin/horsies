@@ -47,13 +47,23 @@ pub(crate) struct NodeTaskFacts {
 
 /// Parse the typed facts of a task node from its merged task options and the
 /// retention class key of its queue (`None`: forever).
+///
+/// An input or options text that does not read, and options that the reader
+/// of a task row refuses, are [`WorkflowError::Validation`] naming the node
+/// index and its task (Python's start refusal names the task,
+/// `start_task_node_facts`, `core/workflows/lifecycle.py`). Pure.
 pub(crate) fn node_task_facts(
     node: &AnyNode,
     merged_task_options: Option<&str>,
     queue_class_key: Option<&str>,
 ) -> Result<NodeTaskFacts, WorkflowError> {
     let facts = prepare_workflow_task_facts(&node.input_json, merged_task_options, queue_class_key)
-        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+        .map_err(|error| {
+            WorkflowError::Validation(format!(
+                "workflow node {} ({}) refused: {error}",
+                node.index, node.task_name,
+            ))
+        })?;
     Ok(NodeTaskFacts {
         max_retries: node_max_retries(node.index, &node.task_name, merged_task_options)?,
         good_until: node_good_until(node.index, &node.task_name, merged_task_options)?,
@@ -140,7 +150,7 @@ async fn start_workflow_attempt<T>(
         Err(error) => Err(refused(
             classify_workflow_error(&error, &spec.name, wf_id),
             error.to_string(),
-            is_retryable_workflow_error(&error),
+            error.is_retryable(),
         )),
     }
 }
@@ -389,10 +399,6 @@ fn classify_workflow_error(
     }
 }
 
-fn is_retryable_workflow_error(e: &WorkflowError) -> bool {
-    e.is_retryable()
-}
-
 /// Retry a failed workflow start using the broker.
 pub async fn retry_start<T>(
     broker: &Arc<PostgresBroker>,
@@ -533,11 +539,11 @@ impl ChildSpecErrorType {
     }
 }
 
-/// Why a registered child gave no spec: the label and the text. For a builder failure they are
+/// Why a child gave no spec: the label and the text. For a builder failure they are
 /// Python's `type(exc).__name__` and `str(exc)` (`core/workflows/engine.py:1196-1211`); for a
 /// refused stored input, `stored node input refused` and the refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChildSpecError {
+pub struct ChildSpecError {
     pub(crate) error_type: ChildSpecErrorType,
     /// The full text; the node error keeps its first 200 characters.
     pub(crate) text: String,
@@ -546,7 +552,7 @@ pub(crate) struct ChildSpecError {
 impl ChildSpecError {
     /// The error of a builder, or of the check of the spec it built: the class of its category and its
     /// text (`Display`). Pure.
-    fn of_builder(error: &HorsiesError) -> Self {
+    pub fn of_builder(error: &HorsiesError) -> Self {
         Self {
             error_type: ChildSpecErrorType::of(error),
             text: error.to_string(),

@@ -1384,6 +1384,416 @@ mod tests {
         }
     }
 
+    /// One TOML document per config level that `AppConfig` reaches, with its
+    /// row key. The line `EXTRA` sits in the table of that level; the key
+    /// goes there. The names are Python's models; the socket settings and
+    /// `pool_recycle` of `broker` are Rust forms of Python's flat
+    /// `PostgresConfig` fields, with a row per variant. A new nested config
+    /// type needs a row.
+    const CONFIG_LEVELS: [(&str, &str); 37] = [
+        (
+            "extra_app_config",
+            "EXTRA
+[broker]
+database_url = \"postgresql://localhost/db\"
+",
+        ),
+        (
+            "extra_postgres_config",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+EXTRA
+",
+        ),
+        (
+            "extra_pool_recycle",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.pool_recycle]
+kind = \"AFTER_SECONDS\"
+seconds = 1800
+EXTRA
+",
+        ),
+        (
+            "extra_tcp_keepalives",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.tcp_keepalives]
+kind = \"ON\"
+idle_seconds = 30
+interval_seconds = 10
+probes = 3
+EXTRA
+",
+        ),
+        (
+            "extra_tcp_user_timeout",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.tcp_user_timeout]
+kind = \"AFTER\"
+milliseconds = 30000
+EXTRA
+",
+        ),
+        (
+            "extra_pool_recycle_never",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.pool_recycle]
+kind = \"NEVER\"
+EXTRA
+",
+        ),
+        (
+            "extra_tcp_keepalives_off",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.tcp_keepalives]
+kind = \"OFF\"
+EXTRA
+",
+        ),
+        (
+            "extra_tcp_user_timeout_system_default",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.tcp_user_timeout]
+kind = \"SYSTEM_DEFAULT\"
+EXTRA
+",
+        ),
+        (
+            "extra_custom_queue_config",
+            "queue_mode = \"custom\"
+[broker]
+database_url = \"postgresql://localhost/db\"
+[[custom_queues]]
+name = \"a\"
+EXTRA
+",
+        ),
+        (
+            "extra_payload_policy",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[payload]
+EXTRA
+",
+        ),
+        (
+            "extra_recovery_config",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[recovery]
+EXTRA
+",
+        ),
+        (
+            "extra_retention_config",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[retention]
+EXTRA
+",
+        ),
+        (
+            "extra_worker_resilience_config",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[resilience]
+EXTRA
+",
+        ),
+        (
+            "extra_worker_profile",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default]
+EXTRA
+",
+        ),
+        (
+            "extra_isolated_children",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+EXTRA
+",
+        ),
+        (
+            "extra_no_isolated_children",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"no_isolated_children\"
+EXTRA
+",
+        ),
+        (
+            "extra_isolated_recycle",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+[worker_profiles.default.isolated.recycle]
+EXTRA
+",
+        ),
+        (
+            "extra_task_limit",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+[worker_profiles.default.isolated.recycle.after]
+kind = \"task_limit\"
+tasks = 10
+EXTRA
+",
+        ),
+        (
+            "extra_no_task_limit",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+[worker_profiles.default.isolated.recycle.after]
+kind = \"no_task_limit\"
+EXTRA
+",
+        ),
+        (
+            "extra_memory_limit",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+[worker_profiles.default.isolated.recycle.above]
+kind = \"memory_limit\"
+mb = 512
+EXTRA
+",
+        ),
+        (
+            "extra_no_memory_limit",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+[worker_profiles.default.isolated.recycle.above]
+kind = \"no_memory_limit\"
+EXTRA
+",
+        ),
+        (
+            "extra_isolated_pool",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+[worker_profiles.default.isolated.pool]
+EXTRA
+",
+        ),
+        (
+            "extra_pool_size",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.isolated]
+kind = \"isolated_children\"
+count = 1
+[worker_profiles.default.isolated.task_send_pool]
+kind = \"pool_size\"
+connections = 2
+EXTRA
+",
+        ),
+        (
+            "extra_shared_async_children",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"shared_async_children\"
+count = 1
+seats = 2
+EXTRA
+",
+        ),
+        (
+            "extra_no_shared_async_children",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"no_shared_async_children\"
+EXTRA
+",
+        ),
+        (
+            "extra_shared_recycle",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"shared_async_children\"
+count = 1
+seats = 2
+[worker_profiles.default.shared_async.recycle]
+EXTRA
+",
+        ),
+        (
+            "extra_shared_pool",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"shared_async_children\"
+count = 1
+seats = 2
+[worker_profiles.default.shared_async.pool]
+EXTRA
+",
+        ),
+        (
+            "extra_pool_size_setting",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"shared_async_children\"
+count = 1
+seats = 2
+[worker_profiles.default.shared_async.pool.max_size]
+kind = \"pool_size\"
+connections = 2
+EXTRA
+",
+        ),
+        (
+            "extra_pool_size_from_seats",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"shared_async_children\"
+count = 1
+seats = 2
+[worker_profiles.default.shared_async.pool.max_size]
+kind = \"pool_size_from_seats\"
+EXTRA
+",
+        ),
+        (
+            "extra_executor_threads",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"shared_async_children\"
+count = 1
+seats = 2
+[worker_profiles.default.shared_async.executor]
+kind = \"executor_threads\"
+threads = 2
+EXTRA
+",
+        ),
+        (
+            "extra_executor_threads_from_seats",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_async]
+kind = \"shared_async_children\"
+count = 1
+seats = 2
+[worker_profiles.default.shared_async.executor]
+kind = \"executor_threads_from_seats\"
+EXTRA
+",
+        ),
+        (
+            "extra_shared_thread_children",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_thread]
+kind = \"shared_thread_children\"
+count = 1
+seats = 2
+EXTRA
+",
+        ),
+        (
+            "extra_no_shared_thread_children",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.shared_thread]
+kind = \"no_shared_thread_children\"
+EXTRA
+",
+        ),
+        (
+            "extra_parent_pool",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.pool]
+EXTRA
+",
+        ),
+        (
+            "extra_claim_limits",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[worker_profiles.default.claim]
+EXTRA
+",
+        ),
+        (
+            "extra_schedule_config",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[schedule]
+EXTRA
+",
+        ),
+        (
+            "extra_task_schedule",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[[schedule.schedules]]
+name = \"a\"
+task_name = \"t\"
+pattern = { type = \"interval\", seconds = 5 }
+EXTRA
+",
+        ),
+    ];
+
+    /// Python `test_config_models_forbid_extra.py::test_every_reachable_config_model_forbids_extra`,
+    /// read from TOML as `horsies web <CONFIG>` reads the config: each config
+    /// level that `AppConfig` reaches ([`CONFIG_LEVELS`]) refuses one unknown
+    /// key, and the error names the key. The document without the key loads.
+    /// The variants of the tagged schedule enums are in
+    /// `schedule::tests::every_variant_of_the_tagged_schedule_enums_refuses_an_unknown_member`.
+    #[test]
+    fn an_unknown_toml_key_is_refused_by_name_at_every_config_level() {
+        for (key, document) in CONFIG_LEVELS {
+            let accepted = document.replace("EXTRA\n", "");
+            let _config: AppConfig = toml::from_str(&accepted).unwrap_or_else(|error| {
+                panic!("{key}: the document without the key must load: {error}")
+            });
+            let refused = document.replace("EXTRA\n", &format!("{key} = 1\n"));
+            let error =
+                toml::from_str::<AppConfig>(&refused).expect_err("an unknown key must be refused");
+            let unknown_field = format!("unknown field `{key}`");
+            assert!(error.to_string().contains(&unknown_field), "{key}: {error}");
+        }
+    }
+
     fn with_profiles(document: &str) -> AppConfig {
         serde_json::from_str(&format!(
             r#"{{"broker": {{"database_url": "postgresql://localhost/db"}},

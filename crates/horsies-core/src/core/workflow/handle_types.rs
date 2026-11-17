@@ -1,5 +1,7 @@
 /// Typed error types for WorkflowHandle operations.
 use uuid::Uuid;
+
+use crate::failure_cause::FailureCause;
 ///
 /// Mirrors Python's `python/horsies/core/models/workflow/handle_types.py`.
 ///
@@ -66,6 +68,9 @@ pub struct HandleOperationError {
     pub retryable: bool,
     /// The workflow this handle refers to.
     pub workflow_id: Uuid,
+    /// What the operation met: the server's error, no answer, a broken read
+    /// contract, or a failed precondition (an absent workflow included).
+    pub cause: FailureCause,
 }
 
 impl std::fmt::Display for HandleOperationError {
@@ -119,6 +124,7 @@ mod tests {
             message: "connection refused".to_owned(),
             retryable: true,
             workflow_id: uuid::Uuid::nil(),
+            cause: FailureCause::Connection,
         };
         let s = format!("{}", err);
         assert!(s.contains("DB_OPERATION_FAILED"));

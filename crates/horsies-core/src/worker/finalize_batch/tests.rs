@@ -98,6 +98,10 @@ fn refused() -> BatchWriteError {
         transience: Transience::Permanent,
         detail: "statement `complete_plain_successes` was refused: no partition for the row"
             .to_owned(),
+        server_error: crate::failure_cause::ServerErrorFacts::new(
+            tokio_postgres::error::SqlState::CHECK_VIOLATION,
+            "no partition of relation found for row".to_owned(),
+        ),
     }
 }
 
@@ -105,12 +109,14 @@ fn not_sent() -> BatchWriteError {
     BatchWriteError::NotSent {
         transience: Transience::Transient,
         detail: "the worker profile pool had no free connection within 30s".to_owned(),
+        cause: crate::failure_cause::FailureCause::Connection,
     }
 }
 
 fn commit_unknown() -> BatchWriteError {
     BatchWriteError::CommitUnknown {
         detail: "the connection was lost after the statement was sent".to_owned(),
+        cause: crate::failure_cause::FailureCause::Connection,
     }
 }
 

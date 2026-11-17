@@ -725,7 +725,9 @@ fn check_join(owner: &str, links: &NodeLinks, report: &mut ValidationReport) {
 /// member also names, and the decode with the input type of the task or
 /// child. The decode reads the input as the child of the worker gives it:
 /// the static members, each `args_from` member as a result envelope, and
-/// the workflow context when the task takes it.
+/// the workflow context when the task takes it. Each static member must
+/// then bind to a field at every depth: a key that the decoded value does
+/// not write back is refused with its key path (Python `extra='forbid'`).
 fn check_input(
     owner: &str,
     input: &NodeInput,
@@ -760,7 +762,8 @@ fn check_input(
     if takes_context {
         members.push((WORKFLOW_CTX_FIELD, context.as_str()));
     }
-    if let Err(failure) = input_check(input.text_with(&members).as_bytes()) {
+    let static_members: Vec<&str> = input.names().collect();
+    if let Err(failure) = input_check(input.text_with(&members).as_bytes(), &static_members) {
         report.add(decode_refusal(owner, &failure));
         return;
     }
@@ -775,7 +778,9 @@ fn check_input(
         .copied()
         .filter(|(member, _)| !links.args_from.contains_key(*member))
         .collect();
-    if let Err(failure) = input_check(input.text_with(&without_results).as_bytes()) {
+    // The static members were compared above; this decode looks for a
+    // missing field only.
+    if let Err(failure) = input_check(input.text_with(&without_results).as_bytes(), &[]) {
         if let Some(member) = missing_field(&failure) {
             if links.args_from.contains_key(member) {
                 report.add(
@@ -793,17 +798,34 @@ fn check_input(
     }
 }
 
-/// The refusal of a node input that does not decode, with Python's code for
-/// each kind: a member that binds to no field, a missing field, a value of
-/// another type.
+/// The refusal of a node input that does not decode, or that holds a member
+/// that binds to no field, with Python's code for each kind:
+///
+/// - A key of the input itself that binds to no field:
+///   `WORKFLOW_INVALID_KWARG_KEY`, as Python's check of the parameter
+///   names. Its failure has depth 1, the path of the key, or depth 0 from
+///   the check of a task with no parameters, which names the key at the
+///   input itself.
+/// - A key below a member that binds to no field (depth 2 or more):
+///   `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, as Python's strict encode of the
+///   member's value.
+/// - A missing field: `WORKFLOW_MISSING_REQUIRED_PARAMS`.
+/// - A value of another type: `WORKFLOW_KWARGS_NOT_SERIALIZABLE`.
+///
+/// serde gives a key inside a value that it buffers (an internally tagged
+/// or untagged enum, a flattened struct) the path of that value. A key that
+/// binds to no field inside such a value of a member has depth 1 and gets
+/// `WORKFLOW_INVALID_KWARG_KEY`.
 fn decode_refusal(owner: &str, failure: &DecodeFailure) -> HorsiesError {
     let code = match (
         failure.text.starts_with("unknown field "),
+        failure.depth,
         missing_field(failure),
     ) {
-        (true, _) => ErrorCode::WorkflowInvalidKwargKey,
-        (false, Some(_)) => ErrorCode::WorkflowMissingRequiredParams,
-        (false, None) => ErrorCode::WorkflowKwargsNotSerializable,
+        (true, 0 | 1, _) => ErrorCode::WorkflowInvalidKwargKey,
+        (true, _, _) => ErrorCode::WorkflowKwargsNotSerializable,
+        (false, _, Some(_)) => ErrorCode::WorkflowMissingRequiredParams,
+        (false, _, None) => ErrorCode::WorkflowKwargsNotSerializable,
     };
     HorsiesError::new(format!(
         "the input of node {owner} does not decode as its input type: {failure}"

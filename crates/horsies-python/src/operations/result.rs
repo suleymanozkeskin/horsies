@@ -135,7 +135,9 @@ pub async fn raw_result_record_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerOperationError, StoredEnvelopeText, TaskAbsenceReason, TaskStatus};
+    use horsies_core::{
+        BrokerOperationError, FailureCause, StoredEnvelopeText, TaskAbsenceReason, TaskStatus,
+    };
 
     use super::*;
 
@@ -201,6 +203,7 @@ mod tests {
                 code: BrokerErrorCode::InvalidJsonPayload,
                 message: "digest mismatch".to_owned(),
                 retryable: false,
+                cause: FailureCause::ContractViolation,
             }),
         ) else {
             panic!("a failed read gives BrokerFailure");

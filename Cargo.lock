@@ -1099,14 +1099,9 @@ name = "horsies-test-support"
 version = "0.1.0-alpha.1"
 dependencies = [
  "chrono",
- "horsies",
  "libc",
- "serde",
- "serde_json",
- "serial_test",
- "sqlx",
  "tokio",
- "tracing",
+ "tokio-postgres",
  "url",
  "uuid",
 ]
@@ -1116,18 +1111,12 @@ name = "horsies-test-worker"
 version = "0.1.0-alpha.1"
 dependencies = [
  "chrono",
- "clap",
- "gethostname",
  "horsies",
  "horsies-test-support",
  "serde",
  "serde_json",
  "serial_test",
- "sqlx",
- "tempfile",
  "tokio",
- "tokio-util",
- "tracing",
  "uuid",
 ]
 

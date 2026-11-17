@@ -30,3 +30,32 @@ pub use socket::{
     KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig, TcpUserTimeoutMs,
 };
 pub use worker_profile::{describe_worker_profile, ChildPreload, ParentCpu, WorkerProfile};
+
+/// The body of a unit variant of a tagged config enum: the members after
+/// the tag, which must be none. serde reads a unit variant of an internally
+/// tagged enum and skips its other members, also under
+/// `deny_unknown_fields`. Each such variant takes this function as
+/// `deserialize_with`, and its serialized form does not change:
+///
+/// - [`CronNumericTerm::Every`], [`CronEnumTerm::Every`] and
+///   [`DaySelector::EveryDay`]: Python's `CronEvery` and `EveryDay` refuse a
+///   member (`extra='forbid'`).
+/// - [`TcpKeepalivesConfig::Off`], [`TcpUserTimeoutConfig::SystemDefault`]
+///   and [`crate::manifest::PoolRecycle::Never`]: Rust forms of Python's
+///   flat `PostgresConfig` fields, and `PostgresConfig` refuses an unknown
+///   key.
+///
+/// Errors: serde's unknown-field error, which names the first member.
+pub(crate) fn no_member_after_the_tag<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    /// A body with no members.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NoMembers {}
+
+    NoMembers::deserialize(deserializer).map(|NoMembers {}| ())
+}
