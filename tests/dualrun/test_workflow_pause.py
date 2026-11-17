@@ -5,6 +5,10 @@ Reference: ``tests/dualrun/reference/workflow_pause.py``. Candidate:
 RUNNING tree of three levels with a PENDING, a CLAIMED and a RUNNING task
 in each level, a PAUSED workflow and a RUNNING bystander with a claimed
 task. Each side pauses the tree, the PAUSED workflow and an unknown id.
+
+The caller pair runs the same seed with the Python caller before the switch
+(``tests/dualrun/reference/workflow_pause_caller.py``) against the caller on
+the core (``CoreHandle.pause_workflow_async``).
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
 from tests.dualrun.reference import workflow_pause as reference
+from tests.dualrun.reference import workflow_pause_caller as caller_reference
 from tests.dualrun.workflow_seeds import (
     ChildOf,
     OnError,
@@ -191,6 +196,41 @@ def test_pause_writes_what_the_session_statements_wrote(
             _seed,
             OperationSide(name='session statements', act=_reference),
             OperationSide(name='horsies_workflow_pause', act=_candidate),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    expected = (reference.Paused(), reference.NotRunning(), reference.NotFound())
+    assert run.reference.report == expected
+    assert run.candidate.report == expected
+
+
+async def _caller_reference_async(
+    database: DualRunDatabase, seed: _Seed,
+) -> tuple[reference.PauseReport, ...]:
+    async with open_broker(database) as broker:
+        return tuple([
+            _report(await caller_reference.pause_workflow(broker, str(target)))
+            for target in _targets(seed)
+        ])
+
+
+def _caller_reference(
+    database: DualRunDatabase, seed: _Seed,
+) -> tuple[reference.PauseReport, ...]:
+    cover_history(database)
+    return asyncio.run(_caller_reference_async(database, seed))
+
+
+def test_the_pause_on_the_core_writes_what_the_python_caller_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = run_or_fail(
+        dual_run(
+            empty_database,
+            _seed,
+            OperationSide(name='python caller', act=_caller_reference),
+            OperationSide(name='core caller', act=_candidate),
         )
     )
 

@@ -32,6 +32,8 @@ class SwitchModule(Enum):
 
     LIFECYCLE = 'lifecycle'
     BROKER = 'broker'
+    MONITORING_AND_WEB = 'monitoring-and-web'
+    WORKFLOW_ENGINE = 'workflow-engine'
 
 
 class Implementation(Enum):
@@ -50,8 +52,9 @@ class DualRunOperation:
 
     ``production_path`` and ``reference_path`` name functions with the same
     signature. ``core_methods`` names the ``CoreHandle`` methods that the
-    production entry point calls: in the Python run each one raises
-    ``TripwireHit``.
+    production entry point calls, and ``core_functions`` the functions of
+    ``horsies._core`` that it calls (a pure call needs no handle): in the
+    Python run each one raises ``TripwireHit``.
     """
 
     name: str
@@ -59,6 +62,7 @@ class DualRunOperation:
     reference_path: str
     mode: OperationMode
     core_methods: tuple[str, ...]
+    core_functions: tuple[str, ...] = ()
 
 
 class TripwireHit(BaseException):

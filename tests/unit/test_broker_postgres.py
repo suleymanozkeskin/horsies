@@ -25,6 +25,11 @@ from horsies.core.brokers.enqueue_task import SendKind
 from horsies._core import (
     BrokerFailure,
     DatabasePingRecord,
+    SchemaInstalled,
+    SchemaInstallNotRun,
+    TaskAttemptRecord,
+    TaskInfoNotFound,
+    TaskInfoRecord,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -44,6 +49,7 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
+    BrokerOperationFailed,
 )
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
@@ -64,11 +70,7 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.history.archive.attempts import AttemptRecord
 from horsies.core.history.archive.versions import archive_digest
 from horsies.core.utils.url import sqlalchemy_url
-from horsies.core.history.reads.detail import (
-    HistoryTaskDetail,
-    TaskAbsenceReason,
-    TaskDetailAbsent,
-)
+from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
     Execution,
@@ -90,7 +92,7 @@ from horsies.core.baseline.install import (
     SchemaNewer,
     SchemaStatementFailed,
 )
-from horsies.core.types.status import TaskStatus
+from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 from horsies.core.utils.loop_runner import LoopRunnerError
 from tests.broker_resources_support import (
     attach_loop_limit,
@@ -497,7 +499,11 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized(await resources_of(broker))
+            # The Python install, which the dual-run reference runs.
+            await broker._run_with_schema_engine(  # pyright: ignore[reportPrivateUsage]
+                await resources_of(broker),
+                broker._maybe_run_schema_init,  # pyright: ignore[reportPrivateUsage]
+            )
 
         assert mock_engine.call_args_list[0].args[0] == sqlalchemy_url(database_url)
         assert mock_engine.call_args_list[1].args[0] == sqlalchemy_url(session_url)
@@ -541,7 +547,11 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized(await resources_of(broker))
+            # The Python install, which the dual-run reference runs.
+            await broker._run_with_schema_engine(  # pyright: ignore[reportPrivateUsage]
+                await resources_of(broker),
+                broker._maybe_run_schema_init,  # pyright: ignore[reportPrivateUsage]
+            )
 
         lock_keys = [
             call.args[1][0]
@@ -2635,24 +2645,28 @@ class TestSyncFacades:
             == 'get_raw_result_record_async'
         )
 
-    def test_get_task_info_delegates_to_loop_runner(self) -> None:
-        """get_task_info() should call _loop_runner.call with get_task_info_async."""
+    def test_get_task_info_runs_the_blocking_core_read(self) -> None:
+        """get_task_info() calls CoreHandle.task_info on this thread, not the runner."""
         broker = _make_broker()
         broker._loop_runner = MagicMock()
-        broker._loop_runner.call = MagicMock(return_value=Ok(None))
+        handle = MagicMock()
+        handle.task_info = MagicMock(return_value=MagicMock(spec=TaskInfoNotFound))
+        broker._core_handle = handle
 
         result = broker.get_task_info(
-            'task-id',
+            TASK_INFO_ID,
             include_result=True,
             include_failed_reason=True,
         )
 
-        assert is_ok(result)
-        assert result.ok_value is None
-        broker._loop_runner.call.assert_called_once()
-        call_args = broker._loop_runner.call.call_args
-        coro_fn = call_args[0][0]
-        assert getattr(coro_fn, '__name__', None) == 'get_task_info_async'
+        assert result == Ok(None)
+        handle.task_info.assert_called_once_with(
+            TASK_INFO_ID,
+            include_result=True,
+            include_failed_reason=True,
+            include_attempts=False,
+        )
+        broker._loop_runner.call.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -2663,278 +2677,244 @@ class TestSyncFacades:
 TASK_INFO_ID = UUID('0198c0de-0000-7000-8000-0000000000ab')
 
 
+def _task_info_record(**changes: Any) -> MagicMock:
+    """A core task info record of a RUNNING live task; ``changes`` overrides fields."""
+    now = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
+    fields: dict[str, Any] = {
+        'task_id': TASK_INFO_ID,
+        'task_name': 'compute',
+        'status': 'RUNNING',
+        'queue_name': 'default',
+        'priority': 100,
+        'retry_count': 1,
+        'max_retries': 3,
+        'next_retry_at': None,
+        'sent_at': now,
+        'enqueued_at': now,
+        'claimed_at': now,
+        'started_at': now,
+        'completed_at': None,
+        'failed_at': None,
+        'worker_hostname': 'host-1',
+        'worker_pid': 9999,
+        'worker_process_name': 'worker-0',
+        'error_code': None,
+        'failed_reason': None,
+        'result_json': None,
+        'attempts': None,
+        'execution': 'ISOLATED',
+    }
+    fields.update(changes)
+    return MagicMock(spec=TaskInfoRecord, **fields)
+
+
+def _core_attempt_record(attempt: int, outcome: str, will_retry: bool) -> MagicMock:
+    at = datetime(2026, 11, 17, 12, attempt, tzinfo=timezone.utc)
+    return MagicMock(
+        spec=TaskAttemptRecord,
+        task_id=TASK_INFO_ID,
+        attempt=attempt,
+        outcome=outcome,
+        will_retry=will_retry,
+        started_at=at,
+        finished_at=at,
+        error_code=None,
+        error_message=None,
+        failed_reason=None,
+        worker_id='w-1',
+        worker_hostname='host-1',
+        worker_pid=100,
+        worker_process_name=None,
+    )
+
+
 @pytest.mark.unit
 class TestGetTaskInfoAsync:
-    """Tests for get_task_info_async: field extraction, optional includes."""
+    """get_task_info_async maps the record of one core read to its result."""
 
-    def _setup_task_info_session(
-        self,
-        broker: Any,
-        row: tuple[Any, ...] | None,
-    ) -> None:
-        """Configure session to return a single row from execute().fetchone()."""
-        mock_result = MagicMock()
-        mock_result.fetchone.return_value = row
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+    @staticmethod
+    def _broker_answering(outcome: object) -> Any:
+        broker = _make_broker()
+        handle = MagicMock()
+        handle.task_info_async = AsyncMock(return_value=outcome)
+        broker._core_handle = handle
+        return broker
 
     @pytest.mark.asyncio
     async def test_task_not_found_returns_none(self) -> None:
-        """No live row and no history row: Ok(None)."""
-        broker = _make_broker()
-        self._setup_task_info_session(broker, row=None)
+        broker = self._broker_answering(MagicMock(spec=TaskInfoNotFound, task_id=TASK_INFO_ID))
 
-        with patch(
-            'horsies.core.history.reads.detail.read_task_detail',
-            AsyncMock(
-                return_value=TaskDetailAbsent(
-                    task_id=TASK_INFO_ID,
-                    reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY,
-                )
-            ),
-        ):
-            result = await broker.get_task_info_async(TASK_INFO_ID)
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_attempts=True)
 
-        assert is_ok(result)
-        assert result.ok_value is None
+        assert result == Ok(None)
+        broker._core_handle.task_info_async.assert_awaited_once_with(
+            TASK_INFO_ID,
+            include_result=False,
+            include_failed_reason=False,
+            include_attempts=True,
+        )
 
     @pytest.mark.asyncio
-    async def test_basic_task_returns_task_info(self) -> None:
-        """Basic task (no optional includes) should return Ok(TaskInfo) with base fields."""
-        broker = _make_broker()
-        now = datetime.now(timezone.utc)
-        # 18 base columns: task_name, status, queue_name, priority,
-        # retry_count, max_retries, next_retry_at, sent_at, enqueued_at, claimed_at,
-        # started_at, completed_at, failed_at, worker_hostname, worker_pid,
-        # worker_process_name, error_code, execution
-        row = (
-            'compute',
-            'RUNNING',
-            'default',
-            100,
-            1,
-            3,
-            None,
-            now,
-            now,
-            None,
-            now,
-            None,
-            None,
-            'host-1',
-            9999,
-            'worker-0',
-            None,
-            'ISOLATED',
-        )
-        self._setup_task_info_session(broker, row=row)
+    async def test_a_live_record_gives_its_fields(self) -> None:
+        broker = self._broker_answering(_task_info_record())
 
         result = await broker.get_task_info_async(TASK_INFO_ID)
 
         assert is_ok(result)
         info = result.ok_value
-        assert info is not None
         assert isinstance(info, TaskInfo)
         assert info.task_id == TASK_INFO_ID
         assert info.task_name == 'compute'
-        assert info.status == TaskStatus.RUNNING
-        assert info.priority == 100
-        assert info.retry_count == 1
-        assert info.max_retries == 3
-        assert info.worker_hostname == 'host-1'
-        assert info.worker_pid == 9999
-        # Strict-serde phase 6: broker emits raw_result (envelope dict)
-        # only; typed decoded_result is filled at the Horsies layer.
+        assert info.status is TaskStatus.RUNNING
+        assert (info.priority, info.retry_count, info.max_retries) == (100, 1, 3)
+        assert (info.worker_hostname, info.worker_pid) == ('host-1', 9999)
+        assert info.worker_process_name == 'worker-0'
         assert info.raw_result is None
         assert info.decoded_result is None
         assert info.result_decoded is False
         assert info.failed_reason is None
+        assert info.attempts is None
         assert info.execution is Execution.ISOLATED
 
     @pytest.mark.asyncio
-    async def test_include_result_populates_raw_result(self) -> None:
-        """include_result=True populates ``raw_result`` (the parsed
-        envelope dict).
-
-        Strict-serde phase 6: broker no longer typed-decodes. Typed
-        ``decoded_result`` is filled at the ``Horsies.get_task_info``
-        layer — see ``tests/unit/test_app_get_result.py`` for the
-        Horsies-level coverage.
-        """
-        broker = _make_broker()
-        now = datetime.now(timezone.utc)
-        result_json = '{"__h_task_result__":true,"ok":"hello","err":null}'
-        # 18 base + 1 result column
-        row = (
-            'compute',
-            'COMPLETED',
-            'default',
-            100,
-            0,
-            0,
-            None,
-            now,
-            now,
-            None,
-            now,
-            now,
-            None,
-            'host-1',
-            9999,
-            'worker-0',
-            None,
-            'ISOLATED',
-            result_json,
+    async def test_a_history_record_has_no_execution_class(self) -> None:
+        broker = self._broker_answering(
+            _task_info_record(status='FAILED', execution=None, failed_reason='boom'),
         )
-        self._setup_task_info_session(broker, row=row)
+
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_failed_reason=True)
+
+        assert is_ok(result)
+        info = result.ok_value
+        assert info is not None
+        assert info.status is TaskStatus.FAILED
+        assert info.execution is None
+        assert info.failed_reason == 'boom'
+
+    @pytest.mark.asyncio
+    async def test_the_stored_envelope_is_the_raw_result(self) -> None:
+        envelope = '{"__h_task_result__":true,"ok":"hello","err":null}'
+        broker = self._broker_answering(
+            _task_info_record(status='COMPLETED', result_json=envelope),
+        )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
 
         assert is_ok(result)
         info = result.ok_value
         assert info is not None
-        assert info.raw_result == {
-            '__h_task_result__': True,
-            'ok': 'hello',
-            'err': None,
-        }
-        # decoded_result stays None at the broker layer.
+        assert info.raw_result == {'__h_task_result__': True, 'ok': 'hello', 'err': None}
         assert info.decoded_result is None
         assert info.result_decoded is False
 
     @pytest.mark.asyncio
-    async def test_include_failed_reason_returns_reason(self) -> None:
-        """include_failed_reason=True should add failed_reason to Ok(TaskInfo)."""
-        broker = _make_broker()
-        now = datetime.now(timezone.utc)
-        # 18 base + 1 failed_reason column
-        row = (
-            'compute',
-            'FAILED',
-            'default',
-            100,
-            0,
-            0,
-            None,
-            now,
-            now,
-            None,
-            now,
-            None,
-            now,
-            'host-1',
-            9999,
-            'worker-0',
-            None,
-            'ISOLATED',
-            'Worker crashed unexpectedly',
+    @pytest.mark.parametrize(
+        ('result_json', 'exception_class'),
+        [
+            pytest.param('{"x": NaN}', SerializationError, id='non-finite'),
+            pytest.param('[1, 2]', NoCause, id='not-an-object'),
+        ],
+    )
+    async def test_a_stored_result_that_does_not_read_is_invalid_json_payload(
+        self, result_json: str, exception_class: type,
+    ) -> None:
+        broker = self._broker_answering(
+            _task_info_record(status='COMPLETED', result_json=result_json),
         )
-        self._setup_task_info_session(broker, row=row)
-
-        result = await broker.get_task_info_async(
-            TASK_INFO_ID, include_failed_reason=True
-        )
-
-        assert is_ok(result)
-        info = result.ok_value
-        assert info is not None
-        assert info.failed_reason == 'Worker crashed unexpectedly'
-
-    @pytest.mark.asyncio
-    async def test_include_result_null_stays_none(self) -> None:
-        """include_result=True with NULL result in DB should return Ok(TaskInfo) with result=None."""
-        broker = _make_broker()
-        now = datetime.now(timezone.utc)
-        # 18 base + 1 result column (None)
-        row = (
-            'compute',
-            'RUNNING',
-            'default',
-            100,
-            0,
-            0,
-            None,
-            now,
-            now,
-            None,
-            now,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            'ISOLATED',
-            None,
-        )
-        self._setup_task_info_session(broker, row=row)
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
 
-        assert is_ok(result)
-        info = result.ok_value
-        assert info is not None
-        assert info.raw_result is None
-        assert info.decoded_result is None
-        assert info.result_decoded is False
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, exception_class)
 
     @pytest.mark.asyncio
-    async def test_include_both_result_and_failed_reason(self) -> None:
-        """Both include flags should add both columns to Ok(TaskInfo)."""
-        broker = _make_broker()
-        now = datetime.now(timezone.utc)
-        result_json = (
-            '{"__h_task_result__":true,"ok":null,"err":'
-            '{"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},'
-            '"message":"fail","data":null,"exception":null}}'
+    async def test_attempts_keep_the_core_order(self) -> None:
+        broker = self._broker_answering(
+            _task_info_record(
+                attempts=[
+                    _core_attempt_record(2, 'FAILED', False),
+                    _core_attempt_record(1, 'WORKER_FAILURE', True),
+                ],
+            ),
         )
-        # 18 base + 1 result + 1 failed_reason
-        row = (
-            'compute',
-            'FAILED',
-            'default',
-            100,
-            0,
-            0,
-            None,
-            now,
-            now,
-            None,
-            now,
-            None,
-            now,
-            'host-1',
-            9999,
-            'worker-0',
-            'TASK_EXCEPTION',
-            'ISOLATED',
-            result_json,
-            'Something broke',
-        )
-        self._setup_task_info_session(broker, row=row)
 
-        result = await broker.get_task_info_async(
-            TASK_INFO_ID,
-            include_result=True,
-            include_failed_reason=True,
-        )
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_attempts=True)
 
         assert is_ok(result)
         info = result.ok_value
         assert info is not None
-        # Broker emits the parsed envelope as raw_result; typed decode
-        # is the Horsies layer's job.
-        assert info.raw_result is not None
-        assert info.raw_result.get('__h_task_result__') is True
-        assert info.raw_result.get('ok') is None
-        assert isinstance(info.raw_result.get('err'), dict)
-        assert info.decoded_result is None
-        assert info.result_decoded is False
-        assert info.failed_reason == 'Something broke'
+        assert info.attempts is not None
+        assert [attempt.attempt for attempt in info.attempts] == [2, 1]
+        assert [attempt.outcome for attempt in info.attempts] == [
+            TaskAttemptOutcome.FAILED,
+            TaskAttemptOutcome.WORKER_FAILURE,
+        ]
+        assert info.attempts[0].worker_id == 'w-1'
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_is_task_info_query_failed(self) -> None:
+        broker = self._broker_answering(
+            MagicMock(
+                spec=BrokerFailure,
+                code='TASK_INFO_QUERY_FAILED',
+                message='pool timed out',
+                retryable=True,
+            ),
+        )
+
+        result = await broker.get_task_info_async(TASK_INFO_ID)
+
+        assert is_err(result)
+        failed = result.err_value
+        assert isinstance(failed, BrokerOperationFailed)
+        assert failed.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert failed.retryable is True
+        assert failed.message == f'get_task_info failed for {TASK_INFO_ID}: pool timed out'
+        assert isinstance(failed.exception, CoreOperationFailed)
+
+    @pytest.mark.asyncio
+    async def test_corrupt_stored_data_found_by_the_core_is_invalid_json_payload(
+        self,
+    ) -> None:
+        broker = self._broker_answering(
+            MagicMock(
+                spec=BrokerFailure,
+                code='INVALID_JSON_PAYLOAD',
+                message='stored result digest mismatch',
+                retryable=False,
+            ),
+        )
+
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, CoreOperationFailed)
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_read_is_task_info_query_failed(self) -> None:
+        broker = _make_broker()
+        error = TooManyPendingCalls('CoreHandle.task_info_async', 65_536)
+        handle = MagicMock()
+        handle.task_info_async = AsyncMock(side_effect=error)
+        broker._core_handle = handle
+
+        result = await broker.get_task_info_async(TASK_INFO_ID)
+
+        assert is_err(result)
+        assert result.err_value.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert result.err_value.retryable is True
+        assert result.err_value.exception is error
+
+    @pytest.mark.asyncio
+    async def test_another_failure_code_is_a_defect(self) -> None:
+        broker = self._broker_answering(
+            MagicMock(spec=BrokerFailure, code='CLEANUP_FAILED', message='x', retryable=False),
+        )
+
+        with pytest.raises(AssertionError, match='CLEANUP_FAILED'):
+            await broker.get_task_info_async(TASK_INFO_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -3118,42 +3098,90 @@ class TestEnqueueAsyncErrorPaths:
 
 
 @pytest.mark.unit
-class TestGetTaskInfoAsyncErrorPaths:
-    """Regression tests for error-path behavior in get_task_info_async."""
-
-    @pytest.mark.asyncio
-    async def test_get_task_info_async_db_error_returns_err(self) -> None:
-        """RuntimeError from session.execute should produce Err(TASK_INFO_QUERY_FAILED)."""
-        broker = _make_broker()
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(side_effect=RuntimeError('db exploded'))
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        result = await broker.get_task_info_async('task-abc')
-
-        assert is_err(result)
-        err = result.err_value
-        assert err.code == BrokerErrorCode.TASK_INFO_QUERY_FAILED
-        assert err.exception is not None
-
-
-@pytest.mark.unit
 class TestEnsureSchemaInitialized:
-    """Tests for ensure_schema_initialized public entry point."""
+    """ensure_schema_initialized maps the record of the core install to its result."""
+
+    @staticmethod
+    def _uninitialized(outcome: object) -> Any:
+        """A broker that has not installed, whose core install answers ``outcome``."""
+        broker = _make_broker()
+        broker._initialized = False
+        handle = MagicMock()
+        handle.install_schema_async = AsyncMock(return_value=outcome)
+        broker._core_handle = handle
+        return broker
 
     @pytest.mark.asyncio
-    async def test_ensure_schema_initialized_returns_ok_on_success(self) -> None:
-        """When already initialized, ensure_schema_initialized returns Ok(None)."""
+    async def test_an_initialized_broker_does_not_call_the_core(self) -> None:
         broker = _make_broker()
-        # _make_broker already sets _initialized = True, so _ensure_initialized is a no-op.
+        handle = MagicMock()
+        handle.install_schema_async = AsyncMock()
+        broker._core_handle = handle
 
         result = await broker.ensure_schema_initialized()
 
-        assert is_ok(result)
-        assert result.ok_value is None
+        assert result == Ok(None)
+        handle.install_schema_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('outcome_class', [SchemaInstalled, SchemaInstallNotRun])
+    async def test_an_install_is_ok_once_per_broker(self, outcome_class: type) -> None:
+        broker = self._uninitialized(MagicMock(spec=outcome_class))
+
+        first = await broker.ensure_schema_initialized()
+        second = await broker.ensure_schema_initialized()
+
+        assert (first, second) == (Ok(None), Ok(None))
+        broker._core_handle.install_schema_async.assert_awaited_once_with()
+        assert broker._initialized is True
+
+    @pytest.mark.asyncio
+    async def test_a_failed_install_is_schema_init_failed_and_runs_again(self) -> None:
+        broker = self._uninitialized(
+            MagicMock(
+                spec=BrokerFailure,
+                code='SCHEMA_INIT_FAILED',
+                message='the database was installed by the RUST client',
+                retryable=False,
+            ),
+        )
+
+        first = await broker.ensure_schema_initialized()
+        second = await broker.ensure_schema_initialized()
+
+        assert is_err(first)
+        failed = first.err_value
+        assert failed.code is BrokerErrorCode.SCHEMA_INIT_FAILED
+        assert failed.retryable is False
+        assert 'installed by the RUST client' in failed.message
+        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception.subject == 'PostgresBroker.ensure_schema_initialized'
+        assert is_err(second)
+        assert broker._core_handle.install_schema_async.await_count == 2
+        assert broker._initialized is False
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_install_is_schema_init_failed(self) -> None:
+        broker = self._uninitialized(None)
+        error = TooManyPendingCalls('CoreHandle.install_schema_async', 65_536)
+        broker._core_handle.install_schema_async = AsyncMock(side_effect=error)
+
+        result = await broker.ensure_schema_initialized()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.SCHEMA_INIT_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
+
+    @pytest.mark.asyncio
+    async def test_another_failure_code_is_a_defect(self) -> None:
+        broker = self._uninitialized(
+            MagicMock(spec=BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+        )
+
+        with pytest.raises(AssertionError, match='DB_PING_FAILED'):
+            await broker.ensure_schema_initialized()
 
 
 @pytest.mark.unit

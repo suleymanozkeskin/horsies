@@ -217,6 +217,7 @@ const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_running", "bool"),
 ];
+const WORKFLOW_ID_PARAMETERS: &[StubParameter] = &[positional("workflow_id", "uuid.UUID")];
 const RAW_RESULT_RECORD_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("timeout_ms", "int | None"),
@@ -245,6 +246,21 @@ const MARK_FINALIZING_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("worker_id", "str"),
     keyword("claimed_at", "datetime.datetime"),
+];
+const EXPIRE_OWNED_CLAIM_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+];
+const CANCEL_OWNED_ORPHAN_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+    keyword("claimed_at", "datetime.datetime"),
+];
+
+const RESOLVE_MONITORING_WINDOW_PARAMETERS: &[StubParameter] = &[
+    keyword("since", "datetime.datetime | None"),
+    keyword("until", "datetime.datetime | None"),
+    keyword("now", "datetime.datetime | None"),
 ];
 
 const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
@@ -278,6 +294,17 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
     "StaleRunningRecovered | StaleRunningScanFull | StaleRunningScanFailed";
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
+const EXPIRE_PENDING_TASKS_OUTCOME: &str =
+    "PendingExpiryDrained | PendingExpiryBoundReached | PendingExpiryFailed";
+const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
+    "OrphanPageAudited | OrphanAuditLockBusy | OrphanAuditFailed";
+const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | \
+     AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
+
+const PAUSE_WORKFLOW_OUTCOME: &str =
+    "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
+const CANCEL_WORKFLOW_OUTCOME: &str =
+    "WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -316,7 +343,7 @@ const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
+const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     StubFunction {
         name: "start_attempt",
         parameters: START_ATTEMPT_PARAMETERS,
@@ -327,6 +354,18 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
         name: "start_attempt_async",
         parameters: START_ATTEMPT_PARAMETERS,
         returns: TypeText::FutureOf(START_ATTEMPT_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "expire_owned_claim",
+        parameters: EXPIRE_OWNED_CLAIM_PARAMETERS,
+        returns: TypeText::Plain(TASK_ROW_END_OUTCOME),
+        doc: "Expire one claimed row of this worker whose deadline passed before its start. Writes,\nin one statement.",
+    },
+    StubFunction {
+        name: "expire_owned_claim_async",
+        parameters: EXPIRE_OWNED_CLAIM_PARAMETERS,
+        returns: TypeText::FutureOf(TASK_ROW_END_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
@@ -343,7 +382,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 24] = [
+const CORE_HANDLE_METHODS: [StubFunction; 29] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -463,6 +502,36 @@ const CORE_HANDLE_METHODS: [StubFunction; 24] = [
         parameters: CANCEL_TASK_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_TASK_OUTCOME),
         doc: "Cancel one plain task; a RUNNING task only with include_running. Writes, in one\nstatement. An outcome that contradicts the function raises PanicException.",
+    },
+    StubFunction {
+        name: "expire_pending_tasks_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(EXPIRE_PENDING_TASKS_OUTCOME),
+        doc: "One pending expiry pass. Writes; each batch commits alone.",
+    },
+    StubFunction {
+        name: "audit_orphaned_workflow_tasks_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME),
+        doc: "One page of the orphan sweep and its cursor counts, in one transaction. Writes.",
+    },
+    StubFunction {
+        name: "cancel_owned_orphan_async",
+        parameters: CANCEL_OWNED_ORPHAN_PARAMETERS,
+        returns: TypeText::FutureOf(TASK_ROW_END_OUTCOME),
+        doc: "Cancel one claimed workflow task that this claim holds and that no runnable node\nlinks. Writes, in one statement. A naive claimed_at raises TypeError.",
+    },
+    StubFunction {
+        name: "pause_workflow_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(PAUSE_WORKFLOW_OUTCOME),
+        doc: "Pause one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
+    },
+    StubFunction {
+        name: "cancel_workflow_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(CANCEL_WORKFLOW_OUTCOME),
+        doc: "Cancel one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
     },
     StubFunction {
         name: "task_info",
@@ -628,7 +697,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 71] = [
+const RECORD_CLASSES: [StubClass; 78] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -890,6 +959,70 @@ const RECORD_CLASSES: [StubClass; 71] = [
         doc: "The stale RUNNING pass did not run: a threshold out of range, a failed connect or family\ncheck, or a failed scan. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PendingExpiryDrained",
+        doc: "The pending expiry pass ended at a short batch: no due row was left. Every batch\ncommitted.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("expired", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PendingExpiryBoundReached",
+        doc: "The pending expiry pass ran its bound of full batches and stopped; due rows can remain.\nEvery batch committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("expired", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PendingExpiryFailed",
+        doc: "The pending expiry pass stopped at a failure. The batches before it committed and\nexpired expired_before rows; the failed batch committed nothing, or its outcome is unknown.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("expired_before", "int"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "OrphanPageAudited",
+        doc: "The orphan page committed: rows_selected workflow tasks scanned, and\ncandidates_returned of them, with no runnable node link, moved to history as CANCELLED.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows_selected", "int"),
+            property("candidates_returned", "int"),
+            property("cancelled", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "OrphanAuditLockBusy",
+        doc: "Another sweep holds the orphan cursor: the page was refused at once (SQLSTATE 55P03)\nand wrote nothing.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "OrphanAuditFailed",
+        doc: "The orphan page did not commit: a failed connect, family check or statement, or a page\noutside the function's contract. After a lost COMMIT reply its outcome is unknown.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskRowEnded",
+        doc: "The row moved to history: kind is EXPIRE_CLAIMED or CANCEL_ORPHAN. The observed fields\nare the row as the statement locked it.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("terminal_at", "datetime.datetime"),
+            property("kind", "str"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
         methods: &[],
     },
     StubClass {
@@ -1368,8 +1501,85 @@ const HANDLE_CLASSES: [StubClass; 3] = [
     },
 ];
 
-const CLASSES: [StubClass; 85] = {
-    let mut classes = [HANDLE_CLASSES[0]; 85];
+/// The classes of the monitoring reads and the web handler.
+const MONITORING_CLASSES: [StubClass; 2] = [
+    StubClass {
+        name: "MonitoringWindowRecord",
+        doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("lower", "datetime.datetime"),
+            property("upper", "datetime.datetime"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WindowRefusedRecord",
+        doc: "The requested window is not servable; reason names why.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("reason", "str")],
+        methods: &[],
+    },
+];
+
+const WORKFLOW_CLASSES: [StubClass; 6] = [
+    StubClass {
+        name: "WorkflowPaused",
+        doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNotRunning",
+        doc: "The workflow exists and is not RUNNING. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowCancelled",
+        doc: "The workflow was PENDING, RUNNING or PAUSED; its tree is CANCELLED.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNotCancellable",
+        doc: "The workflow is COMPLETED, FAILED, CANCELLED or EXPIRED. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowAbsent",
+        doc: "No workflow has this id. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "HandleFailed",
+        doc: "The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a\nstored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After\nDB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+];
+
+const CLASS_COUNT: usize = HANDLE_CLASSES.len()
+    + ARGUMENT_CLASSES.len()
+    + RECORD_CLASSES.len()
+    + MONITORING_CLASSES.len()
+    + WORKFLOW_CLASSES.len();
+
+const CLASSES: [StubClass; CLASS_COUNT] = {
+    let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
     let mut handle_position = 0;
     while handle_position < HANDLE_CLASSES.len() {
         classes[handle_position] = HANDLE_CLASSES[handle_position];
@@ -1385,6 +1595,18 @@ const CLASSES: [StubClass; 85] = {
         classes[HANDLE_CLASSES.len() + ARGUMENT_CLASSES.len() + record_position] =
             RECORD_CLASSES[record_position];
         record_position += 1;
+    }
+    let monitoring_start = HANDLE_CLASSES.len() + ARGUMENT_CLASSES.len() + RECORD_CLASSES.len();
+    let mut monitoring_position = 0;
+    while monitoring_position < MONITORING_CLASSES.len() {
+        classes[monitoring_start + monitoring_position] = MONITORING_CLASSES[monitoring_position];
+        monitoring_position += 1;
+    }
+    let workflow_start = monitoring_start + MONITORING_CLASSES.len();
+    let mut workflow_position = 0;
+    while workflow_position < WORKFLOW_CLASSES.len() {
+        classes[workflow_start + workflow_position] = WORKFLOW_CLASSES[workflow_position];
+        workflow_position += 1;
     }
     classes
 };
@@ -1413,6 +1635,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::Plain("None"),
         doc: "Read the effective level of every horsies logger again.",
+    },
+    StubFunction {
+        name: "resolve_monitoring_window",
+        parameters: RESOLVE_MONITORING_WINDOW_PARAMETERS,
+        returns: TypeText::Plain("MonitoringWindowRecord | WindowRefusedRecord"),
+        doc: "Resolve the terminal-history window of one monitoring request. Absent bounds take the\ndefault: the last 24 hours ending at until, or at now (the clock of this process when\nNone). A naive since or until is refused; a naive now raises TypeError. Starts no runtime.",
     },
     StubFunction {
         name: "set_panic_rule",

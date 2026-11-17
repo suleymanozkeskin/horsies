@@ -23,6 +23,11 @@ from horsies._core import (
     CoreError,
     CoreHandle,
     DatabasePingRecord,
+    SchemaInstalled,
+    SchemaInstallNotRun,
+    TaskAttemptRecord,
+    TaskInfoNotFound,
+    TaskInfoRecord,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -1011,6 +1016,169 @@ class _SyncSendEngineOpen:
     engine: Engine
 
 
+def _task_info_core_error(task_id: UUID, exc: CoreError) -> Err[BrokerOperationFailed]:
+    """The core of this process cannot run a task info read: it stopped, did
+    not start, has too many calls in flight, or a blocking call reached its
+    bound. Nothing changed. Pure."""
+    return Err(
+        BrokerOperationFailed(
+            code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+            message=f'get_task_info failed for {task_id}: {exc}',
+            retryable=core_error_retryable(exc),
+            exception=exc,
+        ),
+    )
+
+
+def _strict_result_envelope(
+    task_id: UUID, result_json: str,
+) -> Result[dict[str, Json] | None, BrokerInvalidJsonPayload]:
+    """Read a stored result envelope with the strict JSON reader: a JSON
+    object, or ``None`` for JSON null. Pure.
+
+    A text that does not read (malformed, a non-finite number) or a value
+    that is neither an object nor null is ``INVALID_JSON_PAYLOAD``, as the
+    Python read of a stored result before the switch.
+    """
+    loaded = loads_json(result_json)
+    if is_err(loaded):
+        return Err(BrokerInvalidJsonPayload(
+            message=f'Result JSON parse failed for task {task_id}: {loaded.err_value}',
+            exception=loaded.err_value,
+        ))
+    match loaded.ok_value:
+        case dict() as envelope:
+            return Ok(envelope)
+        case None:
+            return Ok(None)
+        case other:
+            return Err(BrokerInvalidJsonPayload(
+                message=(
+                    f'Result for task {task_id} is not a JSON object; '
+                    f'got {type(other).__name__}'
+                ),
+                exception=NoCause(),
+            ))
+
+
+def _task_attempt_info(record: TaskAttemptRecord) -> TaskAttemptInfo:
+    """The ``TaskAttemptInfo`` of one core attempt record. Pure."""
+    return TaskAttemptInfo(
+        task_id=record.task_id,
+        attempt=record.attempt,
+        outcome=TaskAttemptOutcome(record.outcome),
+        will_retry=record.will_retry,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+        error_code=record.error_code,
+        error_message=record.error_message,
+        failed_reason=record.failed_reason,
+        worker_id=record.worker_id,
+        worker_hostname=record.worker_hostname,
+        worker_pid=record.worker_pid,
+        worker_process_name=record.worker_process_name,
+    )
+
+
+def _task_info_of_record(record: TaskInfoRecord) -> BrokerResult[TaskInfo]:
+    """The ``TaskInfo`` of one core task info record. Pure.
+
+    ``decoded_result`` stays ``None``: the typed decode needs the task's
+    type, which the caller knows. A stored result that does not read is
+    ``INVALID_JSON_PAYLOAD``.
+    """
+    raw_result: dict[str, Json] | None
+    match record.result_json:
+        case None:
+            raw_result = None
+        case str() as result_json:
+            match _strict_result_envelope(record.task_id, result_json):
+                case Ok(envelope):
+                    raw_result = envelope
+                case Err() as refused:
+                    return refused
+    return Ok(TaskInfo(
+        task_id=record.task_id,
+        task_name=record.task_name,
+        status=TaskStatus(record.status),
+        queue_name=record.queue_name,
+        priority=record.priority,
+        retry_count=record.retry_count,
+        max_retries=record.max_retries,
+        next_retry_at=record.next_retry_at,
+        sent_at=record.sent_at,
+        enqueued_at=record.enqueued_at,
+        claimed_at=record.claimed_at,
+        started_at=record.started_at,
+        completed_at=record.completed_at,
+        failed_at=record.failed_at,
+        worker_hostname=record.worker_hostname,
+        worker_pid=record.worker_pid,
+        worker_process_name=record.worker_process_name,
+        error_code=record.error_code,
+        raw_result=raw_result,
+        decoded_result=None,
+        result_decoded=False,
+        failed_reason=record.failed_reason,
+        attempts=(
+            None
+            if record.attempts is None
+            else [_task_attempt_info(attempt) for attempt in record.attempts]
+        ),
+        execution=None if record.execution is None else Execution(record.execution),
+    ))
+
+
+def _task_info_result(
+    task_id: UUID, outcome: TaskInfoRecord | TaskInfoNotFound | BrokerFailure,
+) -> BrokerResult[TaskInfo | None]:
+    """The result of one core task info read. Pure.
+
+    - ``TaskInfoRecord``: ``Ok(TaskInfo)``, or ``INVALID_JSON_PAYLOAD`` for a
+      stored result that does not read.
+    - ``TaskInfoNotFound``: ``Ok(None)``.
+    - ``BrokerFailure(TASK_INFO_QUERY_FAILED)``: the connect, the install
+      or a read failed; ``retryable`` is the core's classification.
+    - ``BrokerFailure(INVALID_JSON_PAYLOAD)``: the core found stored data
+      that does not read, for example a history result whose digest
+      differs; not retryable.
+
+    Each failure's ``exception`` is a ``CoreOperationFailed``. Another code
+    contradicts the core's catalog of the read: ``AssertionError``.
+    """
+    match outcome:
+        case TaskInfoRecord() as record:
+            return _task_info_of_record(record)
+        case TaskInfoNotFound():
+            return Ok(None)
+        case BrokerFailure(
+            code='TASK_INFO_QUERY_FAILED', message=message, retryable=retryable,
+        ):
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                    message=f'get_task_info failed for {task_id}: {message}',
+                    retryable=retryable,
+                    exception=CoreOperationFailed(
+                        'PostgresBroker.get_task_info_async', message, retryable,
+                    ),
+                ),
+            )
+        case BrokerFailure(code='INVALID_JSON_PAYLOAD', message=message):
+            return Err(
+                BrokerInvalidJsonPayload(
+                    message=f'get_task_info failed for {task_id}: {message}',
+                    exception=CoreOperationFailed(
+                        'PostgresBroker.get_task_info_async', message, False,
+                    ),
+                ),
+            )
+        case BrokerFailure(code=code):
+            raise AssertionError(f'the core task info read answered the code {code}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 # Most open event loops, other than the broker's sync runner loop and a worker
 # child's task loop, that get their own resource set. pytest-asyncio keeps one event loop open per
 # fixture scope (session, package, module, class, function), so one test
@@ -1546,6 +1714,10 @@ class PostgresBroker:
     async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
         """Install the baseline schema when this broker runs migrations.
 
+        The Python install before the switch to the core: the broker installs
+        through ``_ensure_initialized``, and only the dual-run reference
+        (``tests/dualrun/reference/install_caller.py``) runs this path.
+
         ``engine`` is the session URL's engine: the reader publication runs
         on it. The state read, the lock and the migration use their own
         direct session connection.
@@ -1731,39 +1903,68 @@ class PostgresBroker:
                     raise RuntimeError(message)
                 body_error.add_note(message)
 
-    async def _ensure_initialized(self, resources: BrokerResources) -> None:
+    async def _ensure_initialized(self) -> None:
+        """Install the schema once per broker through ``CoreHandle.install_schema_async``.
+
+        The core installs the baseline into an empty database, or completes
+        or checks an installed one, under the fleet schema lock: the
+        migration with this client's family row, then the published history
+        readers. A handle with migrations off or ``assume_initialized`` runs
+        no schema statement. After a success the broker does not call the
+        core again; a broker built with ``assume_initialized=True`` never
+        calls it.
+
+        The ``_maybe_run_schema_init`` path of this class is the Python
+        install before the switch; the dual-run reference
+        (``tests/dualrun/reference/install_caller.py``) runs it.
+
+        Raises:
+            CoreOperationFailed: the core reported ``SCHEMA_INIT_FAILED``;
+                ``retryable`` is the core's classification of the cause. The
+                broker keeps nothing, so the next call installs again.
+            CoreError: the core of this process cannot run the call.
+        """
         if self._initialized:
             return
-        await self._run_with_schema_engine(resources, self._maybe_run_schema_init)
-        self._initialized = True
+        match await self._core_handle.install_schema_async():
+            case SchemaInstalled() | SchemaInstallNotRun():
+                self._initialized = True
+            case BrokerFailure(code='SCHEMA_INIT_FAILED', message=message, retryable=retryable):
+                raise CoreOperationFailed(
+                    'PostgresBroker.ensure_schema_initialized', message, retryable,
+                )
+            case BrokerFailure(code=code):
+                raise AssertionError(f'the core schema install answered the code {code}')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def ensure_schema_initialized(
         self,
     ) -> Result[None, BrokerOperationFailed | BrokerEventLoopLimit]:
-        """
-        Public entry point to ensure tables and triggers exist.
+        """Install the schema, or check it, once per broker. Writes.
 
-        Safe to call multiple times and from multiple processes; internally
-        guarded by a PostgreSQL advisory lock to avoid DDL races.
+        Safe to call many times and from many processes: the core guards the
+        install with the fleet schema advisory lock, and waits for another
+        installer's lock for at most the core's bound.
 
-        Returns Ok(None) on success. On failure: ``BrokerOperationFailed``
-        with ``SCHEMA_INIT_FAILED`` and its cause, or ``BrokerEventLoopLimit``
-        when the call ran on one loop more than the broker's limit.
+        Returns ``Ok(None)`` on success. On failure ``BrokerOperationFailed``
+        with ``SCHEMA_INIT_FAILED`` and its cause: the core reported the
+        install failed (``exception`` is a ``CoreOperationFailed``), for
+        example a database of the other client family or one this build
+        cannot install into (not retryable), or the core of this process
+        cannot run the call (``exception`` is the ``CoreError``). The install
+        runs on the core pools, so ``BrokerEventLoopLimit`` is no longer a
+        failure exit. A cancel of the caller does not stop the install.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('ensure_schema_initialized', loop_limit)
-            case Ok(resources):
-                pass
         try:
-            await self._ensure_initialized(resources)
-            return Ok(None)
-        except Exception as exc:
+            await self._ensure_initialized()
+        except (CoreOperationFailed, CoreError) as exc:
             return _operation_failed(
                 BrokerErrorCode.SCHEMA_INIT_FAILED,
                 f'Schema initialization failed: {exc}',
                 exc,
             )
+        return Ok(None)
 
     # ----------------- Async API -----------------
 
@@ -1946,7 +2147,7 @@ class PostgresBroker:
         # it raises RuntimeError for operator states such as an incomplete
         # cutover, and each of those is a failed enqueue, not a crash.
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
         except Exception as exc:
             return _enqueue_failed(
                 f'Failed to enqueue task {task_name}: {exc}',
@@ -2278,7 +2479,7 @@ class PostgresBroker:
             case Ok(resources):
                 pass
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
 
             start_time = asyncio.get_event_loop().time()
 
@@ -3682,208 +3883,31 @@ class PostgresBroker:
         include_failed_reason: bool = False,
         include_attempts: bool = False,
     ) -> BrokerResult[TaskInfo | None]:
-        """Fetch metadata for a task by ID.
+        """Fetch metadata for a task by ID, through ``CoreHandle.task_info_async``.
 
-        Returns Ok(TaskInfo) if found, Ok(None) if not found,
-        Err(BrokerOperationError) on infrastructure failure.
+        The core installs the schema once per handle first (nothing with
+        migrations off), then reads the live row, or the task's history
+        record when the live row is gone; with ``include_attempts`` the
+        attempts, newest first. A live task has no result, failed reason,
+        error code or terminal time. Reads only; a cancel of the caller
+        drops the read.
+
+        Returns ``Ok(TaskInfo)``, or ``Ok(None)`` when neither the live
+        table nor the history holds the task. ``raw_result`` is the stored
+        envelope, read with the strict JSON reader; ``decoded_result`` is
+        left to the caller (``Horsies.get_task_info_async``). Failures, see
+        ``_task_info_result``.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('get_task_info', loop_limit)
-            case Ok(resources):
-                pass
         try:
-            await self._ensure_initialized(resources)
-
-            async with resources.session_factory() as session:
-                base_columns = [
-                    'task_name',
-                    'status',
-                    'queue_name',
-                    'priority',
-                    'retry_count',
-                    'max_retries',
-                    'next_retry_at',
-                    'sent_at',
-                    'enqueued_at',
-                    'claimed_at',
-                    'started_at',
-                    # A live row stores no terminal times, error code,
-                    # result or failed reason: those live in history.
-                    'NULL::timestamptz AS completed_at',
-                    'NULL::timestamptz AS failed_at',
-                    'worker_hostname',
-                    'worker_pid',
-                    'worker_process_name',
-                    'NULL::text AS error_code',
-                    'execution',
-                ]
-                if include_result:
-                    base_columns.append('NULL::text AS result')
-                if include_failed_reason:
-                    base_columns.append('NULL::text AS failed_reason')
-
-                query = text(
-                    f"""
-                    SELECT {', '.join(base_columns)}
-                    FROM horsies_tasks
-                    WHERE id = :id
-                """
-                )
-                result = await session.execute(query, {'id': str(task_id)})
-                row = result.fetchone()
-                if row is None:
-                    # Terminalization moves finished rows to history, so
-                    # a live miss is the normal terminal case: fall
-                    # through to the staged detail read, exactly like
-                    # the result surface. Ok(None) only on true absence.
-                    return await self._history_task_info(
-                        session,
-                        task_id,
-                        include_result=include_result,
-                        include_failed_reason=include_failed_reason,
-                        include_attempts=include_attempts,
-                    )
-
-                raw_result_value: dict[str, Any] | None = None
-                failed_reason = None
-
-                idx = 0
-                task_name = row[idx]
-                idx += 1
-                status = TaskStatus(row[idx])
-                idx += 1
-                queue_name = row[idx]
-                idx += 1
-                priority = row[idx]
-                idx += 1
-                retry_count = row[idx] or 0
-                idx += 1
-                max_retries = row[idx] or 0
-                idx += 1
-                next_retry_at = row[idx]
-                idx += 1
-                sent_at = row[idx]
-                idx += 1
-                enqueued_at = row[idx]
-                idx += 1
-                claimed_at = row[idx]
-                idx += 1
-                started_at = row[idx]
-                idx += 1
-                completed_at = row[idx]
-                idx += 1
-                failed_at = row[idx]
-                idx += 1
-                worker_hostname = row[idx]
-                idx += 1
-                worker_pid = row[idx]
-                idx += 1
-                worker_process_name = row[idx]
-                idx += 1
-                error_code_value = row[idx]
-                idx += 1
-                # The CHECK on the column holds the domain. A value outside
-                # it raises here, and the read fails as a query failure.
-                execution = Execution(row[idx])
-                idx += 1
-
-                if include_result:
-                    raw_result_text = row[idx]
-                    idx += 1
-                    if raw_result_text:
-                        _lr = loads_json(raw_result_text)
-                        if is_err(_lr):
-                            return Err(BrokerInvalidJsonPayload(
-                                message=(
-                                    f'Result JSON parse failed for task '
-                                    f'{task_id}: {_lr.err_value}'
-                                ),
-                                exception=_lr.err_value,
-                            ))
-                        loaded = _lr.ok_value
-                        if loaded is not None and not isinstance(loaded, dict):
-                            return Err(BrokerInvalidJsonPayload(
-                                message=(
-                                    f'Result for task {task_id} is not a '
-                                    f'JSON object; got '
-                                    f'{type(loaded).__name__}'
-                                ),
-                                exception=NoCause(),
-                            ))
-                        # Broker stays infrastructure: no typed decode
-                        # here. The app-level `get_task_info` does the
-                        # `decode_task_result` step using the local task
-                        # catalog. (Strict-serde design §6.)
-                        raw_result_value = loaded
-                    else:
-                        raw_result_value = None
-                else:
-                    raw_result_value = None
-
-                if include_failed_reason:
-                    failed_reason = row[idx]
-
-                # Load attempt history if requested
-                attempts: list[TaskAttemptInfo] | None = None
-                if include_attempts:
-                    att_result = await session.execute(
-                        SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL,
-                        {'task_id': str(task_id)},
-                    )
-                    attempts = [
-                        TaskAttemptInfo(
-                            task_id=task_id,
-                            attempt=att_row[1],
-                            outcome=TaskAttemptOutcome(att_row[2]),
-                            will_retry=att_row[3],
-                            started_at=att_row[4],
-                            finished_at=att_row[5],
-                            error_code=att_row[6],
-                            error_message=att_row[7],
-                            failed_reason=att_row[8],
-                            worker_id=att_row[9],
-                            worker_hostname=att_row[10],
-                            worker_pid=att_row[11],
-                            worker_process_name=att_row[12],
-                        )
-                        for att_row in att_result.fetchall()
-                    ]
-
-                return Ok(
-                    TaskInfo(
-                        task_id=task_id,
-                        task_name=task_name,
-                        status=status,
-                        queue_name=queue_name,
-                        priority=priority,
-                        retry_count=retry_count,
-                        max_retries=max_retries,
-                        next_retry_at=next_retry_at,
-                        sent_at=sent_at,
-                        enqueued_at=enqueued_at,
-                        claimed_at=claimed_at,
-                        started_at=started_at,
-                        completed_at=completed_at,
-                        failed_at=failed_at,
-                        worker_hostname=worker_hostname,
-                        worker_pid=worker_pid,
-                        worker_process_name=worker_process_name,
-                        error_code=error_code_value,
-                        raw_result=raw_result_value,
-                        decoded_result=None,
-                        result_decoded=False,
-                        failed_reason=failed_reason,
-                        attempts=attempts,
-                        execution=execution,
-                    )
-                )
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                f'get_task_info failed for {task_id}: {exc}',
-                exc,
+            outcome = await self._core_handle.task_info_async(
+                task_id,
+                include_result=include_result,
+                include_failed_reason=include_failed_reason,
+                include_attempts=include_attempts,
             )
+        except CoreError as exc:
+            return _task_info_core_error(task_id, exc)
+        return _task_info_result(task_id, outcome)
 
     def get_task_info(
         self,
@@ -3893,10 +3917,13 @@ class PostgresBroker:
         include_failed_reason: bool = False,
         include_attempts: bool = False,
     ) -> BrokerResult[TaskInfo | None]:
-        """Synchronous wrapper for get_task_info_async().
+        """The blocking form of ``get_task_info_async``: ``CoreHandle.task_info``
+        on the calling thread, with the GIL released.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and does no I/O.
+        and does no I/O. A call that does not end within the core's bound of
+        a blocking call is ``TASK_INFO_QUERY_FAILED`` with the
+        ``CoreCallTimedOut`` (retryable); nothing changed.
         """
         if in_running_event_loop():
             return _async_context_err(
@@ -3904,15 +3931,15 @@ class PostgresBroker:
                 'broker.get_task_info_async(...)',
             )
         try:
-            return self.run_sync(
-                self.get_task_info_async,
+            outcome = self._core_handle.task_info(
                 task_id,
                 include_result=include_result,
                 include_failed_reason=include_failed_reason,
                 include_attempts=include_attempts,
             )
-        except LoopRunnerError as exc:
-            return _loop_runner_err(f'PostgresBroker.get_task_info({task_id!r})', exc)
+        except CoreError as exc:
+            return _task_info_core_error(task_id, exc)
+        return _task_info_result(task_id, outcome)
 
     def close(self) -> BrokerResult[None]:
         """Synchronous cleanup (runs close_async in background loop).

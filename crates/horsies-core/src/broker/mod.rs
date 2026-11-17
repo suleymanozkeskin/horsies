@@ -16,6 +16,7 @@ pub(crate) mod enqueue_history_tests;
 mod enqueue_identity_ports;
 pub(crate) mod enqueue_task;
 pub mod error;
+pub mod expiry_and_orphans;
 pub mod health;
 pub(crate) mod history_reads;
 mod lifecycle_operations;
@@ -53,6 +54,7 @@ pub mod wait_limit;
 #[cfg(test)]
 mod worker_state_read_tests;
 mod workflow_claim_settle;
+mod workflow_operations;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};

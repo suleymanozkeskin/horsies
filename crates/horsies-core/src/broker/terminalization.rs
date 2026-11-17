@@ -768,6 +768,22 @@ pub(crate) async fn terminalize_and_commit_if<T>(
     }
 }
 
+/// Run a command in the caller's open transaction on a core connection and
+/// decode everything it reports. The caller commits or rolls back; a
+/// statement that fails leaves the transaction aborted, so nothing of it
+/// commits. Each outcome is logged ([`log_terminalization_outcome`]).
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::TerminalizationContract`]
+/// when a row or the row count breaks the wire contract.
+pub(crate) async fn terminalize_in_core_transaction(
+    transaction: &mut crate::db::Transaction<'_>,
+    log: StatementLog,
+    command: &TerminalizationCommand,
+) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
+    let rows = run_command(&mut StatementTarget::Transaction(transaction), log, command).await?;
+    decode_outcomes(&rows, command)
+}
+
 /// Decode every row of a command's statement, enforce the cardinality of the
 /// command, and log each outcome ([`log_terminalization_outcome`]). Pure but
 /// for the log.
