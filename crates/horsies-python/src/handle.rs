@@ -1,5 +1,6 @@
 //! `CoreHandle`: the handle that the Python client builds from a producer
-//! manifest.
+//! manifest, with the pool profile of its process: a producer, or a worker
+//! process.
 //!
 //! Building a handle parses the manifest and starts nothing: no runtime, no
 //! connection. The first operation starts the core of the process and
@@ -11,8 +12,10 @@ use std::sync::Arc;
 
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::{
-    BrokerError, BrokerErrorCode, ClientFamily, PostgresBroker, SchemaInitializationMode,
+    BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker,
+    SchemaInitializationMode,
 };
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use tokio::sync::OnceCell;
@@ -41,10 +44,12 @@ use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
-/// The manifest of a handle and its broker, connected at first use.
+/// The manifest of a handle, the pool profile of its process, and its
+/// broker, connected at first use.
 #[derive(Clone)]
 pub struct BrokerConnection {
     manifest: Arc<ProducerManifest>,
+    profile: PoolProfile,
     broker: Arc<OnceCell<Arc<PostgresBroker>>>,
 }
 
@@ -53,7 +58,7 @@ impl BrokerConnection {
     /// returned and not kept.
     pub async fn broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
         self.broker
-            .get_or_try_init(|| connect(&self.manifest))
+            .get_or_try_init(|| connect(&self.manifest, self.profile))
             .await
             .map(Arc::clone)
     }
@@ -93,7 +98,10 @@ enum ConnectState {
     Connected(Arc<PostgresBroker>),
 }
 
-async fn connect(manifest: &ProducerManifest) -> Result<Arc<PostgresBroker>, BrokerError> {
+async fn connect(
+    manifest: &ProducerManifest,
+    profile: PoolProfile,
+) -> Result<Arc<PostgresBroker>, BrokerError> {
     let config = manifest
         .database
         .to_postgres_config(manifest.send.retain_rerun_input_default);
@@ -107,12 +115,25 @@ async fn connect(manifest: &ProducerManifest) -> Result<Arc<PostgresBroker>, Bro
         }
     };
     let window = manifest.send.idempotency_reservation_window.as_duration();
-    PostgresBroker::connect_with_policies(&config, mode, window)
+    PostgresBroker::connect_with_policies(&config, mode, window, profile)
         .await
         .map(|broker| Arc::new(broker.with_client_family(ClientFamily::Python)))
 }
 
-/// The core handle of one producer manifest.
+/// The pool profile of a `CoreHandle`'s process: `PRODUCER` or `WORKER`.
+/// Pure.
+fn handle_profile(text: &str) -> Result<PoolProfile, String> {
+    match text {
+        "PRODUCER" => Ok(PoolProfile::Producer),
+        "WORKER" => Ok(PoolProfile::Worker),
+        other => Err(format!(
+            "pool_profile must be 'PRODUCER' or 'WORKER', not {other:?}"
+        )),
+    }
+}
+
+/// The core handle of one producer manifest and the pool profile of its
+/// process.
 #[pyclass(module = "horsies._core", name = "CoreHandle", frozen)]
 pub struct CoreHandle {
     connection: BrokerConnection,
@@ -127,15 +148,22 @@ impl CoreHandle {
 
 #[pymethods]
 impl CoreHandle {
-    /// Build a handle from the JSON text of a producer manifest. Starts
-    /// nothing. A refused manifest raises `ManifestRefused`.
+    /// Build a handle from the JSON text of a producer manifest and the pool
+    /// profile of its process: `PRODUCER` (a producer or a monitoring
+    /// process: no reserve) or `WORKER` (a worker process: the main core
+    /// pool keeps 2 connections free from batch checkouts, such as the claim
+    /// pass, for the per-task writes). Starts nothing. A refused manifest
+    /// raises `ManifestRefused`; another profile raises `ValueError`.
     #[new]
-    fn new(manifest_json: &str) -> PyResult<Self> {
+    #[pyo3(signature = (manifest_json, *, pool_profile))]
+    fn new(manifest_json: &str, pool_profile: &str) -> PyResult<Self> {
+        let profile = handle_profile(pool_profile).map_err(PyValueError::new_err)?;
         let manifest = parse_producer_manifest(manifest_json)
             .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
         Ok(Self {
             connection: BrokerConnection {
                 manifest: Arc::new(manifest),
+                profile,
                 broker: Arc::new(OnceCell::new()),
             },
         })
@@ -629,8 +657,26 @@ mod tests {
     }"#;
 
     #[test]
+    fn the_two_pool_profiles_are_read_and_any_other_text_is_refused() {
+        assert_eq!(handle_profile("PRODUCER"), Ok(PoolProfile::Producer));
+        assert_eq!(handle_profile("WORKER"), Ok(PoolProfile::Worker));
+        let refused = handle_profile("CHILD").expect_err("a child has a handle of its own");
+        assert!(refused.contains("\"CHILD\""), "{refused}");
+    }
+
+    #[test]
+    fn a_worker_process_handle_keeps_its_profile_and_starts_nothing() {
+        let handle = CoreHandle::new(MANIFEST, "WORKER").expect("the manifest is complete");
+        assert_eq!(handle.connection.profile, PoolProfile::Worker);
+        assert!(matches!(
+            handle.connection.connect_state(),
+            ConnectState::NeverConnected
+        ));
+    }
+
+    #[test]
     fn a_handle_that_never_connected_closes_without_a_core_call() {
-        let handle = CoreHandle::new(MANIFEST).expect("the manifest is complete");
+        let handle = CoreHandle::new(MANIFEST, "PRODUCER").expect("the manifest is complete");
         assert!(matches!(
             handle.connection.connect_state(),
             ConnectState::NeverConnected

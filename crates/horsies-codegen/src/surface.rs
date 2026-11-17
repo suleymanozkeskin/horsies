@@ -116,7 +116,10 @@ const START_AT_PARAMETERS: &[StubParameter] = &[positional("at", "datetime.datet
 
 const RETENTION_PERIOD_PARAMETERS: &[StubParameter] = &[positional("days", "int")];
 
-const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[positional("manifest_json", "str")];
+const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[
+    positional("manifest_json", "str"),
+    keyword("pool_profile", "Literal['PRODUCER', 'WORKER']"),
+];
 
 const SET_PANIC_RULE_PARAMETERS: &[StubParameter] =
     &[positional("rule", "Literal['STOP_CORE', 'ABORT_PROCESS']")];
@@ -1121,7 +1124,7 @@ const RECORD_CLASSES: [StubClass; 55] = [
 
 const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     name: "CoreHandle",
-    doc: "The core handle of one producer manifest. Building it starts nothing.",
+    doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
     constructor: Constructor::Parameters(CORE_HANDLE_PARAMETERS),
     properties: &[property("manifest_version", "int")],
     methods: &CORE_HANDLE_METHODS,

@@ -1030,17 +1030,20 @@ impl PostgresBroker {
     }
 
     /// Connect with the schema behaviour and the keyed-enqueue reservation
-    /// window of a client manifest. The window is checked before any
-    /// database connection is attempted.
+    /// window of a client manifest, with the pools of `profile`: a producer,
+    /// a worker process (the main URL pool keeps
+    /// [`WORKER_RESERVED_CONNECTIONS`] free from batch checkouts), or a
+    /// worker's child. The window is checked before any database connection
+    /// is attempted.
     pub async fn connect_with_policies(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
         window: chrono::Duration,
+        profile: PoolProfile,
     ) -> Result<Self, BrokerError> {
         let seconds = idempotency_reservation_window_seconds(Some(window))?;
         let mut broker =
-            Self::connect_with_schema_initialization_mode(config, schema_initialization_mode)
-                .await?;
+            Self::connect_with_profile(config, schema_initialization_mode, profile).await?;
         broker.idempotency_reservation_window_seconds = seconds;
         Ok(broker)
     }
