@@ -54,6 +54,11 @@ LANGUAGE sql STABLE AS $$
     WHERE h.task_id = p_task_id
     LIMIT 1
 $$;
+CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged(p_task_id))
+        OR EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions AS e WHERE e.task_id = p_task_id)
+$$;
 DO $$
 BEGIN
     EXECUTE format(
@@ -65,7 +70,8 @@ $$;
 CREATE INDEX horsies_heartbeats_lc_sessions_probe ON horsies_heartbeats_lc_sessions (task_id, role, sent_at DESC);
 """
 """Fixtures that the published history readers and the partition manager provide at run time: a provenance
-stand-in that reads the history parent, and one heartbeat leaf around now."""
+stand-in that reads the history parent, a duplicate guard stand-in on top of it, and one heartbeat leaf around
+now."""
 
 _INSERT_TASK_SQL: Final[LiteralString] = """
 INSERT INTO horsies_tasks (

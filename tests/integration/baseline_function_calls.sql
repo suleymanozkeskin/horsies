@@ -4,14 +4,6 @@
 -- tables only when the statement runs, so each function is called on a path that runs its statements that name
 -- columns. Each call checks its outcome.
 
--- The published provenance reader is rendered by horsies_publish_history_readers; this stand-in answers "not found"
--- (no row).
-CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
-RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
-LANGUAGE sql AS $$
-    SELECT NULL::uuid, NULL::text, NULL::timestamptz, NULL::text, NULL::boolean WHERE FALSE
-$$;
-
 CREATE FUNCTION fixture_task(
     p_id uuid, p_status text, p_worker text, p_is_workflow boolean, p_good_until timestamptz DEFAULT NULL
 ) RETURNS void LANGUAGE sql AS $$
@@ -75,6 +67,10 @@ BEGIN
     END IF;
 END
 $$;
+
+-- The published readers (the duplicate guard of the moves, the provenance reader of the miss classifier), as the
+-- install publishes them.
+SELECT expect_value('publish_history_readers', (SELECT outcome FROM horsies_publish_history_readers()), 'PUBLISHED');
 
 -- Helpers with no table reads.
 SELECT expect_value('uuid7_birth', (horsies_uuid7_birth(horsies_uuidv7()) IS NOT NULL)::text, 'true');

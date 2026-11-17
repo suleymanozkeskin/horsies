@@ -17,9 +17,10 @@
 --   fence on it with no NULL arm;
 -- - horsies_key_reservation_claim inserts with ON CONFLICT DO NOTHING and reads again, so concurrent first claims
 --   of one key answer REPLAY or CONFLICT, not 23505.
--- The trigger functions are in 0001_tables.sql. The published history readers are rendered by
--- horsies_publish_history_readers (0008_history_maintenance_functions.sql);
--- horsies_task_history_duplicate_staged here is the first version that the first publication replaces.
+-- The trigger functions are in 0001_tables.sql. The published history readers, among them the duplicate guard
+-- horsies_task_history_duplicate_staged that the moves of 0006_history_functions.sql call, are rendered by
+-- horsies_publish_history_readers (0008_history_maintenance_functions.sql); the install publishes them before it
+-- returns.
 --
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
 -- checksum over the result.
@@ -1796,19 +1797,6 @@ BEGIN
     RETURN ROW('REPOINTED', NULL)::horsies_phase2_quarantine_verdict;
 END
 $$;
-
-CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid) RETURNS boolean
-    LANGUAGE plpgsql STABLE
-    AS $$
-            BEGIN
-                RETURN EXISTS (
-                    SELECT 1 FROM horsies_task_provenance_staged(p_task_id)
-                ) OR EXISTS (
-                    SELECT 1 FROM horsies_task_history_clock_exceptions
-                    WHERE task_id = p_task_id
-                );
-            END
-            $$;
 
 CREATE FUNCTION horsies_task_history_leaf_lock_key(p_class_key text, p_anchor timestamp with time zone) RETURNS bigint
     LANGUAGE sql STABLE STRICT

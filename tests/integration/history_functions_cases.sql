@@ -18,6 +18,12 @@ LANGUAGE sql STABLE AS $$
     FROM horsies_task_history AS h WHERE h.task_id = p_task_id LIMIT 1
 $$;
 
+CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged(p_task_id))
+        OR EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions AS e WHERE e.task_id = p_task_id)
+$$;
+
 CREATE FUNCTION horsies_task_detail_staged(p_task_id uuid)
 RETURNS TABLE (location text, task_row horsies_task_history) LANGUAGE plpgsql STABLE AS $$
 DECLARE

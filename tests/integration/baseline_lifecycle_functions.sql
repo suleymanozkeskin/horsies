@@ -20,6 +20,14 @@ LANGUAGE sql STABLE AS $$
     LIMIT 1
 $$;
 
+-- The duplicate guard of the moves is a published reader too. This stand-in answers TRUE when the provenance
+-- stand-in finds the id or a clock exception records it.
+CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged(p_task_id))
+        OR EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions AS e WHERE e.task_id = p_task_id)
+$$;
+
 -- One heartbeat leaf around NOW(), with the probe index of the run-time leaves.
 CREATE TABLE horsies_heartbeats_lc_window PARTITION OF horsies_heartbeats
     FOR VALUES FROM (now() - interval '2 days') TO (now() + interval '2 days');
