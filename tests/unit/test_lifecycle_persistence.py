@@ -19,7 +19,6 @@ from horsies.core.lifecycle.commands import (
 from horsies.core.lifecycle.fences import (
     OwnedClaim,
     OwnedClaimBatch,
-    PriorLockedRead,
     WorkerOwned,
 )
 from horsies.core.lifecycle.operations import TerminalizationKind
@@ -205,7 +204,10 @@ def test_refusal_log_contains_operation_fence_and_locked_observation(
 ) -> None:
     command = CompleteLockedTask(
         task_id='one',
-        fence=PriorLockedRead(worker_id='expected-worker'),
+        fence=OwnedClaim(
+            worker_id='expected-worker',
+            claimed_at=_NOW - timedelta(seconds=5),
+        ),
         result_json='{"ok": 1}',
     )
     outcome = LostClaim(

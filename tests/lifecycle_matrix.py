@@ -45,15 +45,12 @@ class Fence(Enum):
     """Matches `claimed_by_worker_id` only."""
 
     WORKER_AND_GENERATION = 'WORKER_AND_GENERATION'
-    """Full ClaimedOwnerFence: worker plus `claimed_at` generation."""
+    """Full ClaimedOwnerFence: worker plus `claimed_at` generation, compared
+    on the row the function locks (`FOR UPDATE`). The client command carries
+    both in its fence (`OwnedClaim`)."""
 
     WORKER_AND_GENERATION_PAIRWISE = 'WORKER_AND_GENERATION_PAIRWISE'
     """As above, with generations supplied per task through `unnest`."""
-
-    PRIOR_LOCKED_SELECT = 'PRIOR_LOCKED_SELECT'
-    """The function locks the row (`FOR UPDATE`), then matches worker and
-    `claimed_at` generation. The client command carries the worker in its
-    fence (`PriorLockedRead`) and the generation beside it."""
 
 
 class Guard(Enum):
@@ -193,7 +190,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         statement='MARK_TASK_FAILED_WORKER_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
-        fence=Fence.PRIOR_LOCKED_SELECT,
+        fence=Fence.WORKER_AND_GENERATION,
         guards=(),
         attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
@@ -209,7 +206,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         statement='MARK_TASK_FAILED_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
-        fence=Fence.PRIOR_LOCKED_SELECT,
+        fence=Fence.WORKER_AND_GENERATION,
         guards=(),
         attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
@@ -225,7 +222,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         statement='MARK_TASK_COMPLETED_SQL',
         source_statuses=('RUNNING',),
         target_status='COMPLETED',
-        fence=Fence.PRIOR_LOCKED_SELECT,
+        fence=Fence.WORKER_AND_GENERATION,
         guards=(),
         attempt=Attempt.FUSED_UPSERT,
         writes_result=True,

@@ -29,7 +29,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
 from horsies.core.lifecycle.commands import CompleteLockedTask
-from horsies.core.lifecycle.fences import PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskResult
 from horsies.core.types.result import Err, Ok, Result
@@ -155,18 +155,16 @@ async def _finish(
 ) -> Result[_NodeFinishOwed | None, _FinalizeError]:
     completion = CompleteLockedTask(
         task_id=case.task_id,
-        fence=PriorLockedRead(worker_id=worker_id),
+        fence=OwnedClaim(worker_id=worker_id, claimed_at=case.claim.claimed_at),
         result_json=_ok_result_json(),
     )
     child = _Phase1Input(ok=True, result_json_str=completion.result_json, failed_reason=None)
     match implementation:
         case 'shipped':
-            return await probe._finish_workflow_success(
-                completion, claim=case.claim, child=child,
-            )
+            return await probe._finish_workflow_success(completion, child=child)
         case 'python':
             return await workflow_success_caller.finish_workflow_success(
-                probe, completion, claim=case.claim, child=child,
+                probe, completion, child=child,
             )
 
 

@@ -44,7 +44,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.lifecycle.classify import ErrorProduced, WorkerLevelFailure
 from horsies.core.lifecycle.commands import FailLockedTask
-from horsies.core.lifecycle.fences import PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     FailureApplied,
@@ -326,7 +326,7 @@ async def _persist(
     )
     command = FailLockedTask(
         task_id=case.task_id,
-        fence=PriorLockedRead(worker_id=worker_id),
+        fence=OwnedClaim(worker_id=worker_id, claimed_at=case.claim.claimed_at),
         result_json=failure.result_json,
         error_code=failure.error_code,
         failed_reason=failure.failed_reason,
