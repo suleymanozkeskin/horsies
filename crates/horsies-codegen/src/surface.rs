@@ -425,6 +425,8 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
 const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
     &[keyword("message", "str"), keyword("failure_result", "str")];
+const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | \
+     WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed";
 const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
 const CANCEL_WORKFLOW_OUTCOME: &str =
@@ -676,6 +678,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 40] = [
         parameters: START_WORKFLOW_PARAMETERS,
         returns: TypeText::FutureOf(START_WORKFLOW_OUTCOME),
         doc: "Start one workflow. Writes; the children of its sub-workflow roots come from the child\nspec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no\nchild spec source it raises RuntimeError.",
+    },
+    StubFunction {
+        name: "resume_workflow_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(RESUME_WORKFLOW_OUTCOME),
+        doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain. With no child spec source it raises RuntimeError.",
     },
     StubFunction {
         name: "pause_workflow_async",
@@ -2181,7 +2189,7 @@ const MONITORING_CLASSES: [StubClass; 33] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 29] = [
+const WORKFLOW_CLASSES: [StubClass; 32] = [
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -2447,6 +2455,30 @@ const WORKFLOW_CLASSES: [StubClass; 29] = [
         properties: &[
             property("workflow_id", "uuid.UUID"),
             property("existing_name", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowResumed",
+        doc: "The workflow was PAUSED; its tree is RUNNING again.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNotPaused",
+        doc: "The workflow exists and is not PAUSED. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowResumeRecoveryFailed",
+        doc: "The resume committed; the parent advance or the recovery pass of the tree after it\nfailed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("message", "str"),
         ],
         methods: &[],
     },

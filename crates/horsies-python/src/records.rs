@@ -11,7 +11,7 @@ use pyo3::IntoPyObjectExt;
 /// An expected failure of a broker operation: the catalog code, the cause
 /// and whether a repeat of the same call can succeed.
 #[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerFailure {
     /// A member of `BrokerErrorCode`, as its wire value.
     pub code: String,

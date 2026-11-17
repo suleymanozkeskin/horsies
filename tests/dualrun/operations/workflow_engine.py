@@ -21,6 +21,13 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         core_methods=('start_workflow_async',),
     ),
     DualRunOperation(
+        name='workflow resume',
+        production_path='horsies.core.workflows.lifecycle:resume_workflow',
+        reference_path='tests.dualrun.reference.workflow_resume_caller:resume_workflow',
+        mode=PoolMode(),
+        core_methods=('resume_workflow_async',),
+    ),
+    DualRunOperation(
         name='workflow pause',
         production_path='horsies.core.workflows.lifecycle:pause_workflow',
         reference_path='tests.dualrun.reference.workflow_pause_caller:pause_workflow',
