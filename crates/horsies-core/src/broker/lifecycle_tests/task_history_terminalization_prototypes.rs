@@ -28,7 +28,7 @@ use uuid::Uuid;
 use super::support::*;
 use crate::broker::attempt_writes::FinishWorkflowSuccess;
 use crate::broker::error::BrokerError;
-use crate::broker::postgres::PostgresBroker;
+use crate::broker::postgres::{PostgresBroker, WorkflowStop};
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::history::archive::attempts::{encode_attempt_snapshot, AttemptRecord};
@@ -332,8 +332,8 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
 
-    PostgresBroker::from_pool(pool.clone())
-        .handle_workflow_stop_before_start(task_id, "PAUSED", WORKER, generation())
+    let _stopped = PostgresBroker::from_pool(pool.clone())
+        .stop_workflow_task_before_start(task_id, WorkflowStop::Paused, WORKER, generation())
         .await
         .expect("stop before start");
 
@@ -349,7 +349,7 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
 /// on the post-claim path: the post-claim abandon of a task of a PAUSED
 /// workflow whose node is already COMPLETED leaves the node COMPLETED with
 /// its task link (#785; Python `RESET_PAUSED_WORKFLOW_TASKS_SQL`,
-/// `horsies/core/worker/sql.py:291-296`).
+/// `python/horsies/core/worker/sql.py:291-296`).
 #[tokio::test]
 #[serial]
 async fn post_claim_abandon_keeps_a_finished_node() {

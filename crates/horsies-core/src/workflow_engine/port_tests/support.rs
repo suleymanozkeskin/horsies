@@ -1,7 +1,7 @@
 //! Seeds, databases and engine drivers that the workflow engine ports share.
 //!
 //! Every seed names every column of its baseline table
-//! (`horsies/core/baseline/sql/0001_tables.sql`), and the two node columns that
+//! (`crates/horsies-core/baseline/0001_tables.sql`), and the two node columns that
 //! #788 adds (`sub_workflow_params`, `downstream_subworkflow`). The node
 //! `error` column is not named: the baseline drops it (decision "The node
 //! `error` column", rule-following row 13).
@@ -49,11 +49,11 @@ pub(super) const PORT_QUEUE: &str = "port_workflow_q";
 /// uses `[]` too):
 /// - stored on a promoted task node, they fail that node alone with
 ///   `WORKER_SERIALIZATION_ERROR` (Python `_build_enqueued_task_params`,
-///   `horsies/core/workflows/engine.py:798-805`; the baseline
+///   `python/horsies/core/workflows/engine.py:798-805`; the baseline
 ///   `horsies_workflow_task_options_refusal`);
 /// - on the task of a child node that has a `good_until`, the merge of the
 ///   deadline into them raises at each child start (Python
-///   `_child_task_options_json`, `horsies/core/workflows/engine.py:425-475`).
+///   `_child_task_options_json`, `python/horsies/core/workflows/engine.py:425-475`).
 pub(super) const POISON_TASK_OPTIONS: &str = "[]";
 
 /// The process facts that the start write (`horsies_start_attempt`) records
@@ -582,6 +582,41 @@ pub(super) async fn seed_node_task(
     .fetch_one(pool)
     .await
     .expect("seed the workflow task row")
+}
+
+/// The process id that [`start_claimed_task`] records.
+const START_WORKER_PID: i32 = 4343;
+
+/// The start write of the child host for a task that [`WORKER`] claimed at
+/// `claimed_at` (`broker::claims::start_attempt`, the statement of
+/// `worker::executor::child_host::run::start_attempt`). Every task start of
+/// the worker goes through it.
+pub(super) async fn start_claimed_task(
+    pool: &PgPool,
+    task_id: Uuid,
+    claimed_at: DateTime<Utc>,
+) -> crate::broker::claims::StartOutcome {
+    let broker = broker(pool);
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .expect("the core pools of the broker");
+    crate::broker::claims::start_attempt(
+        open.main(),
+        broker.statement_log(),
+        &crate::broker::claims::StartAttempt {
+            task_id,
+            fence: crate::core::lifecycle::OwnedClaim {
+                worker_id: WORKER.to_owned(),
+                claimed_at,
+            },
+            worker_pid: START_WORKER_PID,
+            worker_hostname: SEEDED_WORKER_HOSTNAME.to_owned(),
+            worker_process_name: SEEDED_WORKER_PROCESS_NAME.to_owned(),
+            beat_sender_id: format!("{WORKER}:{START_WORKER_PID}"),
+        },
+    )
+    .await
+    .expect("the start statement")
 }
 
 // ---------------------------------------------------------------------------

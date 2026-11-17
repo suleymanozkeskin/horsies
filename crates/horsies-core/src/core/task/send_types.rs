@@ -1,6 +1,6 @@
 /// Typed error types for task send/schedule operations.
 ///
-/// Mirrors Python's `horsies/core/models/task_send_types.py`: one variant per
+/// Mirrors Python's `python/horsies/core/models/task_send_types.py`: one variant per
 /// code, and the core maps every enqueue error to its variant once
 /// ([`send_error_from_enqueue`]).
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ use crate::broker::BrokerError;
 /// Categorized task send failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
+/// (`python/horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
 /// `EVENT_LOOP_LIMIT` and `LOOP_RUNNER_FAILED` are produced by the Python
 /// client only; [`TaskSendError`] has no variant for them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
@@ -91,7 +91,7 @@ pub struct TaskSendPayload {
 
 /// Error from task send/schedule operations: one variant per
 /// [`TaskSendErrorCode`] that the core produces, each with only the facts of
-/// its state (Python `horsies/core/models/task_send_types.py:107-252`).
+/// its state (Python `python/horsies/core/models/task_send_types.py:107-252`).
 #[derive(Debug, Clone)]
 pub enum TaskSendError {
     /// Sends are suppressed in this process. Nothing was serialized or
@@ -194,7 +194,7 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `horsies/core/models/task_send_types.py:255-260`) without the
+    /// `python/horsies/core/models/task_send_types.py:255-260`) without the
     /// Python-only codes: an enqueue failure and a key conflict. A refusal
     /// is never replayed, because the same input meets the same refusal.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
@@ -232,7 +232,7 @@ impl std::fmt::Display for TaskSendError {
 impl std::error::Error for TaskSendError {}
 
 /// The send error for a failed enqueue, by Python's rule
-/// (`horsies/core/task_decorator.py:1248-1310`):
+/// (`python/horsies/core/task_decorator.py:1248-1310`):
 /// - a refusal of the input, the options or the call (`EnqueueContract`,
 ///   `Serialization`, `InvalidIdempotencyReservationWindow`) is
 ///   `VALIDATION_FAILED`, not retryable;
@@ -385,7 +385,10 @@ mod tests {
     #[test]
     fn a_refusal_is_validation_failed_and_refused_for_a_resend() {
         for refusal in [
-            BrokerError::EnqueueContract("bad options".to_owned()),
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::by_rule(
+                crate::core::history::enqueue::SendPart::TaskOptions,
+                "bad options".to_owned(),
+            )),
             BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
         ] {
             let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &refusal);

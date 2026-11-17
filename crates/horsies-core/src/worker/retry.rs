@@ -1,8 +1,8 @@
 //! The retry rule and the stored run limits of a claimed task.
 //!
 //! One rule serves the worker and the reaper. Python reference:
-//! `horsies/core/utils/retry.py` (the admission and the delay) and
-//! `horsies/core/worker/stored_timeout.py` (the stored timeout).
+//! `python/horsies/core/utils/retry.py` (the admission and the delay) and
+//! `python/horsies/core/worker/stored_timeout.py` (the stored timeout).
 //!
 //! The stored `task_options` text is read once, when the task is dispatched,
 //! into [`StoredOptions`]. A value that does not fit the rule that wrote it is
@@ -465,7 +465,7 @@ pub enum RetryLimitRefused {
 }
 
 /// The `max_retries` column of a row whose `task_options` are this text
-/// (Python `stored_max_retries`, `horsies/core/codec/task_options.py:80-103`).
+/// (Python `stored_max_retries`, `python/horsies/core/codec/task_options.py:80-103`).
 ///
 /// - No options, an empty text, no `retry_policy` key or a `null` policy: 0.
 /// - A policy that fits the rule of [`read_stored_options`]: its

@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """The schedule fire, before ``horsies_fire_schedule``.
 
-``Scheduler._check_schedule`` (``horsies/core/scheduler/service.py``) ran,
+``Scheduler._check_schedule`` (``python/horsies/core/scheduler/service.py``) ran,
 per due schedule, on a private one-connection engine: BEGIN, the advisory
 lock of the schedule name, the read of the state row. A missing row was
 created in that transaction; a row that was no longer due ended it. Then

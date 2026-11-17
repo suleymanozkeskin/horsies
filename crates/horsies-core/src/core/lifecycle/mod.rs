@@ -1,5 +1,5 @@
 //! The terminal-transition vocabulary (parity with Python's
-//! `horsies/core/lifecycle/`).
+//! `python/horsies/core/lifecycle/`).
 //!
 //! Every way a task reaches a terminal status is one of fifteen commands
 //! (`commands`), each with the ownership fence its site requires (`fences`),
@@ -31,7 +31,7 @@ pub use operations::{
 };
 pub use outcomes::{
     decode_outcome_pg_row, decode_outcome_row, GuardEvidence, GuardKind, ObservedTaskState,
-    OutcomeDecodeError, TerminalizationOutcome,
+    ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome,
 };
 
 /// A command or fence could not be constructed from the given data.

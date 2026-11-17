@@ -1,6 +1,6 @@
 """The worker's phase 2 of a workflow task, before ``horsies_workflow_node_finish``.
 
-``FinalizeMixin._finalize_workflow_phase`` (``horsies/core/worker/finalize.py``)
+``FinalizeMixin._finalize_workflow_phase`` (``python/horsies/core/worker/finalize.py``)
 ran one session transaction: the engine's ``on_workflow_task_complete`` with
 the capacity wake of the task's queue (``COMPLETE_WORKFLOW_TASK_SQL``: the
 wake, the workflow row lock, the node write with the result that the worker

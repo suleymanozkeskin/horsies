@@ -230,6 +230,10 @@ pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Hand
 
 /// Expire PAUSED workflows older than the configured policy age.
 ///
+/// `older_than` may be zero: every PAUSED workflow of the batch is selected (Python's
+/// `expire_paused_workflows` takes any `timedelta`, `core/workflows/lifecycle.py:1409`). A negative age and a
+/// `batch_size` below 1 are refused with `WorkflowError::Validation`, and nothing is read or written.
+///
 /// Each candidate owns one transaction and follows the cancel lock order:
 /// workflow row, backing tasks, workflow-task rows, backing-task re-lock,
 /// PAUSED-to-EXPIRED CAS, canonical backing-task terminalization, then node
@@ -240,9 +244,9 @@ pub async fn expire_paused_workflows(
     batch_size: i64,
 ) -> Result<u64, WorkflowError> {
     let seconds = older_than.num_milliseconds() as f64 / 1_000.0;
-    if seconds <= 0.0 || batch_size <= 0 {
+    if seconds < 0.0 || batch_size <= 0 {
         return Err(WorkflowError::Validation(
-            "paused expiry requires positive age and batch size".to_owned(),
+            "paused expiry requires an age of 0 or more and a positive batch size".to_owned(),
         ));
     }
     let candidates: Vec<IdRow> = sqlx::query_as(FIND_EXPIRED_PAUSED_WORKFLOWS_SQL)
@@ -316,9 +320,9 @@ fn format_python_timedelta(duration: chrono::Duration) -> Result<String, Workflo
     let total_micros = duration.num_microseconds().ok_or_else(|| {
         WorkflowError::Validation("paused expiry duration exceeds microsecond range".to_owned())
     })?;
-    if total_micros <= 0 {
+    if total_micros < 0 {
         return Err(WorkflowError::Validation(
-            "paused expiry duration must be positive".to_owned(),
+            "paused expiry duration must not be negative".to_owned(),
         ));
     }
     const MICROS_PER_SECOND: i64 = 1_000_000;
@@ -457,12 +461,13 @@ pub(crate) async fn pause_tree_and_relocate(
 /// - `RESUME_RECOVERY_FAILED`, not retryable: the resume committed, and the parent advance or the tree recovery
 ///   pass after it failed.
 ///
-/// The handle's client family is checked before the first write (`admit_workflow_write`).
+/// The handle's client family is checked before the first write (`admit_workflow_write`). The payload
+/// policy is not read: the step functions and the tree recovery take no payload policy.
 pub async fn resume_workflow(
     broker: &PostgresBroker,
     workflow_id: Uuid,
     registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
+    _payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
@@ -492,14 +497,12 @@ pub async fn resume_workflow(
     .await
     .map_err(|failure| resume_recovery_failed(workflow_id, &failure.error))?;
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
-    // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree. finalizing_grace_ms = 0:
-    // resume recovers immediately (Python `core/workflows/lifecycle.py:1234-1262`).
+    // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree (Python
+    // `core/workflows/lifecycle.py:1234-1262`).
     crate::workflow_engine::recovery::recover_stuck_workflow_tree(
-        broker.pool(),
+        broker,
         registry,
         workflow_id,
-        0,
-        payload,
         retention,
     )
     .await
@@ -848,6 +851,36 @@ mod p7_lifecycle_tests {
     use crate::core::{OutcomeCode, TaskError};
     use serial_test::serial;
 
+    /// Python's `str(timedelta)` of the paused age: a zero age is `0:00:00`, a negative age is refused.
+    #[test]
+    fn the_paused_age_text_is_python_s_timedelta_text() {
+        assert_eq!(
+            format_python_timedelta(chrono::Duration::zero()).unwrap(),
+            "0:00:00"
+        );
+        assert_eq!(
+            format_python_timedelta(chrono::Duration::milliseconds(86_401_500)).unwrap(),
+            "1 day, 0:00:01.500000"
+        );
+        assert!(matches!(
+            format_python_timedelta(chrono::Duration::seconds(-1)),
+            Err(WorkflowError::Validation(_))
+        ));
+    }
+
+    /// A negative age is refused before any read.
+    #[tokio::test]
+    async fn a_negative_paused_age_is_refused() {
+        // A lazy pool on a port that refuses connections: the refusal must come before any read.
+        let pool = PgPool::connect_lazy("postgres://postgres@127.0.0.1:1/horsies_unreachable")
+            .expect("a lazy pool");
+        let refused = expire_paused_workflows(&pool, chrono::Duration::seconds(-1), 10).await;
+        assert!(
+            matches!(refused, Err(WorkflowError::Validation(_))),
+            "{refused:?}"
+        );
+    }
+
     async fn seed_workflow(pool: &PgPool, id: Uuid, status: &str, parent: Option<Uuid>) {
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -1131,11 +1164,9 @@ mod p7_lifecycle_tests {
             1,
         );
         let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
-            &pool,
+            &crate::broker::PostgresBroker::from_pool(pool.clone()),
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             parent_id,
-            0,
-            &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
         .await
@@ -1247,11 +1278,9 @@ mod p7_lifecycle_tests {
         assert_eq!(child_status, "EXPIRED");
 
         let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
-            &pool,
+            &crate::broker::PostgresBroker::from_pool(pool.clone()),
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             parent_id,
-            0,
-            &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
         .await

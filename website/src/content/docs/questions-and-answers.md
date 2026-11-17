@@ -98,7 +98,7 @@ See [web UI overview](../monitoring/web-ui-overview)
 
 ## Does horsies provide guidance files for coding agents?
 
-Yes. The horsies package includes one skill folder, `horsies/.agents/skills/horsies/`. A source checkout has it at the same path. Run `horsies skills install --target .claude/skills` to copy it into the skills directory of your agent tool.
+Yes. The horsies package includes one skill folder, `horsies/.agents/skills/horsies/`. A source checkout has it at `python/horsies/.agents/skills/horsies/`. Run `horsies skills install --target .claude/skills` to copy it into the skills directory of your agent tool.
 
 These cover:
 

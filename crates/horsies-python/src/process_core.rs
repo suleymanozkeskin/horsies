@@ -4,7 +4,8 @@
 //! - Importing `horsies._core` starts nothing: no runtime, no thread, no
 //!   connection.
 //! - The first operation starts one tokio runtime and the log forwarder
-//!   thread, and stamps them with the process id.
+//!   thread, and stamps them with the process id. The callback thread starts
+//!   later, at the first Python callback (`bridge::callback_thread`).
 //! - A call in a process whose id differs from the stamp is refused with
 //!   `ForkedAfterCoreStart`: the process was forked without `exec` after the
 //!   core started, and tokio does not support a runtime in such a child. The
@@ -31,6 +32,7 @@ use std::sync::{Mutex, Once, OnceLock};
 use pyo3::prelude::*;
 use tokio::sync::watch;
 
+use crate::bridge::callback_thread::{CallbackThreadSlot, CALLBACK_QUEUE_CAPACITY};
 use crate::logging::{self, DrainOutcome, LogBridge, RecordLevel};
 
 /// Worker threads of the runtime of a producer process. In the bridge
@@ -124,6 +126,7 @@ pub struct Core {
     first_panic: OnceLock<PanicReport>,
     stop_signal: watch::Sender<bool>,
     log: LogBridge,
+    callbacks: CallbackThreadSlot,
 }
 
 static CORE: OnceLock<Core> = OnceLock::new();
@@ -148,6 +151,14 @@ impl Core {
     /// The log bridge of this process.
     pub fn log(&self) -> &LogBridge {
         &self.log
+    }
+
+    /// The callback thread of this process, started at the first callback.
+    // The first callers are the build callback of `build_with` and the
+    // worker's `on_started`; until they exist, only the tests submit.
+    #[allow(dead_code)]
+    pub fn callbacks(&self) -> &CallbackThreadSlot {
+        &self.callbacks
     }
 
     /// Stop the core in this process: keep the first report, wake every call
@@ -334,12 +345,14 @@ fn start_core() -> Result<&'static Core, CallRefusal> {
         })
     })?;
     let (stop_signal, _first_receiver) = watch::channel(false);
+    let callbacks = CallbackThreadSlot::new(CALLBACK_QUEUE_CAPACITY, log.dispatch().clone());
     let core = Core {
         pid: std::process::id(),
         runtime,
         first_panic: OnceLock::new(),
         stop_signal,
         log,
+        callbacks,
     };
     // The start lock is held and the cell is empty, so this stores `core`.
     Ok(CORE.get_or_init(|| core))

@@ -1,4 +1,4 @@
-"""Tests for LoopRunner (horsies/core/utils/loop_runner.py)."""
+"""Tests for LoopRunner (python/horsies/core/utils/loop_runner.py)."""
 
 from __future__ import annotations
 

@@ -251,7 +251,6 @@ async fn no_context_is_injected_without_a_context_dependency() {
 /// `TestWorkflowCtx.test_workflow_meta_injected_without_ctx_from`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #886"]
 async fn the_workflow_meta_is_injected_without_a_context_dependency() {
     let pool = shared_pool().await;
     let workflow_id = run(

@@ -149,7 +149,6 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     pub async fn tasks(&self) -> HandleResult<Vec<WorkflowTaskInfo>> {
         crate::workflow_engine::query::get_workflow_tasks(self.broker.pool(), self.workflow_id)
             .await
-            .map_err(|e| self.wrap_error(&e))
     }
 
     /// Cancel the workflow.
