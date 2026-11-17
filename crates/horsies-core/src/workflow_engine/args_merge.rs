@@ -88,29 +88,32 @@ pub(crate) fn input_object(
 pub(crate) enum ChildStaticInput<'a> {
     /// An object: the stored text, whose members are the static members.
     Members(&'a str),
-    /// An empty text, or a value that is not an object: no static members.
-    /// Python reads them as `{}`.
+    /// A value that is not an object: no static members. Python reads it as
+    /// `{}`.
     NoMembers,
 }
 
 /// A stored node input that Python refuses before the child build: the node
-/// fails with `Corrupt kwargs JSON for subworkflow task <index>`.
+/// fails with `Corrupt kwargs JSON for subworkflow task <index>`. A node
+/// without params stores `{}`; no writer stores an empty text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StaticInputCorrupt {
     /// Why the text is refused, for the log.
     pub(crate) cause: String,
 }
 
-/// Read the stored input `text` of a sub-workflow node: an empty text has no
-/// static members; any other text must pass the strict read rule
-/// (`crate::core::codec::check_json_text`, Python `loads_json`) and must not
-/// be `null`; an object gives its members, any other value none.
+/// Read the stored input `text` of a sub-workflow node: the text must not be
+/// empty, must pass the strict read rule (`crate::core::codec::check_json_text`,
+/// Python `loads_json`) and must not be `null`; an object gives its members,
+/// any other value none.
 ///
-/// Errors: [`StaticInputCorrupt`] for a text that the strict read refuses,
-/// and for `null`. Pure.
+/// Errors: [`StaticInputCorrupt`] for an empty text, for a text that the
+/// strict read refuses, and for `null`. Pure.
 pub(crate) fn child_static_input(text: &str) -> Result<ChildStaticInput<'_>, StaticInputCorrupt> {
     if text.is_empty() {
-        return Ok(ChildStaticInput::NoMembers);
+        return Err(StaticInputCorrupt {
+            cause: "the stored text is empty".to_owned(),
+        });
     }
     crate::core::codec::check_json_text(text).map_err(|error| StaticInputCorrupt {
         cause: error.to_string(),
@@ -140,14 +143,16 @@ const JSON_WHITESPACE: [char; 4] = [' ', '\t', '\n', '\r'];
 /// `enqueue_subworkflow_task`, `core/workflows/engine.py:1128-1155`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ArgsFromRead {
-    /// No `args_from` members: no text, an empty text, or a value that is
-    /// not an object.
+    /// No `args_from` members: no text (NULL), or a value that is not an
+    /// object.
     NoMembers,
     /// An object whose every value is a JSON integer: the key to index map,
     /// in text order.
     Indexes(serde_json::Map<String, serde_json::Value>),
-    /// The text breaks the strict read rule, or reads as `null`: the node
-    /// fails with `Corrupt args_from JSON for subworkflow task <index>`.
+    /// The text is empty, breaks the strict read rule, or reads as `null`:
+    /// the node fails with `Corrupt args_from JSON for subworkflow task
+    /// <index>`. A node without `args_from` stores NULL; no writer stores an
+    /// empty text.
     Corrupt { cause: String },
     /// An object with a value that is not a JSON integer: the node fails
     /// with `args_from has non-int values for subworkflow task <index>`.
@@ -162,8 +167,14 @@ pub(crate) enum ArgsFromRead {
 /// its size; an index outside the `integer` range names no node, so the merge
 /// leaves its member out. Pure.
 pub(crate) fn read_args_from(text: Option<&str>) -> ArgsFromRead {
-    let Some(text) = text.filter(|text| !text.is_empty()) else {
-        return ArgsFromRead::NoMembers;
+    let text = match text {
+        None => return ArgsFromRead::NoMembers,
+        Some("") => {
+            return ArgsFromRead::Corrupt {
+                cause: "the stored text is empty".to_owned(),
+            }
+        }
+        Some(text) => text,
     };
     let value: serde_json::Value = match crate::core::codec::from_json_str(text) {
         Ok(value) => value,

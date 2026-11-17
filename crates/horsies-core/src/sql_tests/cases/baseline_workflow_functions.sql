@@ -812,7 +812,7 @@ BEGIN
         SELECT jsonb_agg(n) FROM (
             SELECT jsonb_build_object('idx', 0) AS n
             UNION ALL
-            SELECT jsonb_build_object('idx', i, 'deps', jsonb_build_array(0)) FROM generate_series(1, 9) AS i
+            SELECT jsonb_build_object('idx', i, 'deps', jsonb_build_array(0)) FROM generate_series(1, 11) AS i
         ) AS nodes
     ));
     UPDATE horsies_workflow_tasks n
@@ -826,7 +826,9 @@ BEGIN
         (6, '{}', '{"x":1.5}'),
         (7, '{}', '{"x":null,"y":0}'),
         (8, '{}', '"{broken"'),
-        (9, '{}', '{"x":true}')
+        (9, '{}', '{"x":true}'),
+        (10, '', NULL),
+        (11, '{}', '""')
     ) AS c(task_index, input, args_from)
     WHERE n.workflow_id = v_wf AND n.task_index = c.task_index;
     PERFORM wft_finish(v_wf, 0, wft_ok('1'));
@@ -840,7 +842,9 @@ BEGIN
             (6, 'args_from has non-int values for task 6'),
             (7, 'args_from has non-int values for task 7'),
             (8, 'Corrupt args_from JSON for task 8'),
-            (9, 'args_from has non-int values for task 9')
+            (9, 'args_from has non-int values for task 9'),
+            (10, 'Corrupt kwargs JSON for task 10'),
+            (11, 'Corrupt args_from JSON for task 11')
         ) AS expected(task_index, message)
     LOOP
         PERFORM wft_check(
@@ -860,9 +864,10 @@ DECLARE
     v_wf uuid := '00000000-0000-7000-8000-0000000002b2';
     v_input jsonb;
 BEGIN
-    -- Data that Python reads with no refusal: an input that is not an object or is empty gives no static members; an
-    -- args_from that is not an object gives no members; an index outside the integer range names no node; a jsonb
-    -- string holding an object text is read as that object.
+    -- Data that Python reads with no refusal: an input that is not an object gives no static members; an args_from
+    -- that is not an object gives no members; an index outside the integer range names no node; a jsonb string
+    -- holding an object text is read as that object. An empty input and an empty args_from string are refused (the
+    -- case above).
     PERFORM * FROM wft_start1(v_wf, 'fail', (
         SELECT jsonb_agg(n) FROM (
             SELECT jsonb_build_object('idx', 0) AS n
@@ -874,13 +879,13 @@ BEGIN
     SET input = c.input, args_from = c.args_from
     FROM (VALUES
         (1, '[1,2]', '{"a":0}'::jsonb),
-        (2, '', NULL),
+        (2, '7', NULL),
         (3, ' "text" ', NULL),
         (4, '{}', '{"a":99999999999,"b":-1}'),
         (5, '{}', to_jsonb('{"a":0}'::text)),
         (6, '{"k":1}', '[]'),
         (7, '{"k":1}', 'false'),
-        (8, '{"k":1}', '""')
+        (8, '{"k":1}', '1')
     ) AS c(task_index, input, args_from)
     WHERE n.workflow_id = v_wf AND n.task_index = c.task_index;
     PERFORM wft_finish(v_wf, 0, wft_ok('7'));
@@ -898,7 +903,7 @@ BEGIN
                       AND (SELECT array_agg(k) FROM jsonb_object_keys(
                           (SELECT input::jsonb FROM horsies_tasks WHERE id = wft_task_of(v_wf, 3))) AS k)
                       = ARRAY['__h_workflow_meta__'],
-                      'readable node data: an empty input and a string input give no static members');
+                      'readable node data: a number input and a string input give no static members');
     PERFORM wft_check((SELECT array_agg(k) FROM jsonb_object_keys(
                           (SELECT input::jsonb FROM horsies_tasks WHERE id = wft_task_of(v_wf, 4))) AS k)
                       = ARRAY['__h_workflow_meta__'],
@@ -910,7 +915,7 @@ BEGIN
                                        = ARRAY['__h_workflow_meta__', 'k'])
                        FROM horsies_tasks t
                        WHERE t.id IN (wft_task_of(v_wf, 6), wft_task_of(v_wf, 7), wft_task_of(v_wf, 8))),
-                      'readable node data: an empty array, false and "" give no args_from members');
+                      'readable node data: an empty array, false and a number give no args_from members');
 END $$;
 
 DO $$
