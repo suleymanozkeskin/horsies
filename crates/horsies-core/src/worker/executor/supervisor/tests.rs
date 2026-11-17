@@ -324,7 +324,7 @@ async fn the_spawner_reaps_a_child_and_publishes_its_exit() {
     );
     assert_eq!(
         spawner.handle().kill_session(child.id).await,
-        KillOutcome::AlreadyReaped
+        KillOutcome::SessionGone
     );
     stop(spawner);
 }
@@ -415,6 +415,81 @@ async fn a_kill_reaches_the_subprocesses_of_the_child() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(ended, "the subprocess {grandchild} outlived the kill");
+    stop(spawner);
+}
+
+/// Read one line of a pid that a child wrote to its socket.
+fn read_pid_line(socket: &mut std::os::unix::net::UnixStream) -> libc::pid_t {
+    socket.set_read_timeout(Some(TEST_WAIT)).unwrap();
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    while byte[0] != b'\n' {
+        assert_eq!(socket.read(&mut byte).unwrap(), 1);
+        line.push(byte[0]);
+    }
+    String::from_utf8(line).unwrap().trim().parse().unwrap()
+}
+
+/// Python `ChildProcess.kill_group`: the kill of a reaped child still
+/// reaches the subprocesses left in its session.
+#[tokio::test]
+async fn a_kill_after_the_reap_reaches_the_subprocesses_left_in_the_session() {
+    let spawner = Spawner::start().unwrap();
+    let mut child = spawner
+        .handle()
+        .spawn(shell(r#"sleep 60 & echo $! >&"$0"; exit 0"#))
+        .await
+        .unwrap();
+    let grandchild = read_pid_line(&mut child.socket);
+    assert_eq!(
+        wait_for_exit(&mut child.exit, TEST_WAIT).await,
+        ChildExit::Reaped(ReapedExit::ExitedWith(0))
+    );
+    assert!(!process_ended(grandchild));
+
+    assert_eq!(
+        spawner.handle().kill_session(child.id).await,
+        KillOutcome::SentToReapedSession
+    );
+
+    let mut ended = false;
+    for _ in 0..100 {
+        ended = process_ended(grandchild);
+        if ended {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ended, "the subprocess {grandchild} outlived the kill");
+    stop(spawner);
+}
+
+/// A kill of a reaped child whose pid a live child of the spawner holds
+/// sends no signal: the live child keeps running.
+#[tokio::test]
+async fn a_kill_after_the_reap_refuses_a_pid_that_a_live_child_holds() {
+    let spawner = Spawner::start().unwrap();
+    let mut live = spawner
+        .handle()
+        .spawn(shell("exec sleep 60"))
+        .await
+        .unwrap();
+    let reaped = ChildId::reaped_child_with_pid(live.pid);
+
+    assert_eq!(
+        spawner.handle().kill_session(reaped).await,
+        KillOutcome::PidReused
+    );
+
+    assert_eq!(
+        wait_for_exit(&mut live.exit, Duration::from_millis(500)).await,
+        ChildExit::ExitUnknown
+    );
+    assert_eq!(
+        spawner.handle().kill_session(live.id).await,
+        KillOutcome::Sent
+    );
+    assert_eq!(wait_for_exit(&mut live.exit, TEST_WAIT).await, killed());
     stop(spawner);
 }
 
