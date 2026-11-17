@@ -29,27 +29,28 @@ from horsies.core.lifecycle.outcomes import (
     TerminalizationOutcome,
 )
 from horsies.core.lifecycle.persistence import (
+    COMPLETE_SUCCESSES_SUBJECT,
     FUSED_BATCH_MAX_ROWS,
     BatchCommitUnknown,
     BatchRolledBack,
     BatchWriteError,
+    CoreNotSent,
+    CoreOutcomeUnknown,
+    CoreStatementRefused,
     FusedCompletionBatch,
 )
 from horsies.core.models.child_sizing import (
     FINALIZE_BATCH_FLUSHERS,
     PARENT_POOL_MIN_CONNECTIONS,
 )
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import (
-    AutocommitFailure,
     HeldConnection,
     NotSent,
     OutcomeUnknown,
-    SingleStatement,
     StatementRefused,
-    StatementRows,
-    StatementRunner,
 )
 from horsies.core.worker.finalize_batch import (
     BatcherState,
@@ -131,29 +132,12 @@ def _outcome_unknown() -> OutcomeUnknown:
     )
 
 
-class _NamedRunner:
-    """A ``StatementRunner`` that only names itself: the scripted writes
-    record which runner wrote each batch and never run a statement."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    async def run(
-        self,
-        statement: SingleStatement,
-    ) -> Result[StatementRows, AutocommitFailure]:
-        raise AssertionError(f'{self.name}: the scripted write runs no statement')
-
-
-STEADY_RUNNERS: Final = tuple(
-    _NamedRunner(f'steady-{index}') for index in range(FINALIZE_BATCH_FLUSHERS)
-)
-SURGE_RUNNER: Final = _NamedRunner('surge')
+def _core_failure(message: str, retryable: bool) -> CoreOperationFailed:
+    return CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable)
 
 
 class _ScriptedWrite:
-    """A batch write that records each batch, the runner that wrote it, and
-    answers with ``answer``.
+    """A batch write that records each batch and answers with ``answer``.
 
     With ``gated`` set, each write waits for ``release`` before it answers.
     """
@@ -165,7 +149,6 @@ class _ScriptedWrite:
         gated: bool = False,
     ) -> None:
         self.batches: list[tuple[str, ...]] = []
-        self.runners: list[StatementRunner] = []
         self.in_flight = 0
         self.most_in_flight = 0
         self._answer = answer
@@ -176,13 +159,8 @@ class _ScriptedWrite:
     def release(self) -> None:
         self._gate.set()
 
-    async def __call__(
-        self,
-        batch: FusedCompletionBatch,
-        runner: StatementRunner,
-    ) -> WriteResult:
+    async def __call__(self, batch: FusedCompletionBatch) -> WriteResult:
         self.batches.append(tuple(command.task_id for command in batch.commands))
-        self.runners.append(runner)
         self.in_flight += 1
         self.most_in_flight = max(self.most_in_flight, self.in_flight)
         try:
@@ -198,11 +176,9 @@ def _batcher(
     max_queued_rows: int,
     max_flushers: int,
 ) -> FinalizeBatcher:
-    """A batcher on ``write``, with the named steady and surge runners."""
+    """A batcher on ``write``."""
     return FinalizeBatcher(
         write,
-        steady_runners=STEADY_RUNNERS,
-        surge_runner=SURGE_RUNNER,
         max_queued_rows=max_queued_rows,
         max_flushers=max_flushers,
     )
@@ -424,6 +400,41 @@ async def test_a_refused_batch_writes_each_row_alone_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_batch_that_the_core_refused_writes_each_row_alone_once() -> None:
+    refused = BatchRolledBack(
+        cause=CoreStatementRefused(
+            error=_core_failure('the plain-success batch was refused: 23514', False),
+        ),
+    )
+
+    def refuse_bad(batch: FusedCompletionBatch) -> WriteResult:
+        match [command.task_id for command in batch.commands]:
+            case ['a'] | ['b']:
+                return _all_applied(batch)
+            case _:
+                return Err(refused)
+
+    write = _ScriptedWrite(refuse_bad)
+    batcher = _batcher(
+        write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
+    )
+
+    good_a, bad, good_b = await asyncio.wait_for(
+        asyncio.gather(
+            batcher.complete(_command('a')),
+            batcher.complete(_command('bad')),
+            batcher.complete(_command('b')),
+        ),
+        OUTER_BOUND_S,
+    )
+
+    assert write.batches == [('a', 'bad', 'b'), ('a',), ('bad',), ('b',)]
+    assert _ok_task_id(good_a) == 'a'
+    assert _ok_task_id(good_b) == 'b'
+    assert bad == Err(refused)
+
+
+@pytest.mark.asyncio
 async def test_a_refused_row_of_one_is_not_written_again() -> None:
     write = _ScriptedWrite(lambda _batch: Err(BatchRolledBack(cause=_refused())))
     batcher = _batcher(
@@ -439,8 +450,17 @@ async def test_a_refused_row_of_one_is_not_written_again() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     'error',
-    [BatchRolledBack(cause=_not_sent()), BatchCommitUnknown(cause=_outcome_unknown())],
-    ids=['not_sent', 'commit_unknown'],
+    [
+        BatchRolledBack(cause=_not_sent()),
+        BatchCommitUnknown(cause=_outcome_unknown()),
+        BatchRolledBack(
+            cause=CoreNotSent(error=_core_failure('the plain-success batch was not sent', True)),
+        ),
+        BatchCommitUnknown(
+            cause=CoreOutcomeUnknown(error=_core_failure('connection lost', True)),
+        ),
+    ],
+    ids=['not_sent', 'commit_unknown', 'core_not_sent', 'core_commit_unknown'],
 )
 async def test_a_failure_of_the_connection_answers_every_row_without_a_split(
     error: BatchWriteError,
@@ -472,15 +492,19 @@ def test_the_retryable_flag_follows_the_cause() -> None:
     assert BatchRolledBack(cause=deadlock).retryable is True
 
 
+def test_the_retryable_flag_of_a_core_cause_is_the_core_s() -> None:
+    assert BatchRolledBack(cause=CoreNotSent(error=_core_failure('pool', True))).retryable is True
+    assert (
+        BatchRolledBack(cause=CoreStatementRefused(error=_core_failure('22023', False))).retryable
+        is False
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_defect_of_the_write_is_raised_to_every_row() -> None:
     writes: list[int] = []
 
-    async def broken_once(
-        batch: FusedCompletionBatch,
-        runner: StatementRunner,
-    ) -> WriteResult:
-        del runner
+    async def broken_once(batch: FusedCompletionBatch) -> WriteResult:
         writes.append(len(batch.commands))
         if len(writes) == 1:
             raise RuntimeError('FusedCompletionBatch returned a row without ordinality')
@@ -748,19 +772,13 @@ class _GatedPerWrite:
 
     def __init__(self) -> None:
         self.batches: list[tuple[str, ...]] = []
-        self.runners: list[StatementRunner] = []
         self._gates: list[asyncio.Event] = []
 
     def release(self, call: int) -> None:
         self._gates[call].set()
 
-    async def __call__(
-        self,
-        batch: FusedCompletionBatch,
-        runner: StatementRunner,
-    ) -> WriteResult:
+    async def __call__(self, batch: FusedCompletionBatch) -> WriteResult:
         self.batches.append(tuple(command.task_id for command in batch.commands))
-        self.runners.append(runner)
         gate = asyncio.Event()
         self._gates.append(gate)
         await gate.wait()
@@ -823,85 +841,22 @@ async def test_no_surge_flusher_is_created_while_less_than_a_full_batch_waits() 
     _ = await asyncio.wait_for(asyncio.gather(*held, *calls), OUTER_BOUND_S)
 
 
-# ---------------------------------------------------------------------------
-# Runners: a steady flusher holds one runner while it runs; a surge flusher
-# writes on the surge runner
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_each_running_steady_flusher_writes_on_its_own_runner() -> None:
+async def test_a_bound_of_one_flusher_writes_one_batch_at_a_time() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY)
-    held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
-
-    assert write.in_flight == FINALIZE_BATCH_FLUSHERS
-    assert set(write.runners) == set(STEADY_RUNNERS)
-    assert len(write.runners) == len(set(write.runners))
-    write.release()
-    _ = await asyncio.wait_for(asyncio.gather(*held), OUTER_BOUND_S)
-
-
-@pytest.mark.asyncio
-async def test_a_surge_flusher_writes_on_the_surge_runner() -> None:
-    write = _ScriptedWrite(gated=True)
-    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
-    held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
-    full = await _submit_together(
-        batcher,
-        [f'w{index}' for index in range(FUSED_BATCH_MAX_ROWS)],
-    )
-
-    assert [len(batch) for batch in write.batches] == [1, 1, FUSED_BATCH_MAX_ROWS]
-    assert write.runners[2] is SURGE_RUNNER
-    assert SURGE_RUNNER not in write.runners[:2]
-    write.release()
-    _ = await asyncio.wait_for(asyncio.gather(*held, *full), OUTER_BOUND_S)
-
-
-@pytest.mark.asyncio
-async def test_a_steady_runner_goes_back_when_its_flusher_ends() -> None:
-    """Lone rows one after another: each flusher ends before the next row,
-    so every write finds a free steady runner, and both are free at the end."""
-    write = _ScriptedWrite()
-    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY)
-    for task_id in ('a', 'b', 'c', 'd', 'e'):
-        _ = await asyncio.wait_for(batcher.complete(_command(task_id)), OUTER_BOUND_S)
-
-    assert len(write.runners) == 5
-    assert set(write.runners) <= set(STEADY_RUNNERS)
-
-    gated = _ScriptedWrite(gated=True)
-    batcher._write = gated  # pyright: ignore[reportPrivateUsage]
-    held = [await _submit_alone(batcher, task_id) for task_id in ('f', 'g')]
-
-    assert set(gated.runners) == set(STEADY_RUNNERS)
-    gated.release()
-    _ = await asyncio.wait_for(asyncio.gather(*held), OUTER_BOUND_S)
-
-
-@pytest.mark.asyncio
-async def test_a_pool_of_one_connection_writes_on_one_steady_runner() -> None:
-    write = _ScriptedWrite()
     batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=1)
-    for task_id in ('a', 'b', 'c'):
-        _ = await asyncio.wait_for(batcher.complete(_command(task_id)), OUTER_BOUND_S)
+    calls = [asyncio.create_task(batcher.complete(_command(task_id))) for task_id in ('a', 'b')]
+    await _settle()
 
-    assert write.runners == [STEADY_RUNNERS[0]] * 3
-
-
-def test_fewer_runners_than_steady_flushers_is_refused() -> None:
-    with pytest.raises(ValueError, match='runners'):
-        _ = FinalizeBatcher(
-            _ScriptedWrite(),
-            steady_runners=STEADY_RUNNERS[:1],
-            surge_runner=SURGE_RUNNER,
-            max_queued_rows=QUEUE_BOUND,
-            max_flushers=STEADY_ONLY,
-        )
+    assert write.batches == [('a', 'b')]
+    write.release()
+    _ = await asyncio.wait_for(asyncio.gather(*calls), OUTER_BOUND_S)
+    assert write.most_in_flight == 1
 
 
-def test_the_worker_holds_a_connection_for_claims_and_one_per_steady_flusher() -> None:
+def test_the_worker_holds_one_connection_for_claims_and_none_for_the_batch() -> None:
+    """The batch writes through the core handle: the worker holds no
+    connection of its engine for the flushers."""
     worker = Worker(
         session_factory=MagicMock(),
         listener=MagicMock(),
@@ -913,9 +868,6 @@ def test_the_worker_holds_a_connection_for_claims_and_one_per_steady_flusher() -
         ),
     )
     held = worker._held_connections  # pyright: ignore[reportPrivateUsage]
-    batch = worker._batch_connections  # pyright: ignore[reportPrivateUsage]
 
-    assert all(isinstance(connection, HeldConnection) for connection in held)
-    assert held == (worker._claim_runner, *batch)  # pyright: ignore[reportPrivateUsage]
-    assert len(batch) == FINALIZE_BATCH_FLUSHERS
-    assert len(set(map(id, held))) == len(held)
+    assert held == (worker._claim_runner,)  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(held[0], HeldConnection)

@@ -21,7 +21,6 @@ from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.utils.db import (
     HeldConnection,
-    PooledStatements,
     is_retryable_connection_error,
 )
 from horsies.core.utils.url import to_psycopg_url
@@ -35,10 +34,7 @@ from horsies.core.worker.config import WorkerConfig as WorkerConfig  # noqa: F40
 from horsies.core.worker.child_pool import (
     _initialize_worker_pool as _initialize_worker_pool,
 )  # noqa: F401
-from horsies.core.models.child_sizing import (
-    FINALIZE_BATCH_FLUSHERS,
-    parent_pool_flusher_bound,
-)
+from horsies.core.models.child_sizing import parent_pool_flusher_bound
 from horsies.core.models.worker_profile import (
     MemoryLimit,
     NoMemoryLimit,
@@ -347,30 +343,18 @@ class Worker(
         # The CPUs of the worker process and of its children, planned at the
         # start of the slots from cfg.parent_cpu.
         self._cpu_placement: CpuPlacement = SharedCpus()
-        # The claim loop and each steady flusher of the batched success write
-        # keep one pool connection while they send statements back to back
-        # (HeldConnection); every other write checks out per statement.
-        # ``stop`` gives them back after the claim loop and the batcher end.
+        # The claim loop keeps one pool connection while it sends statements
+        # back to back (HeldConnection); every other write checks out per
+        # statement. ``stop`` gives it back after the claim loop ends.
         claim_connection = HeldConnection(session_factory, cfg.parent_pool_recycle)
-        batch_connections = tuple(
-            HeldConnection(session_factory, cfg.parent_pool_recycle)
-            for _ in range(FINALIZE_BATCH_FLUSHERS)
-        )
         self._claim_runner = claim_connection
-        self._batch_connections = batch_connections
-        self._held_connections: tuple[HeldConnection, ...] = (
-            claim_connection,
-            *batch_connections,
-        )
-        # Writes the plain-success outcomes in batches. Its flushers start on
-        # the first row; the claim loop and the flushers leave
-        # PARENT_POOL_RESERVE connections of the pool free for the other
-        # writes (parent_pool_flusher_bound). ``stop`` closes it after the
-        # finalizer drain.
+        self._held_connections: tuple[HeldConnection, ...] = (claim_connection,)
+        # Writes the plain-success outcomes in batches, through the core
+        # handle (``_write_fused_batch``). Its flushers start on the first
+        # row; parent_pool_flusher_bound bounds the batch statements in
+        # flight. ``stop`` closes it after the finalizer drain.
         self._finalize_batcher = FinalizeBatcher(
             self._write_fused_batch,
-            steady_runners=batch_connections,
-            surge_runner=PooledStatements(session_factory),
             max_queued_rows=self._pending_task_limit(),
             max_flushers=parent_pool_flusher_bound(self.cfg.parent_pool_size),
         )
@@ -1210,7 +1194,7 @@ class Worker(
         # After the finalizers: a finalizer that the drain cancelled leaves
         # its row in the batcher, and the batch of that row is still written.
         await self._close_finalize_batcher()
-        # The claim loop and the batch flushers have ended.
+        # The claim loop has ended.
         await self._release_held_connections()
 
         # Close the Postgres listener after finalizers so completion NOTIFYs
@@ -1233,9 +1217,9 @@ class Worker(
         logger.info('Worker stopped')
 
     async def _release_held_connections(self) -> None:
-        """Give the held connections of the claim loop and of the batch
-        flushers back to the pool. Runs after both have stopped. Never
-        raises: a driver error is logged."""
+        """Give the held connection of the claim loop back to the pool. Runs
+        after the claim loop and the batcher have stopped. Never raises: a
+        driver error is logged."""
         for held in self._held_connections:
             try:
                 await held.release()

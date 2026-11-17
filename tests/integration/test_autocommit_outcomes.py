@@ -2,7 +2,7 @@
 
 The fused completion runs as its own transaction (``apply_in_autocommit``);
 the worker writes it through the batched statement of the finalize batcher
-(``apply_fused_batch``, on the held connection of a steady flusher). These
+(``complete_fused_batch_in_core``, through the worker's core handle). These
 tests pin what the transaction used to guarantee and what the caller relies
 on:
 
@@ -42,16 +42,16 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     TerminalizationOutcome,
 )
+from horsies._core import CoreHandle
 from horsies.core.lifecycle.persistence import (
     BatchWriteError,
     FusedCompletionBatch,
-    apply_fused_batch,
     apply_in_autocommit,
+    complete_fused_batch_in_core,
 )
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.db import (
-    StatementRunner,
     SingleStatement,
     is_retryable_connection_error,
     run_in_autocommit,
@@ -187,10 +187,10 @@ class _RecordedOutcomes:
 
     async def __call__(
         self,
-        runner: StatementRunner,
+        handle: CoreHandle,
         batch: FusedCompletionBatch,
     ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
-        written = await apply_fused_batch(runner, batch)
+        written = await complete_fused_batch_in_core(handle, batch)
         match written:
             case Ok(outcomes):
                 self.outcomes.extend(outcomes)
@@ -202,7 +202,7 @@ class _RecordedOutcomes:
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> _RecordedOutcomes:
     recording = _RecordedOutcomes()
-    monkeypatch.setattr(finalize_module, 'apply_fused_batch', recording)
+    monkeypatch.setattr(finalize_module, 'complete_fused_batch_in_core', recording)
     return recording
 
 
@@ -375,27 +375,23 @@ async def test_a_lost_reply_is_retried_and_classified_on_the_replay(
     assert await _attempt_count(session, task_id) == 1
 
 
-async def test_a_dead_connection_fails_the_completion_and_the_retry_applies(
+async def test_a_dead_connection_of_the_engine_does_not_reach_the_core_completion(
     direct: ProxiedWorker,
     session: AsyncSession,
     recorded: _RecordedOutcomes,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Pre-ping off: the dead connection shows at the fused call, which never
-    reached the server; the phase-1 retry runs on a new connection."""
+    """Pre-ping off: the dead connection of the worker's engine stays in its
+    pool. The plain success writes through the core handle, on the core's
+    pool, so it commits at once. (The core's statement layer has its own
+    tests of a dead pooled connection.)"""
     await _one_pooled_connection(direct)
     task_id, claimed_at = await insert_task(session, status='RUNNING')
-    before = await _live_row(session, task_id)
     await _kill_the_pooled_backend(direct.worker, session)
 
     first = await _finalize_success(direct.worker, task_id, claimed_at)
 
-    error = _retryable_phase1_error(first)
-    assert await _live_row(session, task_id) == before
-    assert recorded.outcomes == []
-
-    await direct.worker._retry_finalize_phase1(error, 0.0)
-
+    assert first == Ok(None)
     assert [type(outcome) for outcome in recorded.outcomes] == [Applied]
     assert await _live_row(session, task_id) is None
     assert await _history_rows(session, task_id) == 1
