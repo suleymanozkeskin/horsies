@@ -233,7 +233,7 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
 - `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
 - `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
-- Each worker profile has a valid name, at least one child, claim limits at or below its capacity (seats + `prefetch_buffer`; one seat per isolated child), and, when it sets `ParentPool(max_size=PoolSize(connections=N))`, an N of at least 5 (`PARENT_POOL_MIN_CONNECTIONS`). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
+- Each worker profile has a valid name, at least one child, claim limits at or below its capacity (seats + `prefetch_buffer`; one seat per isolated child), and, when it sets `ParentPool(max_size=PoolSize(connections=N))`, an N of at least 3 (`PARENT_POOL_MIN_CONNECTIONS`). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
 
 Multiple validation errors within the same phase are collected and reported together (compiler-style), rather than stopping at the first error.
 

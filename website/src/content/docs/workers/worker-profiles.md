@@ -180,7 +180,7 @@ remote_batch_profile = WorkerProfile(
 )
 ```
 
-A `PoolSize` for this pool has at least 5 connections (`PARENT_POOL_MIN_CONNECTIONS`). While the worker is busy, its claim loop holds 1 connection and each of the 2 steady flushers of the batched success write holds 1. The other 2 stay free for the other writes: the reaper holds 2 during a pass (its gate session and one statement of the pass body), and the claimer heartbeats, the health replies and the writes of failures, retries and workflow nodes hold 1 for each statement or transaction. With fewer connections, the held ones take the whole pool and the other writes wait for the pool timeout and fail, so `horsies check` and the worker start refuse the profile (`HRS-218`). The batched success write runs at most `max_size - 3` flushers at once, so 2 connections always stay free.
+A `PoolSize` for this pool has at least 3 connections (`PARENT_POOL_MIN_CONNECTIONS`). While the worker is busy, its claim loop holds 1 connection. The other 2 stay free for the other users: the reaper holds 2 during a pass (its gate session and one statement of the pass body), and the claimer heartbeats, the health replies and the workflow writes after a node ends hold 1 for each statement or transaction. The batched success write and the writes of failures and retries run in the core of the worker process, on a pool of the same `max_size`: the batched success write runs at most `max_size - 2` flushers at once, so 2 connections of that pool always stay free for the other writes. With fewer connections, the other users wait for the pool timeout and fail, so `horsies check` and the worker start refuse the profile (`HRS-218`).
 
 The worker process writes plain successes in batches of up to 64 rows, one statement per batch, so they keep few connections busy: a worker of 1000 seats kept at most 3 to 8 of its 20 connections busy at 970-1,760 tasks/s. A failure, a retry and a workflow node are written per task. A worker of 1000 seats whose tasks all fail, 3.5 ms from Postgres, gives 1,010 tasks/s with 20 connections (all busy) and 500 with 5.
 
@@ -208,7 +208,7 @@ size = min(cap, max(floor, ceil(seats / seats_per_unit)))
 
 For example, a shared async child with 25 seats opens a pool of up to `ceil(25 / 10) = 3` connections and a default executor of 25 threads. A child with 500 seats stops at the caps: 40 connections and 32 threads. A shared thread child with 64 seats opens up to 7 connections; with 256 seats, the most, 26.
 
-The worker process of a profile with 8 isolated children opens up to 5 connections; with 64 isolated children, 7; with one shared async child of 100 seats, 10; with 200 seats or more, 20. The floor of 5 is also the minimum of a `PoolSize` for this pool; see [The Pool of the Worker Process](#the-pool-of-the-worker-process). All constants are in `horsies.core.models.child_sizing`.
+The worker process of a profile with 8 isolated children opens up to 5 connections; with 64 isolated children, 7; with one shared async child of 100 seats, 10; with 200 seats or more, 20. The floor of 5 is above the minimum of a `PoolSize` for this pool, 3; see [The Pool of the Worker Process](#the-pool-of-the-worker-process). All constants are in `horsies.core.models.child_sizing`.
 
 A shared child writes 2 statements per task through its pool, the RUNNING update and the finalizing marker, each one round trip. On average its pool keeps this many connections busy:
 
@@ -419,7 +419,7 @@ Validation refuses a `min_size` above the resolved `max_size` of the pool.
 |-------|------|---------|-------------|
 | `max_size` | `PoolSize \| PoolSizeFromSeats` | `PoolSizeFromSeats()` | The most connections of the pool of the worker process. The pool has no overflow. See [Sizes Derived from the Seats](#sizes-derived-from-the-seats) |
 
-Validation refuses a `PoolSize` below 5. See [The Pool of the Worker Process](#the-pool-of-the-worker-process).
+Validation refuses a `PoolSize` below 3. See [The Pool of the Worker Process](#the-pool-of-the-worker-process).
 
 ### `ClaimLimits`
 
@@ -478,7 +478,7 @@ Validation runs in two places. `horsies check` validates every profile with the 
 | At least one child | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | Claim limit above the capacity (seats plus `prefetch_buffer`) | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | Pool `min_size` above the resolved `max_size` | error `HRS-218` | error `HRS-218` | error: the app config does not build |
-| A `PoolSize` below 5 for the pool of the worker process (`ParentPool.max_size`) | error `HRS-218` | error `HRS-218` | error: the app config does not build |
+| A `PoolSize` below 3 for the pool of the worker process (`ParentPool.max_size`) | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | `--profile` names a defined profile | not checked | not checked | error `HRS-206`, exit 1 |
 | Postgres connections of one worker against the server | not checked | error `HRS-219` | warning |
 | Sum of the per-child memory limits against the usable memory (container limit or host RAM) | not checked | not checked | warning |

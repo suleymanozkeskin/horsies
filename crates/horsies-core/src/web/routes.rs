@@ -29,8 +29,9 @@ use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
 use super::app::WebState;
 use super::common::{
     pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool, parse_group_by,
-    parse_i64, parse_path_uuid, parse_sort_by, parse_sort_direction, parse_statuses, query_failed,
-    validate_f64_range, validate_i64_range, ApiError, QueryValues,
+    parse_i64, parse_path_uuid, parse_sort_by, parse_sort_direction, parse_statuses,
+    parse_workflow_path_uuid, query_failed, validate_f64_range, validate_i64_range, ApiError,
+    QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
 
@@ -429,42 +430,57 @@ async fn read_workflows(
         .map_err(|error| query_failed("Workflow runs", error))
 }
 
+/// The 404 of a workflow run that the read did not find.
+fn workflow_run_not_found() -> ApiError {
+    ApiError::detail(StatusCode::NOT_FOUND, "Workflow run not found.")
+}
+
+/// The 404 of a workflow node that the read did not find.
+fn workflow_task_not_found() -> ApiError {
+    ApiError::detail(StatusCode::NOT_FOUND, "Workflow task not found.")
+}
+
+/// One run's DAG. The Python route takes the id as text, and an id text that
+/// is not a UUID names no run (`get_workflow_run`): 404, with no database
+/// call.
 async fn read_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<crate::monitoring::WorkflowRunDetail>, ApiError> {
-    let workflow_id = parse_path_uuid("workflow_id", &workflow_id)?;
+    let Ok(workflow_id) = Uuid::parse_str(&workflow_id) else {
+        return Err(workflow_run_not_found());
+    };
     get_workflow_run(&state.broker, workflow_id)
         .await
         .map_err(|error| query_failed("Workflow run", error))?
         .map(Json)
-        .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "Workflow run not found."))
+        .ok_or_else(workflow_run_not_found)
 }
 
+/// One node's detail. The Python route takes the id as text and the index
+/// as an integer: an index that is not an integer is the 422 of FastAPI,
+/// and an id text that is not a UUID names no node
+/// (`get_workflow_node`): 404, with no database call.
 async fn read_workflow_task(
     State(state): State<WebState>,
     Path((workflow_id, task_index)): Path<(String, String)>,
 ) -> Result<Json<crate::monitoring::WorkflowTaskDetail>, ApiError> {
-    // FastAPI lists every refused path parameter, in parameter order.
-    let mut refused = Vec::new();
-    let workflow_id = Uuid::parse_str(&workflow_id)
-        .map_err(|error| refused.push(ApiError::path_uuid("workflow_id", &workflow_id, &error)));
-    let task_index = task_index.parse::<i32>().map_err(|_| {
-        refused.push(ApiError::path_issue(
+    let Ok(task_index) = task_index.parse::<i32>() else {
+        return Err(ApiError::Validation(vec![ApiError::path_issue(
             "task_index",
             "int_parsing",
             "Input should be a valid integer, unable to parse string as an integer",
             task_index.as_str(),
-        ));
-    });
-    let (Ok(workflow_id), Ok(task_index)) = (workflow_id, task_index) else {
-        return Err(ApiError::Validation(refused));
+        )]));
+    };
+    let Ok(workflow_id) = Uuid::parse_str(&workflow_id) else {
+        return Err(workflow_task_not_found());
     };
     get_workflow_node(&state.broker, workflow_id, task_index)
         .await
         .map_err(|error| query_failed("Workflow task", error))?
         .map(Json)
-        .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "Workflow task not found."))
+        .ok_or_else(workflow_task_not_found)
 }
 
 #[derive(Debug)]
@@ -708,7 +724,7 @@ async fn cancel_task(
 }
 
 fn workflow_action_id(workflow_id: &str) -> Result<Uuid, Response> {
-    parse_path_uuid("workflow_id", workflow_id).map_err(IntoResponse::into_response)
+    parse_workflow_path_uuid(workflow_id).map_err(IntoResponse::into_response)
 }
 
 async fn pause_workflow(

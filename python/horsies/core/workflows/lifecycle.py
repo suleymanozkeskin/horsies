@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typing import Final
 
 
-from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.codec.json_io import dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.typed import encode_task_error
@@ -969,14 +968,16 @@ async def expire_paused_workflows(
 ) -> int:
     """Expire PAUSED workflows older than the declared age policy.
 
-    The writer is the cancel path's locked sequence with EXPIRED as the
-    terminal status: workflow row locked first (the cancel lock-order
-    invariant), backing tasks and node rows locked, the status CAS
-    applied (PAUSED only — a concurrent resume wins), the shared batch
-    terminalization moving still-live backing rows to history under the
-    workflow-cancel kind, and the node skips driven by the batch's
-    reported ids. No parent-to-child cascade: pause already cascaded,
-    so every paused child carries its own age and expires on it.
+    One read of the candidates, oldest first, at most ``batch_size``
+    (``idx_horsies_workflows_paused_age``); then one statement in autocommit
+    per candidate (``horsies_workflow_expire_paused``). The function locks
+    the workflow row first (the cancel lock order), then the live tasks
+    behind its nodes and its live nodes; it writes EXPIRED only while the
+    workflow is PAUSED and older than the age, so a resume that committed
+    first wins. The tasks behind ENQUEUED nodes move to history under the
+    workflow-cancel kind, and the nodes that did not start are SKIPPED. No
+    parent-to-child cascade: pause already cascaded, so every paused child
+    carries its own age and expires on it.
 
     The age goes to the database as exact microseconds
     (``older_than // timedelta(microseconds=1)``, multiplied by
@@ -984,27 +985,24 @@ async def expire_paused_workflows(
     ``NOW()`` minus the age is the same span in any session time zone,
     also across a daylight-saving change. The core sends the same value.
 
-    Returns the number of workflows expired. One transaction per
-    workflow keeps the pass bounded; a failure on one workflow leaves
-    the remainder for the next tick.
+    Returns the number of workflows expired. Each candidate commits alone,
+    so the pass is bounded; a failure on one candidate raises, and the
+    candidates after it wait for the next tick.
+
+    Raises:
+        OutcomeDecodeError: the function returned a row outside its
+            contract (a defect).
+        Exception: what the pool and the driver raise for a candidate: a
+            pool timeout, a connection error, a statement error. The
+            candidates before it are expired; a connection error after the
+            statement was sent leaves its outcome unknown.
     """
-    from horsies.core.models.workflow.handle import (
-        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
-        LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
-        LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
-        SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
-        SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
-    )
-    from horsies.core.models.workflow.enums import WF_TASK_TERMINAL_VALUES
-    from horsies.core.lifecycle.commands import (
-        CancelNodesOfCancelledWorkflow,
+    from horsies.core.workflows.functions import (
+        EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL,
+        PausedExpiryOutcome,
+        decode_paused_expiry_outcome,
     )
 
-    from horsies.core.types.status import TASK_TERMINAL_STATES
-
-    task_terminal_values = [
-        status.value for status in TASK_TERMINAL_STATES
-    ]
     error_text = f'paused_workflow_auto_cancel_after elapsed: {older_than}'
     error_json = _ser_or_raise(
         dumps_json(
@@ -1022,7 +1020,6 @@ async def expire_paused_workflows(
         'expired workflow error',
     )
     age_us = older_than // timedelta(microseconds=1)
-    expired_count = 0
     async with session_factory() as candidate_session:
         candidate_rows = (
             await candidate_session.execute(
@@ -1031,7 +1028,7 @@ async def expire_paused_workflows(
                     WHERE status = 'PAUSED'
                       AND updated_at < NOW()
                           - CAST(:age_us AS bigint) * interval '1 microsecond'
-                    ORDER BY updated_at
+                    ORDER BY updated_at, id
                     LIMIT :batch_size
                 """),
                 {'age_us': age_us, 'batch_size': batch_size},
@@ -1039,67 +1036,25 @@ async def expire_paused_workflows(
         ).all()
     candidate_ids = [row.id for row in candidate_rows]
 
+    expired_count = 0
     for workflow_id in candidate_ids:
         async with session_factory() as session:
-            lock_params = {
-                'wf_id': workflow_id,
-                'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
-                'task_terminal_states': task_terminal_values,
-            }
-            await session.execute(
-                LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL, {'wf_id': workflow_id}
-            )
-            await session.execute(
-                LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL, lock_params
-            )
-            await session.execute(
-                LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL, lock_params
-            )
-            await session.execute(
-                LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL, lock_params
-            )
-            expired_row = (
-                await session.execute(
-                    text("""
-                        UPDATE horsies_workflows
-                        SET status = 'EXPIRED',
-                            error = :error,
-                            completed_at = NOW(),
-                            updated_at = NOW()
-                        WHERE id = :wf_id
-                          AND status = 'PAUSED'
-                          AND updated_at < NOW()
-                              - CAST(:age_us AS bigint) * interval '1 microsecond'
-                        RETURNING id
-                    """),
+            connection = await autocommit_connection(session)
+            rows = (
+                await connection.execute(
+                    EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL,
                     {
                         'wf_id': workflow_id,
-                        'error': error_json,
                         'age_us': age_us,
+                        'error': error_json,
                     },
                 )
-            ).first()
-            if expired_row is None:
-                await session.rollback()
-                continue
-            outcomes = await apply_batch_async(
-                await session.connection(),
-                CancelNodesOfCancelledWorkflow(
-                    workflow_ids=(workflow_id,),
-                ),
-            )
-            await session.execute(
-                SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL, {'wf_id': workflow_id}
-            )
-            await session.execute(
-                SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
-                {
-                    'wf_id': workflow_id,
-                    'cancelled_task_ids': [
-                        outcome.task_id for outcome in outcomes
-                    ],
-                },
-            )
-            await session.commit()
-            expired_count += 1
+            ).fetchall()
+        match decode_paused_expiry_outcome(rows):
+            case PausedExpiryOutcome.EXPIRED:
+                expired_count += 1
+            case PausedExpiryOutcome.NOT_EXPIRED | PausedExpiryOutcome.NOT_FOUND:
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
     return expired_count

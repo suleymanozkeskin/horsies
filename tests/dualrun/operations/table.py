@@ -31,6 +31,7 @@ class SwitchModule(Enum):
     """A module whose switch has an operation table."""
 
     LIFECYCLE = 'lifecycle'
+    BROKER = 'broker'
 
 
 class Implementation(Enum):
