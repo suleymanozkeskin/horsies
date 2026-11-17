@@ -3,9 +3,12 @@
 //! `printf`. The spawner appends the socket descriptor and the worker pid,
 //! so a script reads the descriptor as `$0`.
 //!
-//! A script reads a frame only after it answered the frame before, so the
-//! parent never has two frames in flight to one child and `head -c` reads
-//! exactly one frame.
+//! Every read takes exactly the bytes it names and no byte after them, on
+//! every platform: [`read_bytes`] reads one byte per `read`, and
+//! [`drop_bytes`] asks for at most the bytes still owed in each `read`.
+//! `head -c` is not used: BSD `head` (macOS) reads a full stdio buffer from
+//! the socket and drops what it does not write, so the rest of the frame,
+//! and any frame after it, is lost to the next read.
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -26,14 +29,14 @@ use super::shared::{SharedPool, SharedPoolConfig};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, BodyEnd, BootDetail,
-    BootErrorName, BootFailedFrame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
-    ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads, InitFrame, IsolatedChild,
-    IsolatedWork, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame,
-    LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame,
-    ReportedBootCause, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, RunRef,
-    RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame, SharedThreadChild,
-    SharedWork, ShortageErrno, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats,
-    HEADER_BYTES,
+    BootErrorName, BootFailedFrame, CancelGraceMs, ChildConnection, ChildFrame, ChildKind,
+    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads,
+    InitFrame, IsolatedChild, IsolatedWork, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame,
+    LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId,
+    ReadyFrame, ReportedBootCause, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame,
+    RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
+    SharedThreadChild, SharedWork, ShortageErrno, StuckWork, TaskInputText, TaskSendPool,
+    TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::read_stored_options;
@@ -114,6 +117,7 @@ fn init_of(child_kind: ChildKind) -> InitFrame {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "horsies-scripted-child".to_owned(),
         child_kind,
     }
@@ -149,7 +153,6 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
         task_id: task.task_id,
         task_name: task.task_name.clone(),
         worker_id: WORKER_ID.to_owned(),
-        task_kind: task.kind,
         claimed_at: task.claimed_at,
         work: IsolatedWork::Run,
         input: input(),
@@ -163,7 +166,6 @@ pub(super) fn shared_run_frame(task: &ClaimedTask, dispatch: u64, work: SharedWo
         task_id: task.task_id,
         task_name: task.task_name.clone(),
         worker_id: WORKER_ID.to_owned(),
-        task_kind: task.kind,
         claimed_at: task.claimed_at,
         work,
         input: input(),
@@ -292,9 +294,47 @@ pub(super) fn send_later(seconds: &str, frames: &[ChildFrame]) -> String {
 // Script steps
 // ---------------------------------------------------------------------------
 
+/// The byte count of one read of a script.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ScriptCount<'a> {
+    /// A count known when the script is built.
+    Known(usize),
+    /// The shell variable of this name holds the count when the step runs.
+    Variable(&'a str),
+}
+
+impl ScriptCount<'_> {
+    fn shell_word(self) -> String {
+        match self {
+            Self::Known(count) => count.to_string(),
+            Self::Variable(name) => format!(r#""${name}""#),
+        }
+    }
+}
+
+/// Shell text that writes the next `count` bytes of the socket to its
+/// standard output, for a command substitution. `dd` with one-byte blocks
+/// reads one byte per `read`, so it never takes a byte past `count`. One
+/// `read` per byte: for headers and metadata, not for large bodies.
+pub(super) fn read_bytes(count: ScriptCount<'_>) -> String {
+    format!(r#"dd bs=1 count={} <&"$0" 2>/dev/null"#, count.shell_word())
+}
+
+/// Shell step that drops the next `count` bytes of the socket. Each `dd`
+/// makes one `read` of at most the bytes still owed (`$left`) and the loop
+/// subtracts what it got, so a short read is read again and no byte past
+/// `count` is taken. The end of the stream ends the loop early, as `head -c`
+/// ends at the end of its input. Sets `$left` and `$got`.
+pub(super) fn drop_bytes(count: ScriptCount<'_>) -> String {
+    format!(
+        r#"left={}; while [ "$left" -gt 0 ]; do got=$(( $(dd bs="$left" count=1 <&"$0" 2>/dev/null | wc -c) )); [ "$got" -gt 0 ] || break; left=$(( left - got )); done; "#,
+        count.shell_word()
+    )
+}
+
 /// Read one parent frame and drop it.
 pub(super) fn take(frame: &ParentFrame) -> String {
-    format!(r#"head -c {} <&"$0" >/dev/null; "#, parent_frame_len(frame))
+    drop_bytes(ScriptCount::Known(parent_frame_len(frame)))
 }
 
 /// Write `frames` to the parent.
@@ -329,7 +369,10 @@ pub(super) fn read_frame() -> String {
         .len()
         - HEADER_BYTES;
     format!(
-        r#"set -- $(head -c 12 <&"$0" | od -An -tu1); m=$(( $1 * 16777216 + $2 * 65536 + $3 * 256 + $4 )); b=$(( $9 * 16777216 + ${{10}} * 65536 + ${{11}} * 256 + ${{12}} )); meta=$(head -c "$m" <&"$0"); if [ "$b" -gt 0 ]; then head -c "$b" <&"$0" >/dev/null; fi; if [ "$m" -eq {stop_meta} ] && [ "$b" -eq 0 ]; then exit 0; fi; "#
+        r#"set -- $({header} | od -An -tu1); m=$(( $1 * 16777216 + $2 * 65536 + $3 * 256 + $4 )); b=$(( $9 * 16777216 + ${{10}} * 65536 + ${{11}} * 256 + ${{12}} )); meta=$({meta}); {body}if [ "$m" -eq {stop_meta} ] && [ "$b" -eq 0 ]; then exit 0; fi; "#,
+        header = read_bytes(ScriptCount::Known(HEADER_BYTES)),
+        meta = read_bytes(ScriptCount::Variable("m")),
+        body = drop_bytes(ScriptCount::Variable("b")),
     )
 }
 
@@ -671,7 +714,8 @@ pub(super) fn start_isolated_from(
     live: LiveDispatches,
 ) -> (IsolatedPool, Arc<PoolBoard>) {
     let board = Arc::new(PoolBoard::new(layout(slots, 0, 0)));
-    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> =
+        Arc::<super::held_exits::HeldExits>::clone(source);
     let pool =
         IsolatedPool::start_from_source(config, Arc::clone(&board), spawner.handle(), source, live);
     (pool, board)
@@ -686,6 +730,7 @@ pub(super) fn start_shared_from(
     config: SharedPoolConfig,
     live: LiveDispatches,
 ) -> SharedPool {
-    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> =
+        Arc::<super::held_exits::HeldExits>::clone(source);
     SharedPool::start_from_source(config, Arc::clone(board), spawner.handle(), source, live)
 }

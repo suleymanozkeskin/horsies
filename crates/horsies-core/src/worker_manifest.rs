@@ -23,6 +23,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::bounded::BoundedU32;
+use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{
     select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
     ExecutorThreadsSetting, IsolatedChildCount, IsolatedChildren, IsolatedPool, IsolatedRecycle,
@@ -268,6 +269,12 @@ pub struct WorkerDatabaseManifest {
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
+    /// TCP keepalives of every core connection (Python `tcp_keepalives` and
+    /// its three values).
+    pub tcp_keepalives: TcpKeepalivesConfig,
+    /// TCP user timeout of every core connection (Python
+    /// `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
+    pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
 /// A limit on a number of tasks.
@@ -658,6 +665,8 @@ impl WorkerManifest {
             pool_timeout: database.pool_timeout.get(),
             pool_recycle: database.pool_recycle,
             echo: database.echo,
+            tcp_keepalives: database.tcp_keepalives,
+            tcp_user_timeout: database.tcp_user_timeout,
         };
         app_config.worker_process_config(NonZeroU32::from(selected.profile.resolved_parent_pool()))
     }

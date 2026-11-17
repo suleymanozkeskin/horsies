@@ -3,12 +3,17 @@
 //!
 //! Each test enters from the pass that the reaper calls and asserts on stored
 //! rows; each has its own database, because a global pass reads every
-//! workflow. Three stored rows raise on every pass:
+//! workflow. Three stored rows raise on every pass, as in Python:
 //!
-//! - [`POISON_TASK_OPTIONS`] on a node: the core refuses them when it builds
-//!   the node's task (a `Validation` error).
+//! - [`BAD_GOOD_UNTIL`] on a node: the insert of its task refuses the
+//!   deadline text (a data exception). Phase-2 recovery tests refuse the
+//!   insert of the workflow's task rows with a trigger instead
+//!   ([`start_a_then_b`]), as Python's do.
 //! - [`poison_success_policy`] on a workflow: the success evaluation fails.
 //! - An output index with no node row: the final result fails.
+//!
+//! A child start raises on [`POISON_TASK_OPTIONS`] with a deadline
+//! ([`poison_child_registry`]).
 
 use serial_test::serial;
 use sqlx::PgPool;
@@ -20,7 +25,7 @@ use super::support::{
     workflow_error_code, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink,
     WorkflowSeed, POISON_TASK_OPTIONS, WORKER,
 };
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
@@ -44,6 +49,13 @@ const POISON_CHILD_KEY: &str = "tests.port.poison_options_child.v1";
 
 /// Text that the limit error message starts with (Python `recovery_limit_error`).
 const LIMIT_MESSAGE: &str = "Workflow recovery raised a persistent error";
+
+/// Stored task options whose `good_until` the database cannot read (Python's
+/// `BAD_GOOD_UNTIL`). The options parse, so the node is not refused when its
+/// task is built; the deadline text goes to the task insert, which raises
+/// (Python `_build_enqueued_task_params`,
+/// `horsies/core/workflows/engine.py:831-835`).
+const BAD_GOOD_UNTIL: &str = r#"{"good_until":"not-a-date"}"#;
 
 async fn pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> RecoveryReport {
     recover_stuck_workflows(
@@ -69,11 +81,11 @@ async fn passes(pool: &PgPool, registry: &WorkflowSpecRegistry, count: u32) -> V
 async fn phase2_pass(pool: &PgPool) -> Phase2RecoverySummary {
     drive_phase2_recovery(
         pool,
-        &WorkflowSpecRegistry::new(),
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         0,
         GLOBAL_SCAN_ROW_CAP,
         LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -98,12 +110,13 @@ async fn failure_rows(pool: &PgPool) -> i64 {
         .expect("count the failure rows")
 }
 
-/// A RUNNING workflow with one READY node whose task options do not parse.
+/// A RUNNING workflow with one READY node whose task insert raises
+/// ([`BAD_GOOD_UNTIL`]).
 async fn seed_poison_ready(pool: &PgPool, seed: WorkflowSeed) -> Uuid {
     let workflow_id = seed_workflow(pool, &seed).await;
     seed_node(
         pool,
-        &NodeSeed::task(workflow_id, 0, "READY").options(POISON_TASK_OPTIONS),
+        &NodeSeed::task(workflow_id, 0, "READY").options(BAD_GOOD_UNTIL),
     )
     .await;
     workflow_id
@@ -184,16 +197,19 @@ async fn stop_killing(pool: &PgPool, table: &str) {
     super::support::execute(pool, "DROP FUNCTION port_test_kill()").await;
 }
 
-/// A registry with a child whose task node stores task options that do not
-/// parse, so each start of the child fails (Python's `PoisonOptionsChild`).
-/// The node has no `good_until`: a deadline would be merged into the options.
+/// A registry with a child whose task has options that are not a JSON object
+/// and a `good_until` (Python's `PoisonOptionsChild`): the merge of the
+/// deadline into the options raises at each start of the child (Python
+/// `_child_task_options_json`, `horsies/core/workflows/engine.py:425-475`).
 fn poison_child_registry() -> WorkflowSpecRegistry {
     let mut child_task = task_node(0, "limit_child_task");
     child_task.task_options_json = Some(POISON_TASK_OPTIONS.to_owned());
+    child_task.good_until = Some(chrono::Utc::now() + chrono::Duration::hours(1));
     let mut child = spec("poison_options_child", vec![child_task]);
     child.definition_key = Some(POISON_CHILD_KEY.to_owned());
     child.output_index = Some(0);
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register(RegisteredWorkflowSpec {
             spec: child,
@@ -203,9 +219,37 @@ fn poison_child_registry() -> WorkflowSpecRegistry {
     registry
 }
 
-/// Starts A then B, makes B's task options poison, and runs phase 1 of A, so
-/// phase-2 recovery owes A's progression, and that progression raises on B.
-/// Returns the workflow id and A's task id. Python: `_start_a_then_b`.
+/// Makes every insert of a task row of `workflow_id` refuse with a data
+/// exception (22007), as the insert of a stored deadline that does not parse
+/// does (Python `_refuse_task_inserts`).
+async fn refuse_task_inserts(pool: &PgPool, workflow_id: Uuid) {
+    super::support::execute(
+        pool,
+        &format!(
+            "CREATE FUNCTION port_test_refuse_task() RETURNS trigger
+             LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF NEW.input::jsonb -> '__h_workflow_meta__' ->> 'workflow_id' = '{workflow_id}' THEN
+                     RAISE EXCEPTION 'refused by the test' USING ERRCODE = '22007';
+                 END IF;
+                 RETURN NEW;
+             END
+             $body$"
+        ),
+    )
+    .await;
+    super::support::execute(
+        pool,
+        "CREATE TRIGGER port_test_refuse_task BEFORE INSERT ON horsies_tasks
+         FOR EACH ROW EXECUTE FUNCTION port_test_refuse_task()",
+    )
+    .await;
+}
+
+/// Starts A then B, refuses the task row of B, and runs phase 1 of A, so
+/// phase-2 recovery owes A's progression, and that progression raises on the
+/// task row of B. Returns the workflow id and A's task id. Python:
+/// `_start_a_then_b`.
 async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
     let first = task_node(0, "limit_task");
     let mut second = task_node(1, "limit_task");
@@ -213,18 +257,10 @@ async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
     let workflow_id = start(
         pool,
         &spec("phase2_a_then_b", vec![first, second]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
-    sqlx::query(
-        "UPDATE horsies_workflow_tasks SET task_options = $2
-         WHERE workflow_id = $1 AND task_index = 1",
-    )
-    .bind(workflow_id)
-    .bind(POISON_TASK_OPTIONS)
-    .execute(pool)
-    .await
-    .expect("make B poison");
+    refuse_task_inserts(pool, workflow_id).await;
     let task_id = node(pool, workflow_id, 0)
         .await
         .task_id
@@ -279,7 +315,7 @@ async fn pending_attempts(pool: &PgPool, task_id: Uuid) -> (i32, Option<String>)
 #[serial]
 async fn each_pass_counts_once_and_changes_nothing_else() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
 
     let reports = passes(&db.pool, &registry, LIMIT - 1).await;
@@ -307,16 +343,20 @@ async fn two_cases_of_one_workflow_count_once_in_one_pass() {
         &db.pool,
         &NodeSeed::task(workflow_id, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
     seed_node(
         &db.pool,
-        &NodeSeed::task(workflow_id, 2, "READY").options(POISON_TASK_OPTIONS),
+        &NodeSeed::task(workflow_id, 2, "READY").options(BAD_GOOD_UNTIL),
     )
     .await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(failed_passes(&db.pool, workflow_id).await, Some(1));
     assert_eq!(report.metrics.case0.errors, 1, "{report:?}");
@@ -331,7 +371,7 @@ async fn two_cases_of_one_workflow_count_once_in_one_pass() {
 #[serial]
 async fn a_new_process_continues_the_count() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
     let _reports = passes(&db.pool, &registry, LIMIT - 1).await;
 
@@ -349,7 +389,7 @@ async fn a_new_process_continues_the_count() {
 #[serial]
 async fn a_repair_before_the_limit_saves_the_workflow() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
     let _reports = passes(&db.pool, &registry, LIMIT - 1).await;
 
@@ -385,7 +425,11 @@ async fn a_healthy_pass_writes_nothing() {
     )
     .await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(report.total(), 1, "{report:?}");
     assert_eq!(node_status(&db.pool, recovered, 0).await, "ENQUEUED");
@@ -401,7 +445,8 @@ async fn a_healthy_pass_writes_nothing() {
 async fn a_transient_raise_never_counts() {
     for sqlstate in ["55P03", "40P01", "57014", "53300"] {
         let db = IsolatedDatabase::create().await;
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
         seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "READY")).await;
         refuse_updates(
@@ -448,7 +493,11 @@ async fn a_connection_loss_counts_no_candidate_of_the_pass() {
     seed_node(&db.pool, &NodeSeed::task(second, 0, "READY")).await;
     kill_on_update(&db.pool, "horsies_workflow_tasks", None).await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     stop_killing(&db.pool, "horsies_workflow_tasks").await;
     assert_eq!(report.metrics.case1.errors, 2, "{report:?}");
@@ -499,7 +548,7 @@ async fn the_resume_pass_logs_and_does_not_count() {
 
     let report = recover_stuck_workflow_tree(
         &db.pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         workflow_id,
         0,
         &PayloadPolicy::default(),
@@ -525,11 +574,16 @@ async fn the_limit_bounds_case_0() {
         &db.pool,
         &NodeSeed::task(workflow_id, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
 
-    let _reports = passes(&db.pool, &WorkflowSpecRegistry::new(), LIMIT).await;
+    let _reports = passes(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        LIMIT,
+    )
+    .await;
 
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "FAILED");
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "FAILED");
@@ -549,7 +603,12 @@ async fn the_limit_bounds_case_1_and_get_returns_the_limit_error() {
     .await;
     seed_node(&db.pool, &NodeSeed::task(workflow_id, 2, "COMPLETED")).await;
 
-    let reports = passes(&db.pool, &WorkflowSpecRegistry::new(), LIMIT).await;
+    let reports = passes(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        LIMIT,
+    )
+    .await;
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "FAILED");
     assert_eq!(node_status(&db.pool, workflow_id, 0).await, "FAILED");
@@ -634,11 +693,16 @@ async fn the_limit_bounds_case_1_6_and_fails_the_parent_workflow() {
         &db.pool,
         &NodeSeed::task(parent, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
 
-    let _reports = passes(&db.pool, &WorkflowSpecRegistry::new(), LIMIT).await;
+    let _reports = passes(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        LIMIT,
+    )
+    .await;
 
     assert_eq!(failed_passes(&db.pool, child).await, None);
     assert_eq!(failed_passes(&db.pool, parent).await, Some(3));
@@ -667,7 +731,12 @@ async fn the_limit_bounds_case_2_3_and_keeps_a_stored_first_failure() {
     .await;
     seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "FAILED")).await;
 
-    let reports = passes(&db.pool, &WorkflowSpecRegistry::new(), LIMIT).await;
+    let reports = passes(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        LIMIT,
+    )
+    .await;
 
     let stored = workflow(&db.pool, workflow_id).await;
     assert_eq!(stored.status, "FAILED");
@@ -686,7 +755,12 @@ async fn the_limit_bounds_a_missing_output_node_row() {
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().output(7)).await;
     seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "COMPLETED")).await;
 
-    let reports = passes(&db.pool, &WorkflowSpecRegistry::new(), LIMIT).await;
+    let reports = passes(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        LIMIT,
+    )
+    .await;
 
     let errors: Vec<u32> = reports.iter().map(|r| r.metrics.case2_3.errors).collect();
     assert_eq!(errors, vec![1, 1, 1]);
@@ -705,7 +779,12 @@ async fn the_limit_fails_an_on_error_pause_workflow() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running().on_error("pause")).await;
 
-    let _reports = passes(&db.pool, &WorkflowSpecRegistry::new(), LIMIT).await;
+    let _reports = passes(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        LIMIT,
+    )
+    .await;
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "FAILED");
     db.drop().await;
@@ -730,7 +809,7 @@ async fn seed_poison_with_live_node(pool: &PgPool, seed: WorkflowSeed) -> (Uuid,
 #[serial]
 async fn a_live_node_finishes_and_ends_the_workflow() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let (workflow_id, live_task) =
         seed_poison_with_live_node(&db.pool, WorkflowSeed::running()).await;
 
@@ -760,7 +839,7 @@ async fn a_live_node_finishes_and_ends_the_workflow() {
 #[serial]
 async fn a_success_policy_met_by_a_live_node_completes_the_workflow() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let (workflow_id, live_task) = seed_poison_with_live_node(
         &db.pool,
         WorkflowSeed::running().policy(serde_json::json!({"cases": [{"required_indices": [1]}]})),
@@ -792,7 +871,12 @@ async fn a_child_at_the_limit_fails_the_parent_node() {
     )
     .await;
 
-    let _reports = passes(&db.pool, &WorkflowSpecRegistry::new(), LIMIT + 1).await;
+    let _reports = passes(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        LIMIT + 1,
+    )
+    .await;
 
     assert_eq!(workflow_status(&db.pool, child).await, "FAILED");
     assert_eq!(node_status(&db.pool, parent, 0).await, "FAILED");
@@ -817,7 +901,7 @@ async fn a_child_at_the_limit_fails_the_parent_node() {
 #[ignore = "waits on #818"]
 async fn a_parent_advance_raise_keeps_the_child_and_counts_on_the_parent() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let parent = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     let child = seed_workflow(
         &db.pool,
@@ -834,7 +918,7 @@ async fn a_parent_advance_raise_keeps_the_child_and_counts_on_the_parent() {
         &db.pool,
         &NodeSeed::task(parent, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
 
@@ -857,7 +941,7 @@ async fn a_parent_advance_raise_keeps_the_child_and_counts_on_the_parent() {
 #[serial]
 async fn a_connection_loss_in_a_completion_is_one_uncounted_error() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "COMPLETED")).await;
     kill_on_update(&db.pool, "horsies_workflows", Some(("id", workflow_id))).await;
@@ -886,7 +970,11 @@ async fn a_raised_completion_commits_its_count() {
     .await;
     seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "COMPLETED")).await;
 
-    let _report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let _report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(failed_passes(&db.pool, workflow_id).await, Some(1));
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "RUNNING");
@@ -919,7 +1007,11 @@ async fn a_failed_count_write_changes_nothing_and_the_pass_goes_on() {
     )
     .await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(report.total(), 1, "{report:?}");
     assert_eq!(report.metrics.case1.failures_counted, 0, "{report:?}");
@@ -935,7 +1027,7 @@ async fn a_failed_count_write_changes_nothing_and_the_pass_goes_on() {
 #[serial]
 async fn a_failed_limit_write_keeps_the_count_and_retries() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
     refuse_updates(&db.pool, "horsies_workflows", "id", workflow_id, "XX000").await;
 

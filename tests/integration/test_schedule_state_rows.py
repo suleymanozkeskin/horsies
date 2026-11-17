@@ -7,13 +7,16 @@ The table stores ``config_hash`` as 32 bytes, ``last_task_id`` as uuid and
 scheduler's own code and reads the row back with SQL, so the column types and
 the CHECKs see every kind of value the scheduler writes.
 
-The due read, the start and the existence heal take their time from the
-database clock. The clock tests move the scheduler's host clock one day ahead
-(``_HostClockAhead``): every time they check must still follow the database.
+The due read, the start, the existence heal and the fire take their time
+from the database clock. The clock tests move the scheduler's host clock one
+day ahead (``_HostClockAhead``): every time they check must still follow the
+database.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -33,7 +36,6 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.schedule import IntervalSchedule, ScheduleConfig, TaskSchedule
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.state import ScheduleStateManager
-from horsies.core.types.result import Ok
 from horsies.core.utils.fingerprint import schedule_slot_task_id
 from tests.broker_resources_support import current_resources
 from tests.integration.conftest import DB_URL, make_simple_task
@@ -103,6 +105,57 @@ async def _set_next_run(session: AsyncSession, schedule_name: str, next_run_at: 
     )
     assert getattr(result, 'rowcount', 0) == 1
     await session.commit()
+
+
+async def _insert_state(session: AsyncSession, schedule_name: str, next_run_at: datetime) -> None:
+    """A state row with no run recorded."""
+    _ = await session.execute(
+        text("""
+            INSERT INTO horsies_schedule_state (
+                schedule_name, last_run_at, next_run_at, last_task_id, run_count,
+                config_hash, updated_at
+            ) VALUES (:schedule_name, NULL, :next_run_at, NULL, 0, :config_hash, now())
+        """),
+        {'schedule_name': schedule_name, 'next_run_at': next_run_at, 'config_hash': CONFIG_HASH},
+    )
+    await session.commit()
+
+
+async def _record_run(
+    session: AsyncSession,
+    schedule_name: str,
+    *,
+    task_id: str,
+    run_at: datetime,
+    next_run_at: datetime,
+) -> None:
+    """Record one run on the row, as a fire records it."""
+    result = await session.execute(
+        text("""
+            UPDATE horsies_schedule_state
+            SET last_run_at = :run_at, last_task_id = CAST(:task_id AS uuid),
+                run_count = run_count + 1, next_run_at = :next_run_at
+            WHERE schedule_name = :schedule_name
+        """),
+        {
+            'schedule_name': schedule_name,
+            'run_at': run_at,
+            'task_id': task_id,
+            'next_run_at': next_run_at,
+        },
+    )
+    assert getattr(result, 'rowcount', 0) == 1
+    await session.commit()
+
+
+async def _sent_at(session: AsyncSession, task_id: str) -> datetime:
+    result = await session.execute(
+        text('SELECT sent_at FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)'),
+        {'task_id': task_id},
+    )
+    value = result.scalar_one()
+    assert isinstance(value, datetime)
+    return value
 
 
 HOST_CLOCK_AHEAD = timedelta(days=1)
@@ -184,20 +237,20 @@ async def test_start_computes_the_first_run_from_the_database_time(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_changed_config_digest_at_start_rewrites_the_digest_and_keeps_the_run_record(
     session: AsyncSession,
-    broker: PostgresBroker,
+    broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
     task_name, schedule_name = _names()
     scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
     await scheduler.start()
     try:
         schedule = scheduler.schedule_config.schedules[0]
-        manager = ScheduleStateManager(current_resources(broker).session_factory)
         slot = await _database_now(session)
-        task_id = schedule_slot_task_id(schedule_name, slot)
-        await manager.update_after_run(
-            schedule_name=schedule_name,
+        task_id = str(schedule_slot_task_id(schedule_name, slot))
+        await _record_run(
+            session,
+            schedule_name,
             task_id=task_id,
-            executed_at=slot,
+            run_at=slot,
             next_run_at=slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS),
         )
         await _set_config_hash(session, schedule_name, STALE_CONFIG_HASH)
@@ -216,33 +269,33 @@ async def test_a_changed_config_digest_at_start_rewrites_the_digest_and_keeps_th
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_recorded_run_stores_the_slot_task_id_and_counts_one_run(
+async def test_a_fired_slot_stores_its_task_id_and_counts_one_run(
     session: AsyncSession,
-    broker: PostgresBroker,
+    broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
-    _, schedule_name = _names()
-    manager = ScheduleStateManager(current_resources(broker).session_factory)
-    slot = datetime.now(timezone.utc).replace(microsecond=0)
-    await manager.initialize_state(schedule_name, slot, CONFIG_HASH)
-
-    task_id = schedule_slot_task_id(schedule_name, slot)
-    executed_at = slot + timedelta(seconds=1)
-    next_run = slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
-    await manager.update_after_run(
-        schedule_name=schedule_name,
-        task_id=task_id,
-        executed_at=executed_at,
-        next_run_at=next_run,
-    )
+    task_name, schedule_name = _names()
+    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    await scheduler.start()
+    try:
+        assert scheduler.state_manager is not None
+        expected_hash = scheduler._compute_config_hash(scheduler.schedule_config.schedules[0])
+        slot = (await _database_now(session)).replace(microsecond=0) - timedelta(seconds=1)
+        await _set_next_run(session, schedule_name, slot)
+        read = await scheduler.state_manager.read_due_schedules([schedule_name])
+        [due] = read.due
+        await scheduler._check_schedule(scheduler.schedule_config.schedules[0], due, read.database_now)
+    finally:
+        await scheduler.stop()
 
     row = await _state_row(session, schedule_name)
-    assert (
-        row.last_task_id,
-        row.last_run_at,
-        row.next_run_at,
-        row.run_count,
-        row.config_hash,
-    ) == (task_id, executed_at, next_run, 1, CONFIG_HASH)
+    task_id = str(schedule_slot_task_id(schedule_name, slot))
+    assert (row.last_task_id, row.next_run_at, row.run_count, row.config_hash) == (
+        task_id,
+        slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS),
+        1,
+        expected_hash,
+    )
+    assert await _sent_at(session, task_id) == slot
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -259,8 +312,8 @@ async def test_the_due_read_returns_the_rows_at_or_before_the_database_time(
         f'not_due_{suffix}': seeded_at + timedelta(hours=1),
     }
     for schedule_name, next_run_at in next_runs.items():
-        await manager.initialize_state(schedule_name, next_run_at, CONFIG_HASH)
-    await manager.initialize_state(f'other_{suffix}', seeded_at, CONFIG_HASH)
+        await _insert_state(session, schedule_name, next_run_at)
+    await _insert_state(session, f'other_{suffix}', seeded_at)
 
     before = await _database_now(session)
     read = await manager.read_due_schedules(list(next_runs))
@@ -303,22 +356,12 @@ async def test_a_due_slot_fires_and_records_its_run_at_the_database_time(
 ) -> None:
     task_name, schedule_name = _names()
     scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
-    fired: list[datetime] = []
-
-    async def _enqueue(schedule: TaskSchedule, *, slot_time: datetime) -> Ok[str]:
-        # The state move is under test here, not the enqueue.
-        fired.append(slot_time)
-        return Ok(schedule_slot_task_id(schedule.name, slot_time))
-
     await scheduler.start()
     try:
         slot = await _database_now(session) - timedelta(seconds=1)
         await _set_next_run(session, schedule_name, slot)
         before = await _database_now(session)
-        with (
-            _scheduler_host_clock_ahead(),
-            patch.object(scheduler, '_enqueue_scheduled_task', side_effect=_enqueue),
-        ):
+        with _scheduler_host_clock_ahead():
             await scheduler._check_and_run_schedules()
         after = await _database_now(session)
     finally:
@@ -326,9 +369,10 @@ async def test_a_due_slot_fires_and_records_its_run_at_the_database_time(
 
     row = await _state_row(session, schedule_name)
     # The latest slot due at the database time is the stored one, not a slot
-    # a day later, and the run is recorded at the due read's database time.
-    assert fired == [slot]
-    assert row.last_task_id == schedule_slot_task_id(schedule_name, slot)
+    # a day later, and the run is recorded at the database time of the fire.
+    task_id = str(schedule_slot_task_id(schedule_name, slot))
+    assert row.last_task_id == task_id
+    assert await _sent_at(session, task_id) == slot
     assert row.next_run_at == slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
     assert row.run_count == 1
     assert before <= row.last_run_at <= after
@@ -361,3 +405,175 @@ async def test_the_heal_creates_a_missing_row_from_the_database_time(
     assert before < row.next_run_at <= after + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
     assert row.config_hash == expected_hash
     assert (row.last_run_at, row.last_task_id, row.run_count) == (None, None, 0)
+
+
+def _catch_up_app(task_name: str, schedule_name: str) -> Horsies:
+    app = Horsies(
+        AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=PostgresConfig(database_url=SecretStr(DB_URL)),
+            schedule=ScheduleConfig(
+                schedules=[
+                    TaskSchedule(
+                        name=schedule_name,
+                        task_name=task_name,
+                        pattern=IntervalSchedule(seconds=SCHEDULE_INTERVAL_SECONDS),
+                        kwargs={'value': 1},
+                        catch_up_missed=True,
+                    ),
+                ],
+            ),
+        ),
+    )
+    make_simple_task(app, task_name)
+    return app
+
+
+async def _slot_task_count(session: AsyncSession, task_name: str) -> int:
+    result = await session.execute(
+        text('SELECT count(*) FROM horsies_tasks WHERE task_name = :task_name'),
+        {'task_name': task_name},
+    )
+    return int(result.scalar_one())
+
+
+async def _terminate_the_waiting_fire(session: AsyncSession) -> None:
+    """Terminate the backend that waits for the state row lock that ``session`` holds."""
+    for _ in range(100):
+        result = await session.execute(
+            text("""
+                SELECT pg_terminate_backend(a.pid)
+                FROM pg_stat_activity AS a
+                WHERE a.datname = current_database()
+                  AND a.wait_event_type = 'Lock'
+                  AND a.pid <> pg_backend_pid()
+                  AND pg_backend_pid() = ANY(pg_blocking_pids(a.pid))
+            """),
+        )
+        if result.scalars().all():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError('no fire statement waited for the state row lock')
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fires_each_slot_once(
+    session: AsyncSession,
+    broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fire of three slots loses its connection while it waits for the
+    state row: no slot and no state move commit. The next tick fires the
+    three slots once and records one run."""
+    task_name, schedule_name = _names()
+    scheduler = Scheduler(_catch_up_app(task_name, schedule_name))
+    await scheduler.start()
+    try:
+        first = (await _database_now(session)).replace(microsecond=0) - timedelta(
+            seconds=2 * SCHEDULE_INTERVAL_SECONDS + 1,
+        )
+        await _set_next_run(session, schedule_name, first)
+        # Hold the state row, so the fire waits for it; then end its connection.
+        _ = await session.execute(
+            text('SELECT 1 FROM horsies_schedule_state WHERE schedule_name = :name FOR UPDATE'),
+            {'name': schedule_name},
+        )
+        with caplog.at_level(logging.WARNING, logger='horsies.scheduler'):
+            tick = asyncio.create_task(scheduler._check_and_run_schedules())
+            await _terminate_the_waiting_fire(session)
+            await session.rollback()
+            await tick
+        assert any('fire failed (transient)' in record.getMessage() for record in caplog.records)
+
+        row = await _state_row(session, schedule_name)
+        assert (row.next_run_at, row.run_count) == (first, 0)
+        assert await _slot_task_count(session, task_name) == 0
+
+        await scheduler._check_and_run_schedules()
+    finally:
+        await scheduler.stop()
+
+    row = await _state_row(session, schedule_name)
+    slots = [first + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS * index) for index in range(3)]
+    assert await _slot_task_count(session, task_name) == 3
+    assert (row.last_task_id, row.run_count) == (str(schedule_slot_task_id(schedule_name, slots[-1])), 1)
+    assert row.next_run_at == slots[-1] + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_two_schedulers_that_fire_one_slot_write_one_task_and_one_run(
+    session: AsyncSession,
+    broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
+) -> None:
+    """Both read the slot as due; the fire locks the state row, so the second
+    finds it moved and writes nothing."""
+    task_name, schedule_name = _names()
+    first = Scheduler(_app_with_schedule(task_name, schedule_name))
+    second = Scheduler(_app_with_schedule(task_name, schedule_name))
+    await first.start()
+    await second.start()
+    try:
+        assert first.state_manager is not None
+        slot = (await _database_now(session)).replace(microsecond=0) - timedelta(seconds=1)
+        await _set_next_run(session, schedule_name, slot)
+        read = await first.state_manager.read_due_schedules([schedule_name])
+        [due] = read.due
+        _ = await asyncio.gather(
+            first._check_schedule(first.schedule_config.schedules[0], due, read.database_now),
+            second._check_schedule(second.schedule_config.schedules[0], due, read.database_now),
+        )
+    finally:
+        await first.stop()
+        await second.stop()
+
+    row = await _state_row(session, schedule_name)
+    assert await _slot_task_count(session, task_name) == 1
+    assert (row.last_task_id, row.run_count) == (str(schedule_slot_task_id(schedule_name, slot)), 1)
+    assert row.next_run_at == slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_live_table(
+    session: AsyncSession,
+    broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A slot fire is the first send of the slot's task id and reads no
+    history. The scheduler repeats a fire whose commit it did not see (a lost
+    reply), after the slot's task finished and left ``horsies_tasks``. The
+    state row moved in the same commit as the slot, so the repeat finds the
+    row moved and the slot does not run a second time; the next tick's due
+    read does not show the slot either."""
+    task_name, schedule_name = _names()
+    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    await scheduler.start()
+    try:
+        assert scheduler.state_manager is not None
+        schedule = scheduler.schedule_config.schedules[0]
+        slot = (await _database_now(session)).replace(microsecond=0) - timedelta(seconds=1)
+        await _set_next_run(session, schedule_name, slot)
+        read = await scheduler.state_manager.read_due_schedules([schedule_name])
+        [due] = read.due
+        await scheduler._check_schedule(schedule, due, read.database_now)
+        task_id = str(schedule_slot_task_id(schedule_name, slot))
+        assert await _slot_task_count(session, task_name) == 1
+        _ = await session.execute(
+            text('DELETE FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)'),
+            {'task_id': task_id},
+        )
+        await session.commit()
+
+        with caplog.at_level(logging.DEBUG, logger='horsies.scheduler'):
+            await scheduler._check_schedule(schedule, due, read.database_now)
+        assert any(
+            'was moved by another scheduler' in record.getMessage()
+            for record in caplog.records
+        )
+        await scheduler._check_and_run_schedules()
+    finally:
+        await scheduler.stop()
+
+    row = await _state_row(session, schedule_name)
+    assert await _slot_task_count(session, task_name) == 0
+    assert (row.last_task_id, row.run_count) == (task_id, 1)
+    assert row.next_run_at == slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)

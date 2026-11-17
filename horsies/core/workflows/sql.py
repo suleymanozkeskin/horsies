@@ -10,29 +10,14 @@ from typing import Any
 from sqlalchemy import text
 
 from ..history.ddl.classes import resolve_retention_class_key
-from ..history.names import WORKFLOW_PHASE2_PENDING, WORKFLOW_PHASE2_QUARANTINE
 from ..history.periods import RetentionClassKey
 from ..models.tasks import Execution
 
-# -- SQL constants for start_workflow_async --
+# -- SQL constants for the engine's child workflow start --
 
-CHECK_WORKFLOW_EXISTS_SQL = text(
-    """SELECT id FROM horsies_workflows WHERE id = :wf_id"""
-)
-INSERT_WORKFLOW_SQL = text("""
-    INSERT INTO horsies_workflows (id, name, status, on_error, output_task_index,
-                             success_policy, definition_key,
-                             depth, root_workflow_id,
-                             sent_at, created_at, started_at, updated_at)
-    VALUES (:id, :name, 'RUNNING', :on_error, :output_idx,
-            :success_policy, :definition_key,
-            0, :id,
-            :sent_at, NOW(), NOW(), NOW())
-    ON CONFLICT (id) DO NOTHING
-    RETURNING id
-""")
-# Unified bulk node insert for workflow start (executemany over all nodes
-# in one pipelined batch). Differences from the per-row inserts above:
+# Bulk node insert of the engine's child workflow start
+# (enqueue_subworkflow_task; executemany over all nodes in one pipelined
+# batch). Differences from the per-row inserts above:
 # - covers BOTH node kinds (sub_* fields NULL + is_subworkflow FALSE for
 #   TaskNodes);
 # - fast-path roots are inserted directly as ENQUEUED with task_id set and
@@ -45,7 +30,9 @@ INSERT_WORKFLOW_SQL = text("""
 # - the node-kind parameters (the typed task facts :max_retries, :execution,
 #   :good_until, :retention_class_key, and :sub_workflow_params) come from
 #   task_node_kind_params for a TaskNode and from
-#   subworkflow_node_kind_params for a SubWorkflowNode.
+#   subworkflow_node_kind_params for a SubWorkflowNode;
+# - :downstream_subworkflow is the fact of the static graph that
+#   with_downstream_subworkflow adds to the parameters of one workflow.
 INSERT_WORKFLOW_TASKS_BULK_SQL = text("""
     INSERT INTO horsies_workflow_tasks
     (id, workflow_id, task_index, node_id, task_name, input,
@@ -53,12 +40,13 @@ INSERT_WORKFLOW_TASKS_BULK_SQL = text("""
      allow_failed_deps, join_type, min_success, task_options,
      max_retries, execution, good_until, retention_class_key, status,
      is_subworkflow, sub_workflow_name, sub_definition_key,
-     sub_workflow_params, task_id, started_at, created_at)
+     sub_workflow_params, downstream_subworkflow, task_id, started_at,
+     created_at)
     VALUES (:id, :wf_id, :idx, :node_id, :name, :input, :queue, :priority,
             :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
             :task_options, :max_retries, :execution, :good_until,
             :retention_class_key, :status, :is_subworkflow, :sub_wf_name,
-            :sub_def_key, :sub_workflow_params, :task_id,
+            :sub_def_key, :sub_workflow_params, :downstream_subworkflow, :task_id,
             CASE WHEN :is_enqueued THEN NOW() END, NOW())
 """)
 # -- SQL constants for pause_workflow --
@@ -87,33 +75,6 @@ RESET_ABANDONED_WORKFLOW_TASKS_SQL = text("""
         started_at = NULL
     WHERE task_id = ANY(:task_ids)
       AND status IN ('ENQUEUED', 'RUNNING')
-""")
-# -- SQL constants for resume_workflow --
-
-RESUME_WORKFLOW_SQL = text("""
-    UPDATE horsies_workflows
-    SET status = 'RUNNING', updated_at = NOW()
-    WHERE id = :wf_id AND status = 'PAUSED'
-    RETURNING id, depth, root_workflow_id
-""")
-GET_PENDING_WORKFLOW_TASKS_SQL = text("""
-    SELECT task_index FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id AND status = 'PENDING'
-""")
-GET_READY_WORKFLOW_TASKS_SQL = text("""
-    SELECT task_index, dependencies, is_subworkflow FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id AND status = 'READY'
-""")
-# -- SQL constants for _cascade_resume_to_children --
-
-GET_PAUSED_CHILD_WORKFLOWS_SQL = text("""
-    SELECT id, depth, root_workflow_id FROM horsies_workflows
-    WHERE parent_workflow_id = :wf_id AND status = 'PAUSED'
-""")
-RESUME_CHILD_WORKFLOW_SQL = text("""
-    UPDATE horsies_workflows
-    SET status = 'RUNNING', updated_at = NOW()
-    WHERE id = :wf_id AND status = 'PAUSED'
 """)
 # -- SQL constants for enqueue_workflow_task --
 
@@ -219,6 +180,63 @@ class SubWorkflowParams(Enum):
 
     GIVEN = 'GIVEN'
     """The node definition carries params for the child's build."""
+
+
+class DownstreamSubworkflow(Enum):
+    """Whether a sub-workflow node is reachable below a node along the
+    dependency edges of its workflow.
+
+    Stored in ``horsies_workflow_tasks.downstream_subworkflow``
+    (``horsies_workflow_tasks_downstream_subworkflow_known``). The core's
+    phase 2 of a REACHABLE node runs in a transaction, because its promotion
+    can owe a child start.
+    """
+
+    NONE = 'NONE'
+    """No sub-workflow node depends on this node, directly or through others."""
+
+    REACHABLE = 'REACHABLE'
+    """The node is an ancestor of a sub-workflow node."""
+
+
+def with_downstream_subworkflow(
+    node_params: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The node parameters of one workflow with ``downstream_subworkflow``
+    added to each, from the static graph: ``idx``, ``deps`` and
+    ``is_subworkflow`` of the given parameters.
+
+    The walk goes up from each sub-workflow node through the dependencies and
+    visits each index once, so it ends after at most the node count of steps.
+    Does no I/O.
+    """
+    dependencies: dict[int, list[int]] = {
+        params['idx']: list(params['deps']) for params in node_params
+    }
+    pending: list[int] = [
+        dependency
+        for params in node_params
+        if params['is_subworkflow']
+        for dependency in params['deps']
+    ]
+    reachable: set[int] = set()
+    while pending:
+        index = pending.pop()
+        if index in reachable:
+            continue
+        reachable.add(index)
+        pending.extend(dependencies.get(index, []))
+    return [
+        {
+            **params,
+            'downstream_subworkflow': (
+                DownstreamSubworkflow.REACHABLE
+                if params['idx'] in reachable
+                else DownstreamSubworkflow.NONE
+            ).value,
+        }
+        for params in node_params
+    ]
 
 
 def task_node_kind_params(facts: TaskNodeFacts) -> dict[str, Any]:
@@ -330,7 +348,6 @@ ENQUEUE_SUBWORKFLOW_TASK_SQL = text("""
               wt.args_from, wt.node_id, wt.sub_definition_key,
               w.name AS parent_workflow_name
 """)
-GET_WORKFLOW_NAME_SQL = text("""SELECT name FROM horsies_workflows WHERE id = :wf_id""")
 MARK_WORKFLOW_TASK_FAILED_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'FAILED', result = :result, completed_at = NOW()
@@ -363,105 +380,6 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
       AND node_id = ANY(:node_ids)
       AND is_subworkflow = TRUE
       AND sub_workflow_summary IS NOT NULL
-""")
-# -- SQL constants for on_workflow_task_complete --
-
-# Single round trip replacing the old locate -> lock -> CAS-update triple
-# (each statement cost one RTT under the workflow lock; see the RTT
-# hot-path audit). One statement does all three:
-#   - `found` locates the workflow task by its backing task id and takes
-#     the workflow row's FOR UPDATE lock (serializes completion handling
-#     per workflow — same lock discipline as before).
-#   - `upd` CAS-updates the node to its terminal status (no-op if a
-#     concurrent path already made it terminal).
-#   - The outer SELECT returns the progression context (wf_status, depth,
-#     root_workflow_id, on_error) so no follow-up reads are needed: the
-#     held lock freezes the workflow row for the rest of the transaction
-#     (pause/cancel are UPDATEs on the same row and block on it), and
-#     data-modifying CTEs always execute exactly once, so the CAS runs
-#     even though the outer query only reads `found`.
-# The statement returns one row. workflow_id NULL = not a workflow task, or
-# its workflow row is missing; the caller treats both as a no-op (matches
-# the old early returns).
-#
-# `woken` sends the capacity wake of the finished task's queue when
-# :wake_channel is not NULL, whether or not a node is found. A NOTIFY is
-# delivered at COMMIT, so its place in the transaction changes nothing for a
-# listener; when the transaction rolls back, no wake is sent. A wake that the
-# server refuses fails the statement, and the transaction with it. The outer
-# query reads `woken` through an aggregate, so it runs exactly once: a SELECT
-# CTE that no query reads does not run.
-#
-# `consumed` deletes the phase-2 pending row that the task's terminal move
-# wrote, and `released` the quarantine row a pending row can point at, as
-# the consumption function does on a durable disposition. The progression
-# runs in this transaction, so the delete commits with it or not at all, and
-# a later recovery pass has nothing left to consume. Both read `found`, so
-# they run after the workflow row lock: the pending row is locked after the
-# workflow row, the order of horsies_phase2_consume.
-#
-# `has_dependents` is whether a node of the same workflow lists the node in
-# its dependencies, with the predicate of the dependents read
-# (GET_DEPENDENTS_EVAL_SQL). The dependencies of a workflow are written with
-# its nodes, in the transaction that starts the workflow
-# (INSERT_WORKFLOW_TASKS_BULK_SQL), and no statement changes them, so the
-# value does not depend on the snapshot. When it is false, the dependents
-# read of the node returns no row, and the progression does not send it.
-#
-# Lock-order invariant (N6): this statement locks the workflow row (`found`'s
-# FOR UPDATE OF w) before the workflow_task row (`upd`'s UPDATE). Every
-# transaction that locks both horsies_workflows and horsies_workflow_tasks
-# rows must take them in that order — workflows before workflow_tasks — or it
-# can deadlock against this path (Postgres aborts one side, SQLSTATE 40P01).
-# The cancel transaction (LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL in
-# models/workflow/handle.py) is held to the same order.
-COMPLETE_WORKFLOW_TASK_SQL = text(f"""
-    WITH woken AS (
-        SELECT pg_notify(
-            CAST(:wake_channel AS text), CAST(:wake_payload AS text)
-        )
-        WHERE CAST(:wake_channel AS text) IS NOT NULL
-    ),
-    found AS (
-        SELECT wt.workflow_id, wt.task_index, wt.task_id,
-               w.status AS wf_status, w.depth, w.root_workflow_id, w.on_error
-        FROM horsies_workflow_tasks wt
-        JOIN horsies_workflows w ON w.id = wt.workflow_id
-        WHERE wt.task_id = :tid
-        FOR UPDATE OF w
-    ),
-    upd AS (
-        UPDATE horsies_workflow_tasks wt
-        SET status = :status, result = :result, completed_at = NOW()
-        FROM found
-        WHERE wt.workflow_id = found.workflow_id
-          AND wt.task_index = found.task_index
-          AND NOT (wt.status = ANY(:terminal_states))
-        RETURNING wt.task_index
-    ),
-    consumed AS (
-        DELETE FROM {WORKFLOW_PHASE2_PENDING} pending
-        USING found
-        WHERE pending.task_id = found.task_id
-          AND pending.workflow_id = found.workflow_id
-        RETURNING pending.recovery_source, pending.quarantine_task_id
-    ),
-    released AS (
-        DELETE FROM {WORKFLOW_PHASE2_QUARANTINE} quarantined
-        USING consumed
-        WHERE consumed.recovery_source = 'QUARANTINE'
-          AND quarantined.task_id = consumed.quarantine_task_id
-    )
-    SELECT found.workflow_id, found.task_index, found.wf_status,
-           found.depth, found.root_workflow_id, found.on_error,
-           EXISTS (SELECT 1 FROM upd) AS cas_won,
-           EXISTS (
-               SELECT 1 FROM horsies_workflow_tasks dependent
-               WHERE dependent.workflow_id = found.workflow_id
-                 AND dependent.dependencies && ARRAY[found.task_index]
-           ) AS has_dependents
-    FROM (SELECT count(*) AS sent FROM woken) AS wake
-    LEFT JOIN found ON TRUE
 """)
 GET_WORKFLOW_STATUS_SQL = text(
     """SELECT status FROM horsies_workflows WHERE id = :wf_id"""
@@ -497,13 +415,13 @@ GET_DEPENDENTS_EVAL_SQL = text("""
 # rows another path already advanced simply drop out of RETURNING.
 SKIP_PENDING_TASKS_BATCH_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = ANY(:idxs) AND status = 'PENDING'
     RETURNING task_index
 """)
 SKIP_READY_TASKS_BATCH_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = ANY(:idxs) AND status = 'READY'
     RETURNING task_index
 """)
@@ -573,7 +491,7 @@ GET_DEP_STATUS_COUNTS_SQL = text("""
 """)
 SKIP_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
 """)
 COUNT_CTX_TERMINAL_DEPS_SQL = text("""
@@ -591,7 +509,7 @@ MARK_TASK_READY_SQL = text("""
 """)
 SKIP_READY_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
 """)
 SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
@@ -603,7 +521,7 @@ SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
 # -- SQL constants for get_dependency_results --
 
 GET_DEPENDENCY_RESULTS_SQL = text("""
-    SELECT task_index, task_name, status, result, sub_definition_key
+    SELECT task_index, task_name, node_id, status, result, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND task_index = ANY(:indices)

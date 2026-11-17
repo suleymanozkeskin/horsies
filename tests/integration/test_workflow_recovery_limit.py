@@ -5,7 +5,10 @@ rows. No test patches the function under test. Three stored rows raise on
 every pass:
 
 - ``BAD_GOOD_UNTIL`` on a node: the INSERT of the task refuses it (DataError).
-- ``BAD_POLICY`` on a workflow: the success evaluation raises AttributeError.
+  Phase-2 recovery copies the node's typed facts instead, so its tests refuse
+  the INSERT of the workflow's task rows with a trigger (DataError).
+- ``BAD_POLICY`` on a workflow: the success evaluation raises
+  StoredSuccessPolicyError (the stored success policy does not parse).
 - An output index with no node row: the final result raises AssertionError.
 
 Each test has its own database, because a global pass reads every workflow.
@@ -44,10 +47,7 @@ from horsies.core.models.workflow import TaskNode, WorkflowDefinition
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_err
 from horsies.core.worker.sql import DELETE_EXPIRED_WORKFLOWS_SQL
-from horsies.core.workflows.engine import (
-    on_workflow_task_complete,
-    start_workflow_async,
-)
+from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.workflows.phase2_recovery import (
     Phase2RecoverySummary,
     _RaisedRowNotRecorded,
@@ -70,7 +70,7 @@ from horsies.core.workflows.recovery_limit import (
     classify_recovery_raise,
 )
 from tests.broker_resources_support import current_resources
-from tests.integration.conftest import DB_URL
+from tests.integration.conftest import DB_URL, finish_task
 from tests.integration.isolated_database import isolated_test_database
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -96,18 +96,32 @@ INSERT_WORKFLOW_SQL = text("""
 """)
 
 INSERT_NODE_SQL = text("""
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input,
         queue_name, priority, dependencies, allow_failed_deps, join_type,
         task_options, status, is_subworkflow, sub_workflow_id,
         sub_definition_key, task_id, created_at,
         max_retries, execution, retention_class_key, sub_workflow_params
-    ) VALUES (
+    ) VALUES ('NONE',
         :id, :workflow_id, :index, :node_id, :task_name, '{}',
         'default', 100, :dependencies, FALSE, 'all',
         :options, :status, :is_subworkflow, :sub_workflow_id,
         :sub_definition_key, :task_id, NOW(),
         :max_retries, :execution, :retention_class_key, :sub_workflow_params
+    )
+""")
+
+INSERT_LIVE_TASK_SQL = text("""
+    INSERT INTO horsies_tasks (
+        id, task_name, queue_name, priority, input, status, sent_at,
+        enqueued_at, is_workflow_task, retry_count, max_retries,
+        command_fingerprint_version, command_fingerprint,
+        retention_class_key, retain_rerun_input, created_at, updated_at,
+        execution
+    ) VALUES (
+        :id, :task_name, 'default', 100, '{}', 'PENDING', NOW(),
+        NOW(), TRUE, 0, 0, NULL, NULL, 'standard_30d', FALSE, NOW(), NOW(),
+        'ISOLATED'
     )
 """)
 
@@ -225,6 +239,15 @@ async def _seed_node(
                 'retention_class_key': None if subworkflow_node else 'standard_30d',
                 'sub_workflow_params': 'NOT_GIVEN' if subworkflow_node else None,
             },
+        )
+        await session.commit()
+
+
+async def _seed_live_task(harness: Harness, task_id: str) -> None:
+    """A PENDING workflow task of ``TASK_NAME``: a worker can claim and end it."""
+    async with harness.sessions() as session:
+        await session.execute(
+            INSERT_LIVE_TASK_SQL, {'id': task_id, 'task_name': TASK_NAME},
         )
         await session.commit()
 
@@ -372,11 +395,38 @@ async def _stop_raising_on_update(harness: Harness, *, table: str) -> None:
     await _execute(harness, 'DROP FUNCTION limit_test_refuse()')
 
 
+async def _refuse_task_inserts(harness: Harness, workflow_id: str) -> None:
+    """Make every INSERT of a task row of this workflow refuse with a
+    DataError (22007), as a stored ``good_until`` that does not parse did."""
+    await _execute(
+        harness,
+        f"""
+        CREATE FUNCTION limit_test_refuse_task() RETURNS trigger
+        LANGUAGE plpgsql AS $body$
+        BEGIN
+            IF NEW.input::jsonb -> '__h_workflow_meta__' ->> 'workflow_id' = '{workflow_id}' THEN
+                RAISE EXCEPTION 'refused by the test' USING ERRCODE = '22007';
+            END IF;
+            RETURN NEW;
+        END
+        $body$
+        """,
+    )
+    await _execute(
+        harness,
+        """
+        CREATE TRIGGER limit_test_refuse_task BEFORE INSERT ON horsies_tasks
+        FOR EACH ROW EXECUTE FUNCTION limit_test_refuse_task()
+        """,
+    )
+
+
 async def _start_a_then_b(harness: Harness) -> tuple[str, str]:
-    """Start A then B for real, make B poison, and put A's task in history.
+    """Start A then B for real, refuse the task row of B, and put A's task in
+    history.
 
     Returns the workflow id and the task id of A. Phase-2 recovery then owes
-    the progression of A, and that progression raises on B.
+    the progression of A, and that progression raises on the task row of B.
     """
     from tests.integration.history_seeding import force_terminal
 
@@ -400,14 +450,8 @@ async def _start_a_then_b(harness: Harness) -> tuple[str, str]:
     started = await start_workflow_async(spec, harness.broker)
     assert not is_err(started), started
     workflow_id = started.ok_value.workflow_id
+    await _refuse_task_inserts(harness, workflow_id)
     async with harness.sessions() as session:
-        await session.execute(
-            text(
-                'UPDATE horsies_workflow_tasks SET task_options = :options '
-                'WHERE workflow_id = :id AND task_index = 1',
-            ),
-            {'options': BAD_GOOD_UNTIL, 'id': workflow_id},
-        )
         task_id = (
             await session.execute(
                 text(
@@ -797,6 +841,7 @@ class TestLiveNodes:
         self, harness: Harness,
     ) -> None:
         live_task = str(uuid.uuid4())
+        await _seed_live_task(harness, live_task)
         workflow_id = await _seed_workflow(harness)
         await _seed_node(harness, workflow_id, 0, status='READY', options=BAD_GOOD_UNTIL)
         await _seed_node(harness, workflow_id, 1, status='RUNNING', task_id=live_task)
@@ -810,14 +855,7 @@ class TestLiveNodes:
         assert reports[-1].over_failure_limit == 1
 
         async with harness.sessions() as session:
-            await on_workflow_task_complete(
-                session,
-                live_task,
-                TaskResult(ok=1),
-                harness.broker,
-                task_name=TASK_NAME,
-            )
-            await session.commit()
+            await finish_task(session, harness.broker, workflow_id, 1, TaskResult(ok=1))
 
         assert await _workflow_status(harness, workflow_id) == 'FAILED'
         error = await _workflow_error(harness, workflow_id)
@@ -831,6 +869,7 @@ class TestLiveNodes:
         """The nodes that the success case requires completed, so the
         declared policy decides."""
         live_task = str(uuid.uuid4())
+        await _seed_live_task(harness, live_task)
         workflow_id = await _seed_workflow(
             harness, policy='{"cases":[{"required_indices":[1]}]}',
         )
@@ -839,14 +878,7 @@ class TestLiveNodes:
         await _run_passes(harness, LIMIT)
 
         async with harness.sessions() as session:
-            await on_workflow_task_complete(
-                session,
-                live_task,
-                TaskResult(ok=1),
-                harness.broker,
-                task_name=TASK_NAME,
-            )
-            await session.commit()
+            await finish_task(session, harness.broker, workflow_id, 1, TaskResult(ok=1))
 
         assert await _node_status(harness, workflow_id, 0) == 'FAILED'
         assert await _workflow_status(harness, workflow_id) == 'COMPLETED'
@@ -951,6 +983,30 @@ class TestGlobalCompletion:
 
         assert await _failed_passes(harness, workflow_id) == 1
         assert await _workflow_status(harness, workflow_id) == 'RUNNING'
+
+    @pytest.mark.parametrize(
+        'policy',
+        ['[1,2,3]', '"text"', '{"cases":"not a list"}', '{"cases":[{}]}'],
+        ids=['array', 'string', 'cases-not-array', 'case-without-required'],
+    )
+    async def test_a_policy_that_does_not_parse_fails_the_workflow_closed(
+        self, harness: Harness, policy: str,
+    ) -> None:
+        """Each completion step fails, and the recovery limit fails the
+        workflow. A policy that was not an object used to read as no policy,
+        so this workflow completed."""
+        workflow_id = await _seed_workflow(harness, policy=policy)
+        await _seed_node(harness, workflow_id, 0, status='COMPLETED')
+
+        reports = await _run_passes(harness, LIMIT)
+
+        assert [r.metrics['case_2_3'].errors for r in reports] == [1, 1, 1]
+        assert await _workflow_status(harness, workflow_id) == 'FAILED'
+        error = await _workflow_error(harness, workflow_id)
+        assert error is not None
+        assert 'WORKFLOW_RECOVERY_LIMIT_REACHED' in error
+        assert 'StoredSuccessPolicyError' in error
+        assert 'does not parse' in error
 
 
 class TestCountWrite:
@@ -1162,6 +1218,8 @@ class TestPhase2PauseWindow:
         row = await _record_raised_row(
             harness.sessions,
             task_id=task_id,
+            workflow_id=workflow_id,
+            task_index=0,
             exc=RuntimeError('raised before the pause'),
             quarantine_after_attempts=LIMIT,
         )

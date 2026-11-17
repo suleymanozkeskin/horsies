@@ -34,8 +34,8 @@ from horsies.core.lifecycle.operations import (
 )
 from tests.lifecycle_matrix import MATRIX
 from tests.unit.test_lifecycle_commands import ONE_OF_EACH
-from tests.unit.test_lifecycle_matrix import _STATEMENT_TEXT
-from tests.unit.test_terminal_writer_inventory import update_clauses
+from tests.baseline_sql import baseline_function
+from tests.unit.test_lifecycle_matrix import FUNCTION_OF_WRITER
 
 pytestmark = [pytest.mark.unit]
 
@@ -99,28 +99,19 @@ def _command_by_name() -> dict[str, TerminalizationCommand]:
 
 
 def _caller_supplied_payload_columns(writer_id: str) -> set[str]:
-    """Payload columns this statement takes from its caller.
+    """Payload columns this writer's function takes from its caller.
 
-    A literal in the SET clause is the statement's own; only a bound parameter
-    is something the caller chose and a command therefore has to carry.
+    A literal passed to the move is the function's own; only a parameter of
+    the function is something the caller chose and a command therefore has
+    to carry. The parameter ``p_<column>`` carries the column.
     """
-    assignments = ' '.join(
-        ' '.join(window.split()) for window, _ in update_clauses(_STATEMENT_TEXT[writer_id])
-    )
-    supplied: set[str] = set()
-    for column in ('result', 'error_code', 'failed_reason'):
-        match = re.search(rf'(?<![a-z_]){column}\s*=\s*([^,]+?)(?:,|$)', assignments)
-        if match is None:
-            continue
-        value = match.group(1).strip()
-        if (
-            value.startswith(':')
-            or value.startswith('%s')
-            or value == '%s'
-            or re.search(r'\bp_[a-z_]+\b', value)
-        ):
-            supplied.add(column)
-    return supplied
+    function = baseline_function(FUNCTION_OF_WRITER[writer_id])
+    parameters = function[: function.index(') RETURNS')]
+    return {
+        column
+        for column in ('result', 'error_code', 'failed_reason')
+        if re.search(rf'\bp_{column}\b', parameters) is not None
+    }
 
 
 class TestEveryCommandHasADatabaseIdentity:

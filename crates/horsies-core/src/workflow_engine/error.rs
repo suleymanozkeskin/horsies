@@ -2,6 +2,8 @@ use crate::broker::BrokerError;
 use crate::core::TaskError;
 use uuid::Uuid;
 
+use crate::workflow_engine::steps::StepContractError;
+
 /// Errors produced by workflow engine operations.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkflowError {
@@ -9,7 +11,9 @@ pub enum WorkflowError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    /// Broker-level error (enqueue, claim, etc.).
+    /// Broker-level error (enqueue, claim, etc.), and the failures of the
+    /// workflow steps on the core statement layer (`BrokerError::Statement`,
+    /// `BrokerError::PoolSettings`).
     #[error("broker error: {0}")]
     Broker(#[from] BrokerError),
 
@@ -36,4 +40,9 @@ pub enum WorkflowError {
     /// Workflow validation error (unresolved queue, invalid node config, etc.).
     #[error("workflow validation error: {0}")]
     Validation(String),
+
+    /// A row of a workflow step function that breaks the outcome contract of
+    /// its function. Not retryable: the same call meets it again.
+    #[error("workflow step contract: {0}")]
+    StepContract(#[from] StepContractError),
 }

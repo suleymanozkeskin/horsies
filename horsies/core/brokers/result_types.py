@@ -55,6 +55,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Literal, assert_never
+from uuid import UUID
 
 from horsies._catalog.broker import BrokerErrorCode as BrokerErrorCode
 from horsies.core.types.error_detail import NoCause
@@ -139,7 +140,7 @@ class BrokerIdempotencyKeyConflict:
     code: ClassVar[BrokerErrorCode] = BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    owner_task_id: str
+    owner_task_id: UUID
 
 
 @dataclass(slots=True, frozen=True)
@@ -369,7 +370,7 @@ class RawResultRecord:
             stored no payload.
     """
 
-    task_id: str
+    task_id: UUID
     task_name: str
     status: 'TaskStatus'
     raw_result: 'dict[str, Json] | None'

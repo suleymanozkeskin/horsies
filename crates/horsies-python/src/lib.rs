@@ -128,6 +128,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<handle::CoreHandle>()?;
     module.add_class::<records::BrokerFailure>()?;
     module.add_class::<records::DatabasePingRecord>()?;
+    module.add_class::<records::HandleClosed>()?;
     module.add_class::<IdMintRefused>()?;
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;
@@ -135,6 +136,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::RetentionDefault>()?;
     module.add_class::<operations::arguments::RetentionForever>()?;
     module.add_class::<operations::arguments::RetentionPeriod>()?;
+    module.add_class::<operations::cancel::TaskCancelledRecord>()?;
+    module.add_class::<operations::cancel::CancelRefusedWorkflowTask>()?;
+    module.add_class::<operations::cancel::CancelRefusedStatus>()?;
+    module.add_class::<operations::cancel::CancelTaskAbsent>()?;
+    module.add_class::<operations::cancel::CancelFailed>()?;
+    module.add_class::<operations::cancel::CancelStoredDataInvalid>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
@@ -143,9 +150,17 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
     module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
     module.add_class::<operations::enqueue::SendKeyConflict>()?;
+    module.add_class::<operations::release::ReleaseClaimsRequest>()?;
+    module.add_class::<operations::release::ClaimsReleased>()?;
+    module.add_class::<operations::release::ReleasedRow>()?;
+    module.add_class::<operations::release::NotHeldRow>()?;
+    module.add_class::<operations::release::ReleaseFailed>()?;
     module.add_class::<operations::schema::SchemaInstalled>()?;
     module.add_class::<operations::schema::SchemaInstallNotRun>()?;
     module.add_class::<operations::schema::SchemaStatusRecord>()?;
+    module.add_class::<operations::stale_claims::StaleClaimsDrained>()?;
+    module.add_class::<operations::stale_claims::StaleClaimsBoundReached>()?;
+    module.add_class::<operations::stale_claims::StaleClaimsRequeueFailed>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;

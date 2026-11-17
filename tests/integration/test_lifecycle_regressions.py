@@ -18,14 +18,12 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.lifecycle.commands import CompleteLockedTask
 from horsies.core.lifecycle.fences import PriorLockedRead
-from horsies.core.lifecycle.outcomes import Applied
+from horsies.core.lifecycle.outcomes import Applied, PhaseTwoStep
 from horsies.core.lifecycle.persistence import LOCK_TASK_SQL, apply_async
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     RetryPolicy,
-    TaskError,
     TaskOptions,
-    TaskResult,
 )
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
@@ -34,7 +32,9 @@ from horsies.core.worker.worker import (
     Worker,
     _RequeueOutcome,
 )
+from horsies.core.worker.finalize import _NodeFinishOwed
 from horsies.core.workflows.lifecycle import pause_workflow
+from horsies.core.workflows.node_finish import FactsUnknown
 from tests.dispatch_claim_support import claim_at, row_claim
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
@@ -61,7 +61,7 @@ class _TaskRow(TypedDict):
 def _make_worker(engine: AsyncEngine) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -150,12 +150,12 @@ async def _link_running_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, task_id,
                  is_subworkflow, created_at, started_at,
                  max_retries, execution, retention_class_key)
-            VALUES (:node_id, :workflow_id, 0, 'node-0',
+            VALUES ('NONE', :node_id, :workflow_id, 0, 'node-0',
                     'lifecycle_regression_task', '{}', 'default', 100,
                     ARRAY[]::integer[], FALSE, 'all', 'RUNNING',
                     CAST(:task_id AS uuid), FALSE, NOW(), NOW(),
@@ -248,13 +248,13 @@ async def _insert_retry_window_workflow_task(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, args_from,
                  workflow_ctx_from, allow_failed_deps, join_type, task_options,
                  status, task_id, is_subworkflow, created_at, started_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:workflow_task_id, :workflow_id, 0, 'retry_node',
+                ('NONE', :workflow_task_id, :workflow_id, 0, 'retry_node',
                  'lifecycle_regression_task', '{}', 'default', 100,
                  ARRAY[]::integer[], NULL, NULL, FALSE, 'all', NULL,
                  'RUNNING', :task_id, FALSE, NOW(), NOW(),
@@ -335,11 +335,11 @@ async def test_future_failure_retry_replays_committed_terminal_phase(
 
     assert first is _RequeueOutcome.REQUEUED
     assert replay is _RequeueOutcome.TERMINAL_REPLAYED
-    worker._finalize_workflow_phase.assert_awaited_once()  # type: ignore[attr-defined]
-    persisted_result = worker._finalize_workflow_phase.await_args.args[1]  # type: ignore[attr-defined]
-    assert persisted_result.is_err()
-    assert (
-        persisted_result.unwrap_err().error_code == OperationalErrorCode.WORKER_CRASHED
+    # The replay has no phase-1 node facts: phase 2 runs in the
+    # transaction form. The node result comes from the phase-2 record.
+    worker._finalize_workflow_phase.assert_awaited_once_with(  # type: ignore[attr-defined]
+        task_id,
+        _NodeFinishOwed(queue_name='default', facts=FactsUnknown()),
     )
     # The replay must add no attempt to the one the first call committed,
     # counted wherever the move left it.
@@ -463,7 +463,8 @@ async def test_finalize_worker_failure_runs_phase2(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A workflow task's worker failure returns a TaskResult so phase 2 runs."""
+    """A workflow task's worker failure owes phase 2, in the form of the
+    node facts that phase 1 read (no node links this task: no dependents)."""
     worker = _make_worker(engine)
     task_id = await _insert_owned_running_task(
         session,
@@ -471,14 +472,10 @@ async def test_finalize_worker_failure_runs_phase2(
         is_workflow_task=True,
     )
 
-    phase2_calls: list[tuple[str, TaskResult[object, TaskError]]] = []
+    phase2_calls: list[tuple[str, _NodeFinishOwed]] = []
 
-    async def _phase2(
-        task_id_arg: str,
-        result: TaskResult[object, TaskError],
-        **_: object,
-    ) -> object:
-        phase2_calls.append((task_id_arg, result))
+    async def _phase2(task_id_arg: str, owed: _NodeFinishOwed) -> object:
+        phase2_calls.append((task_id_arg, owed))
         return Ok(None)
 
     worker._finalize_workflow_phase = _phase2  # type: ignore[method-assign]
@@ -494,9 +491,12 @@ async def test_finalize_worker_failure_runs_phase2(
     )
 
     assert is_ok(result)
-    assert len(phase2_calls) == 1
-    assert phase2_calls[0][0] == task_id
-    assert phase2_calls[0][1].is_err()
+    assert phase2_calls == [
+        (
+            task_id,
+            _NodeFinishOwed(queue_name='default', facts=PhaseTwoStep.NO_DEPENDENTS),
+        ),
+    ]
     row = await _task_row(session, task_id)
     assert row['status'] == 'FAILED'
     assert row['error_code'] == OperationalErrorCode.BROKER_ERROR.value
@@ -517,7 +517,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
         worker_id=worker.worker_instance_id,
     )
     listener = await psycopg.AsyncConnection.connect(
-        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        DB_URL,
         autocommit=True,
     )
     try:

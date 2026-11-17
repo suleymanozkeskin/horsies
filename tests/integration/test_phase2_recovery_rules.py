@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker
 
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
 from tests.integration.task_history_harness import (
     HistorySchema,
@@ -34,6 +35,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 CLASS_KEY: Final = 'standard_30d'
 WORKER: Final = 'worker-phase2-rules'
 MAX_ROWS: Final = 10
+ATTEMPT_BOUND: Final = 3
+"""The smallest attempt bound that ``horsies_workflow_phase2_recover`` takes (3 to 1000)."""
 
 terminalization_schema = terminalization_schema_fixture('task_history_it_phase2')
 
@@ -213,6 +216,7 @@ async def test_a_failed_pending_delete_rolls_back_the_node_write(
 )
 async def test_a_retained_row_records_its_failure_class_and_keeps_its_evidence(
     terminalization_schema: HistorySchema,
+    broker: PostgresBroker,
     fault: str,
     failure_class: str,
 ) -> None:
@@ -227,29 +231,38 @@ async def test_a_retained_row_records_its_failure_class_and_keeps_its_evidence(
     sessions = async_sessionmaker(
         terminalization_schema.engine, expire_on_commit=False
     )
-    first = await drive_phase2_recovery(
-        sessions, grace_ms=0, max_rows=MAX_ROWS, quarantine_after_attempts=2
-    )
-    assert (first.retained, first.quarantined) == (1, 0)
-    assert first.quarantine_refusals == ()
-    async with terminalization_schema.engine.connect() as connection:
-        recorded = (
-            await connection.execute(
-                text(
-                    'SELECT attempt_count, last_failure_class, recovery_source '
-                    'FROM horsies_workflow_phase2_pending '
-                    'WHERE task_id = CAST(:task_id AS uuid)'
-                ),
-                {'task_id': task_id},
-            )
-        ).one()
-    assert tuple(recorded) == (1, failure_class, 'HISTORY')
+    for attempt in range(1, ATTEMPT_BOUND):
+        under = await drive_phase2_recovery(
+            sessions,
+            broker,
+            grace_ms=0,
+            max_rows=MAX_ROWS,
+            quarantine_after_attempts=ATTEMPT_BOUND,
+        )
+        assert (under.retained, under.quarantined) == (1, 0), under
+        assert under.quarantine_refusals == ()
+        async with terminalization_schema.engine.connect() as connection:
+            recorded = (
+                await connection.execute(
+                    text(
+                        'SELECT attempt_count, last_failure_class, recovery_source '
+                        'FROM horsies_workflow_phase2_pending '
+                        'WHERE task_id = CAST(:task_id AS uuid)'
+                    ),
+                    {'task_id': task_id},
+                )
+            ).one()
+        assert tuple(recorded) == (attempt, failure_class, 'HISTORY')
 
-    second = await drive_phase2_recovery(
-        sessions, grace_ms=0, max_rows=MAX_ROWS, quarantine_after_attempts=2
+    at_bound = await drive_phase2_recovery(
+        sessions,
+        broker,
+        grace_ms=0,
+        max_rows=MAX_ROWS,
+        quarantine_after_attempts=ATTEMPT_BOUND,
     )
-    assert (second.retained, second.quarantined) == (1, 0)
-    assert len(second.quarantine_refusals) == 1
+    assert (at_bound.retained, at_bound.quarantined) == (1, 0)
+    assert len(at_bound.quarantine_refusals) == 1
     async with terminalization_schema.engine.connect() as connection:
         assert await recovery_rows(connection, task_id) == (
             'HISTORY',
@@ -267,4 +280,4 @@ async def test_a_retained_row_records_its_failure_class_and_keeps_its_evidence(
                 {'task_id': task_id},
             )
         ).one()
-    assert tuple(recorded) == (2, failure_class)
+    assert tuple(recorded) == (ATTEMPT_BOUND, failure_class)

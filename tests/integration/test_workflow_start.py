@@ -21,7 +21,6 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.task_decorator import from_node
-from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
@@ -29,7 +28,7 @@ from horsies.core.workflows.start_types import (
 from horsies.core.types.result import is_err
 
 from .conftest import (
-    task_name_for,
+    finish_task,
     make_simple_task,
     make_workflow_spec,
     make_identity_task,
@@ -492,19 +491,7 @@ class TestWorkflowStart:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        row = res.fetchone()
-        assert row is not None
-        await on_workflow_task_complete(
-            session, row[0], TaskResult(ok=10), broker,
-            task_name=await task_name_for(session, row[0]),
-        )
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
         await session.commit()
 
         # Verify B task row has retry settings

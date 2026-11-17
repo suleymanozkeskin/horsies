@@ -6,7 +6,7 @@ use sqlx::{PgPool, Row};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
     CallerHoldsRowLock, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
@@ -78,15 +78,23 @@ async fn seed_workflow(pool: &PgPool, workflow_id: Uuid) {
     .expect("seed W1 workflow");
 }
 
+/// One snapshot with every NOT NULL column of the baseline
+/// `horsies_worker_states` named: no slot down, no class budget.
 async fn seed_worker_state(pool: &PgPool, worker_id: &str) {
     sqlx::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
-            max_claim_batch, max_claim_per_worker, queues,
-            tasks_running, tasks_claimed, worker_started_at
+            max_claim_batch, max_claim_per_worker, cluster_wide_cap, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, memory_usage_mb, memory_percent,
+            cpu_percent, children_memory_mb, worker_started_at,
+            slots_down, class_capacity
         ) VALUES (
-            $1, NOW(), 'w1-host', 1, 1, 1, 1,
-            ARRAY['default']::text[], 0, 0, NOW()
+            $1, NOW(), 'w1-host', 1, 1, 1, 1, NULL,
+            ARRAY['default']::text[], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            0, 0, NULL, NULL,
+            NULL, NULL, NOW(),
+            '[]'::jsonb, '{}'::jsonb
         )",
     )
     .bind(worker_id)
@@ -120,10 +128,10 @@ async fn explain(pool: &PgPool, statement: &str) -> String {
 async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() {
     let pool = migrated_pool().await;
 
-    for (index_name, expected_column) in [
-        ("idx_horsies_tasks_enqueued_at", "enqueued_at"),
-        ("idx_horsies_tasks_task_name", "task_name"),
-    ] {
+    // The baseline keeps one monitoring index on the live table. It drops
+    // idx_horsies_tasks_task_name: its only reader was the facet statement of
+    // a plan test, which production does not call.
+    for (index_name, expected_column) in [("idx_horsies_tasks_enqueued_at", "enqueued_at")] {
         let shape: (String, bool, bool, bool, bool, i32, i32, String) = sqlx::query_as(
             "SELECT am.amname, i.indisvalid, i.indisready, i.indisunique,
                         i.indpred IS NULL, i.indnkeyatts::int, i.indnatts::int,
@@ -192,24 +200,14 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
     );
     assert!(!list_plan.contains("Sort"), "{list_plan}");
 
-    let facet_plan = explain(
-        &pool,
-        "SELECT task_name, count(*)
-         FROM horsies_tasks
-         GROUP BY task_name
-         ORDER BY task_name",
-    )
-    .await;
-    assert!(
-        facet_plan.contains("Index Only Scan using idx_horsies_tasks_task_name"),
-        "{facet_plan}"
-    );
-
+    // The pending arm of horsies_claim_candidates
+    // (0004_lifecycle_functions.sql): one queue and one execution class.
     let claim_plan = explain(
         &pool,
         "SELECT id
          FROM horsies_tasks
          WHERE queue_name = 'default'
+           AND execution = 'ISOLATED'
            AND status = 'PENDING'
            AND enqueued_at <= now()
            AND (next_retry_at IS NULL OR next_retry_at <= now())
@@ -220,12 +218,11 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
     )
     .await;
     assert!(
-        claim_plan.contains("idx_horsies_tasks_claim_pending"),
+        claim_plan.contains("horsies_tasks_claim_pending"),
         "{claim_plan}"
     );
     assert!(
-        !claim_plan.contains("idx_horsies_tasks_enqueued_at")
-            && !claim_plan.contains("idx_horsies_tasks_task_name"),
+        !claim_plan.contains("idx_horsies_tasks_enqueued_at"),
         "{claim_plan}"
     );
 
@@ -255,11 +252,16 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         &task_id.to_string(),
     )
     .await;
-    sqlx::query("UPDATE horsies_tasks SET status = 'CLAIMED' WHERE id = $1")
-        .bind(task_id)
-        .execute(&pool)
-        .await
-        .expect("update task status");
+    // A CLAIMED row carries its lease (horsies_tasks_status_live).
+    sqlx::query(
+        "UPDATE horsies_tasks
+         SET status = 'CLAIMED', claim_expires_at = NOW() + interval '1 minute'
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .execute(&pool)
+    .await
+    .expect("update task status");
     assert_notification(
         &mut task_listener,
         TASK_STATUS_CHANNEL,
@@ -304,6 +306,10 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         .expect("listen worker channel");
     seed_worker_state(&pool, &worker_id).await;
     assert_notification(&mut worker_listener, WORKER_STATE_CHANNEL, &worker_id).await;
+    // The worker-state trigger fires on INSERT only (0001_tables.sql): an
+    // update of a snapshot sends nothing. A marker sent after the update
+    // commits is the next event on the channel; an event of the update
+    // would arrive before it.
     sqlx::query(
         "UPDATE horsies_worker_states
          SET tasks_running = 1
@@ -313,7 +319,14 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     .execute(&pool)
     .await
     .expect("update worker state");
-    assert_notification(&mut worker_listener, WORKER_STATE_CHANNEL, &worker_id).await;
+    let marker = format!("{worker_id}-after-update");
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(WORKER_STATE_CHANNEL)
+        .bind(&marker)
+        .execute(&pool)
+        .await
+        .expect("send the marker event");
+    assert_notification(&mut worker_listener, WORKER_STATE_CHANNEL, &marker).await;
 
     sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(&worker_id)

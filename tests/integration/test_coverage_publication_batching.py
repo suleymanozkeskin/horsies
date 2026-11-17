@@ -26,10 +26,7 @@ from horsies.core.history.maintenance.coverage import (
 )
 from horsies.core.history.names import LEAF_CATALOG, TASK_LOOKUP_MANIFEST
 from horsies.core.history.partitions.publication import LoaderRepublished
-from horsies.core.history.reads.publisher import (
-    StagedLoaderPublisher,
-    published_manifest_matches_catalog,
-)
+from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -90,4 +87,4 @@ async def test_coverage_creating_leaves_in_two_classes_publishes_once(
         ))).all()
         assert [row.probe_position for row in manifest] == list(range(len(manifest)))
         assert len({row.published_at for row in manifest}) == 1
-        assert await published_manifest_matches_catalog(connection)
+        assert await StagedLoaderPublisher().is_current(connection)

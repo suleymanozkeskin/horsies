@@ -1,22 +1,17 @@
-"""Outbox-driven phase-2 recovery: the crashed-worker case, post-split.
+"""Outbox-driven phase-2 recovery: the crashed-worker case.
 
 A worker that dies between phase 1 (terminalize the task) and phase 2
-(advance its workflow node) leaves the node behind. Before the live and
-history sides were split, that was found by scanning the live table for
-terminal tasks whose node had not moved. Terminalization now deletes the
-live row and records the pending progression in the outbox instead, so
-the evidence is written precisely rather than rediscovered — and this
-module is its consumer.
-
-The database-owned consumption function does the hard part: it takes the
-locks in the engine's order, loads the authoritative material, validates
-identity and integrity, classifies into the exhaustive disposition set,
-applies the node write when progression is still valid, and deletes the
-evidence only on a durable disposition. This module discovers the rows,
-supplies the node status the engine's policy dictates, and applies the
-engine's own remaining progression steps — failure policy, paused guard,
-dependents, workflow completion — by calling them, never by restating
-them.
+(advance its workflow node) leaves the node behind, and the phase-2 record
+that the terminal move wrote. This module discovers the records and
+recovers each one with ``horsies_workflow_phase2_recover``
+(``0005_workflow_functions.sql``), the body of the worker's phase 2 with no
+wake: in one transaction (``BEGIN``, the function, one
+``horsies_workflow_child_start`` per owed child start, ``COMMIT``) it writes
+the node from the stored result, runs the failure policy, promotion and
+the completion check, and deletes the record. A record whose stored result
+does not pass its check is kept: the function adds one attempt, and at the
+attempt bound it quarantines the evidence. After the commit, the parent
+nodes of the child workflows that the step ended advance.
 
 Bounds are the ones the retired scan carried, deliberately: oldest
 first, a grace window that leaves recent terminalizations to the healthy
@@ -26,53 +21,45 @@ per interval under the reaper's cluster-wide gate.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, assert_never
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from horsies.core.codec.json_io import SerializationError, loads_json
-from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
-from horsies.core.codec.typed import (
-    decode_task_error,
-    validate_task_result_envelope,
-)
-from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.history.names import WORKFLOW_PHASE2_PENDING
-from horsies.core.history.phase2.consumption import (
-    Phase2Disposition,
-    consume_phase2,
-)
 from horsies.core.history.phase2.quarantine import (
     DRAINED_VERDICTS,
-    PHASE2_QUARANTINE_FUNCTION,
     REPOINTED,
 )
-from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import (
-    OperationalErrorCode,
-    OutcomeCode,
-    RetrievalCode,
-    TaskError,
-    TaskResult,
-)
-from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.types.status import TaskStatus
-from horsies.core.workflows.engine import (
-    NodeMayHaveDependents,
-    apply_node_progression,
-    node_status_for_terminal_task,
+from horsies.core.utils.db import autocommit_connection
+from horsies.core.workflows.functions import (
+    PHASE2_RECORD_RAISE_FUNCTION_SQL,
+    RaiseCounted,
+    RaiseLimitReached,
+    RaiseNotRecorded,
+    RaisePendingAbsent,
+    RecoveryLimitWrite,
+    decode_phase2_raise,
+    quarantine_parts,
 )
 from horsies.core.workflows.recovery_limit import (
-    RecoveryCandidateOutcome,
     RecoveryCase,
+    RecoveryLimitOutcome,
     RecoveryRaise,
     RecoveryRaiseClass,
-    apply_recovery_limit,
     classify_recovery_raise,
-    report_recovery_limit,
+    recovery_limit_error,
+    recovery_limit_payloads,
+)
+from horsies.core.workflows.steps import (
+    PHASE2_RECOVER_FUNCTION_SQL,
+    NodeFinishDisposition,
+    advance_parents,
+    run_in_transaction,
 )
 
 if TYPE_CHECKING:
@@ -82,31 +69,20 @@ if TYPE_CHECKING:
 
 logger = get_logger('phase2_recovery')
 
-DURABLE_DISPOSITIONS: frozenset[str] = frozenset(
-    {
-        'APPLIED_TO_NODE',
-        'ALREADY_APPLIED',
-        'SUPERSEDED_BY_WORKFLOW_TERMINAL',
-    }
-)
-"""The dispositions that commit with the evidence deleted.
-
-Every other disposition RETAINS its pending row by the consumption
-function's own contract, so the next pass sees it again; this module
-never deletes evidence itself."""
-
-
 DISCOVER_PENDING_SQL = text(f"""
-    SELECT task_id, terminalization_kind
-    FROM {WORKFLOW_PHASE2_PENDING}
-    WHERE created_at < NOW()
+    SELECT pending.task_id, pending.workflow_id, node.task_index
+    FROM {WORKFLOW_PHASE2_PENDING} pending
+    JOIN horsies_workflow_tasks node ON node.id = pending.workflow_node_row_id
+    WHERE pending.created_at < NOW()
           - (CAST(:grace_ms AS double precision) / 1000.0)
             * INTERVAL '1 second'
-      AND attempt_count < CAST(:attempt_bound AS integer)
-    ORDER BY created_at, task_id
+      AND pending.attempt_count < CAST(:attempt_bound AS integer)
+    ORDER BY pending.created_at, pending.task_id
     LIMIT CAST(:max_rows AS bigint)
 """)
-"""Oldest first, past the grace window, under the attempt bound, capped.
+"""Oldest first, past the grace window, under the attempt bound, capped,
+with the workflow and the node of each record (the limit error of a raised
+record names them).
 
 The ordering and the cap ride the outbox's (created_at, task_id) index.
 The grace window is why a healthy finalizer's in-flight phase 2 is not
@@ -115,75 +91,6 @@ why an unresolvable row cannot retry forever: once a row has retained
 through that many passes it is quarantined and discovery stops selecting
 it — the exclusion holds even if the quarantine transition itself
 refused, so a stuck row costs a bounded number of passes either way."""
-
-
-@dataclass(frozen=True, slots=True)
-class PendingKindWithoutPhase2:
-    """A pending row names a kind whose terminal move writes no pending row.
-
-    The pending table's CHECK admits only the five kinds that
-    `terminal_status_of_pending_kind` maps, so this names a row that the
-    schema refuses.
-    """
-
-    kind: str
-
-
-def terminal_status_of_pending_kind(
-    kind: str,
-) -> Result[TaskStatus, PendingKindWithoutPhase2]:
-    '''The task status that the terminal move wrote with this kind.
-
-    The move pairs each kind with one terminal status and refuses any other
-    pair, and only these five kinds write a pending row. No cancel kind
-    writes one, so a pending row never stands for a CANCELLED task.
-
-    Returns:
-        `Ok` with the status of the kind; `Err(PendingKindWithoutPhase2)`
-        for any other kind.
-    '''
-    match kind:
-        case TerminalizationKind.COMPLETE_LOCKED.value:
-            return Ok(TaskStatus.COMPLETED)
-        case (
-            TerminalizationKind.FAIL_RUNNING.value
-            | TerminalizationKind.FAIL_STALE.value
-        ):
-            return Ok(TaskStatus.FAILED)
-        case (
-            TerminalizationKind.EXPIRE_CLAIMED.value
-            | TerminalizationKind.EXPIRE_PENDING.value
-        ):
-            return Ok(TaskStatus.EXPIRED)
-        case _:
-            return Err(PendingKindWithoutPhase2(kind=kind))
-
-
-RECORD_RETAINING_ATTEMPT_SQL = text(f"""
-    UPDATE {WORKFLOW_PHASE2_PENDING}
-    SET attempt_count = attempt_count + 1,
-        last_attempt_at = statement_timestamp(),
-        last_failure_class = :failure_class
-    WHERE task_id = CAST(:task_id AS uuid)
-    RETURNING attempt_count
-""")
-"""One retaining disposition, recorded on the row it retained.
-
-The count rides the pending row as a column, never process memory: a
-worker restart, a different holder next pass, or a crashed pass all see
-the same count. Written in the same transaction as the consumption call
-that produced the disposition. A row whose progression raised writes it
-in a new transaction, because the raise rolled back the first one."""
-
-
-RAISED_ROW_CONTEXT_SQL = text(f"""
-    SELECT pending.workflow_id, node.task_index
-    FROM {WORKFLOW_PHASE2_PENDING} pending
-    JOIN horsies_workflow_tasks node
-      ON node.id = pending.workflow_node_row_id
-    WHERE pending.task_id = CAST(:task_id AS uuid)
-""")
-"""The workflow and the node of a row whose transaction rolled back."""
 
 
 RAISED_FAILURE_CLASS = 'RAISED'
@@ -237,150 +144,81 @@ class Phase2RecoverySummary:
     names why its evidence could not be relocated."""
 
 
-def _undecodable_failure_result(
-    terminal_status: str,
-    cause: SerializationError | StrictJsonError,
-) -> TaskResult[Any, TaskError]:
-    """``RESULT_DESERIALIZATION_ERROR`` for a stored result that does not decode.
+@dataclass
+class _PassCounts:
+    """The counts of one pass, written row by row."""
 
-    ``cause`` can hold text from a stored row, so a lone surrogate in it is
-    escaped: the failure handler encodes this error, and a raise there would
-    repeat on each recovery pass until the recovery limit fails the workflow.
-    """
-    logger.error(
-        'Phase-2 recovery could not decode the stored result (%s: %s)',
-        type(cause).__name__,
-        cause,
-    )
-    return TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-            message=escape_lone_surrogates(
-                f'Stored result of the failed node does not decode: {cause}',
-            ),
-            data={'task_status': terminal_status},
-        ),
-    )
+    applied: int = 0
+    already_applied: int = 0
+    superseded: int = 0
+    retained: int = 0
+    failed: int = 0
+    quarantined: int = 0
+    raised_counted: int = 0
+    details: list[str] = field(default_factory=lambda: [])
+    quarantine_refusals: list[str] = field(default_factory=lambda: [])
 
 
-def _recovered_failure_result(
-    terminal_status: str,
-    node_result_json: str | None,
-) -> TaskResult[Any, TaskError]:
-    """The failed task's error, for the workflow-level failure policy.
-
-    The node's own result was written from the history record by the
-    consumption function; this reads the error out of it so the
-    workflow's recorded error is the task's real one. Only the err slot
-    is decoded — TaskError has a fixed schema and needs no ok-type — so
-    recovery never depends on the local task registry.
-
-    Outcomes:
-        - A stored error that decodes: that error.
-        - Stored data that does not parse: ``RESULT_DESERIALIZATION_ERROR``,
-          with the cause in the message. ``loads_json`` refuses text that is
-          not JSON, ``validate_task_result_envelope`` refuses with
-          ``StrictJsonError``, and ``decode_task_error`` refuses with
-          ``StrictJsonError`` or ``ValueValidationError``.
-        - No stored result, or an envelope with no err slot: the error that
-          the terminal status names, because the task has to say something
-          true.
-
-    Any other exception is a defect and propagates.
-    """
-    if node_result_json is not None:
-        parsed = loads_json(node_result_json)
-        if is_err(parsed):
-            return _undecodable_failure_result(terminal_status, parsed.err_value)
-        try:
-            envelope = validate_task_result_envelope(parsed.ok_value)
-            err_slot = envelope.get('err')
-            if err_slot is not None:
-                return TaskResult(err=decode_task_error(err_slot))
-        except (StrictJsonError, ValueValidationError) as exc:
-            # A stored envelope or error that will not decode is reported
-            # through this error rather than failing the recovery of a task
-            # that has already run.
-            return _undecodable_failure_result(terminal_status, exc)
-
-    error_code: OutcomeCode | RetrievalCode | OperationalErrorCode
-    match terminal_status:
-        case 'CANCELLED':
-            error_code = OutcomeCode.TASK_CANCELLED
-            message = 'Task was cancelled before producing a result'
-        case 'EXPIRED':
-            error_code = OutcomeCode.TASK_EXPIRED
-            message = (
-                'Task expired before execution started (good_until passed)'
-            )
-        case 'COMPLETED':
-            error_code = RetrievalCode.RESULT_NOT_AVAILABLE
-            message = 'Task completed but result is missing'
-        case _:
-            error_code = OperationalErrorCode.WORKER_CRASHED
-            message = (
-                'Worker crashed during task execution '
-                f'(task_status={terminal_status}, no result stored)'
-            )
-    return TaskResult(
-        err=TaskError(
-            error_code=error_code,
-            message=message,
-            data={'task_status': terminal_status},
-        ),
-    )
-
-
-NODE_RESULT_SQL = text("""
-    SELECT result FROM horsies_workflow_tasks WHERE id = CAST(:id AS uuid)
-""")
-
-
-async def _apply_progression(
-    session: 'AsyncSession',
-    disposition: Phase2Disposition,
-    terminal_status: str,
-    broker: 'PostgresBroker | None',
+def _count_outcome(
+    counts: _PassCounts,
+    task_id: str,
+    disposition: NodeFinishDisposition,
+    detail: str | None,
+    quarantine_after_attempts: int,
 ) -> None:
-    """Hand one applied node to the engine's shared progression body.
+    """Count the outcome of one recovered record.
 
-    The consumption function has already written the node and returned
-    the progression context; the engine owns everything after that, and
-    the in-process completion path enters the same body with the same
-    arguments. The consumption function does not return whether the node
-    has dependents, so the progression reads them. `terminal_status` is
-    the task status of the pending row's kind.
+    A kept record (``SOURCE_*``) is logged with its disposition; ``detail``
+    is the quarantine verdict when the call reached the attempt bound.
     """
-    workflow_id = disposition.workflow_id
-    if workflow_id is None or disposition.task_index is None:
-        return
-
-    failure: TaskResult[Any, TaskError] | None = None
-    if disposition.node_status == 'FAILED':
-        node_result = (
-            await session.execute(
-                NODE_RESULT_SQL, {'id': disposition.node_row_id},
+    match disposition:
+        case NodeFinishDisposition.APPLIED:
+            counts.applied += 1
+        case NodeFinishDisposition.APPLIED_WORKFLOW_ENDED:
+            counts.superseded += 1
+        case NodeFinishDisposition.ALREADY_APPLIED:
+            counts.already_applied += 1
+        case NodeFinishDisposition.PENDING_ABSENT:
+            logger.warning(
+                'Phase-2 recovery found no record for task %s and its node not '
+                'terminal; nothing written',
+                task_id,
             )
-        ).scalar_one_or_none()
-        failure = _recovered_failure_result(terminal_status, node_result)
-
-    await apply_node_progression(
-        session,
-        broker,
-        workflow_id=workflow_id,
-        task_index=disposition.task_index,
-        failure=failure,
-        on_error=disposition.on_error,
-        workflow_status=disposition.workflow_status,
-        depth=disposition.workflow_depth,
-        root_workflow_id=disposition.root_workflow_id,
-        dependents=NodeMayHaveDependents(),
-    )
+            counts.already_applied += 1
+        case (
+            NodeFinishDisposition.SOURCE_ABSENT
+            | NodeFinishDisposition.SOURCE_STATE_CONFLICT
+            | NodeFinishDisposition.SOURCE_VERSION_CONFLICT
+            | NodeFinishDisposition.SOURCE_DIGEST_MISMATCH
+        ):
+            counts.retained += 1
+            entry = f'{task_id}: {disposition.value}'
+            counts.details.append(entry)
+            # Verbatim: the disposition is what an operator needs to act on,
+            # and a count alone hides a population that never disposes.
+            logger.error('Phase-2 recovery retained evidence — %s', entry)
+            match detail:
+                case None:
+                    pass
+                case verdict_text:
+                    verdict, verdict_detail = quarantine_parts(verdict_text)
+                    quarantined, refusal = _quarantine_report(
+                        task_id=task_id,
+                        attempt_count=quarantine_after_attempts,
+                        disposition=disposition.value,
+                        verdict=verdict,
+                        detail=verdict_detail,
+                    )
+                    counts.quarantined += int(quarantined)
+                    if refusal is not None:
+                        counts.quarantine_refusals.append(refusal)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 async def drive_phase2_recovery(
     session_factory: 'async_sessionmaker[AsyncSession]',
-    broker: 'PostgresBroker | None' = None,
+    broker: 'PostgresBroker',
     *,
     grace_ms: int,
     max_rows: int,
@@ -388,20 +226,21 @@ async def drive_phase2_recovery(
 ) -> Phase2RecoverySummary:
     """One bounded pass over the phase-2 outbox.
 
-    Each row is consumed in its OWN transaction: the consumption
-    function is one transaction from pending to durable disposition, and
-    batching them would let a single bad row poison every good row
-    behind it while holding workflow locks across the whole set.
+    Each record is recovered in its OWN transaction (``BEGIN``,
+    ``horsies_workflow_phase2_recover``, the owed child starts, ``COMMIT``):
+    batching them would let a single bad record poison every good one
+    behind it while holding workflow locks across the whole set. After the
+    commit, the parent nodes of the child workflows that the record's step
+    ended advance; a failed advance is logged and left to workflow recovery
+    (a terminal child under a live parent node).
 
-    A retaining disposition increments the row's attempt count in the
-    same transaction; at the bound the row's evidence is quarantined —
-    copied, verified, and repointed by the database-owned quarantine
-    function — and the discovery predicate stops selecting it either
-    way. A transient raise does NOT count toward the bound: a database
-    outage must not march healthy rows toward quarantine. A persistent
-    raise counts, in a new transaction because its own rolled back; at the
-    bound the workflow also fails closed, because discovery stops and no
-    other path would end it.
+    A kept record (``SOURCE_*``) gets one attempt in the same statement; at
+    the bound the function quarantines its evidence, and discovery stops
+    selecting it either way. A transient raise does NOT count toward the
+    bound: a database outage must not march healthy records toward
+    quarantine. A persistent raise counts, in a new statement because its
+    own transaction rolled back; at the bound the workflow also fails
+    closed, because discovery stops and no other path would end it.
 
     Caller owns the one-holder guarantee. The reaper runs this inside a
     pass already gated by the cluster-wide advisory lock, so no second
@@ -425,86 +264,25 @@ async def drive_phase2_recovery(
             )
         ).scalar_one()
 
-    considered = 0
-    applied = 0
-    already_applied = 0
-    superseded = 0
-    retained = 0
-    failed = 0
-    quarantined = 0
-    raised_counted = 0
-    details: list[str] = []
-    quarantine_refusals: list[str] = []
-
+    counts = _PassCounts()
     for candidate in candidates:
-        considered += 1
         task_id = str(candidate.task_id)
-        match terminal_status_of_pending_kind(
-            str(candidate.terminalization_kind),
-        ):
-            case Ok(status):
-                terminal_status = status.value
-            case Err(without_phase2):
-                failed += 1
-                logger.error(
-                    'Phase-2 recovery refused task %s: kind %r writes no '
-                    'pending row',
-                    task_id,
-                    without_phase2.kind,
-                )
-                continue
-            case _ as unreachable:
-                assert_never(unreachable)
-        try:
-            node_status = node_status_for_terminal_task(terminal_status)
-        except ValueError as exc:
-            failed += 1
-            logger.error(
-                'Phase-2 recovery refused task %s: %s', task_id, exc,
-            )
-            continue
-
-        quarantined_this_row = False
-        quarantine_refusal: str | None = None
         try:
             async with session_factory() as session:
-                connection = await session.connection()
-                disposition = await consume_phase2(
-                    connection,
-                    task_id=task_id,
-                    terminal_node_status=node_status,
+                committed = await run_in_transaction(
+                    session,
+                    broker,
+                    PHASE2_RECOVER_FUNCTION_SQL,
+                    {'task_id': task_id, 'attempt_bound': quarantine_after_attempts},
+                    'horsies_workflow_phase2_recover',
+                    NodeFinishDisposition,
                 )
-                if disposition.disposition == 'APPLIED_TO_NODE':
-                    await _apply_progression(
-                        session, disposition, terminal_status, broker,
-                    )
-                elif disposition.disposition not in DURABLE_DISPOSITIONS:
-                    attempt_count = (
-                        await session.execute(
-                            RECORD_RETAINING_ATTEMPT_SQL,
-                            {
-                                'task_id': task_id,
-                                'failure_class': disposition.disposition,
-                            },
-                        )
-                    ).scalar_one()
-                    if int(attempt_count) >= quarantine_after_attempts:
-                        (
-                            quarantined_this_row,
-                            quarantine_refusal,
-                        ) = await _quarantine_exhausted_row(
-                            session,
-                            task_id=task_id,
-                            attempt_count=int(attempt_count),
-                            disposition=disposition.disposition,
-                        )
-                await session.commit()
         except Exception as exc:
-            # This row keeps its evidence and is seen again next pass;
-            # the rows behind it still run. A transient raise stays
+            # This record keeps its evidence and is seen again next pass;
+            # the records behind it still run. A transient raise stays
             # uncounted toward the attempt bound: an outage is not the
-            # row's fault.
-            failed += 1
+            # record's fault.
+            counts.failed += 1
             logger.error(
                 'Phase-2 recovery failed for task %s: %s: %s',
                 task_id,
@@ -518,6 +296,8 @@ async def drive_phase2_recovery(
                     match await _record_raised_row(
                         session_factory,
                         task_id=task_id,
+                        workflow_id=str(candidate.workflow_id),
+                        task_index=int(candidate.task_index),
                         exc=exc,
                         quarantine_after_attempts=quarantine_after_attempts,
                     ):
@@ -527,51 +307,48 @@ async def drive_phase2_recovery(
                             quarantined=row_quarantined,
                             quarantine_refusal=row_refusal,
                         ):
-                            raised_counted += 1
-                            quarantined += int(row_quarantined)
+                            counts.raised_counted += 1
+                            counts.quarantined += int(row_quarantined)
                             if row_refusal is not None:
-                                quarantine_refusals.append(row_refusal)
+                                counts.quarantine_refusals.append(row_refusal)
                         case _ as unreachable:
                             assert_never(unreachable)
                 case _ as unreachable:
                     assert_never(unreachable)
             continue
 
-        match disposition.disposition:
-            case 'APPLIED_TO_NODE':
-                applied += 1
-            case 'ALREADY_APPLIED':
-                already_applied += 1
-            case 'SUPERSEDED_BY_WORKFLOW_TERMINAL':
-                superseded += 1
-            case _:
-                retained += 1
-                detail = (
-                    f'{task_id}: {disposition.disposition}'
-                    f'{f": {disposition.detail}" if disposition.detail else ""}'
+        _count_outcome(
+            counts,
+            task_id,
+            committed.outcome.disposition,
+            committed.outcome.detail,
+            quarantine_after_attempts,
+        )
+        match await advance_parents(broker, session_factory, committed.parent_advances):
+            case None:
+                pass
+            case failure:
+                logger.error(
+                    'Phase-2 recovery of task %s: the parent advance of child '
+                    'workflow %s failed: %s: %s; workflow recovery advances it',
+                    task_id,
+                    failure.failed_child_workflow_id,
+                    type(failure.cause).__name__,
+                    failure.cause,
                 )
-                details.append(detail)
-                # Verbatim, never reworded: the function's own words are
-                # what an operator needs to act on, and a count alone
-                # hides a population that never disposes.
-                logger.error('Phase-2 recovery retained evidence — %s', detail)
-                if quarantined_this_row:
-                    quarantined += 1
-                if quarantine_refusal is not None:
-                    quarantine_refusals.append(quarantine_refusal)
 
     return Phase2RecoverySummary(
-        considered=considered,
-        applied=applied,
-        already_applied=already_applied,
-        superseded=superseded,
-        retained=retained,
-        failed=failed,
-        quarantined=quarantined,
-        raised_counted=raised_counted,
+        considered=len(candidates),
+        applied=counts.applied,
+        already_applied=counts.already_applied,
+        superseded=counts.superseded,
+        retained=counts.retained,
+        failed=counts.failed,
+        quarantined=counts.quarantined,
+        raised_counted=counts.raised_counted,
         over_attempt_bound=int(over_bound),
-        retained_details=tuple(details),
-        quarantine_refusals=tuple(quarantine_refusals),
+        retained_details=tuple(counts.details),
+        quarantine_refusals=tuple(counts.quarantine_refusals),
     )
 
 
@@ -595,79 +372,55 @@ async def _record_raised_row(
     session_factory: 'async_sessionmaker[AsyncSession]',
     *,
     task_id: str,
+    workflow_id: str,
+    task_index: int,
     exc: Exception,
     quarantine_after_attempts: int,
 ) -> _RaisedRow:
     """Count one persistent raise of a row, and stop its workflow at the bound.
 
-    Runs in a new transaction, because the raise rolled back the transaction
-    of the row. Discovery stops at the bound, so the bound must not be
-    reached unless the limit applied. A limit write that fails, or that a
-    PAUSED workflow refuses, rolls this attempt back. The row then stays
-    under the bound. A later pass, after a resume, raises again and applies
-    the limit to a RUNNING workflow.
+    Runs on an autocommit connection, because the raise rolled back the
+    transaction of the row: one ``horsies_workflow_phase2_record_raise``
+    statement. ``workflow_id`` and ``task_index`` are the record's, from
+    discovery; the limit error names them. Discovery stops at
+    the bound, so the bound is reached only with the limit applied: the
+    statement writes nothing when a PAUSED workflow refuses the limit, and a
+    limit write that fails fails the statement. A later pass, after a
+    resume, raises again and applies the limit to a RUNNING workflow.
+
+    The limit error names ``quarantine_after_attempts`` failed passes:
+    discovery selects a row only under the bound, and the statement applies
+    the limit only when the count reaches it, so the count at the limit is
+    the bound.
 
     Returns:
-        `_RaisedRowRecorded` when the attempt committed;
-        `_RaisedRowNotRecorded` when a write failed, when the limit was
+        `_RaisedRowRecorded` when the count committed;
+        `_RaisedRowNotRecorded` when a statement failed, when the limit was
         refused, or when the row is gone. After that outcome nothing changed.
     """
+    failure = RecoveryRaise.of(
+        exc,
+        workflow_id=workflow_id,
+        task_index=task_index,
+        case=RecoveryCase.PHASE2_PROGRESSION,
+    )
+    payloads = recovery_limit_payloads(
+        recovery_limit_error(failure, quarantine_after_attempts),
+    )
     try:
         async with session_factory() as session:
-            context = (
-                await session.execute(
-                    RAISED_ROW_CONTEXT_SQL, {'task_id': task_id},
+            connection = await autocommit_connection(session)
+            rows = (
+                await connection.execute(
+                    PHASE2_RECORD_RAISE_FUNCTION_SQL,
+                    {
+                        'task_id': task_id,
+                        'attempt_bound': quarantine_after_attempts,
+                        'limit_error': payloads.workflow_error_json,
+                        'limit_node_result': payloads.node_result_json,
+                    },
                 )
-            ).first()
-            attempt_count = (
-                await session.execute(
-                    RECORD_RETAINING_ATTEMPT_SQL,
-                    {'task_id': task_id, 'failure_class': RAISED_FAILURE_CLASS},
-                )
-            ).scalar_one_or_none()
-            if context is None or attempt_count is None:
-                await session.rollback()
-                return _RaisedRowNotRecorded()
-            if int(attempt_count) < quarantine_after_attempts:
-                await session.commit()
-                return _RaisedRowRecorded(
-                    quarantined=False,
-                    quarantine_refusal=None,
-                )
-            failure = RecoveryRaise.of(
-                exc,
-                workflow_id=str(context.workflow_id),
-                task_index=int(context.task_index),
-                case=RecoveryCase.PHASE2_PROGRESSION,
-            )
-            record = report_recovery_limit(
-                await apply_recovery_limit(
-                    session, failure, int(attempt_count),
-                ),
-                failure,
-                int(attempt_count),
-            )
-            match record:
-                case RecoveryCandidateOutcome.LIMIT_REACHED:
-                    quarantined, refusal = await _quarantine_exhausted_row(
-                        session,
-                        task_id=task_id,
-                        attempt_count=int(attempt_count),
-                        disposition=RAISED_FAILURE_CLASS,
-                    )
-                    await session.commit()
-                    return _RaisedRowRecorded(
-                        quarantined=quarantined,
-                        quarantine_refusal=refusal,
-                    )
-                case (
-                    RecoveryCandidateOutcome.COUNTED
-                    | RecoveryCandidateOutcome.NOT_COUNTED
-                ):
-                    await session.rollback()
-                    return _RaisedRowNotRecorded()
-                case _ as unreachable:
-                    assert_never(unreachable)
+            ).fetchall()
     except SQLAlchemyError as write_error:
         logger.error(
             'Phase-2 recovery could not record the raise of task %s: %s: %s',
@@ -676,50 +429,84 @@ async def _record_raised_row(
             write_error,
         )
         return _RaisedRowNotRecorded()
+    match decode_phase2_raise(rows):
+        case RaisePendingAbsent():
+            return _RaisedRowNotRecorded()
+        case RaiseNotRecorded():
+            logger.warning(
+                'Workflow recovery limit refused: workflow_id=%s is not RUNNING',
+                failure.workflow_id,
+            )
+            return _RaisedRowNotRecorded()
+        case RaiseCounted():
+            return _RaisedRowRecorded(quarantined=False, quarantine_refusal=None)
+        case RaiseLimitReached(
+            attempt_count=attempt_count,
+            limit=limit,
+            quarantine_verdict=verdict,
+            quarantine_detail=detail,
+        ):
+            logger.critical(
+                'Workflow recovery limit reached: workflow_id=%s '
+                'failed_passes=%s outcome=%s case=%s task_index=%s '
+                'exception_type=%s exception=%s',
+                failure.workflow_id,
+                attempt_count,
+                _LIMIT_LOG_OUTCOME[limit].value,
+                failure.case.value,
+                failure.task_index,
+                failure.exception_type,
+                failure.detail,
+            )
+            quarantined, refusal = _quarantine_report(
+                task_id=task_id,
+                attempt_count=attempt_count,
+                disposition=RAISED_FAILURE_CLASS,
+                verdict=verdict,
+                detail=detail,
+            )
+            return _RaisedRowRecorded(
+                quarantined=quarantined, quarantine_refusal=refusal,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
-async def _quarantine_exhausted_row(
-    session: 'AsyncSession',
+_LIMIT_LOG_OUTCOME: Final[Mapping[RecoveryLimitWrite, RecoveryLimitOutcome]] = (
+    MappingProxyType({
+        RecoveryLimitWrite.WORKFLOW_FAILED: RecoveryLimitOutcome.WORKFLOW_FAILED,
+        RecoveryLimitWrite.LIVE_NODES_FINISH: RecoveryLimitOutcome.LIVE_NODES_FINISH,
+    })
+)
+"""The limit outcome that the log names, as the session path named it."""
+
+
+def _quarantine_report(
     *,
     task_id: str,
     attempt_count: int,
     disposition: str,
+    verdict: str,
+    detail: str | None,
 ) -> tuple[bool, str | None]:
-    """Move one exhausted row's evidence to the quarantine table.
+    """Log one quarantine verdict; return (quarantined, refusal_detail).
 
-    Runs in the same transaction as the consumption call that produced
-    the final retaining disposition; the quarantine function locks only
-    the pending row, which this transaction already holds, so no new
-    lock tier is introduced. Returns (quarantined, refusal_detail): a
-    REPOINTED or already-drained verdict counts as quarantined, and a
-    refusal is reported verbatim — the row is excluded from discovery by
-    the attempt bound regardless, so a refusal costs visibility of the
-    relocation, never an unbounded retry. The cause is logged, not stored:
-    the attempt bound is the one cause of a quarantine copy, and the pending
-    row keeps the attempt count and the last failure class.
+    A REPOINTED or already-drained verdict counts as quarantined; any other
+    verdict is a refusal, reported verbatim. The row is excluded from
+    discovery by the attempt bound either way.
     """
-    reason = (
-        f'attempt bound {attempt_count} reached; '
-        f'last disposition {disposition}'
-    )
-    row = (
-        await session.execute(
-            text(
-                f'SELECT * FROM {PHASE2_QUARANTINE_FUNCTION}('
-                'CAST(:task_id AS uuid))'
-            ),
-            {'task_id': task_id},
-        )
-    ).one()
-    verdict = str(row.verdict)
     if verdict == REPOINTED or verdict in DRAINED_VERDICTS:
         logger.error(
-            'Phase-2 recovery quarantined task %s: %s', task_id, reason,
+            'Phase-2 recovery quarantined task %s: attempt bound %s reached; '
+            'last disposition %s',
+            task_id,
+            attempt_count,
+            disposition,
         )
         return True, None
     refusal = (
         f'{task_id}: quarantine refused with {verdict}'
-        f'{f": {row.detail}" if row.detail else ""}'
+        f'{f": {detail}" if detail else ""}'
     )
     logger.error('Phase-2 recovery %s', refusal)
     return False, refusal

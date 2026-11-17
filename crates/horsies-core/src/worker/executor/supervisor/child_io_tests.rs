@@ -15,7 +15,7 @@ use super::channel::JOINED_WRITE_BODY_BYTES;
 use super::*;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, ChildFrame, IsolatedWork, ParentFrame, ProcessId,
-    ReadyFrame, RssReading, RunFrame, TaskInputText, TaskKind,
+    ReadyFrame, RssReading, RunFrame, TaskInputText,
 };
 
 const TEST_WAIT: Duration = Duration::from_secs(10);
@@ -102,14 +102,19 @@ async fn a_frame_reaches_the_child_whole_with_a_small_or_a_large_body() {
             task_id: Uuid::from_u128(1),
             task_name: "app.tasks.send".to_owned(),
             worker_id: "worker-1".to_owned(),
-            task_kind: TaskKind::Plain,
             claimed_at: Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap(),
             work: IsolatedWork::Run,
             input: TaskInputText::new(format!("\"{}\"", "a".repeat(body_bytes))),
         });
         let bytes = encode_parent_frame(&frame).unwrap().to_bytes();
         let path = test_file("frame");
-        let script = format!(r#"head -c {} <&"$0" > "{}""#, bytes.len(), path.display());
+        // `dd` with one-byte blocks takes exactly the frame; BSD `head -c`
+        // (macOS) reads a full stdio buffer and drops what it does not write.
+        let script = format!(
+            r#"dd bs=1 count={} <&"$0" 2>/dev/null > "{}""#,
+            bytes.len(),
+            path.display()
+        );
         let spawner = Spawner::start().unwrap();
         let spawned = spawner.handle().spawn(shell(&script)).await.unwrap();
         let mut channel = ChildChannel::attach(

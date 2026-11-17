@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Final, LiteralString, assert_never
+from uuid import UUID
 
 import psycopg
 
@@ -98,7 +99,7 @@ class SendAnswer:
     """
 
     outcome: str
-    holder: str
+    holder: UUID
 
 
 def _insert_params(row: EnqueueRow) -> dict[str, Any]:
@@ -178,10 +179,10 @@ def _send_keyed_in_transaction(connection: Connection, row: EnqueueRow, key: Key
     match claim:
         case ('APPLIED', _, _):
             pass
-        case ('REPLAY', holder, _):
-            return SendAnswer('KEY_REPLAY', str(holder))
-        case ('CONFLICT', owner, _):
-            return SendAnswer('KEY_CONFLICT', str(owner))
+        case ('REPLAY', UUID() as holder, _):
+            return SendAnswer('KEY_REPLAY', holder)
+        case ('CONFLICT', UUID() as owner, _):
+            return SendAnswer('KEY_CONFLICT', owner)
         case _:
             raise AssertionError(f'the key claim returned {claim!r}')
     inserted = connection.execute(ENQUEUE_INSERT_SQL, _insert_params(row)).fetchone()

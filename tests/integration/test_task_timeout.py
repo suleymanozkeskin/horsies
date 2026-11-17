@@ -24,9 +24,11 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OutcomeCode, TaskOptions
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.finalize import _NodeFinishOwed
 from horsies.core.worker.slots import ChildExit, ExitUnknown, KilledBySignal, SlotHandle
 from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout, read_stored_timeout
 from horsies.core.worker.worker import Worker
+from horsies.core.workflows.node_finish import FactsUnknown
 from tests.dispatch_claim_support import claim_at, row_claim
 from tests.fixtures.slots.handles import (
     HANDLE_CLAIMED_AT,
@@ -64,7 +66,7 @@ def _make_worker(
 ) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
         recovery_config=recovery,
@@ -142,12 +144,12 @@ async def _insert_task(
         await session.execute(
             text("""
                 INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name,
+                    (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
                      input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
                      is_subworkflow, status, task_id, created_at,
                      max_retries, execution, retention_class_key)
-                VALUES (:id, :wf, 0, 'node-0', 'timeout_test', '{}',
+                VALUES ('NONE', :id, :wf, 0, 'node-0', 'timeout_test', '{}',
                         'default', 100, '{}', FALSE, 'all', FALSE,
                         'RUNNING', CAST(:task_id AS uuid), NOW(),
                         0, 'ISOLATED', 'standard_30d')
@@ -230,10 +232,12 @@ async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
         claim_at(HANDLE_CLAIMED_AT),
     )
 
-    worker._finalize_workflow_phase.assert_awaited_once()
-    persisted_result = worker._finalize_workflow_phase.await_args.args[1]
-    assert persisted_result.is_err()
-    assert persisted_result.unwrap_err().error_code == OutcomeCode.TASK_TIMEOUT
+    # The replay has no phase-1 node facts: phase 2 runs in the transaction
+    # form, and reads the TASK_TIMEOUT result from the phase-2 record.
+    worker._finalize_workflow_phase.assert_awaited_once_with(
+        task_id,
+        _NodeFinishOwed(queue_name='default', facts=FactsUnknown()),
+    )
     # The replay adds no attempt to the one the first handler
     # committed, counted wherever the move left it.
     assert len(await read_attempts(session, task_id)) == 1
@@ -322,7 +326,7 @@ async def test_timeout_retries_when_opted_in(
         {
             'retry_policy': {
                 'max_retries': 3,
-                'intervals': [1],
+                'intervals': [1, 1, 1],
                 'backoff_strategy': 'fixed',
                 'jitter': False,
                 'auto_retry_for': ['TASK_TIMEOUT'],

@@ -96,7 +96,7 @@ def _test_app() -> Horsies:
     global _TEST_APP
     if _TEST_APP is None:
         cfg = AppConfig(broker=PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db',
+            database_url='postgresql://u:p@localhost/db',
         ))
         _TEST_APP = Horsies(cfg)
 
@@ -116,15 +116,17 @@ def _test_app() -> Horsies:
 TEST_WORKER_ID = 'w-finalize-test'
 
 
-def _make_worker(engine: AsyncEngine) -> Worker:
-    """Construct a Worker wired to the test DB."""
+def _make_worker(engine: AsyncEngine, *, broker: PostgresBroker | None = None) -> Worker:
+    """Construct a Worker wired to the test DB. A test that runs the phase 2
+    of a workflow task passes the broker: phase 2 builds child starts
+    through it, as a running worker does."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg, broker=broker)
     worker._app = _test_app()
     worker.worker_instance_id = TEST_WORKER_ID
     return worker
@@ -159,12 +161,12 @@ async def _link_workflow_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
                  task_id, created_at,
                  max_retries, execution, retention_class_key)
-            VALUES (:id, :wf, 0, 'node-0', :task_name, '{}', 'default',
+            VALUES ('NONE', :id, :wf, 0, 'node-0', :task_name, '{}', 'default',
                     100, '{}', FALSE, 'all', FALSE, 'RUNNING',
                     CAST(:task_id AS uuid), NOW(),
                     0, 'ISOLATED', 'standard_30d')
@@ -312,12 +314,13 @@ def _make_finalize_error(task_id: str, stage: str) -> _FinalizeError:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_happy_path_success_completes_and_clears(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Future resolves ok → phase-1 COMPLETED, phase-2 runs, retry attempts cleared."""
     task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker=broker)
     result_json = _serialize_ok('hello')
     handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 
@@ -545,13 +548,14 @@ async def test_child_lost_marks_non_retryable_running_task_failed(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_child_lost_after_the_return_writes_what_the_body_returned(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """The body returned with work left on its task loop, and its child was
     killed because that work did not stop. The row gets what the body
     returned, not WORKER_CRASHED and not TASK_TIMEOUT."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker=broker)
     task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
     returned = SeatFinished(
         ok=True, result_json=_serialize_ok('kept'), failed_reason=None
@@ -599,7 +603,8 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
     await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET status = 'CLAIMED', started_at = NULL
+            SET status = 'CLAIMED', started_at = NULL,
+                claim_expires_at = NOW() + INTERVAL '1 hour'
             WHERE id = CAST(:id AS uuid)
         """),
         {'id': task_id},
@@ -684,7 +689,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     task_row = (
         await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 0
@@ -693,7 +698,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
         )
     ).fetchone()
     assert task_row is not None
-    task_id, task_name, args_json, kwargs_json = task_row
+    task_id, task_name, input_json = task_row
 
     # Claim node 0's backing task with a good_until about to pass.
     await session.execute(
@@ -702,7 +707,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
             SET status = 'CLAIMED',
                 claimed_at = NOW(),
                 claimed_by_worker_id = :wid,
-                claim_expires_at = NULL,
+                claim_expires_at = NOW() + interval '1 hour',
                 good_until = NOW() + interval '1 second'
             WHERE id = :tid
         """),
@@ -725,8 +730,8 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     wire = wire_of(
         _run_task_entry(
             task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
+            args_json=None,
+            kwargs_json=input_json,
             task_id=task_id,
             master_worker_id=TEST_WORKER_ID,
             claimed_at=claimed_at,
@@ -775,7 +780,7 @@ async def test_task_expired_plain_task_skips_finalization(
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Plain-task TASK_EXPIRED keeps the skip: Ok(None), no DB write,
-    no phase 2, no persisted-result load."""
+    no phase 2, no load of the persisted terminal."""
     task_id = await _insert_running_task(session, is_workflow_task=False)
     worker = _make_worker(engine)
     handle = task_finished_handle(
@@ -784,7 +789,7 @@ async def test_task_expired_plain_task_skips_finalization(
     worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
         return_value=Ok(None),
     )
-    worker._load_persisted_task_result = AsyncMock()  # type: ignore[method-assign]
+    worker._load_persisted_terminal = AsyncMock()  # type: ignore[method-assign]
 
     result = await worker._finalize_after(
         handle,
@@ -798,7 +803,7 @@ async def test_task_expired_plain_task_skips_finalization(
     assert result.ok_value is None
     assert await _get_task_status(session, task_id) == 'RUNNING'
     worker._finalize_workflow_phase.assert_not_awaited()
-    worker._load_persisted_task_result.assert_not_awaited()
+    worker._load_persisted_terminal.assert_not_awaited()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -807,15 +812,16 @@ async def test_task_expired_workflow_task_loader_error_propagates(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Workflow-task TASK_EXPIRED with a failing persisted-result load
-    returns that finalize error (phase-2 stage) instead of skipping."""
+    """Workflow-task TASK_EXPIRED with a failing load of the persisted
+    terminal returns that finalize error (phase-2 stage) instead of
+    skipping."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     handle = task_finished_handle(
         ok=False, result_json='', failed_reason='TASK_EXPIRED',
     )
     loader_err = _make_finalize_error(task_id, _FINALIZE_STAGE_PHASE2)
-    worker._load_persisted_task_result = AsyncMock(  # type: ignore[method-assign]
+    worker._load_persisted_terminal = AsyncMock(  # type: ignore[method-assign]
         return_value=Err(loader_err),
     )
     worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
@@ -831,8 +837,10 @@ async def test_task_expired_workflow_task_loader_error_propagates(
     )
 
     assert is_err(result)
+    assert result.err_value.error_code == loader_err.error_code
     assert result.err_value.stage == _FINALIZE_STAGE_PHASE2
     assert result.err_value.task_id == task_id
+    worker._load_persisted_terminal.assert_awaited_once_with(task_id)
     worker._finalize_workflow_phase.assert_not_awaited()
 
 
@@ -844,12 +852,13 @@ async def test_task_expired_workflow_task_loader_error_propagates(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_full_success_clears_both_retry_stages(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Full success path (phase-1 Ok(tr) + phase-2 Ok) clears both stages."""
     task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker=broker)
     result_json = _serialize_ok(42)
     handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 

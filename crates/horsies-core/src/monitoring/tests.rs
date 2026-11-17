@@ -8,7 +8,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::history::partitions::publication::LoaderPublication;
@@ -587,7 +587,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
             keys(ScheduleStateInfo {
                 schedule_name: "s".to_owned(),
                 last_run_at: None,
-                next_run_at: None,
+                next_run_at: now,
                 last_task_id: None,
                 run_count: 0,
                 updated_at: now,
@@ -637,6 +637,9 @@ struct TestScope {
 }
 
 impl TestScope {
+    /// The queue is `w2_<label>_<32 hex digits>_queue`, which the baseline
+    /// bounds to 52 bytes (`horsies_tasks_queue_name_length`), so `label`
+    /// has 10 bytes at most.
     fn new(label: &str) -> Self {
         let suffix = Uuid::new_v4().simple().to_string();
         let prefix = format!("w2_{label}_{suffix}_");
@@ -1336,13 +1339,13 @@ async fn seed_node(
 ) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
             sub_workflow_params, sub_workflow_id, created_at, started_at, completed_at,
             max_retries, execution,
             retention_class_key
         ) VALUES (
-            $1, $2, $3, $8 || $3, $8 || 'node_task', 'null', $9, 100, $4, FALSE, 'all', $5, $6,
+            'NONE', $1, $2, $3, $8 || $3, $8 || 'node_task', 'null', $9, 100, $4, FALSE, 'all', $5, $6,
             $7 IS NOT NULL, CASE WHEN $7 IS NOT NULL THEN 'NOT_GIVEN' END, $7, NOW(),
             CASE WHEN $5 IN ('RUNNING', 'COMPLETED', 'FAILED')
                   THEN NOW() - INTERVAL '30 seconds' ELSE NULL END,
@@ -1642,7 +1645,7 @@ async fn database_failure_is_typed_and_retryable() {
 #[ignore = "waits on #842"]
 async fn unpublished_staged_detail_preserves_absent_semantics() {
     let pool = migrated_pool().await;
-    let scope = TestScope::new("unpublished");
+    let scope = TestScope::new("unpub");
     clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let task = scope.running("unpublished_detail");

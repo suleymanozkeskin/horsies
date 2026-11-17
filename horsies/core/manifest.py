@@ -2,8 +2,10 @@
 
 `to_producer_manifest` is the one place where the user config (Pydantic)
 meets the core's input (the manifest generated from horsies-core). It maps
-`PostgresConfig` field by field, and turns SQLAlchemy's `pool_recycle=-1`
-into the typed "never" value. The two inputs that `PostgresConfig` does
+`PostgresConfig` field by field. The typed values of the database section
+(the session database, `pool_recycle`, the TCP keepalive and user timeout
+settings) follow the rules of `horsies/core/manifest_database.py`, which the
+worker manifest builder shares. The two inputs that `PostgresConfig` does
 not hold, the schema mode and the idempotency reservation window, are
 parameters: the caller decides them. `schema_mode_of` gives the schema mode
 of the broker flags `run_schema_migrations` and `assume_initialized`.
@@ -31,14 +33,21 @@ from horsies._catalog.manifest import (
     SessionDatabase,
     SessionDatabaseSameAsDatabaseUrl,
     SessionDatabaseSeparate,
+    TcpKeepalivesConfig,
+    TcpKeepalivesConfigOff,
+    TcpKeepalivesConfigOn,
+    TcpUserTimeoutConfig,
+    TcpUserTimeoutConfigAfter,
+    TcpUserTimeoutConfigSystemDefault,
 )
-from horsies.core.models.broker import SQLALCHEMY_NEVER_RECYCLE, PostgresConfig
-
-PSYCOPG_URL_SCHEME: Final = 'postgresql+psycopg://'
-"""The scheme that the `PostgresConfig` validators require."""
-
-CORE_URL_SCHEME: Final = 'postgresql://'
-"""The scheme that the core's connection layer reads."""
+from horsies.core.manifest_database import (
+    core_database_url,
+    pool_recycle_with,
+    session_database_with,
+    tcp_keepalives_with,
+    tcp_user_timeout_with,
+)
+from horsies.core.models.broker import PostgresConfig
 
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
@@ -104,22 +113,6 @@ def reservation_window_micros(window: timedelta) -> int:
     return micros
 
 
-def core_database_url(url: str) -> str:
-    """`url` with the scheme that the core reads.
-
-    The `PostgresConfig` validators admit only `postgresql+psycopg://`, so
-    another scheme here is a defect: it raises `AssertionError`, which names
-    the scheme and never the rest of the URL (it can hold a password).
-    """
-    scheme_end = url.find('://')
-    scheme = url[: scheme_end + 3] if scheme_end >= 0 else '(none)'
-    assert url.startswith(PSYCOPG_URL_SCHEME), (
-        f'a validated database URL starts with {PSYCOPG_URL_SCHEME!r}, '
-        f'not with {scheme!r}'
-    )
-    return CORE_URL_SCHEME + url.removeprefix(PSYCOPG_URL_SCHEME)
-
-
 def _database_manifest(config: PostgresConfig) -> DatabaseManifest:
     return DatabaseManifest(
         database_url=core_database_url(config.database_url.get_secret_value()),
@@ -131,32 +124,41 @@ def _database_manifest(config: PostgresConfig) -> DatabaseManifest:
         pool_timeout=config.pool_timeout,
         pool_recycle=pool_recycle_of(config.pool_recycle),
         echo=config.echo,
+        tcp_keepalives=tcp_keepalives_of(config),
+        tcp_user_timeout=tcp_user_timeout_of(config.tcp_user_timeout_ms),
     )
 
 
 def pool_recycle_of(value: int) -> PoolRecycle:
-    """The typed form of a validated `pool_recycle`: `-1` is never, any other
-    value a number of seconds.
+    """`pool_recycle_with` with the classes of the producer manifest."""
+    return pool_recycle_with(
+        value,
+        never=PoolRecycleNever,
+        after_seconds=PoolRecycleAfterSeconds,
+    )
 
-    The `PostgresConfig` validator admits only these, so another value is a
-    defect and raises `AssertionError`.
-    """
-    match value:
-        case _ if value == SQLALCHEMY_NEVER_RECYCLE:
-            return PoolRecycleNever()
-        case _:
-            assert value >= 0, (
-                f'pool_recycle={value} passed the PostgresConfig validator, which '
-                'admits only -1 and a number of seconds'
-            )
-            return PoolRecycleAfterSeconds(seconds=value)
+
+def tcp_keepalives_of(config: PostgresConfig) -> TcpKeepalivesConfig:
+    """`tcp_keepalives_with` with the classes of the producer manifest."""
+    return tcp_keepalives_with(
+        config,
+        off=TcpKeepalivesConfigOff,
+        on=TcpKeepalivesConfigOn,
+    )
+
+
+def tcp_user_timeout_of(milliseconds: int) -> TcpUserTimeoutConfig:
+    """`tcp_user_timeout_with` with the classes of the producer manifest."""
+    return tcp_user_timeout_with(
+        milliseconds,
+        system_default=TcpUserTimeoutConfigSystemDefault,
+        after=TcpUserTimeoutConfigAfter,
+    )
 
 
 def _session_database(config: PostgresConfig) -> SessionDatabase:
-    match config.session_database_url:
-        case None:
-            return SessionDatabaseSameAsDatabaseUrl()
-        case session_url:
-            return SessionDatabaseSeparate(
-                url=core_database_url(session_url.get_secret_value()),
-            )
+    return session_database_with(
+        config,
+        same_as_database_url=SessionDatabaseSameAsDatabaseUrl,
+        separate=SessionDatabaseSeparate,
+    )

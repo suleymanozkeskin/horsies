@@ -24,8 +24,8 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::SuccessPolicy;
 use crate::core::{
-    AnyNode, HorsiesError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
-    WorkflowStatus, WorkflowTaskStatus,
+    AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskResult, WorkflowSpec,
+    WorkflowSpecRegistry, WorkflowStatus, WorkflowTaskStatus,
 };
 
 /// How long `get()` waits; every workflow here is terminal or PAUSED before the call.
@@ -115,18 +115,24 @@ pub(super) fn given_params_node(
 
 /// `E2ESubFailedInputWorkflow`: the builder reads the `value` result that the
 /// parent passes through `args_from` and writes what it saw into the input of
-/// its one task.
+/// its one task. The builder runs in the engine, so `value` is the result
+/// envelope itself, not the wrap that crosses to a worker (Python
+/// `horsies/core/workflows/engine.py:1171-1185`; the core's
+/// `child_build_input`).
 fn failed_input_definition() -> RegisteredWorkflowDefinition {
     RegisteredWorkflowDefinition {
         name: "e2e_sub_failed_input_workflow".to_owned(),
         definition_key: FAILED_INPUT_KEY.to_owned(),
         declared_children: Vec::new(),
         spec_builder: Arc::new(|input| {
-            let params: serde_json::Value = serde_json::from_str(input)
-                .map_err(|error| HorsiesError::new(format!("params do not decode: {error}")))?;
+            let params: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+                SpecBuildError::Failed(HorsiesError::new(format!("params do not decode: {error}")))
+            })?;
             let received: TaskResult<serde_json::Value> =
-                serde_json::from_value(params["value"]["inner"].clone()).map_err(|error| {
-                    HorsiesError::new(format!("no result envelope under 'value': {error}"))
+                serde_json::from_value(params["value"].clone()).map_err(|error| {
+                    SpecBuildError::Failed(HorsiesError::new(format!(
+                        "'value' is not a result envelope: {error}"
+                    )))
                 })?;
             let report = match &received {
                 TaskResult::Ok(value) => serde_json::json!({
@@ -170,7 +176,8 @@ fn slow_definition() -> RegisteredWorkflowDefinition {
 /// A registry with every child of the matrix. The dynamic definitions come
 /// first, so the static middles that name them resolve.
 pub(super) fn registry() -> WorkflowSpecRegistry {
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     for definition in [failed_input_definition(), slow_definition()] {
         registry
             .register_definition(definition)
@@ -581,9 +588,14 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
     let _through_args =
         assert_subworkflow_error(&args_from_inner(&input, "child_result"), Some(child_id));
     let _through_ctx = assert_subworkflow_error(&ctx_result(&input, "node_0"), Some(child_id));
+    // The context holds the stored summary text as a JSON string (Python
+    // `_build_workflow_context_data`, `horsies/core/workflows/engine.py:1666-1677`;
+    // the baseline `horsies_workflow_task_input`); the worker parses it.
+    let summary_text = input[WORKFLOW_CTX_KWARG]["summaries_by_id"]["node_0"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the context holds the child summary as text: {input}"));
     let summary: SubWorkflowSummary =
-        serde_json::from_value(input[WORKFLOW_CTX_KWARG]["summaries_by_id"]["node_0"].clone())
-            .expect("the context holds the child summary");
+        serde_json::from_str(summary_text).expect("the child summary decodes");
     assert_eq!(summary.status, "FAILED");
     assert_eq!(summary.failed_tasks, 1);
 }

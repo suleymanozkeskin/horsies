@@ -7,7 +7,6 @@ from horsies.core.workflows.engine import (
     pause_workflow_sync,
     resume_workflow,
     resume_workflow_sync,
-    on_workflow_task_complete,
 )
 from horsies.core.workflows.recovery import (
     recover_stuck_workflow_tree,
@@ -35,7 +34,6 @@ __all__ = [
     'pause_workflow_sync',
     'resume_workflow',
     'resume_workflow_sync',
-    'on_workflow_task_complete',
     'recover_stuck_workflows',
     'recover_stuck_workflow_tree',
     'recover_stuck_workflows_global',

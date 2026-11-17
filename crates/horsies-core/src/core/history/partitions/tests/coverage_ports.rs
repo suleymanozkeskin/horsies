@@ -15,7 +15,9 @@ use super::*;
 use crate::core::history::ddl::runtime_names::daily_leaf_name as history_leaf_name;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::coverage::{CoverageEnsureFailed, CoverageEnsured};
-use crate::core::history::partitions::catalog::read_leaf_ordering_index_exists;
+use crate::core::history::partitions::catalog::{
+    read_all_attached_leaf_rows, read_leaf_ordering_index_exists,
+};
 
 fn period(days: i64) -> RetentionDays {
     RetentionDays::parse_period(Duration::days(days)).expect("retention period")
@@ -99,12 +101,14 @@ fn ensured(outcome: CoverageOutcome) -> CoverageEnsured {
     }
 }
 
-/// `test_coverage_creating_leaves_in_two_classes_publishes_once`: a pass that
-/// creates the leaves of two classes publishes the readers once; the manifest
-/// rows share one timestamp and have contiguous positions.
+/// `test_a_created_leaf_is_published_by_its_own_creation`: a pass that
+/// creates the leaves of two classes publishes each created leaf in its own
+/// creation call, so the readers are current at the end and the last step
+/// does not publish; the manifest rows share one timestamp and have
+/// contiguous positions.
 #[tokio::test]
 #[serial]
-async fn coverage_creating_leaves_in_two_classes_publishes_once() {
+async fn coverage_creating_leaves_in_two_classes_leaves_the_readers_current() {
     let database = TestDatabase::create_with_connections(4).await;
     let publisher = CountingStagedPublisher::default();
     let outcome = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[period(7)], &publisher)
@@ -112,8 +116,8 @@ async fn coverage_creating_leaves_in_two_classes_publishes_once() {
         .expect("coverage pass");
     let report = ensured(outcome);
     assert_eq!(report.created_history_leaves, 8);
-    assert!(report.republished);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    assert!(!report.republished);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 0);
     assert_eq!(class_leaf_count(&database.pool, "standard_30d").await, 4);
     assert_eq!(class_leaf_count(&database.pool, "standard_7d").await, 4);
 
@@ -545,7 +549,7 @@ async fn an_in_horizon_loss_does_not_refuse_worker_startup() {
 }
 
 /// `TestMissingLeafBreaksAndHeals.test_no_parent_resolving_at_all_raises`: the
-/// manifest read fails closed when no history parent resolves.
+/// publication fails closed (`42P01`) when no history parent resolves.
 #[tokio::test]
 #[serial]
 async fn the_manifest_read_fails_closed_when_no_history_parent_resolves() {
@@ -566,13 +570,19 @@ async fn the_manifest_read_fails_closed_when_no_history_parent_resolves() {
     .execute(&database.pool)
     .await
     .expect("drop every history parent");
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    let refused = read_manifest_leaf_rows(&mut connection)
+    let mut transaction = database.pool.begin().await.expect("begin publication");
+    let refused = StagedLoaderPublisher
+        .republish(&mut transaction)
         .await
         .expect_err("no parent resolves");
-    drop(connection);
+    transaction.rollback().await.expect("rollback publication");
     assert!(
-        matches!(refused, HistoryError::HistoryParentAbsent(_)),
+        matches!(
+            refused,
+            HistoryError::Database(sqlx::Error::Database(ref error))
+                if error.code().as_deref() == Some("42P01")
+                    && error.message().contains("cannot see")
+        ),
         "{refused:?}"
     );
     database.drop().await;
@@ -600,17 +610,15 @@ async fn one_history_parent_gone_is_reported_not_raised() {
         .expect("drop one class parent");
 
     let mut transaction = database.pool.begin().await.expect("begin publication");
-    let selection = read_manifest_leaf_rows(&mut transaction)
+    let absent: Vec<String> = sqlx::query_scalar("SELECT horsies_history_absent_leaves()")
+        .fetch_one(&mut *transaction)
         .await
-        .expect("read manifest rows");
-    assert_eq!(
-        selection.absent_relations,
-        vec![lost.leaf_name().to_owned()]
-    );
-    assert!(selection
-        .attached
-        .iter()
-        .any(|row| row.leaf_name == kept.leaf_name()));
+        .expect("read absent history leaves");
+    assert_eq!(absent, vec![lost.leaf_name().to_owned()]);
+    let attached = read_all_attached_leaf_rows(&mut transaction)
+        .await
+        .expect("read attached catalog leaves");
+    assert!(attached.iter().any(|row| row.leaf_name == kept.leaf_name()));
     let republished = StagedLoaderPublisher
         .republish(&mut transaction)
         .await

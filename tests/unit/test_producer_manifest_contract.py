@@ -32,6 +32,10 @@ from horsies._catalog.manifest import (
     SessionDatabaseSameAsDatabaseUrl,
     SchemaMode,
     SessionDatabaseSeparate,
+    TcpKeepalivesConfigOff,
+    TcpKeepalivesConfigOn,
+    TcpUserTimeoutConfigAfter,
+    TcpUserTimeoutConfigSystemDefault,
     dump_producer_manifest,
 )
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -43,14 +47,16 @@ from horsies.core.manifest import (
     core_database_url,
     reservation_window_micros,
     schema_mode_of,
+    tcp_keepalives_of,
+    tcp_user_timeout_of,
     to_producer_manifest,
 )
 from horsies.core.models.broker import PostgresConfig
 
 pytestmark = [pytest.mark.unit]
 
-MAIN_URL: Final = 'postgresql+psycopg://user:secret@pooler:6432/app'
-SESSION_URL: Final = 'postgresql+psycopg://user:secret@direct:5432/app'
+MAIN_URL: Final = 'postgresql://user:secret@pooler:6432/app'
+SESSION_URL: Final = 'postgresql://user:secret@direct:5432/app'
 
 # PostgresConfig field -> the manifest path it fills.
 MAPPED_FIELDS: Final[dict[str, str]] = {
@@ -63,21 +69,18 @@ MAPPED_FIELDS: Final[dict[str, str]] = {
     'pool_timeout': 'database.pool_timeout',
     'pool_recycle': 'database.pool_recycle',
     'echo': 'database.echo',
+    'tcp_keepalives': 'database.tcp_keepalives',
+    'tcp_keepalives_idle': 'database.tcp_keepalives.idle_seconds',
+    'tcp_keepalives_interval': 'database.tcp_keepalives.interval_seconds',
+    'tcp_keepalives_count': 'database.tcp_keepalives.probes',
+    'tcp_user_timeout_ms': 'database.tcp_user_timeout',
     'retain_rerun_input_default': 'send.retain_rerun_input_default',
 }
 
 # PostgresConfig fields that the producer manifest does not hold.
-# worker_pool_pre_ping belongs to the worker. The TCP keepalive settings and
-# tcp_user_timeout_ms get their manifest fields from #775; #943 maps them.
+# worker_pool_pre_ping belongs to the worker.
 OUTSIDE_PRODUCER_MANIFEST: Final[frozenset[str]] = frozenset(
-    {
-        'worker_pool_pre_ping',
-        'tcp_keepalives',
-        'tcp_keepalives_idle',
-        'tcp_keepalives_interval',
-        'tcp_keepalives_count',
-        'tcp_user_timeout_ms',
-    },
+    {'worker_pool_pre_ping'},
 )
 
 # Manifest paths that come from to_producer_manifest's parameters or from
@@ -101,6 +104,11 @@ def _config_with_every_value_set() -> PostgresConfig:
         pool_timeout=11,
         pool_recycle=600,
         echo=True,
+        tcp_keepalives=True,
+        tcp_keepalives_idle=45,
+        tcp_keepalives_interval=7,
+        tcp_keepalives_count=5,
+        tcp_user_timeout_ms=1500,
         retain_rerun_input_default=True,
     )
 
@@ -163,6 +171,12 @@ def test_a_config_resolves_field_by_field() -> None:
             pool_timeout=11,
             pool_recycle=PoolRecycleAfterSeconds(seconds=600),
             echo=True,
+            tcp_keepalives=TcpKeepalivesConfigOn(
+                idle_seconds=45,
+                interval_seconds=7,
+                probes=5,
+            ),
+            tcp_user_timeout=TcpUserTimeoutConfigAfter(milliseconds=1500),
         ),
         schema='OBSERVE_ONLY',
         send=SendManifest(
@@ -191,6 +205,13 @@ def test_the_dump_is_the_json_document_the_core_parses() -> None:
             'pool_timeout': 30,
             'pool_recycle': {'kind': 'AFTER_SECONDS', 'seconds': 1800},
             'echo': False,
+            'tcp_keepalives': {
+                'kind': 'ON',
+                'idle_seconds': 30,
+                'interval_seconds': 10,
+                'probes': 3,
+            },
+            'tcp_user_timeout': {'kind': 'AFTER', 'milliseconds': 30_000},
         },
         'schema': 'MIGRATE_AND_VALIDATE',
         'send': {
@@ -276,11 +297,68 @@ def test_a_pool_recycle_without_meaning_is_refused(seconds: int) -> None:
     _ = _refusal_of('pool_recycle', seconds)
 
 
+def test_keepalives_off_is_the_off_variant_whatever_the_three_values() -> None:
+    config = PostgresConfig.model_validate(
+        {
+            'database_url': MAIN_URL,
+            'tcp_keepalives': False,
+            'tcp_keepalives_idle': 0,
+            'tcp_keepalives_interval': 0,
+            'tcp_keepalives_count': 0,
+        },
+    )
+    assert tcp_keepalives_of(config) == TcpKeepalivesConfigOff()
+
+
+def test_a_keepalive_value_that_the_validator_refuses_is_a_defect_here() -> None:
+    with pytest.raises(ConfigurationError):
+        PostgresConfig.model_validate(
+            {'database_url': MAIN_URL, 'tcp_keepalives': True, 'tcp_keepalives_idle': 0},
+        )
+    unvalidated = PostgresConfig.model_construct(
+        database_url=SecretStr(MAIN_URL),
+        tcp_keepalives=True,
+        tcp_keepalives_idle=0,
+        tcp_keepalives_interval=10,
+        tcp_keepalives_count=3,
+    )
+    with pytest.raises(AssertionError, match='keepalive values'):
+        tcp_keepalives_of(unvalidated)
+
+
+def test_a_tcp_user_timeout_of_zero_is_the_system_default() -> None:
+    assert _database_of('tcp_user_timeout_ms', 0).tcp_user_timeout == (
+        TcpUserTimeoutConfigSystemDefault()
+    )
+
+
+@pytest.mark.parametrize('milliseconds', [1, 30_000])
+def test_a_tcp_user_timeout_is_a_number_of_milliseconds(milliseconds: int) -> None:
+    assert _database_of('tcp_user_timeout_ms', milliseconds).tcp_user_timeout == (
+        TcpUserTimeoutConfigAfter(milliseconds=milliseconds)
+    )
+
+
+def test_a_tcp_user_timeout_that_the_validator_refuses_is_a_defect_here() -> None:
+    with pytest.raises(ConfigurationError):
+        PostgresConfig.model_validate({'database_url': MAIN_URL, 'tcp_user_timeout_ms': -1})
+    with pytest.raises(AssertionError, match='tcp_user_timeout_ms=-1'):
+        tcp_user_timeout_of(-1)
+
+
 def test_a_url_with_another_scheme_is_a_defect_named_without_its_password() -> None:
     with pytest.raises(AssertionError) as raised:
-        core_database_url('postgres://user:secret@host/app')
-    assert 'postgres://' in str(raised.value)
+        core_database_url('postgresql+psycopg://user:secret@host/app')
+    assert 'postgresql+psycopg' in str(raised.value)
     assert 'secret' not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    'url',
+    ['postgresql://user:secret@host/app', 'postgres://user:secret@host/app'],
+)
+def test_the_core_reads_the_postgresql_scheme(url: str) -> None:
+    assert core_database_url(url) == 'postgresql://user:secret@host/app'
 
 
 @pytest.mark.parametrize(

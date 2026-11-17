@@ -32,18 +32,21 @@ use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadP
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
-    AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand,
-    TerminalizationOutcome, UnreportedAttemptOutcome, WorkflowSuccessOutcome,
+    AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoStep,
+    TerminalizationCommand, TerminalizationOutcome, UnreportedAttemptOutcome,
+    WorkflowSuccessOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
-use crate::core::types::status::TaskStatus;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
+use crate::db::CheckoutClass;
 use crate::workflow_engine::args_merge::unwrap_args_from_entries;
-use crate::workflow_engine::phase2_recovery::{
-    send_phase2_wake, terminal_status_of_pending_kind, Phase2Wake,
+use crate::workflow_engine::phase2_recovery::{send_phase2_wake, Phase2Wake};
+use crate::workflow_engine::steps::{
+    advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
+    NodeFinishDisposition, OwedParentAdvances,
 };
 
 use crate::worker::retry::{
@@ -73,14 +76,30 @@ pub(crate) enum OwnershipOutcome {
     Aborted,
 }
 
+/// The form of a workflow task's phase-2 statement
+/// (`horsies_workflow_node_finish`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhaseTwoForm {
+    /// The phase-1 outcome named the step from the node facts.
+    Step(PhaseTwoStep),
+    /// The phase-1 outcome is not at hand (a replay of a committed phase-1
+    /// write, a pre-start expiry): the step reads the dependents and runs in
+    /// a transaction. A plain task has no phase-2 statement and carries this
+    /// form too.
+    NotKnown,
+}
+
 /// Outcome of Phase 1 finalize: persisting the terminal task state.
 pub(crate) enum FinalizeOutcome {
     /// Task completed or failed terminally. Needs Phase 2 (workflow callback).
+    /// The node status comes from the kind of the phase-2 record, which the
+    /// node finish reads; phase 2 does not take the task's status.
     Terminal {
-        is_success: bool,
         /// Phase 1 already fired the capacity wake (the fused success path
         /// notifies in-statement); Phase 2 must not wake capacity twice.
         capacity_notified: bool,
+        /// The form of the phase-2 statement.
+        phase_two: PhaseTwoForm,
     },
     /// Task was requeued for retry. No workflow callback needed.
     Retried,
@@ -101,11 +120,12 @@ pub(crate) enum FinalizeOutcome {
 /// before running potentially slow workflow callbacks + retries.
 pub(crate) struct Phase2Work {
     pub task_id: Uuid,
-    pub is_success: bool,
     pub queue_name: String,
     pub is_workflow_task: bool,
     /// Phase 1 already woke queue capacity; Phase 2 skips its notify.
     pub capacity_notified: bool,
+    /// The form of the phase-2 statement of a workflow task.
+    pub phase_two: PhaseTwoForm,
 }
 
 /// Which finalize phase failed.
@@ -302,17 +322,23 @@ async fn cancel_orphan_before_start(
     worker_id: &str,
     claimed_at: chrono::DateTime<Utc>,
 ) {
-    let cancelled = terminalize(
-        broker.pool(),
-        &TerminalizationCommand::CancelOwnedOrphan {
-            task_id,
-            fence: OwnedClaim {
-                worker_id: worker_id.to_owned(),
-                claimed_at,
-            },
-        },
-    )
-    .await;
+    let cancelled = match broker.core_pools_for_write() {
+        Ok((open, _write)) => {
+            terminalize(
+                open.main(),
+                broker.statement_log(),
+                &TerminalizationCommand::CancelOwnedOrphan {
+                    task_id,
+                    fence: OwnedClaim {
+                        worker_id: worker_id.to_owned(),
+                        claimed_at,
+                    },
+                },
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     match cancelled {
         Ok(outcomes) => match outcomes.first() {
             Some(TerminalizationOutcome::Applied { .. }) => tracing::warn!(
@@ -370,10 +396,10 @@ fn phase2_after_prestart_expiry(
     match is_workflow_task {
         true => Some(Phase2Work {
             task_id,
-            is_success: false,
             queue_name,
             is_workflow_task,
             capacity_notified: false,
+            phase_two: PhaseTwoForm::NotKnown,
         }),
         false => None,
     }
@@ -703,15 +729,7 @@ pub(crate) async fn persist_terminal_state(
                 PayloadKind::Result,
                 result_bytes.len(),
             );
-            persist_ok_result(
-                broker,
-                task_id,
-                result_bytes,
-                fence,
-                row.is_workflow_task,
-                &row.queue_name,
-            )
-            .await
+            persist_ok_result(broker, task_id, result_bytes, fence, row.is_workflow_task).await
         }
         TaskResult::Err(ref task_error) => {
             // The stored error keeps its code when its `data` cannot be stored:
@@ -788,7 +806,6 @@ pub(crate) async fn persist_ok_result(
     result_bytes: &[u8],
     fence: OwnedClaim,
     is_workflow_task: bool,
-    queue_name: &str,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     // Wrap the task's result bytes via `&RawValue`: parsing validates the JSON,
     // and the adjacently-tagged wrapper embeds the original bytes verbatim
@@ -810,27 +827,28 @@ pub(crate) async fn persist_ok_result(
         .map_err(|error| envelope_error(task_id, error))?;
     match is_workflow_task {
         true => persist_workflow_success(broker, task_id, fence, result_json).await,
-        false => persist_plain_success(broker, task_id, fence, result_json, queue_name).await,
+        false => persist_plain_success(broker, task_id, fence, result_json).await,
     }
 }
 
-/// The success of a plain task: one statement locks the RUNNING row under the
-/// full fence, writes the attempt, moves the row and sends the capacity wake.
+/// The success of a plain task: one statement on the main core pool locks the
+/// RUNNING row under the full fence, writes the attempt, moves the row and
+/// sends the capacity wake of the row's queue.
 async fn persist_plain_success(
     broker: &PostgresBroker,
     task_id: Uuid,
     fence: OwnedClaim,
     result_json: String,
-    queue_name: &str,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let command = TerminalizationCommand::CompleteTaskFused {
         task_id,
         fence,
         result_json,
-        notify_channel: format!("task_queue_{queue_name}"),
-        notify_payload: format!("capacity:{task_id}"),
     };
-    let outcomes = terminalize(broker.pool(), &command)
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(task_id, "complete-fused", error))?;
+    let outcomes = terminalize(open.main(), broker.statement_log(), &command)
         .await
         .map_err(|error| phase1_error(task_id, "complete-fused", error))?;
     match outcomes.into_iter().next() {
@@ -872,9 +890,9 @@ async fn persist_workflow_success(
         .await
         .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
-        WorkflowSuccessOutcome::SuccessApplied { .. } => Ok(FinalizeOutcome::Terminal {
-            is_success: true,
+        WorkflowSuccessOutcome::SuccessApplied { phase_two, .. } => Ok(FinalizeOutcome::Terminal {
             capacity_notified: false,
+            phase_two: PhaseTwoForm::Step(phase_two.step),
         }),
         WorkflowSuccessOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { .. }) => {
             replay_of_committed_write(broker.pool(), task_id, true).await
@@ -992,11 +1010,11 @@ async fn after_failed_attempt(
             ..
         } => Ok(FinalizeOutcome::Finalized),
         FailedAttemptOutcome::FailureApplied {
-            after: AfterFailure::PhaseTwoOwed(_),
+            after: AfterFailure::PhaseTwoOwed(owed),
             ..
         } => Ok(FinalizeOutcome::Terminal {
-            is_success: false,
             capacity_notified: false,
+            phase_two: PhaseTwoForm::Step(owed.step),
         }),
         FailedAttemptOutcome::RetryScheduled {
             retry_count,
@@ -1051,8 +1069,8 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
 }
 
 /// A replay of a committed write (`AlreadyApplied`). A workflow task owes
-/// phase 2 while its durable phase-2 record exists, with the outcome of the
-/// status that the record's kind stands for; a plain task owes nothing.
+/// phase 2 while its durable phase-2 record exists; a plain task owes
+/// nothing.
 async fn replay_of_committed_write(
     pool: &sqlx::PgPool,
     task_id: Uuid,
@@ -1060,9 +1078,9 @@ async fn replay_of_committed_write(
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
         true => match load_pending_phase_two(pool, task_id).await? {
-            PendingPhaseTwo::Owed(status) => Ok(FinalizeOutcome::Terminal {
-                is_success: status == TaskStatus::Completed,
+            PendingPhaseTwo::Owed => Ok(FinalizeOutcome::Terminal {
                 capacity_notified: false,
+                phase_two: PhaseTwoForm::NotKnown,
             }),
             PendingPhaseTwo::Consumed => Ok(FinalizeOutcome::Finalized),
         },
@@ -1112,115 +1130,207 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
         | crate::workflow_engine::WorkflowError::WorkflowTimeout { .. }
         | crate::workflow_engine::WorkflowError::WorkflowError(_)
         | crate::workflow_engine::WorkflowError::InvalidStatus(_)
-        | crate::workflow_engine::WorkflowError::Validation(_) => false,
+        | crate::workflow_engine::WorkflowError::Validation(_)
+        | crate::workflow_engine::WorkflowError::StepContract(_) => false,
     }
 }
 
-/// Phase 2 of finalization: workflow advancement and the capacity wake of
-/// the task's queue (Python `_finalize_workflow_phase`,
+/// Phase 2 of finalization: the node finish of a workflow task, or the
+/// capacity wake of a plain task (Python `_finalize_workflow_phase`,
 /// `core/worker/finalize.py:1619-1674`).
 ///
-/// Separate transaction from Phase 1. If this fails after Phase 1 succeeded,
-/// the terminal task result is already durable and workflow recovery can resume.
+/// Separate from phase 1. If this fails after phase 1 committed, the terminal
+/// task result and its phase-2 record are durable and phase-2 recovery
+/// applies them.
 ///
-/// A workflow task sends the wake as the first statement of its phase-2
-/// transaction; a plain task sends it as one statement. An error of the wake
-/// is a phase-2 error, never dropped: for a plain task it is retryable when
-/// the database error is transient (`is_retryable_sqlx_error`, Python
-/// `_phase2_error`, `core/worker/finalize.py:1676-1697`).
+/// A workflow task runs `horsies_workflow_node_finish` on the worker reserve
+/// ([`finish_workflow_node`]), which sends the capacity wake when phase 1 did
+/// not. A plain task sends the wake as one statement when phase 1 did not; an
+/// error of the wake is a phase-2 error, never dropped, retryable when the
+/// database error is transient (`is_retryable_sqlx_error`, Python
+/// `_phase2_error`, `core/worker/finalize.py:1676-1697`). Returns the parent
+/// advances that the step owes after its commit.
+///
+/// Errors: [`FinalizeError`] at [`FinalizeStage::Phase2Workflow`], retryable
+/// when the failure may clear.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_workflow_phase(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
     task_id: Uuid,
-    is_success: bool,
     queue_name: &str,
     is_workflow_task: bool,
     capacity_notified: bool,
-    payload_policy: &PayloadPolicy,
+    phase_two: PhaseTwoForm,
     retention: &RetentionConfig,
-) -> Result<(), FinalizeError> {
-    // Skipped when Phase 1's statement already sent the wake in the same
-    // commit as the transition (waking twice would be harmless but wasteful).
-    let wake = match capacity_notified {
-        true => Phase2Wake::NoWake,
-        false => capacity_wake(queue_name, task_id),
-    };
+) -> Result<OwedParentAdvances, FinalizeError> {
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
     match is_workflow_task {
-        true => crate::workflow_engine::phase2_recovery::finalize_phase2(
-            pool,
-            task_id,
-            if is_success { "COMPLETED" } else { "FAILED" },
-            &wake,
-            workflow_registry,
-            payload_policy,
-            retention,
-        )
-        .await
-        .map(|_disposition| ())
-        .map_err(|e| {
-            let retryable = is_retryable_workflow_error(&e);
-            FinalizeError {
-                stage: FinalizeStage::Phase2Workflow,
-                task_id,
-                message: format!("workflow callback failed: {}", e),
-                retryable,
-            }
-        }),
-        false => send_phase2_wake(pool, &wake)
-            .await
-            .map_err(|error| FinalizeError {
-                stage: FinalizeStage::Phase2Workflow,
-                task_id,
-                message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
-                retryable: is_retryable_sqlx_error(&error),
-            }),
+        true => {
+            let build = ChildBuild {
+                registry: workflow_registry,
+                retention,
+            };
+            finish_workflow_node(broker, build, task_id, capacity_notified, phase_two).await
+        }
+        false => {
+            // Skipped when phase 1's statement already sent the wake in the
+            // same commit as the transition.
+            let wake = match capacity_notified {
+                true => Phase2Wake::NoWake,
+                false => capacity_wake(queue_name),
+            };
+            send_phase2_wake(broker.pool(), &wake)
+                .await
+                .map_err(|error| FinalizeError {
+                    stage: FinalizeStage::Phase2Workflow,
+                    task_id,
+                    message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
+                    retryable: is_retryable_sqlx_error(&error),
+                })?;
+            Ok(OwedParentAdvances::default())
+        }
     }
 }
 
-/// The capacity wake of `queue_name` for `task_id`: the workers of the
-/// queue check their capacity and backlog. It goes only to the queue's
-/// channel; workers do not listen on `task_new` (Python
+/// The payload of a capacity wake. The baseline functions send the same
+/// constant (`horsies/core/baseline/sql/0004_lifecycle_functions.sql:1064`,
+/// `:1510`; `0005_workflow_functions.sql:1972`). No receiver reads the
+/// payload on a queue channel: the claim loop subscribes by channel.
+const CAPACITY_WAKE_PAYLOAD: &str = "capacity";
+
+/// The capacity wake of `queue_name`: the workers of the queue check their
+/// capacity and backlog. It goes only to the queue's channel
+/// `task_queue_<queue>`; workers do not listen on `task_new` (Python
 /// `core/worker/finalize.py:1657-1660`).
-pub(crate) fn capacity_wake(queue_name: &str, task_id: Uuid) -> Phase2Wake {
+pub(crate) fn capacity_wake(queue_name: &str) -> Phase2Wake {
     Phase2Wake::Queue {
         channel: format!("task_queue_{queue_name}"),
-        payload: format!("capacity:{task_id}"),
+        payload: CAPACITY_WAKE_PAYLOAD.to_owned(),
     }
 }
 
-/// The kind of a task's phase-2 record. The record has no status column: the
-/// status follows from the kind (`terminal_status_of_pending_kind`).
-const LOAD_PENDING_KIND_SQL: &str =
-    "SELECT terminalization_kind FROM horsies_workflow_phase2_pending WHERE task_id = $1";
+/// The node finish of a workflow task, in the form that the phase-1 node
+/// facts name (`PhaseTwoStep`):
+///
+/// | Form | Statements |
+/// |---|---|
+/// | `NoDependents` | `horsies_workflow_node_finish(task, wake, 'NONE')`, one statement in autocommit |
+/// | `DependentsWithoutSubworkflow` | `horsies_workflow_node_finish(task, wake, 'READ')`, one statement in autocommit |
+/// | `SubworkflowReachable`, `NotKnown` | `BEGIN`; `horsies_workflow_node_finish(task, wake, 'READ')`; `horsies_workflow_child_start` per owed child start; `COMMIT` |
+///
+/// `wake` is true when phase 1 did not send the capacity wake; the statement
+/// sends it on the channel of the node row's queue, delivered at its commit.
+/// A call that finds no phase-2 record (a replay) sends no wake
+/// (`horsies_workflow_node_apply`, `0005_workflow_functions.sql:1914-1919`).
+///
+/// A retaining disposition (the stored result did not pass its check) writes
+/// nothing and is a phase-2 error that is not retried; phase-2 recovery
+/// counts the record.
+async fn finish_workflow_node(
+    broker: &PostgresBroker,
+    build: ChildBuild<'_>,
+    task_id: Uuid,
+    capacity_notified: bool,
+    phase_two: PhaseTwoForm,
+) -> Result<OwedParentAdvances, FinalizeError> {
+    let wake = !capacity_notified;
+    let finished = match phase_two {
+        PhaseTwoForm::Step(PhaseTwoStep::NoDependents) => {
+            node_finish_alone(broker, task_id, wake, Dependents::NoneToRead)
+                .await
+                .map(|outcome| {
+                    (
+                        outcome.disposition,
+                        OwedParentAdvances::of(outcome.parent_advance),
+                    )
+                })
+        }
+        PhaseTwoForm::Step(PhaseTwoStep::DependentsWithoutSubworkflow) => {
+            node_finish_alone(broker, task_id, wake, Dependents::Read)
+                .await
+                .map(|outcome| {
+                    (
+                        outcome.disposition,
+                        OwedParentAdvances::of(outcome.parent_advance),
+                    )
+                })
+        }
+        PhaseTwoForm::Step(PhaseTwoStep::SubworkflowReachable) | PhaseTwoForm::NotKnown => {
+            node_finish_in_transaction(broker, task_id, wake, build)
+                .await
+                .map(|committed| (committed.disposition, committed.parent_advances))
+        }
+    };
+    let (disposition, parent_advances) = finished.map_err(|error| FinalizeError {
+        stage: FinalizeStage::Phase2Workflow,
+        task_id,
+        message: format!("workflow node finish failed: {error}"),
+        retryable: is_retryable_workflow_error(&error),
+    })?;
+    node_finish_outcome(task_id, disposition, parent_advances)
+}
+
+/// What a committed node finish leaves owed. Pure, apart from the log.
+fn node_finish_outcome(
+    task_id: Uuid,
+    disposition: NodeFinishDisposition,
+    parent_advances: OwedParentAdvances,
+) -> Result<OwedParentAdvances, FinalizeError> {
+    match disposition {
+        NodeFinishDisposition::Applied | NodeFinishDisposition::AppliedWorkflowEnded => {
+            Ok(parent_advances)
+        }
+        NodeFinishDisposition::AlreadyApplied | NodeFinishDisposition::PendingAbsent => {
+            tracing::debug!(
+                task_id = %task_id,
+                disposition = ?disposition,
+                "phase 2 found its record applied or absent; nothing written",
+            );
+            Ok(parent_advances)
+        }
+        NodeFinishDisposition::Retained(failure) => Err(FinalizeError {
+            stage: FinalizeStage::Phase2Workflow,
+            task_id,
+            message: format!(
+                "phase-2 record kept: the stored result did not pass its check ({}); \
+                 phase-2 recovery counts it",
+                failure.as_str()
+            ),
+            retryable: false,
+        }),
+    }
+}
+
+/// Whether a task has a phase-2 record. Its status is not read: the node
+/// finish takes the node status from the record's kind.
+const PENDING_PHASE_TWO_EXISTS_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)";
 
 /// What the phase-2 record of a committed workflow write owes, as a replay
 /// reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingPhaseTwo {
-    /// The record exists: phase 2 is owed for a task that ended with this
-    /// status (COMPLETED, FAILED or EXPIRED).
-    Owed(TaskStatus),
+    /// The record exists: phase 2 is owed.
+    Owed,
     /// No record: phase 2 consumed it, so the replay owes nothing.
     Consumed,
 }
 
-/// Read the phase-2 record of a workflow task after a phase-1 replay.
+/// Read whether a workflow task's phase-2 record exists after a phase-1
+/// replay. One statement; writes nothing. The moved history row is not read:
+/// the record is the evidence that phase 2 is still owed.
 ///
-/// One statement; writes nothing. The moved history row is not read: the
-/// record is the evidence that phase 2 is still owed.
-///
-/// Errors:
-/// - the read fails: retryable;
-/// - the record names a kind that writes no phase-2 record: not retryable.
+/// Errors: the read fails: [`FinalizeError`] at
+/// [`FinalizeStage::Phase2Workflow`], retryable.
 async fn load_pending_phase_two(
     pool: &sqlx::PgPool,
     task_id: Uuid,
 ) -> Result<PendingPhaseTwo, FinalizeError> {
-    let kind: Option<String> = sqlx::query_scalar(LOAD_PENDING_KIND_SQL)
+    let owed: bool = sqlx::query_scalar(PENDING_PHASE_TWO_EXISTS_SQL)
         .bind(task_id)
-        .fetch_optional(pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| FinalizeError {
             stage: FinalizeStage::Phase2Workflow,
@@ -1228,17 +1338,10 @@ async fn load_pending_phase_two(
             message: format!("failed to load the phase-2 record: {error}"),
             retryable: true,
         })?;
-    match kind {
-        None => Ok(PendingPhaseTwo::Consumed),
-        Some(kind) => terminal_status_of_pending_kind(&kind)
-            .map(PendingPhaseTwo::Owed)
-            .map_err(|refusal| FinalizeError {
-                stage: FinalizeStage::Phase2Workflow,
-                task_id,
-                message: refusal.to_string(),
-                retryable: false,
-            }),
-    }
+    Ok(match owed {
+        true => PendingPhaseTwo::Owed,
+        false => PendingPhaseTwo::Consumed,
+    })
 }
 
 #[cfg(test)]
@@ -1291,14 +1394,14 @@ pub(crate) async fn finalize_pre_execution_failure(
     .await
     {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
+            phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
+            phase_two,
         }),
         Some(FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused)
         | None => None,
@@ -1475,43 +1578,46 @@ pub(crate) async fn execute_and_finalize(
 
     match phase1_outcome {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
+            phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
+            phase_two,
         }),
         Some(FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused)
         | None => None,
     }
 }
 
-/// Run Phase 2 finalize: workflow advancement + capacity notifications.
+/// Run Phase 2 finalize: the node finish of a workflow task (or the capacity
+/// wake of a plain task), then the parent advances it owes.
 ///
-/// Should be called AFTER the semaphore permit is released.
-/// Uses bounded retries (up to 5) with reload-from-persisted-result for replays.
+/// Should be called AFTER the semaphore permit is released. Phase 2 has up to
+/// [`PHASE2_MAX_RETRIES`] retries; the parent advances that a committed phase 2
+/// owes run after it, one transaction per level, with their own retries
+/// ([`retry_parent_advances`]).
 pub(crate) async fn run_phase2(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
     work: Phase2Work,
-    payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
 ) {
-    retry_phase2(
-        pool,
-        workflow_registry,
-        work.task_id,
-        work.is_success,
-        &work.queue_name,
-        work.is_workflow_task,
-        work.capacity_notified,
-        payload_policy,
-        retention,
-    )
-    .await;
+    let finished = retry_phase2(broker, workflow_registry, &work, retention).await;
+    match finished {
+        Ok(owed) if !owed.is_empty() => {
+            let build = ChildBuild {
+                registry: workflow_registry,
+                retention,
+            };
+            retry_parent_advances(broker, build, work.task_id, owed).await;
+        }
+        // Each failure was logged where it happened; workflow recovery
+        // applies the durable phase-2 record.
+        Ok(_) | Err(_) => {}
+    }
 }
 
 /// Run Phase 1: the first write and up to [`PHASE1_MAX_RETRIES`] retries of
@@ -1586,105 +1692,129 @@ async fn retry_phase1(
     None
 }
 
-/// Run Phase 2 with bounded retries.
+/// Run Phase 2 with bounded retries: the first try and up to
+/// [`PHASE2_MAX_RETRIES`] retries, each after [`phase_retry_delay`]. Only a
+/// retryable error is retried.
 ///
-/// Phase 1 already committed the durable outbox row, so every retry repeats
-/// the same consume-and-progress transaction without consulting live rows.
-#[allow(clippy::too_many_arguments)]
+/// Phase 1 already committed the durable phase-2 record, so every retry sends
+/// the same step. If an earlier try committed (its reply was lost), the step
+/// finds the record gone and reports `ALREADY_APPLIED`; the parent advances
+/// that try owed are then left to workflow recovery (case 1.6).
+///
+/// Returns the parent advances of the committed step, or the last error
+/// (already logged).
 async fn retry_phase2(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
-    task_id: Uuid,
-    is_success: bool,
-    queue_name: &str,
-    is_workflow_task: bool,
-    capacity_notified: bool,
-    payload_policy: &PayloadPolicy,
+    work: &Phase2Work,
     retention: &RetentionConfig,
-) {
-    // First attempt consumes the durable outbox evidence.
-    match finalize_workflow_phase(
-        pool,
-        workflow_registry,
-        task_id,
-        is_success,
-        queue_name,
-        is_workflow_task,
-        capacity_notified,
-        payload_policy,
-        retention,
-    )
-    .await
-    {
-        Ok(()) => return,
-        Err(e) if !e.retryable => {
-            tracing::error!(
-                task_id = %task_id,
-                error = %e,
-                "Phase 2 finalize failed (non-retryable)",
-            );
-            return;
-        }
-        Err(e) => {
+) -> Result<OwedParentAdvances, FinalizeError> {
+    let mut attempt: u32 = 0;
+    loop {
+        if attempt > 0 {
+            let delay = phase_retry_delay(attempt);
             tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "Phase 2 finalize failed, scheduling retries",
+                task_id = %work.task_id,
+                attempt,
+                max = PHASE2_MAX_RETRIES,
+                delay_s = format!("{:.1}", delay),
+                "retrying Phase 2 finalize",
             );
+            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         }
-    }
-
-    // Retry attempts consume the same durable pending evidence. If a previous
-    // attempt committed, consume reports PENDING_ABSENT and the call is a no-op.
-    for attempt in 1..=PHASE2_MAX_RETRIES {
-        let delay = phase_retry_delay(attempt);
-        tracing::warn!(
-            task_id = %task_id,
-            attempt,
-            max = PHASE2_MAX_RETRIES,
-            delay_s = format!("{:.1}", delay),
-            "retrying Phase 2 finalize",
-        );
-        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
-
-        match finalize_workflow_phase(
-            pool,
+        let finished = finalize_workflow_phase(
+            broker,
             workflow_registry,
-            task_id,
-            is_success,
-            queue_name,
-            is_workflow_task,
-            capacity_notified,
-            payload_policy,
+            work.task_id,
+            &work.queue_name,
+            work.is_workflow_task,
+            work.capacity_notified,
+            work.phase_two,
             retention,
         )
-        .await
-        {
+        .await;
+        match finished {
+            Ok(owed) => return Ok(owed),
+            Err(error) if !error.retryable => {
+                tracing::error!(
+                    task_id = %work.task_id,
+                    error = %error,
+                    attempt,
+                    "Phase 2 finalize failed (non-retryable)",
+                );
+                return Err(error);
+            }
+            Err(error) if attempt >= PHASE2_MAX_RETRIES => {
+                tracing::error!(
+                    task_id = %work.task_id,
+                    error = %error,
+                    attempts = PHASE2_MAX_RETRIES,
+                    "Phase 2 finalize retries exhausted — workflow recovery will handle",
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %work.task_id,
+                    error = %error,
+                    attempt,
+                    "Phase 2 finalize failed (retryable)",
+                );
+            }
+        }
+        attempt += 1;
+    }
+}
+
+/// Advances the parents above the child workflows that phase 2 ended
+/// ([`advance_parents`], one transaction per level, on the worker reserve),
+/// with up to [`PHASE2_MAX_RETRIES`] retries that go on from the level that
+/// failed (Python's parent-propagation stage, `_retry_finalize_parent`,
+/// `core/worker/finalize.py:2248-2310`). A non-retryable failure, or spent
+/// retries, leave the rest to workflow recovery (case 1.6: a terminal child
+/// under a live parent node). Logs every failure.
+async fn retry_parent_advances(
+    broker: &PostgresBroker,
+    build: ChildBuild<'_>,
+    task_id: Uuid,
+    first_owed: OwedParentAdvances,
+) {
+    let mut owed = first_owed;
+    for attempt in 0..=PHASE2_MAX_RETRIES {
+        if attempt > 0 {
+            let delay = phase_retry_delay(attempt);
+            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+        }
+        let failure = match advance_parents(broker, CheckoutClass::Reserved, owed, build).await {
             Ok(()) => return,
-            Err(e) if !e.retryable => {
+            Err(failure) => failure,
+        };
+        match is_retryable_workflow_error(&failure.error) {
+            true => tracing::warn!(
+                task_id = %task_id,
+                child_workflow_id = %failure.failed_child_workflow_id,
+                attempt,
+                error = %failure.error,
+                "parent advance failed (retryable)",
+            ),
+            false => {
                 tracing::error!(
                     task_id = %task_id,
-                    error = %e,
-                    attempt,
-                    "Phase 2 finalize retry failed (non-retryable)",
+                    child_workflow_id = %failure.failed_child_workflow_id,
+                    owed_after = failure.owed_after.child_workflow_ids().len(),
+                    error = %failure.error,
+                    "parent advance failed (non-retryable) — workflow recovery will handle",
                 );
                 return;
             }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    attempt,
-                    "Phase 2 finalize retry failed (retryable)",
-                );
-            }
         }
+        owed = failure.still_owed();
     }
-
     tracing::error!(
         task_id = %task_id,
+        child_workflow_ids = ?owed.child_workflow_ids(),
         attempts = PHASE2_MAX_RETRIES,
-        "Phase 2 finalize retries exhausted — workflow recovery will handle",
+        "parent advance retries exhausted — workflow recovery will handle",
     );
 }
 
@@ -2114,11 +2244,11 @@ mod set_running_gate_tests {
         .expect("insert workflow");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'p1_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'p1_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2203,11 +2333,11 @@ mod set_running_gate_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 started_at, created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'p1_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'p1_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'RUNNING', FALSE, $3, $4, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2326,7 +2456,7 @@ mod set_running_gate_tests {
             let node = Uuid::new_v4();
             sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key,on_error,depth,root_workflow_id,sent_at,created_at,updated_at) VALUES($1,'handoff_contract','RUNNING','handoff_contract','fail',0,$1,NOW(),NOW(),NOW())").bind(wf).execute(&pool).await.unwrap();
             if let Some(status) = status {
-                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,input,status,task_id,started_at,queue_name,priority,dependencies,allow_failed_deps,join_type,is_subworkflow,created_at,max_retries,execution,retention_class_key) VALUES($1,$2,0,'handoff_contract','null',$3,$4,timestamptz '2026-01-01','default',100,'{}',FALSE,'all',FALSE,NOW(),0,'ISOLATED','standard_30d')").bind(node).bind(wf).bind(status).bind(task).execute(&pool).await.unwrap();
+                sqlx::query("INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,task_name,input,status,task_id,started_at,queue_name,priority,dependencies,allow_failed_deps,join_type,is_subworkflow,created_at,max_retries,execution,retention_class_key) VALUES('NONE', $1,$2,0,'handoff_contract','null',$3,$4,timestamptz '2026-01-01','default',100,'{}',FALSE,'all',FALSE,NOW(),0,'ISOLATED','standard_30d')").bind(node).bind(wf).bind(status).bind(task).execute(&pool).await.unwrap();
             }
             seed_claimed(&pool, &task.to_string(), true).await;
             let claimed_at = generation(&pool, task).await;
@@ -2377,7 +2507,7 @@ mod set_running_gate_tests {
         let task = Uuid::new_v4();
         let node = Uuid::new_v4();
         sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key,on_error,depth,root_workflow_id,sent_at,created_at,updated_at) VALUES($1,'handoff_race','RUNNING','handoff_contract','fail',0,$1,NOW(),NOW(),NOW())").bind(wf).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,input,status,task_id,queue_name,priority,dependencies,allow_failed_deps,join_type,is_subworkflow,created_at,max_retries,execution,retention_class_key) VALUES($1,$2,0,'handoff_race','null','ENQUEUED',$3,'default',100,'{}',FALSE,'all',FALSE,NOW(),0,'ISOLATED','standard_30d')").bind(node).bind(wf).bind(task).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,task_name,input,status,task_id,queue_name,priority,dependencies,allow_failed_deps,join_type,is_subworkflow,created_at,max_retries,execution,retention_class_key) VALUES('NONE', $1,$2,0,'handoff_race','null','ENQUEUED',$3,'default',100,'{}',FALSE,'all',FALSE,NOW(),0,'ISOLATED','standard_30d')").bind(node).bind(wf).bind(task).execute(&pool).await.unwrap();
         seed_claimed(&pool, &task.to_string(), true).await;
         let claimed_at = generation(&pool, task).await;
         let mut held = pool.begin().await.unwrap();
@@ -2462,7 +2592,6 @@ mod prestart_expiry_tests {
     fn a_workflow_task_expired_before_start_owes_its_phase_two() {
         let work = phase2_after_prestart_expiry(Uuid::nil(), "q".to_owned(), true)
             .expect("phase 2 is owed");
-        assert!(!work.is_success);
         assert!(work.is_workflow_task);
     }
 }

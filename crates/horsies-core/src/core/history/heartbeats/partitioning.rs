@@ -26,7 +26,7 @@ use crate::core::history::partitions::locks::{
 };
 use crate::core::history::partitions::manager::{
     detach_expired_leaf, drop_detached_leaf, inspect_leaf, remove_attached_index_for_repair,
-    DetachExpiredLeafOutcome, IndexRepairRemoval, NoQuarantine,
+    DetachExpiredLeafOutcome, IndexRepairRemoval,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::HeartbeatHorizonHours;
@@ -511,15 +511,13 @@ async fn sweep_heartbeat_leaf<P: LoaderPublication>(
     publisher: &P,
 ) -> Result<HeartbeatLeafSwept, HistoryError> {
     let detach_command =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(DETACH_STATEMENT_TIMEOUT_MS))
+        DetachExpiredHistoryLeaf::new(leaf.clone(), Some(DETACH_STATEMENT_TIMEOUT_MS))
             .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let detach = detach_expired_leaf(pool, &detach_command, publisher, &NoQuarantine).await?;
+    let detach = detach_expired_leaf(pool, &detach_command, publisher).await?;
     let detached = match &detach {
         DetachExpiredLeafOutcome::Detached { .. }
         | DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
-        DetachExpiredLeafOutcome::Busy { .. }
-        | DetachExpiredLeafOutcome::Inspection(_)
-        | DetachExpiredLeafOutcome::QuarantineRefused(_) => {
+        DetachExpiredLeafOutcome::Busy { .. } | DetachExpiredLeafOutcome::Inspection(_) => {
             let mut connection = pool.acquire().await?;
             matches!(
                 inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await?,

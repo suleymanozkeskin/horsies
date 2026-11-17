@@ -46,10 +46,14 @@ mod isolated_run_tests;
 mod isolated_stop_tests;
 #[cfg(test)]
 mod isolated_verdict_tests;
+#[cfg(test)]
+mod outcome_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod placement_tests;
 #[cfg(test)]
 mod plain_success_tests;
+#[cfg(test)]
+mod report_tests;
 #[cfg(test)]
 pub(crate) mod scripted;
 #[cfg(test)]

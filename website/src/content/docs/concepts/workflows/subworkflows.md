@@ -30,7 +30,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, TaskResult, TaskError, JsonValue
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 @app.task(task_name="fetch_data")
@@ -357,6 +357,10 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
 ```
 
 `build_with()` must build the `WorkflowSpec` from its arguments only. Do not call the network, a database or the file system in `build_with()`, and do not sleep in it. Put that work in an upstream `TaskNode`, and pass its result to `build_with()` through `args_from`.
+
+The `build_with()` of a `SubWorkflowNode` with no `waits_for` runs when its parent starts, before the start writes anything. It also runs when the start finds that a workflow with the given `workflow_id` exists already, and then the start writes nothing.
+
+If the parent has `on_error=OnError.PAUSE`, the start takes the `SubWorkflowNode`s with no `waits_for` in node order. When one of them cannot build its child, or its child fails at the start, the start pauses the parent and does not write the children that `build_with()` built for the later ones. Their nodes stay `READY`, and `handle.resume()` runs `build_with()` again and starts the children.
 
 :::note[Queue and priority binding]
 A `build_with()` that returns a `WorkflowSpec(...)` directly does not run the
@@ -1051,7 +1055,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 

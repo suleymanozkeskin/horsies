@@ -359,7 +359,7 @@ impl Drop for KillOnDrop {
             DropKill::Disarmed => {}
             DropKill::Armed => {
                 // The answer is not awaited: the spawner kills the session
-                // of a child it has not reaped, and the reader ends at the
+                // of the child, reaped or not, and the reader ends at the
                 // EOF that follows.
                 if let Err(refused) = self.spawner.request_kill(self.child) {
                     tracing::error!(

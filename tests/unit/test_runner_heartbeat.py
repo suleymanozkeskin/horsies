@@ -904,7 +904,7 @@ async def test_failed_writes_are_logged_at_most_once_per_log_interval(
 
 def _worker(recovery: RecoveryConfig | None = None) -> Worker:
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
         recovery_config=recovery,
