@@ -115,7 +115,7 @@ class CoreHandle:
         """Write the end of an attempt whose child ended without a result (claimed-row rule
         RELEASE). Writes, in one statement.
         """
-    def complete_successes_async(self, request: SuccessBatchRequest) -> asyncio.Future[SuccessesWritten | BatchRolledBack | BatchCommitUnknown]:
+    def complete_successes_async(self, request: SuccessBatchRequest) -> asyncio.Future[SuccessesWritten | BatchNotSent | BatchRefused | BatchCommitUnknown]:
         """Write the plain successes of one request in one statement. Writes. Rows outside the
         function's contract raise PanicException.
         """
@@ -715,8 +715,19 @@ class SuccessesWritten:
 
 
 @final
-class BatchRolledBack:
-    """No row of the batch changed."""
+class BatchNotSent:
+    """No row of the batch changed, and the statement was not sent: the pools, the client
+    family check or the checkout failed.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class BatchRefused:
+    """No row of the batch changed: the server refused the statement. One row can be the cause."""
     @property
     def message(self) -> str: ...
     @property
