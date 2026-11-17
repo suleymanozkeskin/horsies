@@ -23,7 +23,7 @@ use horsies_core::{RegisteredTask, SchedulerService, SchedulerStartError, Schedu
 pub use horsies_core::SchedulerStop;
 
 use crate::check::{CheckReport, CheckScope, SCHEDULER_STARTUP};
-use crate::config::scheduler_manifest;
+use crate::config::{schedule_input_text, scheduler_manifest};
 use crate::registry::resolve_task_queue;
 use crate::signals::stop_on_signals;
 use crate::{ErrorCode, Horsies, HorsiesError, ScheduleConfig, TaskSchedule};
@@ -194,7 +194,7 @@ impl Horsies {
                 .with_help("name a queue of the app config in the schedule, or none"),
             );
         }
-        let input = input_text(schedule);
+        let input = schedule_input_text(schedule);
         if let Err(refused) = task.validate_input(input.as_bytes()) {
             return Some(
                 HorsiesError::new(format!(
@@ -252,17 +252,6 @@ fn schedule_queue(
         (None, Some(task_queue)) => Ok(task_queue.to_owned()),
         (None, None) => resolve_task_queue(app.config(), None),
     }
-}
-
-/// The input of each slot as one JSON text (`null` for a schedule without
-/// input), the text that the scheduler manifest stores. Pure.
-fn input_text(schedule: &TaskSchedule) -> String {
-    serde_json::to_string(&schedule.input).unwrap_or_else(|error| {
-        panic!(
-            "the input of schedule '{}' is a JSON value and encodes: {error}",
-            schedule.name
-        )
-    })
 }
 
 /// The refusal of an input over `payload.reject_bytes`: every slot sends

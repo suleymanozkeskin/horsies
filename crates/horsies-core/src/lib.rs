@@ -28,6 +28,8 @@ pub mod monitoring;
 pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
+mod stored_form_vectors;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(feature = "web")]
 pub mod web;
@@ -75,10 +77,10 @@ pub use crate::broker::{
     expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
     CheckInterruption, ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow,
     ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead,
-    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow,
-    TaskHandle, TaskInfoRead, TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
-    WORKER_PING_CHANNEL,
+    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
+    StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskHandle, TaskInfoRead,
+    TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong, WorkerPongPayload,
+    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
@@ -104,6 +106,11 @@ pub use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement,
     RetryRequest,
 };
+pub use crate::broker::child_writes::{
+    WriteDeadline, CANCELLED_WRITE_END, CHILD_REFUSAL_WRITES_BOUND, CHILD_STATEMENT_BOUND,
+    CHILD_WRITE_CHECKOUT_WAIT, FINALIZING_MARKER_BOUND, FINALIZING_MARKER_END,
+    PRE_START_CONFIRM_ATTEMPTS, START_ATTEMPT_BOUND, START_ATTEMPT_END,
+};
 pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, QueueStartCheck, QueueStarts,
     ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt,
@@ -118,8 +125,8 @@ pub use crate::broker::stale_recovery::{
     ThresholdMs, ThresholdOutOfRange, STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
 };
 pub use crate::broker::{
-    CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, SendKind,
-    WorkflowRetentionFailed, WorkflowRetentionPass,
+    CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, OrphanSelfHeal, SendKind,
+    StopBeforeStart, StopMove, WorkflowRetentionFailed, WorkflowRetentionPass,
 };
 pub use crate::core::history::enqueue::SendPart;
 pub use crate::worker::execution::FinalizingMark;
@@ -146,8 +153,12 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
-// The worker connection check of a client's live check (`check --live`).
-pub use crate::worker::connection_fit::check_worker_connections;
+// The worker connection check of a client's live check (`check --live`):
+// on a connected broker (the Rust client), and on a lazy handle (the Python
+// bridge).
+pub use crate::worker::connection_fit::{
+    check_handle_worker_connections, check_worker_connections,
+};
 pub use crate::worker::from_manifest::{WorkerPlan, WorkerPlanRefused};
 pub use crate::worker::run_end::{
     run_end_of, RunPhase, WorkerBootCause, WorkerFailCause, WorkerRunEnd,

@@ -63,7 +63,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.history.terminalization.move import (
-    ABANDON_OWNED_NODE_FUNCTION,
     EXPIRE_OWNED_FUNCTION,
     TASK_LOCK_SEED,
 )
@@ -516,7 +515,10 @@ async def test_a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_l
 async def shared_child_pool(
     broker: PostgresBroker,
 ) -> AsyncIterator[AsyncConnectionPool[psycopg.AsyncConnection[Any]]]:
-    """The async pool of a shared async child, on the loop of the test."""
+    """The async pool of a shared async child, on the loop of the test. The
+    sync pool of the child opens as well: the reference start of a dual-run
+    runs on it."""
+    _initialize_worker_pool(listener_of(broker).database_url)
     pool = await open_shared_async_pool(
         listener_of(broker).database_url,
         connect_kwargs={},
@@ -620,6 +622,7 @@ async def test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path(
             NODE_WORKER_ID,
             True,
             child_claimed_at,
+            orphan_self_heal=True,
         )
 
     with caplog.at_level(logging.ERROR):
@@ -649,11 +652,11 @@ async def test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path(
 
     async def start() -> StartResult:
         return await confirm_until_not_resumed(
-            shared_child_pool,
             task_id,
             NODE_WORKER_ID,
             True,
             child_claimed_at,
+            orphan_self_heal=True,
         )
 
     with caplog.at_level(logging.ERROR):
@@ -669,6 +672,11 @@ async def test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path(
     assert [status for status, _ in await _history(engine, task_id)] == ['EXPIRED']
 
 
+STOP_BEFORE_START_FUNCTION = 'horsies_workflow_task_stop_before_start'
+"""The function of the miss path of a workflow task, which locks the
+workflow row before any task lock."""
+
+
 async def _abandon_while_a_holder_locks_the_workflow(
     engine: AsyncEngine,
     workflow_id: str,
@@ -677,9 +685,9 @@ async def _abandon_while_a_holder_locks_the_workflow(
     """Run ``start`` while another transaction holds the workflow row.
 
     The holder locks the workflow row, as the cancel of a workflow does
-    first, and ``start`` begins. Once the start waits on a lock in the
-    abandon of its miss path, the holder locks the backing task rows, as
-    the cancel does next, and commits. Returns the error of that second
+    first, and ``start`` begins. Once the start waits on a lock in the stop
+    before start of its miss path, the holder locks the backing task rows,
+    as the cancel does next, and commits. Returns the error of that second
     lock of the holder (None: the holder got the rows) and the result of
     the start.
     """
@@ -692,7 +700,7 @@ async def _abandon_while_a_holder_locks_the_workflow(
             started = asyncio.ensure_future(start())
             await _until_a_backend_waits_on_a_lock(
                 engine,
-                ABANDON_OWNED_NODE_FUNCTION,
+                STOP_BEFORE_START_FUNCTION,
             )
             backing_lock_error = await _lock_error(
                 holder,
@@ -714,10 +722,10 @@ async def test_an_isolated_abandon_waits_for_the_workflow_without_task_locks(
     clean_workflow_tables: None,  # noqa: ARG001
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The workflow of a claimed task is PAUSED: the start returns no row,
-    the expiry does not apply, and the abandon waits for the workflow row,
-    which the holder locked as a cancel does. The holder then locks the
-    backing task rows: it gets them at once and commits, and the abandon
+    """The workflow of a claimed task is PAUSED: the start misses, and the
+    stop before start waits for the workflow row, which the holder locked as
+    a cancel does, before any task lock. The holder then locks the backing
+    task rows: it gets them at once and commits, and the abandon of the stop
     applies."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     workflow_id, task_id = await _seed_paused_workflow_with_claimed_node(
@@ -733,6 +741,7 @@ async def test_an_isolated_abandon_waits_for_the_workflow_without_task_locks(
             PAUSE_WORKER_ID,
             True,
             claimed_at,
+            orphan_self_heal=True,
         )
 
     with caplog.at_level(logging.ERROR):
@@ -772,11 +781,11 @@ async def test_a_shared_async_abandon_waits_for_the_workflow_without_task_locks(
 
     async def start() -> StartResult:
         return await confirm_until_not_resumed(
-            shared_child_pool,
             task_id,
             PAUSE_WORKER_ID,
             True,
             claimed_at,
+            orphan_self_heal=True,
         )
 
     with caplog.at_level(logging.ERROR):

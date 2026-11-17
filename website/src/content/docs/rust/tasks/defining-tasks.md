@@ -35,8 +35,9 @@ async fn validate_order(order: Order) -> Result<String, TaskError<OrderCode>> {
 }
 ```
 
-- The parameters form the input, stored as Python stores keyword arguments: a generated `Input` struct with one field per parameter, keyed by the parameter's name, a single parameter of any type included. `validate_order` stores `{"order": {"order_id": "...", "total_cents": ...}}`; `fn double(x: i64)` stores `{"x": 2}`. No parameter, or one parameter written `()`, is the input `()`: a send stores `null`, a workflow node `{}`.
+- The parameters form the input, stored as Python stores keyword arguments: a generated `Input` struct with one field per parameter, keyed by the parameter's name, a single parameter of any type included. `validate_order` stores `{"order": {"order_id": "...", "total_cents": ...}}`; `fn double(x: i64)` stores `{"x": 2}`. No parameter, or one parameter written `()`, is the input `()`: a send and a workflow node store `{}`, as Python stores no keyword arguments.
 - A parameter whose value is stored needs a name: `_` is a compile error for it.
+- A date-time of type `horsies::StoredDateTime<T>` (`T` is a chrono `DateTime<Tz>` or `NaiveDateTime`) is stored in Python's text: `2026-08-12T09:10:12.500000Z`. chrono's own serde form writes a whole millisecond with 3 digits (`…12.500Z`). Both clients read either text to the same value; use `StoredDateTime` in a parameter, the output type or a field of either when the stored bytes must equal Python's.
 - A first parameter of type `horsies::TaskRuntime` is not input: the body gets the runtime of the app. See [Task Runtime](#task-runtime).
 - A task with no codes of its own uses `TaskError<std::convert::Infallible>`. `TaskError` without its code type is a compile error.
 

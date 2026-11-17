@@ -1,38 +1,63 @@
-use horsies::{HorsiesError, WorkflowSpec};
-use serde_json::json;
+//! The supplier restock: read every supplier feed, then apply the stock
+//! levels once a quorum of feeds completed. The feeds reach the update
+//! through its workflow context. The workflow succeeds when the update
+//! completed; a feed may fail.
 
-use super::{builder, finish, success_policy, WorkflowTasks};
+use horsies::{
+    HorsiesError, SuccessCase, SuccessPolicy, WorkflowDefConfig, WorkflowDefinition,
+    WorkflowSpecBuilder,
+};
 
-pub fn build(tasks: &WorkflowTasks, suppliers: Vec<String>) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = builder("restock", "acme.restock.v1");
-    let mut refs = Vec::new();
-    let mut ids = Vec::new();
-    for supplier in &suppliers {
-        let id = format!("feed_{}", supplier.replace('-', "_"));
-        ids.push(id.clone());
-        refs.push(builder.task(tasks.node(
-            "sync_supplier_feed",
-            &id,
-            json!({"supplier": supplier}),
-        )?));
+use crate::domain::StockUpdate;
+use crate::tasks::inventory::{sync_supplier_feed, update_stock_levels};
+use crate::tuning;
+
+/// The node id of the feed of `supplier`.
+pub fn feed_node_id(supplier: &str) -> String {
+    format!("feed_{}", supplier.replace('-', "_"))
+}
+
+/// The restock workflow. Its result is the stock update.
+pub struct Restock;
+
+impl WorkflowDefinition for Restock {
+    type Output = StockUpdate;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "restock"
     }
-    let aggregate = builder.task(
-        tasks
-            .node(
-                "update_stock_levels",
-                "update_stock_levels",
-                json!({"feed_node_ids": ids}),
-            )?
-            .waits_for_all(refs.iter().copied())
-            .workflow_ctx_from(refs.iter().copied())
-            .join_quorum(crate::tuning::RESTOCK_MIN_SUCCESSFUL_FEEDS.min(suppliers.len()) as i32),
-    );
-    let mut spec = finish(builder, Some("update_stock_levels"), &[], &[], None)?;
-    spec.success_policy = Some(success_policy(
-        &["update_stock_levels"],
-        &ids.iter().map(String::as_str).collect::<Vec<_>>(),
-        &spec.tasks,
-    )?);
-    let _ = aggregate;
-    Ok(spec)
+
+    fn definition_key() -> &'static str {
+        "acme.restock.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let mut feeds = Vec::new();
+        let mut feed_ids = Vec::new();
+        for supplier in tuning::SUPPLIERS {
+            let node_id = feed_node_id(supplier);
+            feeds.push(
+                builder.task(sync_supplier_feed::node()?.node_id(node_id.clone()).set(
+                    sync_supplier_feed::params::supplier(),
+                    (*supplier).to_owned(),
+                )?),
+            );
+            feed_ids.push(node_id);
+        }
+        let quorum = u32::try_from(tuning::RESTOCK_MIN_SUCCESSFUL_FEEDS.min(feeds.len()))
+            .map_err(|_| HorsiesError::new("RESTOCK_MIN_SUCCESSFUL_FEEDS is above u32::MAX"))?;
+        let update = builder.task(
+            update_stock_levels::node()?
+                .node_id("update_stock_levels")
+                .set(update_stock_levels::params::feed_node_ids(), feed_ids)?
+                .waits_for_all(feeds.iter().copied())
+                .workflow_ctx_from(feeds.iter().copied())
+                .join_quorum(quorum),
+        );
+        let policy = SuccessPolicy::new(vec![SuccessCase::new([update])]).optional(feeds);
+        Ok(WorkflowDefConfig::new()
+            .output(update)
+            .success_policy(policy))
+    }
 }

@@ -233,6 +233,17 @@ class WorkerConfig:
             self.shared_thread_children(),
         )
 
+    def orphan_self_heal(self) -> bool:
+        """Whether the stop before start of a workflow task whose node is not
+        linked cancels the task: the app's
+        ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``, off with no
+        recovery config. Each run frame carries it to the child."""
+        match self.recovery_config:
+            case None:
+                return False
+            case recovery:
+                return recovery.auto_terminate_orphaned_workflow_tasks
+
     def seat_count(self) -> int:
         """The tasks that the children run at once: one per isolated child,
         and the seats of each shared child."""

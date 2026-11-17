@@ -124,10 +124,11 @@ class RecoveryConfig(BaseModel):
     - auto_requeue_stale_claimed: If True, automatically requeue tasks stuck in CLAIMED
     - claimed_stale_threshold_ms: Milliseconds without heartbeat before CLAIMED task is stale
     - auto_terminate_orphaned_workflow_tasks: If True (default), cancel orphaned workflow
-      tasks (CLAIMED, workflow_task linkage missing or terminal) at finalization and in the
-      reaper. If False, they are left CLAIMED for inspection — never requeued (futile, they
-      cannot reach RUNNING) and never deleted by retention (their workflow is retained while
-      the backing task is non-terminal). Orphans are never requeued regardless of this flag.
+      tasks (CLAIMED, workflow_task linkage missing or terminal) when their start misses in
+      the child and in the reaper. If False, they are left CLAIMED for inspection — never
+      requeued (futile, they cannot reach RUNNING) and never deleted by retention (their
+      workflow is retained while the backing task is non-terminal). Orphans are never
+      requeued regardless of this flag.
     - auto_fail_stale_running: If True, automatically mark stale RUNNING tasks as FAILED
     - running_stale_threshold_ms: Milliseconds without heartbeat before RUNNING task is stale
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
@@ -159,7 +160,8 @@ class RecoveryConfig(BaseModel):
         default=True,
         description=(
             'Cancel orphaned workflow tasks (CLAIMED, workflow_task linkage missing '
-            'or terminal) at finalization and in the reaper. When False they are left '
+            'or terminal) when their start misses in the child and in the reaper. When '
+            'False they are left '
             'CLAIMED for inspection: never requeued (futile - they cannot reach RUNNING) '
             'and never deleted by retention while the backing task is non-terminal'
         ),

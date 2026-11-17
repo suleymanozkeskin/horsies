@@ -652,9 +652,7 @@ where
         TaskNode::new(TaskNodeParts {
             task_name: self.task_name().to_owned(),
             queue: self.queue_name().to_owned(),
-            task_options: self
-                .task_options()
-                .and_then(TaskOptions::serialize_retry_options),
+            task_options: self.task_options().map(TaskOptions::stored_options_text),
             accepts_workflow_ctx: self.accepts_workflow_ctx(),
             input_check: decode_check::<A>,
         })

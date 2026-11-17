@@ -22,7 +22,7 @@ mod workflow_input;
 /// (`#[derive(horsies::UserErrorCode)]`, or `std::convert::Infallible`).
 /// Its parameters form the input, stored as Python stores keyword
 /// arguments: no parameter, or one parameter written `()`, is `()` (a send
-/// stores `null`); any other parameters are a generated `Input` struct with
+/// stores `{}`); any other parameters are a generated `Input` struct with
 /// one field per parameter, keyed by the parameter's name. A single
 /// parameter is wrapped whatever its type: `fn double(x: i64)` stores
 /// `{"x": 2}`, and `fn validate_order(order: Order)` stores `{"order":

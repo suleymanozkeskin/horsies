@@ -1,29 +1,33 @@
-//! Acme domain rows and task payloads.
+//! Acme domain rows, task payloads, and the error codes of the Acme tasks.
 
 use chrono::{DateTime, Utc};
+use horsies::UserErrorCode;
 use serde::{Deserialize, Serialize};
 
-pub const CARD_DECLINED: &str = "CARD_DECLINED";
-pub const PSP_UNAVAILABLE: &str = "PSP_UNAVAILABLE";
-pub const PAYMENT_ALREADY_CAPTURED: &str = "PAYMENT_ALREADY_CAPTURED";
-pub const INSUFFICIENT_STOCK: &str = "INSUFFICIENT_STOCK";
-pub const UNKNOWN_SKU: &str = "UNKNOWN_SKU";
-pub const ORDER_NOT_FOUND: &str = "ORDER_NOT_FOUND";
-pub const ORDER_CLOSED: &str = "ORDER_CLOSED";
-pub const SHIPMENT_NOT_FOUND: &str = "SHIPMENT_NOT_FOUND";
-pub const RETURN_NOT_FOUND: &str = "RETURN_NOT_FOUND";
-pub const DAMAGED_ITEM: &str = "DAMAGED_ITEM";
-pub const NO_WORKFLOW_CONTEXT: &str = "NO_WORKFLOW_CONTEXT";
-pub const QUORUM_NOT_MET: &str = "QUORUM_NOT_MET";
-pub const CDN_REJECTED: &str = "CDN_REJECTED";
-pub const ORIGIN_REJECTED: &str = "ORIGIN_REJECTED";
-pub const SEARCH_INDEX_STALE: &str = "SEARCH_INDEX_STALE";
-pub const RECONCILIATION_MISMATCH: &str = "RECONCILIATION_MISMATCH";
-pub const COURIER_UNAVAILABLE: &str = "COURIER_UNAVAILABLE";
-pub const SUPPLIER_TIMEOUT: &str = "SUPPLIER_TIMEOUT";
-pub const DATA_CORRUPTION: &str = "DATA_CORRUPTION";
-pub const LOYALTY_ENGINE_BUG: &str = "LOYALTY_ENGINE_BUG";
-pub const STORE_UNAVAILABLE: &str = "STORE_UNAVAILABLE";
+/// The codes of the Acme tasks' own errors. Each code is the variant name in
+/// UPPER_SNAKE_CASE (`CardDeclined` is `CARD_DECLINED`). Every Acme task
+/// returns `TaskError<AcmeCode>`, so a node can read the result of any other
+/// Acme node with this code type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, UserErrorCode)]
+pub enum AcmeCode {
+    CardDeclined,
+    PspUnavailable,
+    PaymentAlreadyCaptured,
+    InsufficientStock,
+    UnknownSku,
+    OrderNotFound,
+    OrderClosed,
+    ShipmentNotFound,
+    ReturnNotFound,
+    DamagedItem,
+    NoWorkflowContext,
+    QuorumNotMet,
+    CourierUnavailable,
+    SupplierTimeout,
+    DataCorruption,
+    LoyaltyEngineBug,
+    StoreUnavailable,
+}
 
 pub type OrderStatus = String;
 pub type PaymentKind = String;

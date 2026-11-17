@@ -2,6 +2,7 @@
 
 pub mod attempt_writes;
 pub mod bound_handle;
+pub mod child_writes;
 pub mod claims;
 pub mod class_budgets;
 pub mod class_coverage;
@@ -58,6 +59,7 @@ mod workflow_operations;
 pub mod workflow_phase2;
 mod workflow_reads;
 pub mod workflow_start;
+pub(crate) mod workflow_stop_before_start;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
@@ -83,14 +85,14 @@ pub use partition_maintenance::{CoveragePassError, PrunePassError};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ConnectivityRefusal, ListenProbeFailure, PostgresBroker, PrestartExpiry,
-    SchemaInitializationMode, WorkflowStop, WorkflowStopBeforeStart,
+    SchemaInitializationMode,
 };
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
 pub use result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
-    TaskInfoRead,
+    StoredEnvelopeRefused, StoredEnvelopeText, TaskInfoRead,
 };
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow};
@@ -100,3 +102,4 @@ pub use slot_health::{
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 pub use workflow_operations::{WorkflowRetentionFailed, WorkflowRetentionPass};
+pub use workflow_stop_before_start::{OrphanSelfHeal, StopBeforeStart, StopMove};

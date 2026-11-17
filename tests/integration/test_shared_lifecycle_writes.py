@@ -1,9 +1,10 @@
 """The lifecycle writes of a shared async child against a real database.
 
-A shared async child sets its row RUNNING, writes the first runner heartbeat
-and marks the row finalizing on an async connection pool that it opens on its
-event loop. These tests run those writes, with the real statements and the
-real terminalization functions, on such a pool.
+A shared async child sets its row RUNNING and writes the first runner
+heartbeat through the awaitable methods of its core handle, and marks the
+row finalizing on an async connection pool that it opens on its event loop.
+These tests run those writes, with the real functions, on the core handle of
+the suite and on such a pool.
 """
 
 # pyright: reportPrivateUsage=false
@@ -28,13 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.worker import shared_lifecycle
-from horsies.core.worker.child_pool import open_shared_async_pool
-from horsies.core.worker.child_runner import _PRE_START_CONFIRM_ATTEMPTS
+from horsies.core.worker.child_pool import _initialize_worker_pool, open_shared_async_pool
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
 )
 from tests.broker_resources_support import listener_of
+from tests.fixtures.child_core import wait_for_start_statements_to_end
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.test_pause_abandon_after_resume import (
     WORKER_ID as PAUSE_WORKER_ID,
@@ -56,6 +57,10 @@ WORKER_ID = 'shared-lifecycle-worker'
 async def shared_pool(
     broker: PostgresBroker,
 ) -> AsyncGenerator[AsyncConnectionPool[AsyncConnection[Any]], None]:
+    """The async pool of the child for the finalizing marker. The sync pool
+    of the child opens as well: the reference start of a dual-run runs on
+    it."""
+    _initialize_worker_pool(listener_of(broker).database_url)
     pool = await open_shared_async_pool(
         listener_of(broker).database_url,
         connect_kwargs={},
@@ -140,11 +145,11 @@ async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
 
     started = await confirm_until_not_resumed(
-        shared_pool,
         task_id,
         WORKER_ID,
         False,
         claimed_at,
+        orphan_self_heal=True,
     )
     running = await _row(session, task_id)
     await session.commit()
@@ -163,15 +168,17 @@ async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound(
     session: AsyncSession,
-    shared_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    shared_pool: AsyncConnectionPool[AsyncConnection[Any]],  # noqa: ARG001
     clean_workflow_tables: None,  # noqa: ARG001
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Another session holds the row lock. Each attempt of the RUNNING
-    transition ends at its bound: the run stops before user code with
-    OWNERSHIP_UNCONFIRMED, the row stays CLAIMED, and the pool serves the
-    next write once the lock is gone."""
-    monkeypatch.setattr(shared_lifecycle, 'RUNNING_ATTEMPT_TIMEOUT_S', 0.5)
+    """Another session holds the row lock. The core sends the cancel request
+    of the start at its statement bound (``RUNNING_STATEMENTS_TIMEOUT_S``):
+    the run stops before user code with OWNERSHIP_UNCONFIRMED, before the
+    wait of the seat (``RUNNING_ATTEMPT_TIMEOUT_S``) ends. The cancelled
+    start does not commit once the lock is gone: the row stays CLAIMED with
+    no beat."""
+    statements_s = shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
+    cancel_end_s = shared_lifecycle.CANCELLED_WRITE_END_S
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     await session.execute(
@@ -183,34 +190,23 @@ async def test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound(
     try:
         result = await asyncio.wait_for(
             confirm_until_not_resumed(
-                shared_pool,
                 task_id,
                 WORKER_ID,
                 False,
                 claimed_at,
+                orphan_self_heal=True,
             ),
-            timeout=10.0,
+            timeout=shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S + cancel_end_s,
         )
+        elapsed_s = time.monotonic() - started
     finally:
         await session.rollback()
-    elapsed_s = time.monotonic() - started
 
     assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
-    assert elapsed_s < _PRE_START_CONFIRM_ATTEMPTS * (
-        0.5 + shared_lifecycle.CANCELLED_WRITE_END_S
-    )
+    assert statements_s <= elapsed_s < statements_s + cancel_end_s
+    assert await wait_for_start_statements_to_end(session) == 0
     assert (await _row(session, task_id)).status == 'CLAIMED'
     assert await _runner_beats(session, task_id) == []
-    assert (
-        await confirm_until_not_resumed(
-            shared_pool,
-            task_id,
-            WORKER_ID,
-            False,
-            claimed_at,
-        )
-        is None
-    )
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -223,11 +219,11 @@ async def test_a_claim_of_another_generation_is_lost(
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
 
     result = await confirm_until_not_resumed(
-        shared_pool,
         task_id,
         WORKER_ID,
         False,
         claimed_at - timedelta(seconds=30),
+        orphan_self_heal=True,
     )
 
     assert result == (False, '', 'CLAIM_LOST')
@@ -249,11 +245,11 @@ async def test_a_claim_past_its_deadline_expires_before_start(
     )
 
     result = await confirm_until_not_resumed(
-        shared_pool,
         task_id,
         WORKER_ID,
         False,
         claimed_at,
+        orphan_self_heal=True,
     )
 
     assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
@@ -273,11 +269,11 @@ async def test_a_paused_workflow_abandons_the_claim_through_the_async_path(
     )
 
     result = await confirm_until_not_resumed(
-        shared_pool,
         task_id,
         PAUSE_WORKER_ID,
         True,
         claimed_at,
+        orphan_self_heal=True,
     )
 
     assert result == (False, '', 'WORKFLOW_STOPPED')
@@ -295,22 +291,61 @@ async def test_a_failed_workflow_check_undoes_the_running_update(
     shared_pool: AsyncConnectionPool[AsyncConnection[Any]],
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The pool is in autocommit, and a workflow task's start runs in its own
-    transaction: a node that is not linked rolls back the RUNNING update and
-    its first beat."""
+    """A workflow task's start is one statement: a node that is not linked
+    writes no RUNNING update and no first beat. With the orphan self-heal of
+    the run off, the stop before start leaves the row CLAIMED."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
     task_id = await _seed_claimed_workflow_task(session, claimed_at)
     await _seed_running_workflow_with_node(session, task_id, 'COMPLETED')
     await session.commit()
 
     result = await confirm_until_not_resumed(
-        shared_pool,
         task_id,
         NODE_WORKER_ID,
         True,
         claimed_at,
+        orphan_self_heal=False,
     )
 
     assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
     assert (await _row(session, task_id)).status == 'CLAIMED'
+    assert await _runner_beats(session, task_id) == []
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_node_that_is_not_linked_with_the_self_heal_on_cancels_the_orphan(
+    session: AsyncSession,
+    shared_pool: AsyncConnectionPool[AsyncConnection[Any]],  # noqa: ARG001
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """With the orphan self-heal of the run on, the stop before start moves
+    the row to history as CANCELLED (CANCEL_ORPHAN): no RUNNING update, no
+    first beat."""
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    task_id = await _seed_claimed_workflow_task(session, claimed_at)
+    await _seed_running_workflow_with_node(session, task_id, 'COMPLETED')
+    await session.commit()
+
+    result = await confirm_until_not_resumed(
+        task_id,
+        NODE_WORKER_ID,
+        True,
+        claimed_at,
+        orphan_self_heal=True,
+    )
+
+    assert result == (False, '', 'ORPHAN_CANCELLED')
+    assert await _row(session, task_id) is None
+    history = (
+        await session.execute(
+            text("""
+                SELECT status::text AS status,
+                       terminalization_kind::text AS terminalization_kind
+                FROM horsies_task_history
+                WHERE task_id = CAST(:id AS uuid)
+            """),
+            {'id': task_id},
+        )
+    ).one()
+    assert (history.status, history.terminalization_kind) == ('CANCELLED', 'CANCEL_ORPHAN')
     assert await _runner_beats(session, task_id) == []

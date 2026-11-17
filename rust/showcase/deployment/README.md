@@ -22,7 +22,11 @@ install -D -m 0755 \
 
 The build requires a Rust toolchain and network access for the first
 dependency download. The target must be `x86_64-unknown-linux-gnu` on the
-Ubuntu x86_64 host. The `web` feature embeds the monitoring SPA.
+Ubuntu x86_64 host. The `web` feature adds `acme web`, which serves the
+monitoring UI of horsies through `horsies::web::router`.
+
+The worker starts each child by running its own binary again, so the
+worker and its children run the same `acme` build.
 
 ## Environment contract
 

@@ -291,10 +291,6 @@ fn test_queue() -> String {
 }
 
 fn writer(pool: PgPool) -> OutcomeWriter {
-    writer_with_self_heal(pool, OrphanSelfHeal::On)
-}
-
-fn writer_with_self_heal(pool: PgPool, orphan_self_heal: OrphanSelfHeal) -> OutcomeWriter {
     let broker = Arc::new(PostgresBroker::from_pool(pool));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
@@ -306,7 +302,6 @@ fn writer_with_self_heal(pool: PgPool, orphan_self_heal: OrphanSelfHeal) -> Outc
         PayloadPolicy::default(),
         RetentionConfig::default(),
         successes,
-        orphan_self_heal,
     )
 }
 
@@ -775,40 +770,19 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
     }
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_enabled_cancels_the_orphan`
-/// and `::test_orphan_cancel_fences_on_the_dispatched_generation`: a start
-/// that found no linked node cancels the owned orphan of this claim.
-#[tokio::test]
-#[serial]
-async fn a_task_whose_node_is_not_linked_is_cancelled_when_the_self_heal_is_on() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let queue = test_queue();
-    let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
-
-    let settled = writer_with_self_heal(pool.clone(), OrphanSelfHeal::On)
-        .settle(
-            &claimed,
-            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
-        )
-        .await;
-
-    assert_eq!(settled, Settlement::Written);
-    let history = history_row(&pool, claimed.task_id).await;
-    assert_eq!(history["status"], "CANCELLED");
-    assert_eq!(history["error_code"], "WORKFLOW_CHECK_FAILED");
-    remove_task(&pool, claimed.task_id).await;
-}
-
 /// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
-/// with the self-heal off the row stays CLAIMED by this claim.
+/// a child reports `NODE_NOT_LINKED` only when its stop before start left
+/// the orphan, with the self-heal off; the worker writes nothing, and the
+/// row stays CLAIMED by this claim. The cancel with the self-heal on runs in
+/// the child (`child_host::start_node_tests`).
 #[tokio::test]
 #[serial]
-async fn a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off() {
+async fn a_task_whose_node_is_not_linked_stays_claimed() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
     let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
 
-    let settled = writer_with_self_heal(pool.clone(), OrphanSelfHeal::Off)
+    let settled = writer(pool.clone())
         .settle(
             &claimed,
             AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),

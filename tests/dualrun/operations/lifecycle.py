@@ -93,13 +93,6 @@ LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('audit_orphaned_workflow_tasks_async',),
     ),
-    DualRunOperation(
-        name='orphan self-heal',
-        production_path='horsies.core.worker.finalize:FinalizeMixin._cancel_owned_orphan',
-        reference_path='tests.dualrun.reference.expiry_and_orphans_caller:cancel_owned_orphan',
-        mode=PoolMode(),
-        core_methods=('cancel_owned_orphan_async',),
-    ),
 )
 
 

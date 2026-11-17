@@ -32,6 +32,8 @@ mod start_node_tests;
 #[cfg(test)]
 mod start_tests;
 #[cfg(test)]
+mod stored_form_vector_tests;
+#[cfg(test)]
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};

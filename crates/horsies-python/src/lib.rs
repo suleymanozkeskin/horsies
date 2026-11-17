@@ -184,6 +184,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<records::HandleClosed>()?;
     module.add_class::<operations::connectivity::ConnectivityPassed>()?;
     module.add_class::<operations::connectivity::ConnectivityRefused>()?;
+    module.add_class::<operations::worker_connections::WorkerConnectionError>()?;
     module.add_class::<IdMintRefused>()?;
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;
@@ -270,6 +271,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::finalizing::FinalizingMarked>()?;
     module.add_class::<operations::finalizing::FinalizingNotHeld>()?;
     module.add_class::<operations::finalizing::MarkFinalizingFailed>()?;
+    module.add_class::<operations::stop_before_start::StoppedBeforeStart>()?;
+    module.add_class::<operations::stop_before_start::ResumedBeforeStart>()?;
+    module.add_class::<operations::stop_before_start::StopBeforeStartFailed>()?;
     module.add_class::<operations::schema::SchemaInstalled>()?;
     module.add_class::<operations::schema::SchemaInstallNotRun>()?;
     module.add_class::<operations::schema::SchemaStatusRecord>()?;

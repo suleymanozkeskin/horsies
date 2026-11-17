@@ -25,6 +25,11 @@ use tokio_postgres::Row;
 /// outcome is unknown.
 pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// The longest time of the cancel request of a statement past its bound:
+/// the connection that carries the request and the request itself. The
+/// connect timeout of the URL bounds it too, when it is shorter.
+pub const CANCEL_REQUEST_BOUND: Duration = Duration::from_secs(5);
+
 /// The built-in PostgreSQL types a statement parameter may have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ParameterType {
@@ -309,7 +314,8 @@ pub enum StatementBound {
     /// A statement that runs long on a live connection is not bounded.
     ConnectionTimeouts,
     /// After this time the core sends a cancel request on a separate
-    /// connection and waits [`CANCEL_GRACE`] for the reply.
+    /// connection, within [`CANCEL_REQUEST_BOUND`], and waits
+    /// [`CANCEL_GRACE`] for the reply.
     CancelAfter(Duration),
 }
 

@@ -169,6 +169,7 @@ async def _finalize(worker: Worker, task_id: str, outcome: SharedOutcome) -> Non
         is_workflow_task=False,
         claim=claim,
         work=WORK,
+        orphan_self_heal=True,
     )
     handle = SharedHandle(request.frame_for(1), asyncio.get_running_loop())
     handle.finish(outcome)
