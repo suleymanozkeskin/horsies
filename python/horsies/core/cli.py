@@ -915,6 +915,11 @@ def worker_command(args: argparse.Namespace) -> None:
 
             broker: PostgresBroker | None = None
             try:
+                # A panic in a core background task aborts the worker
+                # process, and its supervisor restarts it. Set before the
+                # first core call of the process: the schema install of the
+                # schema broker runs through its core handle.
+                set_panic_rule('ABORT_PROCESS')
                 schema_broker = PostgresBroker(worker_postgres_config)
                 schema_broker.app = app
                 try:
@@ -935,10 +940,6 @@ def worker_command(args: argparse.Namespace) -> None:
                 finally:
                     await _close_broker(schema_broker, logger)
 
-                # A panic in a core background task aborts the worker
-                # process, and its supervisor restarts it. Set before the
-                # first core call of the process: the worker broker's.
-                set_panic_rule('ABORT_PROCESS')
                 broker = WorkerProcessBroker(worker_postgres_config)
                 broker.app = app
                 # A fresh broker on this loop: reaching the loop limit is a programmer error.
