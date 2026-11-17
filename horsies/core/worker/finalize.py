@@ -1648,7 +1648,9 @@ class FinalizeMixin:
                 # capacity and backlog (workers no longer listen on
                 # task_new). It is part of the first statement: when the
                 # server refuses it, the statement fails, and the error goes
-                # to the phase-2 error below, never past it.
+                # to the phase-2 error below, never past it. The payload is
+                # the constant that the baseline functions send; no receiver
+                # reads it.
                 await self._handle_workflow_task_if_needed(
                     s,
                     task_id,
@@ -1656,7 +1658,7 @@ class FinalizeMixin:
                     task_name=task_name,
                     wake=QueueWake(
                         channel=f'task_queue_{queue_name or "default"}',
-                        payload=f'capacity:{task_id}',
+                        payload='capacity',
                     ),
                 )
                 # The COMMIT delivers the NOTIFYs of the transaction.

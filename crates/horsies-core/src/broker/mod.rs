@@ -60,7 +60,7 @@ pub use health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
-pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
+pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop,

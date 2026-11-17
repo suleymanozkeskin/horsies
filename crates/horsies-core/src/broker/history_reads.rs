@@ -196,7 +196,6 @@ fn result_wire_row(row: &Row) -> Result<ResultWireRow, RowDecodeError> {
     Ok(ResultWireRow {
         location: column(row, statement, "location")?,
         status: column(row, statement, "status")?,
-        live_result: column(row, statement, "live_result")?,
         failed_reason: column(row, statement, "failed_reason")?,
         result_envelope_version: column(row, statement, "result_envelope_version")?,
         result_payload: column(row, statement, "result_payload")?,

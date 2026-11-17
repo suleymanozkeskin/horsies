@@ -9,8 +9,9 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::broker::history_reads::read_task_result;
+use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::history::partitions::catalog::read_attached_leaf_rows;
 use crate::core::history::reads::publisher::rendered_reader_signatures;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
 
@@ -234,26 +235,20 @@ async fn seed_two_classes(pool: &PgPool) -> (Uuid, Uuid) {
     (rows[0], rows[1])
 }
 
-async fn provenance_found(connection: &mut PgConnection, task_id: Uuid) -> bool {
-    sqlx::query_scalar("SELECT found FROM horsies_task_provenance_staged($1, FALSE)")
-        .bind(task_id)
-        .fetch_one(connection)
+/// Marks one reader as written by another renderer: its comment is not the
+/// stamp of the published manifest, so `horsies_history_readers_current()`
+/// answers FALSE and the next publication replaces it.
+async fn mark_reader_stale(connection: &mut PgConnection, signature: &str) {
+    sqlx::query(&format!("COMMENT ON FUNCTION {signature} IS 'stale'"))
+        .execute(connection)
         .await
-        .expect("call the provenance reader")
-}
-
-/// The manifest of the `standard_30d` leaves only: a publication that missed
-/// the other class.
-async fn single_class_manifest(connection: &mut PgConnection) -> LookupManifest {
-    let rows = read_attached_leaf_rows(connection, "standard_30d")
-        .await
-        .expect("read one class's leaves");
-    manifest_from_catalog(&rows, &HashSet::new()).expect("single-class manifest")
+        .expect("mark the reader stale");
 }
 
 /// `TestPublicationAtomicity.test_publisher_keeps_both_functions_in_agreement`:
-/// a provenance body rendered from a stale single-class manifest misses the
-/// other class's row; one republish renders it again and it finds the row.
+/// a provenance body that probes the `standard_30d` class only (a publication
+/// that missed the other class) misses the other class's row; one republish
+/// renders it again and it finds the row.
 #[tokio::test]
 #[serial]
 async fn one_republish_heals_a_stale_provenance_body() {
@@ -261,11 +256,21 @@ async fn one_republish_heals_a_stale_provenance_body() {
     let (row_a, row_b) = seed_two_classes(&database.pool).await;
     let mut transaction = database.pool.begin().await.expect("begin divergence");
     assert!(provenance_found(&mut transaction, row_b).await);
-    let manifest = single_class_manifest(&mut transaction).await;
-    sqlx::query(&render_staged_provenance_function(&manifest))
-        .execute(&mut *transaction)
-        .await
-        .expect("install a stale provenance body");
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+         RETURNS TABLE(task_id uuid, status text, terminal_at timestamp with time zone,
+                       terminalization_kind text, is_workflow_task boolean)
+         LANGUAGE sql STABLE STRICT AS $$
+             SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text,
+                 h.is_workflow_task
+             FROM horsies_task_history AS h
+             WHERE h.retention_class_key = 'standard_30d' AND h.task_id = p_task_id
+         $$",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect("install a stale provenance body");
+    mark_reader_stale(&mut transaction, "horsies_task_provenance_staged(uuid)").await;
     assert!(!provenance_found(&mut transaction, row_b).await);
 
     StagedLoaderPublisher
@@ -285,11 +290,19 @@ async fn one_republish_heals_a_stale_detail_body() {
     let database = TestDatabase::create().await;
     let (_, row_b) = seed_two_classes(&database.pool).await;
     let mut transaction = database.pool.begin().await.expect("begin divergence");
-    let manifest = single_class_manifest(&mut transaction).await;
-    sqlx::query(&render_staged_detail_function(&manifest))
-        .execute(&mut *transaction)
-        .await
-        .expect("install a stale detail body");
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION horsies_task_detail_staged(p_task_id uuid)
+         RETURNS TABLE(location text, task_row horsies_task_history)
+         LANGUAGE sql STABLE STRICT AS $$
+             SELECT 'HISTORY'::text, h
+             FROM horsies_task_history AS h
+             WHERE h.retention_class_key = 'standard_30d' AND h.task_id = p_task_id
+         $$",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect("install a stale detail body");
+    mark_reader_stale(&mut transaction, "horsies_task_detail_staged(uuid)").await;
     let diverged = read_task_detail(&mut transaction, row_b)
         .await
         .expect("read detail through the stale body");
@@ -342,7 +355,9 @@ async fn every_rendered_reader_runs_without_sequential_scans() {
 /// `TestStagedResultReader.test_a_reader_dropped_after_it_was_seen_fails_once`:
 /// a result reader removed out of band after a read saw it fails the next
 /// call once with an error; the call after it answers from the live and
-/// detail reads (decisions, 13 rule-following rows, row 8).
+/// detail reads (decisions, 13 rule-following rows, row 8). The reads run on
+/// one connection of a core pool, so the second read meets the statement
+/// that the first read prepared.
 #[tokio::test]
 #[serial]
 #[ignore = "waits on #838"]
@@ -357,24 +372,24 @@ async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
         Utc::now(),
     )
     .await;
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    let seen = read_task_result(&mut connection, task_id)
+    let reader = unpinged_single_connection_core_pool(&database.pool.connect_options());
+    let seen = read_task_result(&reader, StatementLog::Off, task_id)
         .await
         .expect("read through the published reader");
     assert!(matches!(seen, TaskResultRead::Live(_)), "{seen:?}");
     sqlx::query("DROP FUNCTION horsies_task_result_staged(uuid)")
-        .execute(&mut *connection)
+        .execute(&database.pool)
         .await
         .expect("drop the result reader out of band");
-    let first = read_task_result(&mut connection, task_id).await;
+    let first = read_task_result(&reader, StatementLog::Off, task_id).await;
     assert!(
         first.is_err(),
         "the first call after the drop fails: {first:?}"
     );
-    let second = read_task_result(&mut connection, task_id)
+    let second = read_task_result(&reader, StatementLog::Off, task_id)
         .await
         .expect("the next call answers");
     assert!(matches!(second, TaskResultRead::NotPublished), "{second:?}");
-    drop(connection);
+    reader.close();
     database.drop().await;
 }

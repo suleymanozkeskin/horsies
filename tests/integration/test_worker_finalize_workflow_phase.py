@@ -374,7 +374,7 @@ async def test_phase_two_wakes_the_queue_of_the_task_once(
         await listener.close()
 
     assert is_ok(result)
-    assert payloads == [f'capacity:{task_id}']
+    assert payloads == ['capacity']
 
 
 @pytest.mark.asyncio(loop_scope='function')

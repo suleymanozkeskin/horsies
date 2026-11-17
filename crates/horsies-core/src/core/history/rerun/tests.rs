@@ -493,9 +493,12 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
     let (workflow_task, workflow_id) = seed_source(&pool, TerminalSource::Failed, true, None).await;
     let mut corrupt_eligibility = pool.begin().await.unwrap();
+    // The baseline keeps the eligibility rule (no INLINE input on a completed
+    // or workflow row) in the shape check (0001_tables.sql,
+    // horsies_task_history_rerun_input_shape).
     sqlx::query(
         "ALTER TABLE horsies_task_history
-         DROP CONSTRAINT horsies_task_history_rerun_input_eligibility",
+         DROP CONSTRAINT horsies_task_history_rerun_input_shape",
     )
     .execute(&mut *corrupt_eligibility)
     .await
@@ -599,18 +602,28 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         crate::TaskAttemptOutcome::WorkerFailure
     );
 
-    sqlx::query("UPDATE horsies_tasks SET result = '[]' WHERE id = $1")
-        .bind(live)
-        .execute(&pool)
+    // A live row stores no result (0001_tables.sql): the stored result of a
+    // terminal task is in history. A stored result that is not a task result
+    // is INVALID_JSON_PAYLOAD.
+    let non_object = b"[]".to_vec();
+    sqlx::query(
+        "UPDATE horsies_task_history
+         SET result_payload = $2, result_digest = sha256($2)
+         WHERE task_id = $1",
+    )
+    .bind(completed)
+    .bind(&non_object)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let history_error = broker
+        .get_task_info(completed, true, false)
         .await
-        .unwrap();
-    let live_error = broker.get_task_info(live, true, false).await.unwrap_err();
-    assert_eq!(live_error.code, crate::BrokerErrorCode::InvalidJsonPayload);
-    sqlx::query("UPDATE horsies_tasks SET result = NULL WHERE id = $1")
-        .bind(live)
-        .execute(&pool)
-        .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(
+        history_error.code,
+        crate::BrokerErrorCode::InvalidJsonPayload
+    );
     let absent = Uuid::new_v4();
     assert!(matches!(
         broker

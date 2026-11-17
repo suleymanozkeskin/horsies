@@ -1179,7 +1179,7 @@ pub(crate) async fn finalize_workflow_phase(
             // same commit as the transition.
             let wake = match capacity_notified {
                 true => Phase2Wake::NoWake,
-                false => capacity_wake(queue_name, task_id),
+                false => capacity_wake(queue_name),
             };
             send_phase2_wake(broker.pool(), &wake)
                 .await
@@ -1194,14 +1194,20 @@ pub(crate) async fn finalize_workflow_phase(
     }
 }
 
-/// The capacity wake of `queue_name` for `task_id`: the workers of the
-/// queue check their capacity and backlog. It goes only to the queue's
-/// channel; workers do not listen on `task_new` (Python
+/// The payload of a capacity wake. The baseline functions send the same
+/// constant (`horsies/core/baseline/sql/0004_lifecycle_functions.sql:1064`,
+/// `:1510`; `0005_workflow_functions.sql:1972`). No receiver reads the
+/// payload on a queue channel: the claim loop subscribes by channel.
+const CAPACITY_WAKE_PAYLOAD: &str = "capacity";
+
+/// The capacity wake of `queue_name`: the workers of the queue check their
+/// capacity and backlog. It goes only to the queue's channel
+/// `task_queue_<queue>`; workers do not listen on `task_new` (Python
 /// `core/worker/finalize.py:1657-1660`).
-pub(crate) fn capacity_wake(queue_name: &str, task_id: Uuid) -> Phase2Wake {
+pub(crate) fn capacity_wake(queue_name: &str) -> Phase2Wake {
     Phase2Wake::Queue {
         channel: format!("task_queue_{queue_name}"),
-        payload: format!("capacity:{task_id}"),
+        payload: CAPACITY_WAKE_PAYLOAD.to_owned(),
     }
 }
 
@@ -1215,7 +1221,9 @@ pub(crate) fn capacity_wake(queue_name: &str, task_id: Uuid) -> Phase2Wake {
 /// | `SubworkflowReachable`, `NotKnown` | `BEGIN`; `horsies_workflow_node_finish(task, wake, 'READ')`; `horsies_workflow_child_start` per owed child start; `COMMIT` |
 ///
 /// `wake` is true when phase 1 did not send the capacity wake; the statement
-/// sends it, delivered at its commit.
+/// sends it on the channel of the node row's queue, delivered at its commit.
+/// A call that finds no phase-2 record (a replay) sends no wake
+/// (`horsies_workflow_node_apply`, `0005_workflow_functions.sql:1914-1919`).
 ///
 /// A retaining disposition (the stored result did not pass its check) writes
 /// nothing and is a phase-2 error that is not retried; phase-2 recovery

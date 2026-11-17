@@ -9,16 +9,13 @@
 //! Times that the engine compares with the database clock are set with
 //! `NOW()` in SQL, so the test clock never enters a comparison.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::client_family::ClientFamily;
-use crate::broker::migrations::install_schema;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -33,6 +30,7 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
@@ -78,18 +76,17 @@ pub(super) async fn shared_pool() -> PgPool {
     crate::broker::terminalization_matrix::migrated_pool().await
 }
 
-/// Prefix of the databases that [`IsolatedDatabase`] creates.
-const ISOLATED_DATABASE_PREFIX: &str = "core_wf_port_";
-
-/// Length of the hex suffix of a generated database name (a simple UUID).
-const ISOLATED_DATABASE_SUFFIX_LENGTH: usize = 32;
-
 /// Connections of one test pool.
 const TEST_POOL_CONNECTIONS: u32 = 5;
 
 /// History leaves the coverage pass creates ahead, in days and in hours.
 const COVERAGE_HISTORY_DAYS: u32 = 2;
 const COVERAGE_HEARTBEAT_HOURS: u32 = 2;
+
+/// The maintenance database of the test server: `ALTER DATABASE ...
+/// ALLOW_CONNECTIONS false` cannot run on a session of the database it
+/// changes.
+const ADMIN_DATABASE: &str = "postgres";
 
 // ---------------------------------------------------------------------------
 // Isolated database
@@ -99,36 +96,17 @@ const COVERAGE_HEARTBEAT_HOURS: u32 = 2;
 /// reads every workflow, so a test that runs one gets its own database, as
 /// the Python tests do (`isolated_test_database`).
 pub(super) struct IsolatedDatabase {
-    admin: PgConnection,
+    admin: tokio_postgres::Client,
     pub(super) pool: PgPool,
-    options: PgConnectOptions,
-    name: String,
+    database: TestDatabase,
 }
 
 impl IsolatedDatabase {
-    /// Creates, migrates and covers a new database, and records the core's
-    /// client family in it (a workflow start, pause, resume and cancel refuse
-    /// a database with no family row). Inactive databases that earlier runs
-    /// left behind are dropped first.
+    /// A copy of the installed test template (`crate::test_support`),
+    /// covered by the partition coverage pass.
     pub(super) async fn create() -> Self {
-        let shared_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        let base = PgConnectOptions::from_str(&shared_url).expect("parse the test database URL");
-        let mut admin = PgConnection::connect_with(&base.clone().database("postgres"))
-            .await
-            .expect("connect to the admin database");
-        lock_setup(&mut admin).await;
-        drop_inactive_databases(&mut admin).await;
-        let name = format!("{ISOLATED_DATABASE_PREFIX}{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create the isolated database");
-        unlock_setup(&mut admin).await;
-        let options = base.database(&name);
-        let pool = connect(&options).await;
-        install_schema(&pool, ClientFamily::Rust)
-            .await
-            .expect("install the schema of the isolated database");
+        let database = TestDatabase::create().await;
+        let pool = connect(database.url()).await;
         let coverage = ensure_partition_coverage_in_pool(
             &pool,
             COVERAGE_HISTORY_DAYS,
@@ -142,109 +120,47 @@ impl IsolatedDatabase {
             matches!(coverage, CoverageOutcome::Ensured(_)),
             "partition coverage of the isolated database: {coverage:?}"
         );
+        let admin =
+            crate::test_support::connect(&with_database(&server_url(), ADMIN_DATABASE)).await;
         Self {
             admin,
             pool,
-            options,
-            name,
+            database,
         }
     }
 
     /// A second pool on the same database: a process that did not share any
     /// state in memory with the first one.
     pub(super) async fn other_process_pool(&self) -> PgPool {
-        connect(&self.options).await
+        connect(self.database.url()).await
     }
 
     /// Allows or refuses new connections to the database. Connections that
     /// are open stay open, so a pool keeps working while a new connection,
     /// such as a listener's, is refused.
     pub(super) async fn allow_connections(&mut self, allowed: bool) {
-        sqlx::query(&format!(
-            "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS {allowed}",
-            self.name
-        ))
-        .execute(&mut self.admin)
-        .await
-        .expect("change ALLOW_CONNECTIONS of the isolated database");
+        self.admin
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS {allowed}",
+                self.database.name()
+            ))
+            .await
+            .expect("change ALLOW_CONNECTIONS of the isolated database");
     }
 
     /// Closes the pool and drops the database.
-    pub(super) async fn drop(mut self) {
+    pub(super) async fn drop(self) {
         self.pool.close().await;
-        lock_setup(&mut self.admin).await;
-        drop_database(&mut self.admin, &self.name, DropMode::Forced).await;
-        unlock_setup(&mut self.admin).await;
+        self.database.drop().await;
     }
 }
 
-async fn connect(options: &PgConnectOptions) -> PgPool {
+async fn connect(url: &str) -> PgPool {
     PgPoolOptions::new()
         .max_connections(TEST_POOL_CONNECTIONS)
-        .connect_with(options.clone())
+        .connect(url)
         .await
         .expect("connect the test pool")
-}
-
-async fn lock_setup(admin: &mut PgConnection) {
-    sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_workflow_port_database_setup'))")
-        .execute(admin)
-        .await
-        .expect("lock the database setup");
-}
-
-async fn unlock_setup(admin: &mut PgConnection) {
-    let unlocked: bool = sqlx::query_scalar(
-        "SELECT pg_advisory_unlock(hashtext('horsies_workflow_port_database_setup'))",
-    )
-    .fetch_one(admin)
-    .await
-    .expect("unlock the database setup");
-    assert!(unlocked, "the database setup lock was not held");
-}
-
-/// How a generated database is dropped.
-#[derive(Debug, Clone, Copy)]
-enum DropMode {
-    /// Only when no session uses it (a database of an earlier run).
-    InactiveOnly,
-    /// With `FORCE`: this test owns it.
-    Forced,
-}
-
-async fn drop_database(admin: &mut PgConnection, name: &str, mode: DropMode) {
-    let suffix = name
-        .strip_prefix(ISOLATED_DATABASE_PREFIX)
-        .expect("a generated database name starts with the prefix");
-    assert!(
-        suffix.len() == ISOLATED_DATABASE_SUFFIX_LENGTH
-            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "refuse to drop a database that this module did not generate: {name:?}"
-    );
-    let statement = match mode {
-        DropMode::InactiveOnly => format!("DROP DATABASE \"{name}\""),
-        DropMode::Forced => format!("DROP DATABASE \"{name}\" WITH (FORCE)"),
-    };
-    sqlx::query(&statement)
-        .execute(admin)
-        .await
-        .expect("drop the generated database");
-}
-
-async fn drop_inactive_databases(admin: &mut PgConnection) {
-    let stale: Vec<String> = sqlx::query_scalar(
-        "SELECT d.datname FROM pg_database d
-         WHERE left(d.datname, length($1)) = $1
-           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)
-         ORDER BY d.datname",
-    )
-    .bind(ISOLATED_DATABASE_PREFIX)
-    .fetch_all(&mut *admin)
-    .await
-    .expect("list inactive generated databases");
-    for name in stale {
-        drop_database(admin, &name, DropMode::InactiveOnly).await;
-    }
 }
 
 // ---------------------------------------------------------------------------

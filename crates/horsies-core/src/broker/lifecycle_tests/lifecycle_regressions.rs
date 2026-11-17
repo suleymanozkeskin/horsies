@@ -188,10 +188,9 @@ async fn future_failure_replay_of_a_plain_task_sends_no_second_wake() {
         ),
         "{first:?}"
     );
-    assert_eq!(
-        wakes.payloads(&pool).await,
-        vec![format!("capacity:{task_id}")]
-    );
+    // The wake contract: channel `task_queue_<queue>`, payload `capacity`,
+    // as the baseline write sends it (0004_lifecycle_functions.sql).
+    assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
 
     let replay = write_failed_attempt(&pool, &command).await.expect("replay");
 
@@ -305,10 +304,9 @@ async fn plain_worker_failure_wakes_the_queue_in_its_write() {
         ),
         "{outcome:?}"
     );
-    assert_eq!(
-        wakes.payloads(&pool).await,
-        vec![format!("capacity:{task_id}")]
-    );
+    // The wake contract: channel `task_queue_<queue>`, payload `capacity`,
+    // as the baseline write sends it (0004_lifecycle_functions.sql).
+    assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
     cleanup_tasks(&pool, &[task_id]).await;
 }
 

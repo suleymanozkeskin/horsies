@@ -528,22 +528,26 @@ mod resume_idempotency_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
+    /// A child row names its parent node (`horsies_workflows_parent_pair`) and sits one level below its
+    /// parent (`horsies_workflows_root_depth`).
     async fn insert_workflow(pool: &PgPool, id: &str, status: &str, parent: Option<&str>) {
         sqlx::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
-                definition_key, depth, root_workflow_id, parent_workflow_id,
+                definition_key, depth, root_workflow_id, parent_workflow_id, parent_task_index,
                 sent_at, created_at, started_at, updated_at
             ) VALUES (
                 $1::uuid, 'c8_wf', $2, 'fail', NULL,
-                'test.c8.v1', 0, $3::uuid, $4::uuid,
+                'test.c8.v1', $3, $4::uuid, $5::uuid, $6,
                 NOW(), NOW(), NOW(), NOW()
             )",
         )
         .bind(test_uuid(id))
         .bind(status)
+        .bind(if parent.is_some() { 1_i32 } else { 0_i32 })
         .bind(test_uuid(parent.unwrap_or(id)))
         .bind(parent.map(test_uuid))
+        .bind(parent.map(|_| 0_i32))
         .execute(pool)
         .await
         .expect("insert workflow");
@@ -888,7 +892,7 @@ mod p7_lifecycle_tests {
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                'NONE', $1, $2, 0, 'root', 'p7_lifecycle_task', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_lifecycle_task', '{}', 'default', 100, '{}', FALSE,
                 'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1284,8 +1288,19 @@ mod p7_lifecycle_tests {
         let child_id = Uuid::new_v4();
         seed_workflow(&pool, parent_id, "RUNNING", None).await;
         seed_workflow(&pool, child_id, "COMPLETED", Some(parent_id)).await;
-        sqlx::query("UPDATE horsies_workflows SET completed_at = NOW() WHERE id = $1")
+        // The stored result of a COMPLETED child with no output node: the outputless envelope (Python
+        // `core/workflows/engine.py:3946-3963`). A COMPLETED child with no result fails its parent node
+        // (Python `_completed_child_node`, `core/workflows/engine.py:3171-3222`).
+        let child_result = serde_json::json!({
+            "__h_task_result__": true,
+            "__h_outputless_terminals__": true,
+            "ok": {"results_by_id": {}, "task_name_by_id": {}, "definition_key_by_id": {}},
+            "err": null,
+        })
+        .to_string();
+        sqlx::query("UPDATE horsies_workflows SET result = $2, completed_at = NOW() WHERE id = $1")
             .bind(child_id)
+            .bind(&child_result)
             .execute(&pool)
             .await
             .unwrap();
@@ -1310,7 +1325,7 @@ mod p7_lifecycle_tests {
             &mut propagation,
             child_id,
             "COMPLETED",
-            None,
+            Some(child_result.as_str()),
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
