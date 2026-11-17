@@ -289,9 +289,13 @@ async fn a_detach_whose_bounds_differ_from_the_catalog_raises_and_frees_the_lock
     )
     .expect("shifted leaf ref");
     let command = DetachExpiredHistoryLeaf::new(shifted, Some(5_000)).expect("detach");
-    let error = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
-        .await
-        .expect_err("a ref that differs from the catalog is a caller defect");
+    let error = detach_expired_leaf(
+        &core_pool_for_test_pool(&database.pool),
+        StatementLog::Off,
+        &command,
+    )
+    .await
+    .expect_err("a ref that differs from the catalog is a caller defect");
     assert!(
         matches!(
             &error,
@@ -386,9 +390,13 @@ async fn a_fresh_leaf_is_not_expired_and_a_detach_keeps_it() {
         }
     );
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach");
-    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
-        .await
-        .expect("detach outcome");
+    let outcome = detach_expired_leaf(
+        &core_pool_for_test_pool(&database.pool),
+        StatementLog::Off,
+        &command,
+    )
+    .await
+    .expect("detach outcome");
     assert!(
         matches!(
             outcome,
@@ -417,19 +425,8 @@ async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
         LeafCreation::Created { .. }
     ));
     // One connection: the detach takes the session whose timeouts are set here.
-    let detach_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(test_options(&database))
-        .await
-        .expect("connect detach pool");
-    sqlx::query("SET statement_timeout = '13s'")
-        .execute(&detach_pool)
-        .await
-        .expect("set session statement timeout");
-    sqlx::query("SET lock_timeout = '17s'")
-        .execute(&detach_pool)
-        .await
-        .expect("set session lock timeout");
+    let detach_pool = crate::broker::pools::session_core_pool_for_test_pool(&database.pool, 1);
+    set_core_session_timeouts(&detach_pool, "13s", "17s").await;
 
     let mut holder = database.pool.begin().await.expect("begin parent holder");
     sqlx::query(&format!("LOCK TABLE {parent} IN SHARE MODE"))
@@ -440,7 +437,7 @@ async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
     let started = Instant::now();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader),
+        detach_expired_leaf(&detach_pool, StatementLog::Off, &command),
     )
     .await
     .expect("the detach returns")
@@ -458,18 +455,12 @@ async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
         elapsed < std::time::Duration::from_secs(3),
         "the detach waited {elapsed:?}"
     );
-    let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-        .fetch_one(&detach_pool)
-        .await
-        .expect("read statement timeout");
-    let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
-        .fetch_one(&detach_pool)
-        .await
-        .expect("read lock timeout");
-    assert_eq!(statement_timeout, "13s");
-    assert_eq!(lock_timeout, "17s");
+    assert_eq!(
+        core_session_timeouts(&detach_pool).await,
+        ("13s".to_owned(), "17s".to_owned())
+    );
     assert!(is_attached(&database.pool, leaf.leaf_name()).await);
-    detach_pool.close().await;
+    detach_pool.close();
     database.drop().await;
 }
 
@@ -489,12 +480,14 @@ async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
         LeafCreation::Created { .. }
     ));
     // `horsies_begin_leaf_detach` takes the session lock inside its call. The
-    // read of the session's lock timeout comes after it; the proxy holds that
+    // read of the session's timeouts comes after it; the proxy holds that
     // statement.
-    let (proxy, detach_pool, pause) = pausing_proxied_pool(&database, "SHOW lock_timeout").await;
+    let (proxy, proxied, pause) = pausing_proxied_pool(&database, "AS lock_timeout").await;
+    let detach_pool = crate::broker::pools::session_core_pool_for_test_pool(&proxied, 1);
+    proxied.close().await;
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach");
     let detach = tokio::spawn(async move {
-        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader).await
+        detach_expired_leaf(&detach_pool, StatementLog::Off, &command).await
     });
     pause.wait_until_entered().await;
 
@@ -906,7 +899,23 @@ async fn the_heartbeat_sweep_drops_leaves_across_a_fold() {
             "{created:?}"
         );
     }
-    let sweep = sweep_expired_heartbeat_leaves(&berlin, &UnpublishedLoader, 64)
+    // One connection, whose session runs in Europe/Berlin.
+    let berlin_core = crate::broker::pools::session_core_pool_for_test_pool(&berlin, 1);
+    {
+        let mut connection = berlin_core
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the Berlin core connection");
+        let _rows = connection
+            .query(
+                &SET_SESSION_TIMEZONE.bind().value(&DST_ZONE).finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("set the Berlin session time zone");
+    }
+    assert_eq!(core_session_timezone(&berlin_core).await, DST_ZONE);
+    let sweep = sweep_expired_heartbeat_leaves(&berlin_core, StatementLog::Off, 64)
         .await
         .expect("sweep expired heartbeat leaves");
     assert!(sweep.errors.is_empty(), "{:?}", sweep.errors);

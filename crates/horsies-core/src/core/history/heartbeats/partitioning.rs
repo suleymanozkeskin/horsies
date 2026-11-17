@@ -1,21 +1,19 @@
 //! Hourly heartbeat registration, create-ahead, and expiry sweep.
 
 use chrono::{DateTime, Duration, Timelike, Utc};
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 
-use crate::core::history::commands::{
-    is_safe_identifier, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, InspectHistoryLeaf,
-    LeafBounds, LeafRef, DETACH_STATEMENT_TIMEOUT_MS,
-};
+use crate::broker::core_rows::StatementLog;
+use crate::core::history::commands::{is_safe_identifier, LeafBounds, LeafRef};
 use crate::core::history::ddl::runtime_names::render_daily_leaf_ddl;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::pruning::{
-    sweep_counts_toward_bound, LeafSweep, PruneReach, MAX_PRUNE_CANDIDATES_PER_PASS,
+    pass_candidates, sweep_counts_toward_bound, sweep_retention_leaf, LeafSweep, PruneReach,
 };
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES,
 };
-use crate::core::history::outcomes::{CatalogConflictKind, LeafCreation, LeafDrop, LeafInspection};
+use crate::core::history::outcomes::{CatalogConflictKind, LeafCreation, LeafDrop};
 use crate::core::history::partitions::catalog::{
     database_now, read_leaf_catalog_row, read_leaf_physical_state, read_retention_class,
     LeafIndexKind, LeafPartitionBoundExpectation, RetentionClassKind, AT_LOWER_BOUND_KIND,
@@ -25,12 +23,11 @@ use crate::core::history::partitions::locks::{
     try_lock_leaf_for_transaction, try_lock_relation_exclusive_for_transaction, LeafLockAttempt,
 };
 use crate::core::history::partitions::manager::{
-    detach_expired_leaf, drop_detached_leaf, inspect_leaf, remove_attached_index_for_repair,
-    DetachExpiredLeafOutcome, IndexRepairRemoval,
+    remove_attached_index_for_repair, DetachExpiredLeafOutcome, IndexRepairRemoval,
 };
-use crate::core::history::partitions::publication::LoaderPublication;
-use crate::core::history::partitions::retirement::{read_prune_candidates, RetiredClassKind};
+use crate::core::history::partitions::retirement::RetiredClassKind;
 use crate::core::history::periods::HeartbeatHorizonHours;
+use crate::db::CorePool;
 
 const HOURLY: Duration = Duration::hours(1);
 const HORIZON_FLOOR: Duration = Duration::hours(1);
@@ -465,57 +462,16 @@ pub struct HeartbeatLeafSwept {
     pub drop: Option<LeafDrop>,
 }
 
-/// Detach one expired heartbeat leaf and drop it once detached. A leaf left
-/// detached by an earlier crash is dropped too.
-async fn sweep_heartbeat_leaf<P: LoaderPublication>(
-    pool: &PgPool,
-    leaf: &LeafRef,
-    publisher: &P,
-) -> Result<HeartbeatLeafSwept, HistoryError> {
-    let detach_command =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), Some(DETACH_STATEMENT_TIMEOUT_MS))
-            .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let detach = detach_expired_leaf(pool, &detach_command, publisher).await?;
-    let detached = match &detach {
-        DetachExpiredLeafOutcome::Detached { .. }
-        | DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
-        DetachExpiredLeafOutcome::Busy { .. } | DetachExpiredLeafOutcome::Inspection(_) => {
-            let mut connection = pool.acquire().await?;
-            matches!(
-                inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
-                LeafInspection::Detached { .. }
-            )
-        }
-    };
-    let drop = match detached {
-        true => {
-            let mut transaction = pool.begin().await?;
-            let outcome = drop_detached_leaf(
-                &mut transaction,
-                &DropDetachedHistoryLeaf::new(leaf.clone()),
-            )
-            .await?;
-            transaction.commit().await?;
-            Some(outcome)
-        }
-        false => None,
-    };
-    Ok(HeartbeatLeafSwept {
-        leaf_name: leaf.leaf_name().to_owned(),
-        detach,
-        drop,
-    })
-}
-
 /// Detach and drop the given expired heartbeat leaves, in the given order,
 /// until `max_acted_leaves` leaves count toward the bound
-/// (`sweep_counts_toward_bound`). A leaf whose sweep fails counts, since its
-/// effects are unknown; its error goes to the error list and the sweep goes
-/// on with the next leaf. `Truncated` when the bound left leaves for the next
-/// pass.
-pub(crate) async fn sweep_heartbeat_leaves<P: LoaderPublication>(
-    pool: &PgPool,
-    publisher: &P,
+/// (`sweep_counts_toward_bound`). Each leaf is swept as a period leaf is
+/// (`pruning::sweep_retention_leaf`). A leaf whose sweep fails counts, since
+/// its effects are unknown; its error goes to the error list and the sweep
+/// goes on with the next leaf. `Truncated` when the bound left leaves for the
+/// next pass.
+pub(crate) async fn sweep_heartbeat_leaves(
+    pool: &CorePool,
+    log: StatementLog,
     leaves: &[LeafRef],
     max_acted_leaves: usize,
 ) -> LeafSweep<HeartbeatLeafSwept> {
@@ -528,13 +484,14 @@ pub(crate) async fn sweep_heartbeat_leaves<P: LoaderPublication>(
             reach = PruneReach::Truncated;
             break;
         }
-        match sweep_heartbeat_leaf(pool, leaf, publisher).await {
-            Ok(entry) => {
-                acted += usize::from(sweep_counts_toward_bound(
-                    &entry.detach,
-                    entry.drop.as_ref(),
-                ));
-                swept.push(entry);
+        match sweep_retention_leaf(pool, log, leaf).await {
+            Ok((detach, drop)) => {
+                acted += usize::from(sweep_counts_toward_bound(&detach, drop.as_ref()));
+                swept.push(HeartbeatLeafSwept {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                    detach,
+                    drop,
+                });
             }
             Err(error) => {
                 acted += 1;
@@ -550,24 +507,22 @@ pub(crate) async fn sweep_heartbeat_leaves<P: LoaderPublication>(
     }
 }
 
-/// Sweep expired heartbeat leaves, oldest first, through a direct or
-/// session-capable pool: one candidate read (`horsies_prune_candidates`, at
-/// most `MAX_PRUNE_CANDIDATES_PER_PASS` leaves), then
-/// `sweep_heartbeat_leaves` over its heartbeat leaves. The `Err` side is a
-/// failed candidate read, which sweeps nothing. `Truncated` when the
+/// Sweep expired heartbeat leaves, oldest first, on a direct or
+/// session-capable core pool: one candidate read (`horsies_prune_candidates`,
+/// at most `MAX_PRUNE_CANDIDATES_PER_PASS` leaves), then
+/// `sweep_heartbeat_leaves` over its heartbeat leaves. `Truncated` when the
 /// candidate read or the leaf bound left expired leaves for the next pass.
-pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
-    pool: &PgPool,
-    publisher: &P,
+///
+/// Errors: the failed candidate read, which sweeps nothing.
+pub(crate) async fn sweep_expired_heartbeat_leaves(
+    pool: &CorePool,
+    log: StatementLog,
     max_acted_leaves: usize,
 ) -> Result<LeafSweep<HeartbeatLeafSwept>, HistoryError> {
-    let candidates = {
-        let mut connection = pool.acquire().await?;
-        read_prune_candidates(&mut connection, MAX_PRUNE_CANDIDATES_PER_PASS).await?
-    };
+    let candidates = pass_candidates(pool, log).await?;
     let sweep = sweep_heartbeat_leaves(
         pool,
-        publisher,
+        log,
         &candidates.of_kind(RetiredClassKind::Heartbeat),
         max_acted_leaves,
     )

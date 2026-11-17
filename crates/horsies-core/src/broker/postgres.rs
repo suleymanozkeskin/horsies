@@ -36,9 +36,9 @@ use crate::broker::enqueue_task::{
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError, EnqueueRefusal};
 use crate::broker::health::{
-    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
-    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    checked_history_limit, read_listed_worker_states, read_worker_snapshot, read_worker_snapshots,
+    DatabasePing, ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload,
+    WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
@@ -2419,11 +2419,7 @@ impl PostgresBroker {
         worker_id: &str,
         limit: Option<i64>,
     ) -> BrokerResult<Vec<WorkerStateSnapshot>> {
-        if let Some(refused) = limit.filter(|value| *value <= 0) {
-            return Err(invalid_input(format!(
-                "limit must be positive when set, got {refused}"
-            )));
-        }
+        let limit = checked_history_limit(limit)?;
         let rows = self
             .read_main(
                 &GET_WORKER_STATE_HISTORY

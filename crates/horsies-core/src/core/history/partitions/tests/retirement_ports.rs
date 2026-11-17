@@ -59,9 +59,13 @@ async fn a_drop_of_a_ref_that_differs_from_the_catalog_rolls_back() {
     let leaf = expired_leaf(&database.pool, &parent, class_key, 5).await;
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None).expect("detach command");
     assert!(matches!(
-        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
-            .await
-            .expect("detach the leaf"),
+        detach_expired_leaf(
+            &core_pool_for_test_pool(&database.pool),
+            StatementLog::Off,
+            &command
+        )
+        .await
+        .expect("detach the leaf"),
         DetachExpiredLeafOutcome::Detached { .. }
     ));
     let stale = LeafRef::new(leaf.leaf_name(), "standard_7d", leaf.bounds().clone())
@@ -102,9 +106,13 @@ async fn finalize_records_a_detach_made_out_of_band() {
     assert!(!detached_at_is_set(&database.pool, &leaf).await);
 
     let command = FinalizeInterruptedLeafDetach::new(leaf.clone(), None).expect("finalize");
-    let outcome = finalize_interrupted_detach(&database.pool, &command, &UnpublishedLoader)
-        .await
-        .expect("finalize outcome");
+    let outcome = finalize_interrupted_detach(
+        &core_pool_for_test_pool(&database.pool),
+        StatementLog::Off,
+        &command,
+    )
+    .await
+    .expect("finalize outcome");
 
     assert!(
         matches!(
@@ -130,9 +138,13 @@ async fn a_held_leaf_lock_makes_the_detach_and_the_drop_busy() {
     let other = expired_leaf(&database.pool, &parent, class_key, 6).await;
     let detach_other = DetachExpiredHistoryLeaf::new(other.clone(), None).expect("detach other");
     assert!(matches!(
-        detach_expired_leaf(&database.pool, &detach_other, &UnpublishedLoader)
-            .await
-            .expect("detach the other leaf"),
+        detach_expired_leaf(
+            &core_pool_for_test_pool(&database.pool),
+            StatementLog::Off,
+            &detach_other
+        )
+        .await
+        .expect("detach the other leaf"),
         DetachExpiredLeafOutcome::Detached { .. }
     ));
 
@@ -150,7 +162,11 @@ async fn a_held_leaf_lock_makes_the_detach_and_the_drop_busy() {
     let detach = DetachExpiredHistoryLeaf::new(leaf.clone(), None).expect("detach command");
     let busy_detach = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader),
+        detach_expired_leaf(
+            &core_pool_for_test_pool(&database.pool),
+            StatementLog::Off,
+            &detach,
+        ),
     )
     .await
     .expect("a busy detach does not wait")
