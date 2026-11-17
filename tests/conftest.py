@@ -12,6 +12,10 @@ from dotenv import load_dotenv
 # Load test environment before any test module imports
 load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env.test')
 
+# The integration dual-run of a module switch (--dual-run=<module>). It
+# imports no horsies module at import.
+pytest_plugins = ('tests.dualrun.operations.plugin',)
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers, and create the session database when needed.
@@ -69,5 +73,7 @@ def no_library_data_refusal(request: pytest.FixtureRequest) -> Iterator[None]:
     codec_logger.addHandler(handler)
     yield
     codec_logger.removeHandler(handler)
-    if request.node.get_closest_marker('allow_library_data_refusal') is None:
+    node: object = getattr(request, 'node')
+    assert isinstance(node, pytest.Item), f'a function fixture request has a test item: {node!r}'
+    if node.get_closest_marker('allow_library_data_refusal') is None:
         assert handler.messages == []
