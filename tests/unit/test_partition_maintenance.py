@@ -86,7 +86,7 @@ class TestPruningWiring:
 
         source = inspect.getsource(ReaperMixin._run_reaper_pass)  # pyright: ignore[reportPrivateUsage]
         positions = [
-            source.index('maintain_partition_coverage('),
+            source.index('self._run_partition_coverage('),
             source.index('prune_expired_partitions('),
             source.index('state.next_partition_maintenance_at = ('),
         ]

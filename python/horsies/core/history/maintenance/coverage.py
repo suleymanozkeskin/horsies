@@ -27,12 +27,23 @@ import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Final
+from enum import Enum
+from typing import Any, Final, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies._core import (
+    CoreHandle,
+    CoverageEnsuredRecord,
+    CoverageEnsureFailedRecord,
+    CoverageFailed,
+    CoverageRequest,
+    CoveredForeverRecord,
+    CoveredUntilRecord,
+)
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok
 
 from ..commands import (
@@ -1078,6 +1089,121 @@ async def ensure_startup_coverage_in_database(
         history_horizon_days=history_horizon_days,
         heartbeat_horizon_hours=heartbeat_horizon_hours,
         declared_classes=declared_classes,
+    )
+    if not outcome.heartbeat_covered_now:
+        return StartupCoverageRefused(outcome=outcome)
+    return outcome
+
+
+class CoverageSerialization(Enum):
+    """How a damaged coverage pass of the core is serialized against other passes."""
+
+    GATED = 'GATED'
+    """Worker startup: a damaged pass takes the coverage gate when the core
+    pool has two connections or more; a pass that finds the gate busy repairs
+    nothing (``serialize_damaged_work=True``)."""
+
+    PER_LEAF_LOCKS = 'PER_LEAF_LOCKS'
+    """The reaper's periodic pass: no gate; the per-leaf locks contain an
+    overlap with a startup pass (``serialize_damaged_work=False``)."""
+
+
+COVERAGE_SUBJECT: Final = 'CoreHandle.ensure_partition_coverage_async'
+"""The subject of a ``CoreOperationFailed`` of the core coverage pass."""
+
+
+def _history_coverage_of_record(
+    record: CoveredForeverRecord | CoveredUntilRecord,
+) -> HistoryCoverage:
+    """The ``HistoryCoverage`` of a core record. Pure."""
+    match record:
+        case CoveredForeverRecord():
+            return CoveredForever()
+        case CoveredUntilRecord(at=at):
+            return CoveredUntil(at=at)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def maintain_partition_coverage_in_core(
+    handle: CoreHandle,
+    *,
+    history_horizon_days: int,
+    heartbeat_horizon_hours: int,
+    declared_classes: Sequence[tuple[str, timedelta]],
+    serialization: CoverageSerialization,
+) -> CoverageOutcome:
+    """One coverage pass in the core (``CoreHandle.ensure_partition_coverage_async``):
+    the steps of ``maintain_partition_coverage`` on the session-work core
+    pool of ``handle``, whose connections carry the TCP keepalives and the
+    TCP user timeout of the config.
+
+    Returns ``CoverageEnsured`` or ``CoverageEnsureFailed`` (a contained
+    refusal), with the facts of the core's record. Raises:
+
+    - ``ValueError`` before any core call: a declared class that is not the
+      class of a period of whole days (``declared_days``), or a horizon that
+      the core request refuses;
+    - ``CoreOperationFailed`` when the pass has no outcome (the connect, the
+      client family check, a probe, the gate, the registration or the final
+      publication failed); the leaves that committed before stay;
+    - ``CoreError`` when the core of this process cannot run the pass.
+
+    A cancel of the caller does not stop the pass: the core runs it to its
+    end.
+    """
+    request = CoverageRequest(
+        history_horizon_days=history_horizon_days,
+        heartbeat_horizon_hours=heartbeat_horizon_hours,
+        declared_period_days=declared_days(declared_classes),
+        serialization=serialization.value,
+    )
+    record = await handle.ensure_partition_coverage_async(request)
+    match record:
+        case CoverageEnsuredRecord():
+            return CoverageEnsured(
+                created_history_leaves=record.created_history_leaves,
+                created_heartbeat_leaves=record.created_heartbeat_leaves,
+                republished=record.republished,
+                heartbeat_covered_now=record.heartbeat_covered_now,
+                history_covered_through=_history_coverage_of_record(
+                    record.history_covered_through
+                ),
+                heartbeats_covered_through=record.heartbeats_covered_through,
+                absent_leaves=tuple(record.absent_leaves),
+            )
+        case CoverageEnsureFailedRecord():
+            return CoverageEnsureFailed(
+                stage=record.stage,
+                class_key=record.class_key,
+                refusal=record.refusal,
+                heartbeat_covered_now=record.heartbeat_covered_now,
+                absent_leaves=tuple(record.absent_leaves),
+            )
+        case CoverageFailed(message=message, retryable=retryable):
+            raise CoreOperationFailed(COVERAGE_SUBJECT, message, retryable)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def ensure_startup_coverage_in_core(
+    handle: CoreHandle,
+    *,
+    history_horizon_days: int,
+    heartbeat_horizon_hours: int,
+    declared_classes: Sequence[tuple[str, timedelta]],
+) -> CoverageOutcome | StartupCoverageRefused:
+    """The worker-startup ensure in the core: the ``GATED`` pass of
+    ``maintain_partition_coverage_in_core``, fatal exactly when no heartbeat
+    leaf covers the present instant (``StartupCoverageRefused``). Raises as
+    ``maintain_partition_coverage_in_core``.
+    """
+    outcome = await maintain_partition_coverage_in_core(
+        handle,
+        history_horizon_days=history_horizon_days,
+        heartbeat_horizon_hours=heartbeat_horizon_hours,
+        declared_classes=declared_classes,
+        serialization=CoverageSerialization.GATED,
     )
     if not outcome.heartbeat_covered_now:
         return StartupCoverageRefused(outcome=outcome)

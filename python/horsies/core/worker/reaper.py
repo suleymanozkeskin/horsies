@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.brokers.resources import BrokerResources
+    from horsies.core.history.maintenance.coverage import CoverageOutcome
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.retention import RetentionConfig
     from horsies.core.worker.config import WorkerConfig
@@ -437,7 +438,6 @@ class ReaperMixin:
                 CoverageEnsureFailed,
                 CoverageEnsured,
                 history_coverage_payload,
-                maintain_partition_coverage,
             )
             from horsies.core.history.maintenance.pruning import (
                 prune_expired_partitions,
@@ -447,16 +447,10 @@ class ReaperMixin:
             )
 
             try:
-                coverage = await maintain_partition_coverage(
-                    resources.partition_maintenance,
-                    history_horizon_days=(
-                        retention_cfg.history_leaf_horizon_days
-                    ),
-                    heartbeat_horizon_hours=(
-                        retention_cfg.heartbeat_leaf_horizon_hours
-                    ),
-                    declared_classes=retention_cfg.registrable_classes(),
-                    serialize_damaged_work=False,
+                coverage = await self._run_partition_coverage(
+                    temp_broker,
+                    resources,
+                    retention_cfg,
                 )
                 # A leaf the catalog still calls attached whose relation
                 # is gone means someone dropped it behind the manager's
@@ -573,6 +567,35 @@ class ReaperMixin:
             await self._check_class_coverage(temp_broker, state)
         except Exception as coverage_err:
             logger.error(f'Class coverage check error: {coverage_err}')
+
+    async def _run_partition_coverage(
+        self,
+        temp_broker: 'PostgresBroker',
+        resources: 'BrokerResources',
+        retention_cfg: 'RetentionConfig',
+    ) -> 'CoverageOutcome':
+        """One periodic coverage pass in the core, on the core handle of
+        ``temp_broker`` (``maintain_partition_coverage_in_core``,
+        ``PER_LEAF_LOCKS``): no coverage gate; the per-leaf locks contain an
+        overlap with a worker's startup pass. ``resources`` is not read: the
+        pass runs on the core pools, not on ``partition_maintenance``.
+
+        Returns the outcome; raises ``CoreOperationFailed`` when the pass has
+        no outcome and ``CoreError`` when the core of this process cannot run
+        it. The caller logs both and records the health.
+        """
+        from horsies.core.history.maintenance.coverage import (
+            CoverageSerialization,
+            maintain_partition_coverage_in_core,
+        )
+
+        return await maintain_partition_coverage_in_core(
+            temp_broker._core_handle,
+            history_horizon_days=retention_cfg.history_leaf_horizon_days,
+            heartbeat_horizon_hours=retention_cfg.heartbeat_leaf_horizon_hours,
+            declared_classes=retention_cfg.registrable_classes(),
+            serialization=CoverageSerialization.PER_LEAF_LOCKS,
+        )
 
     async def _check_class_coverage(
         self,
