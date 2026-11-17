@@ -14,15 +14,19 @@ pub struct SuccessCase {
 /// A workflow with a `SuccessPolicy` succeeds if **any** case in `cases`
 /// is fully satisfied (all its required tasks completed).
 ///
-/// Tasks listed in `optional_indices` are allowed to fail without
-/// causing the workflow to fail, even when no explicit case matches.
+/// `optional_indices` is declarative: it records which tasks may fail, and
+/// it has no runtime effect. The completion reads only the required indices
+/// of each case. A task that no case requires does not change the result,
+/// with or without `optional_indices` (Python `SuccessPolicy.optional`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SuccessPolicy {
     /// One or more success cases. The workflow succeeds if any single case
     /// has all its required indices in COMPLETED status.
     pub cases: Vec<SuccessCase>,
 
-    /// Task indices that may fail without affecting success evaluation.
+    /// Declarative: the task indices that may fail. No runtime effect. The
+    /// spec check refuses an index that is not a task of the workflow, and
+    /// the workflow start stores the list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optional_indices: Option<Vec<usize>>,
 }

@@ -64,7 +64,12 @@ impl SuccessCase {
 }
 
 /// When a workflow succeeds (Python `SuccessPolicy`): when one case has
-/// every required node COMPLETED. The optional nodes may fail.
+/// every required node COMPLETED.
+///
+/// The optional nodes are declarative: they record which nodes may fail,
+/// and they have no runtime effect. A node that no case requires does not
+/// change the result, with or without [`Self::optional`]. The spec build
+/// refuses an optional node of another workflow builder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuccessPolicy {
     cases: Vec<SuccessCase>,
@@ -80,7 +85,8 @@ impl SuccessPolicy {
         }
     }
 
-    /// The policy with `optional` nodes that may fail.
+    /// The policy with `optional` recorded as the nodes that may fail.
+    /// Declarative: no runtime effect.
     pub fn optional<I, R>(mut self, optional: I) -> Self
     where
         I: IntoIterator<Item = R>,
