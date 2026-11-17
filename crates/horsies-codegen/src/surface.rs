@@ -731,6 +731,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "One global workflow recovery pass of the reaper, with failure_limit passes per workflow\nbefore it fails closed. Writes; each candidate commits alone, and owed child starts build\ntheir children through the child spec source. A build that raised KeyboardInterrupt or\nSystemExit raises it again after the pass. A negative value raises OverflowError; with\nno child spec source it raises RuntimeError.",
     },
     StubFunction {
+        name: "settle_claimed_workflow_tasks_async",
+        parameters: &[positional("request", "SettleRequest")],
+        returns: TypeText::FutureOf("ClaimsSettled | SettleFailed"),
+        doc: "Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000\nclaims. A request with no claim sends nothing.",
+    },
+    StubFunction {
         name: "pause_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(PAUSE_WORKFLOW_OUTCOME),
@@ -2623,6 +2629,30 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("message", "str"),
             property("retryable", "bool"),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "SettleRequest",
+        doc: "The claims of one settle: the worker and each claimed workflow task with its claim\ngeneration. A naive datetime raises TypeError.",
+        constructor: Constructor::Parameters(&[
+            keyword("worker_id", "str"),
+            keyword("claims", "list[tuple[uuid.UUID, datetime.datetime]]"),
+        ]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimsSettled",
+        doc: "The settle committed: the tasks of PAUSED and CANCELLED workflows, never to dispatch, in\ninput order. Every other claim dispatches.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("blocked_task_ids", "list[uuid.UUID]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SettleFailed",
+        doc: "The settle failed: the client family check, a statement, or rows outside the function's\ncontract (not retryable). The statements before the failed one stay committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
         methods: &[],
     },
     StubClass {
