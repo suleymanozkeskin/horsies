@@ -1,57 +1,28 @@
-//! Shared task definitions and config builders for queue mismatch guard tests.
+//! The configurations and tasks of the queue guard scenarios (Python
+//! `tests/unit/test_queue_mismatch_guard.py`).
 //!
-//! Each scenario test in `tests/` imports from here to build a real `Horsies`
-//! app with real task functions, real `AppConfig`, and real `WorkerConfig`.
+//! An app is built with no I/O, so the scenarios that only register and
+//! check use a URL of a server that does not exist. Scenario 5 connects to
+//! the test server.
 
-use horsies::{
-    AppConfig, CustomQueueConfig, PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig,
-};
+use std::convert::Infallible;
 
-// ---------------------------------------------------------------------------
-// Config builders
-// ---------------------------------------------------------------------------
+use horsies::{task, AppConfig, CustomQueueConfig, QueueMode, TaskError};
+use serde::{Deserialize, Serialize};
 
-/// Fake DB URL — we never actually connect; queue validation fires first.
-const FAKE_DB_URL: &str = "postgresql://guard_test:guard_test@localhost:5432/guard_test";
+/// A URL that no scenario connects to: the registration and the check run
+/// before any connect.
+pub const UNUSED_DATABASE_URL: &str = "postgresql://guard_test:guard_test@localhost:1/guard_test";
 
-fn broker_config() -> PostgresConfig {
-    PostgresConfig {
-        database_url: FAKE_DB_URL.to_owned(),
-        session_database_url: None,
-        pgbouncer_transaction_mode: false,
-        pool_pre_ping: true,
-        pool_size: 5,
-        max_overflow: 5,
-        retain_rerun_input_default: false,
-        pool_timeout: 10,
-        pool_recycle: 600,
-        echo: false,
-    }
+/// `Default` queue mode: the one implicit queue `default`.
+pub fn default_mode_config(database_url: &str) -> AppConfig {
+    AppConfig::for_database_url(database_url)
 }
 
-/// DEFAULT mode — single implicit "default" queue.
-pub fn default_mode_config() -> AppConfig {
-    AppConfig {
-        payload: horsies::PayloadPolicy::default(),
-        queue_mode: QueueMode::Default,
-        custom_queues: None,
-        broker: broker_config(),
-        cluster_wide_cap: None,
-        prefetch_buffer: 0,
-        claim_lease_ms: None,
-        max_claim_renew_age_ms: 180_000,
-        recovery: RecoveryConfig::default(),
-        retention: horsies::RetentionConfig::default(),
-        resilience: WorkerResilienceConfig::default(),
-        schedule: None,
-        resend_on_transient_err: false,
-    }
-}
-
-/// CUSTOM mode with two queues: "fast" (priority 1) and "slow" (priority 50).
+/// `Custom` queue mode with `fast` (priority 1, cap 10) and `slow`
+/// (priority 50, cap 5).
 pub fn custom_mode_config() -> AppConfig {
     AppConfig {
-        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
             CustomQueueConfig {
@@ -65,51 +36,42 @@ pub fn custom_mode_config() -> AppConfig {
                 max_concurrency: Some(5),
             },
         ]),
-        broker: broker_config(),
-        cluster_wide_cap: None,
-        prefetch_buffer: 0,
-        claim_lease_ms: None,
-        max_claim_renew_age_ms: 180_000,
-        recovery: RecoveryConfig::default(),
-        retention: horsies::RetentionConfig::default(),
-        resilience: WorkerResilienceConfig::default(),
-        schedule: None,
-        resend_on_transient_err: false,
+        ..AppConfig::for_database_url(UNUSED_DATABASE_URL)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Real task functions
-// ---------------------------------------------------------------------------
+/// A task with no queue: right in `Default` mode, refused in `Custom`.
+#[task("ping")]
+pub async fn ping() -> Result<String, TaskError<Infallible>> {
+    Ok("pong".to_owned())
+}
 
-pub mod tasks {
-    use horsies::TaskError;
-    use serde::{Deserialize, Serialize};
+/// A task on `fast`: refused in `Default` mode, right in `Custom`.
+#[task("fast_compute", queue = "fast")]
+pub async fn fast_compute(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a + b)
+}
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ComputeInput {
-        pub a: f64,
-        pub b: f64,
-    }
+/// A task on `slow`.
+#[task("slow_compute", queue = "slow")]
+pub async fn slow_compute(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a * b)
+}
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ComputeResult {
-        pub value: f64,
-    }
+/// A task on `analytics`, which no scenario configures.
+#[task("analytics_compute", queue = "analytics")]
+pub async fn analytics_compute(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a - b)
+}
 
-    pub async fn add(input: ComputeInput) -> Result<ComputeResult, TaskError> {
-        Ok(ComputeResult {
-            value: input.a + input.b,
-        })
-    }
+/// The input of the hand-registered task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeInput {
+    pub a: i64,
+    pub b: i64,
+}
 
-    pub async fn multiply(input: ComputeInput) -> Result<ComputeResult, TaskError> {
-        Ok(ComputeResult {
-            value: input.a * input.b,
-        })
-    }
-
-    pub async fn ping(_: ()) -> Result<String, TaskError> {
-        Ok("pong".to_owned())
-    }
+/// The body of a task registered by hand with `Horsies::register_with_queue`.
+pub async fn compute_body(input: ComputeInput) -> Result<i64, TaskError<Infallible>> {
+    Ok(input.a + input.b)
 }
