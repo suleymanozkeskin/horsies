@@ -111,7 +111,7 @@ impl PostgresBroker {
         let mut attempt: u32 = 0;
         loop {
             match self
-                .start_attempt(spec, workflow_id, &arguments, sent_at, source)
+                .client_start_attempt(spec, workflow_id, &arguments, sent_at, source)
                 .await
             {
                 Ok(outcome) => return Ok(outcome),
@@ -134,7 +134,7 @@ impl PostgresBroker {
     }
 
     /// One attempt of step 2 and step 3 of [`Self::start_client_workflow`].
-    async fn start_attempt(
+    async fn client_start_attempt(
         &self,
         spec: &ClientSpec,
         workflow_id: Uuid,
