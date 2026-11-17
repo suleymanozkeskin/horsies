@@ -9,6 +9,7 @@
 //! - A lost child gives the crash path, and its reason names the exit.
 
 use super::*;
+use crate::worker::executor::slots::scripted::read_bytes;
 
 /// The child script: wait `before_boot`, take the init frame, send ready,
 /// then do `after_ready` (which reads the run frame itself).
@@ -23,8 +24,8 @@ fn child_script(before_boot: &str, after_ready: &str) -> ChildCommand {
     .unwrap()
     .to_bytes();
     let script = format!(
-        r#"{before_boot} head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; {after_ready}"#,
-        init = init.len(),
+        r#"{before_boot} {init}printf '{ready}' >&"$0"; {after_ready}"#,
+        init = drop_bytes(ScriptCount::Known(init.len())),
         ready = printf_bytes(&ready),
     );
     ChildCommand {
@@ -47,8 +48,9 @@ fn answer_ok(claimed: &ClaimedTask) -> String {
     .unwrap()
     .to_bytes();
     format!(
-        r#"printf '{}' >&"$0"; head -c 27 <&"$0" >/dev/null; exit 0"#,
-        printf_bytes(&result)
+        r#"printf '{}' >&"$0"; {}"#,
+        printf_bytes(&result),
+        exit_at_stop(),
     )
 }
 
@@ -102,8 +104,8 @@ async fn end_of(
 async fn the_deadline_starts_when_the_child_takes_the_task() {
     let claimed = task(ExecutionClass::Isolated, "{}");
     let after_ready = format!(
-        r#"head -c {run} <&"$0" >/dev/null; {answer}"#,
-        run = run_frame_bytes(&claimed).len(),
+        r#"{run}{answer}"#,
+        run = drop_bytes(ScriptCount::Known(run_frame_bytes(&claimed).len())),
         answer = answer_ok(&claimed),
     );
     let deadline = IsolatedDeadline::After(TaskTimeoutMs::new(1_000).unwrap());
@@ -134,8 +136,8 @@ async fn a_result_inside_the_deadline_is_the_end_of_the_task() {
 fn compare_run_frame(claimed: &ClaimedTask, expected: &[u8]) -> String {
     let hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
     format!(
-        r#"received=$(head -c {run} <&"$0" | od -An -v -tx1 | tr -d ' \n'); [ "$received" = "{hex}" ] || exit 9; {answer}"#,
-        run = expected.len(),
+        r#"received=$({run} | od -An -v -tx1 | tr -d ' \n'); [ "$received" = "{hex}" ] || exit 9; {answer}"#,
+        run = read_bytes(ScriptCount::Known(expected.len())),
         answer = answer_ok(claimed),
     )
 }

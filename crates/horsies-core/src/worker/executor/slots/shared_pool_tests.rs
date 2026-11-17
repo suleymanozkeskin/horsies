@@ -8,6 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
+use super::scripted::{drop_bytes, ScriptCount};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::placement::ChildCpus;
@@ -219,10 +220,10 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
     .unwrap()
     .to_bytes();
     let script = format!(
-        r#"head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; head -c {run} <&"$0" >/dev/null; printf '{frames}' >&"$0"; {after}"#,
-        init = init.len(),
+        r#"{init}printf '{ready}' >&"$0"; {run}printf '{frames}' >&"$0"; {after}"#,
+        init = drop_bytes(ScriptCount::Known(init.len())),
         ready = printf_bytes(&ready),
-        run = run.len(),
+        run = drop_bytes(ScriptCount::Known(run.len())),
         frames = child_frames(frames),
     );
     ChildCommand {
@@ -234,7 +235,7 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
 /// After the frames: take the stop frame and exit.
 fn exit_at_stop() -> String {
     let stop = encode_parent_frame(&ParentFrame::Stop).unwrap().to_bytes();
-    format!(r#"head -c {} <&"$0" >/dev/null; exit 0"#, stop.len())
+    format!("{}exit 0", drop_bytes(ScriptCount::Known(stop.len())))
 }
 
 async fn run_one(
