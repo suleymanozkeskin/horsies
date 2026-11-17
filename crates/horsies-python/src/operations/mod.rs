@@ -10,6 +10,7 @@ pub mod enqueue;
 pub mod failed_attempt;
 pub mod queue_starts;
 pub mod release;
+pub mod result;
 pub mod schema;
 pub mod stale_claims;
 pub mod stale_running;

@@ -1100,6 +1100,17 @@ impl PostgresBroker {
         self
     }
 
+    /// The same handle with no listener (Python's
+    /// `PostgresBroker(assume_initialized=True)`): a result wait reads again
+    /// every 200 ms (`TASK_RESULT_REPOLL_POLLING`), and an operation that
+    /// needs a listener answers `LISTENER_DISABLED`. Opens and closes
+    /// nothing: the listener of a connected broker opens its connection at
+    /// the first subscription.
+    pub fn without_listener(mut self) -> Self {
+        self.listener = ProcessListener::without_session_url();
+        self
+    }
+
     /// Check once, before the first write of this handle, that the database
     /// records this handle's client family. Reads never call it. A handle
     /// whose install ran in this process has passed it already. A database of
@@ -3346,6 +3357,25 @@ impl ResultWaitMode {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_broker_without_a_listener_waits_for_a_result_by_polling() {
+        // No server listens on port 1; the session URL would give a
+        // listener, and `without_listener` takes it away.
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let broker = PostgresBroker::from_pool_and_session_url(
+            pool,
+            "postgresql://horsies@127.0.0.1:1/horsies",
+        )
+        .without_listener();
+        let mode = broker.result_wait_mode(Uuid::from_u128(7)).await;
+        assert!(matches!(mode, ResultWaitMode::Polling));
+        assert_eq!(mode.repoll_interval(), TASK_RESULT_REPOLL_POLLING);
+    }
 
     #[test]
     fn idempotency_reservation_window_defaults_and_bounds_are_exact() {
