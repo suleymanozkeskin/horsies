@@ -11,6 +11,7 @@ use std::collections::HashSet;
 
 use serial_test::serial;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 use super::*;
 use crate::core::WorkflowTaskStatus;
@@ -310,14 +311,12 @@ async fn the_completion_yield_is_the_share_of_scanned_workflows_that_are_candida
     }
     let mut report = RecoveryReport::default();
 
-    let pass = recover_global_workflow_end_states(
-        &pool,
+    let pass = audit_end_states(
+        &PostgresBroker::from_pool(pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        Some(AUDIT_PAGE_ROWS),
+        AUDIT_PAGE_ROWS,
         &mut report,
         RecoveryFailurePolicy::LogOnly,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
     )
     .await;
 
