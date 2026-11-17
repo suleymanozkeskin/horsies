@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn the_statement_log_goes_to_its_own_logger() {
-        // The broker's statement log (`StatementLog::Debug`, `echo=True`)
+        // The broker's statement log (`StatementLog::Info`, `echo=True`)
         // names the target `horsies.sql`.
         assert_eq!(route("horsies.sql"), Some(LoggerName::Sql));
         assert_eq!(LoggerName::Sql.python_name(), "horsies.sql");
