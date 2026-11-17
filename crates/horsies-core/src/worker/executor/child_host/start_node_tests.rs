@@ -17,7 +17,7 @@ use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::host::{ChildApp, ChildStartHook};
+use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
 use super::link::FrameWriter;
 use super::run::{start_attempt, HostContext, RunFacts, Started};
 use crate::broker::PostgresBroker;
@@ -44,6 +44,7 @@ fn context(pool: PgPool) -> (HostContext, UnixStream) {
             hostname: "h1".to_owned(),
             start_hook: ChildStartHook::NoHook,
             producer_manifest: super::producer::test_producer_manifest(),
+            log_setup: ChildLogSetup::NoSetup,
         }),
         pid: 1,
         writer,

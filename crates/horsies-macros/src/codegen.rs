@@ -355,7 +355,7 @@ fn registered_task(
             &self,
             input: &[u8],
         ) -> ::std::result::Result<(), ::horsies::__private::StoredTaskError> {
-            ::horsies::__private::decode_input::<#input>(input).map(|_decoded| ())
+            ::horsies::__private::check_input::<#input>(input)
         }
     };
     match kind {

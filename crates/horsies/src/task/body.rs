@@ -57,6 +57,50 @@ pub fn decode_input<A: DeserializeOwned>(input: &[u8]) -> Result<A, StoredTaskEr
     })
 }
 
+/// The input check of a schedule and of the static check (Python
+/// `encode_kwargs_read_back` and `sig.bind`): `input` decodes as `A` by the
+/// path the body takes ([`decode_input`]), the decoded value reads back to
+/// itself ([`encode_read_back`]), and each member of an object input that
+/// is not `null` is a member that `A` writes back. The client's task
+/// bodies give it as `validate_input`. Pure.
+///
+/// Fails with `WORKER_SERIALIZATION_ERROR`; the text names `A`, the field
+/// path or the member, never a value.
+pub fn check_input<A>(input: &[u8]) -> Result<(), StoredTaskError>
+where
+    A: Serialize + DeserializeOwned,
+{
+    let decoded = decode_input::<A>(input)?;
+    let encoded = encode_read_back(&decoded).map_err(|cause| {
+        serialization_error::<A>(format!(
+            "task input of type {} does not read back: {cause}",
+            std::any::type_name::<A>()
+        ))
+    })?;
+    match unread_member(input, &encoded) {
+        None => Ok(()),
+        Some(member) => Err(serialization_error::<A>(format!(
+            "task input names the member '{member}', which {} does not read",
+            std::any::type_name::<A>()
+        ))),
+    }
+}
+
+/// The first member of an object `input`, with a value that is not `null`,
+/// that the object `encoded` does not hold. `None` when either is not an
+/// object. Pure.
+fn unread_member(input: &[u8], encoded: &[u8]) -> Option<String> {
+    let given = serde_json::from_slice::<serde_json::Value>(input).ok()?;
+    let read = serde_json::from_slice::<serde_json::Value>(encoded).ok()?;
+    let (serde_json::Value::Object(given), serde_json::Value::Object(read)) = (given, read) else {
+        return None;
+    };
+    given
+        .into_iter()
+        .find(|(key, value)| !value.is_null() && !read.contains_key(key))
+        .map(|(key, _)| key)
+}
+
 /// The stored value of what a task body returned.
 ///
 /// - `Ok(value)`: the encoded value, after the read-back of
@@ -330,6 +374,27 @@ mod tests {
             error.error_code,
             horsies_core::TaskErrorCode::from(OperationalErrorCode::WorkerSerializationError)
         );
+    }
+
+    /// Python `encode_kwargs_read_back` and `sig.bind`: the schedule check
+    /// takes an input that decodes and reads back, and refuses a member that
+    /// the type does not read, naming the member and not its value.
+    #[test]
+    fn check_input_takes_a_value_that_reads_back_and_names_a_member_it_does_not_read() {
+        assert!(check_input::<Order>(br#"{"id": 1, "items": []}"#).is_ok());
+        let unread =
+            check_input::<Order>(br#"{"id": 1, "items": [], "note": "secret"}"#).unwrap_err();
+        let message = unread.message.unwrap_or_default();
+        assert!(message.contains("'note'"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        assert!(check_input::<Order>(br#"{"id": 1, "items": [], "note": null}"#).is_ok());
+    }
+
+    #[test]
+    fn check_input_refuses_a_value_that_does_not_decode() {
+        let wrong_type = check_input::<Order>(br#"{"id": "one", "items": []}"#).unwrap_err();
+        assert_serialization_error(&wrong_type);
+        assert!(!text_of(&wrong_type).contains("one"));
     }
 
     #[test]

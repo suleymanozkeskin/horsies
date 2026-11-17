@@ -43,9 +43,12 @@ serde_json = { version = "1", features = ["unbounded_depth"] }
 # The field path of a decode failure of a task input or a returned value.
 serde_path_to_error = "0.1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+# The host name that a worker child writes with each start (the core's
+# worker uses the same crate).
+gethostname = "0.4"
 axum = { version = "0.8", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 owo-colors = { version = "4", optional = true }

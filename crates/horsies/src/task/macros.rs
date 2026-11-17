@@ -55,7 +55,7 @@ macro_rules! async_task_fn {
                 &self,
                 input: &[u8],
             ) -> ::std::result::Result<(), $crate::__private::StoredTaskError> {
-                $crate::__private::decode_input::<$input>(input).map(|_decoded| ())
+                $crate::__private::check_input::<$input>(input)
             }
         }
 
@@ -98,7 +98,7 @@ macro_rules! blocking_task_fn {
                 &self,
                 input: &[u8],
             ) -> ::std::result::Result<(), $crate::__private::StoredTaskError> {
-                $crate::__private::decode_input::<$input>(input).map(|_decoded| ())
+                $crate::__private::check_input::<$input>(input)
             }
         }
 
