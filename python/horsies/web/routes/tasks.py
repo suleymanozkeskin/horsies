@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal, assert_never
-from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -52,6 +51,7 @@ from horsies.web.routes._common import (
     parse_sort_by,
     parse_statuses,
     query_failed,
+    require_path_uuid,
 )
 
 
@@ -265,13 +265,14 @@ def build_router(
         return result.ok_value
 
     @router.get('/{task_id}')
-    async def read_task(task_id: UUID) -> TaskDetail:
+    async def read_task(task_id: str) -> TaskDetail:
         """One task with its full attempt history.
 
-        A path id that is not a UUID is refused with 422 before the route
-        runs; nothing is read.
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read.
         """
-        result = await get_task_detail(broker, task_id)
+        parsed_id = require_path_uuid('task_id', task_id)
+        result = await get_task_detail(broker, parsed_id)
         if is_err(result):
             raise query_failed('Task detail', result.err_value)
         match result.ok_value:

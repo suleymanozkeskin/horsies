@@ -187,8 +187,8 @@ the live read and the history read see the same rows.
 404 for each reason. `get_task_detail` derives it from the detached history
 leaves: a UUIDv7 id born before the latest upper bound of a detached leaf of a
 period class (plus 5 s) predates retained history; any other UUIDv7 id is
-within it. A path id that is not a UUID answers 422 (`uuid_parsing`) before
-any read.
+within it. A path id that is not a UUID answers 400 with
+`{"code": "INVALID_INPUT", "detail": ...}` before any read.
 
 <!-- members: TaskAbsenceReason -->
 | Reason | Meaning |
@@ -237,7 +237,8 @@ cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[Task
   `TaskActionErrorCode` member; match on the variant. Every variant has
   `code`, `message`, `retryable` and `task_id` (a `uuid.UUID`). HTTP is the
   status of `POST /api/tasks/{task_id}/cancel`. A path id that is not a UUID
-  answers 422 (`uuid_parsing`) before the action runs.
+  answers 400 with `{"code": "INVALID_INPUT", "detail": ...}` before the
+  action runs.
 
 <!-- members: TaskActionErrorCode -->
 | Code | Variant | Fields | `retryable` | HTTP | When |
