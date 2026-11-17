@@ -33,4 +33,11 @@ LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('release_claims_async',),
     ),
+    DualRunOperation(
+        name='monitoring cancel',
+        production_path='horsies.monitoring.task_actions:cancel_task',
+        reference_path='tests.dualrun.reference.cancel_caller:cancel_task',
+        mode=PoolMode(),
+        core_methods=('cancel_task_async',),
+    ),
 )

@@ -33,11 +33,7 @@ from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle_types import HandleErrorCode, HandleEventLoopLimit
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.monitoring.task_actions import (
-    TaskActionErrorCode,
-    TaskActionEventLoopLimit,
-    cancel_task,
-)
+from horsies.monitoring.task_actions import TaskActionEventLoopLimit
 from horsies.core.workflows.lifecycle import (
     pause_workflow,
     resume_workflow,
@@ -260,12 +256,6 @@ class TestRealBrokerAtTheLimit:
 
         assert is_err(result)
         assert result.err_value.code is MonitoringQueryErrorCode.EVENT_LOOP_LIMIT
-
-    def test_task_action(self, at_limit: _AtLimit) -> None:
-        result = at_limit.run(cancel_task(at_limit.broker, uuid.uuid4()))
-
-        assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.EVENT_LOOP_LIMIT
 
     def test_task_handle_get_async(self, at_limit: _AtLimit) -> None:
         """TaskHandle folds the limit into RetrievalCode, as WorkflowHandle does."""

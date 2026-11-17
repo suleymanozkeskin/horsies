@@ -31,6 +31,7 @@ from horsies._core import (
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
+    TooManyPendingCalls,
 )
 from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SyncSendRoute
@@ -2574,6 +2575,22 @@ class TestRequeueStaleClaimed:
         )
         assert isinstance(failed.exception, CoreOperationFailed)
         assert failed.exception.subject == 'PostgresBroker.requeue_stale_claimed'
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
+        broker = _make_broker()
+        error = TooManyPendingCalls('CoreHandle.requeue_stale_claimed_async', 65_536)
+        handle = MagicMock()
+        handle.requeue_stale_claimed_async = AsyncMock(side_effect=error)
+        broker._core_handle = handle
+
+        result = await broker.requeue_stale_claimed()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
 
     @pytest.mark.asyncio
     async def test_a_threshold_past_64_bits_is_refused_before_the_core(self) -> None:
