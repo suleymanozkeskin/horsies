@@ -20,7 +20,9 @@
 //! `python/horsies/core/baseline/install.py`, and `_run_fleet_schema_init` in
 //! `python/horsies/core/brokers/postgres.py`):
 //! 1. Read the state of the current schema on a session-work connection, with
-//!    no lock: one statement on an empty database, two otherwise.
+//!    no lock: one statement on an empty database, two otherwise, and a third
+//!    on a database that holds this build's chain (whether its history
+//!    readers exist).
 //! 2. Decide. A database that holds this build's chain and this client's
 //!    family gets no lock and no write. A database that this build does not
 //!    know is refused with a [`SchemaRefusal`], and a database of the other
@@ -32,7 +34,11 @@
 //!      with its bookkeeping row; the transaction of migration 1000 also
 //!      publishes the history readers (`horsies_publish_history_readers`)
 //!      and writes this client's family row;
-//!    - a database with no family row gets this client's row.
+//!    - a database that holds this build's chain with a history reader
+//!      missing or no family row (an install that stopped before them, or a
+//!      reader dropped out of band) gets the readers published in one READ
+//!      COMMITTED transaction, then this client's family row (Python
+//!      `CompleteInstall`).
 //! 4. Release the lock and check the release.
 //!
 //! A deadlock (SQLSTATE 40P01) runs the whole install again, at most
@@ -253,8 +259,9 @@ const INSTALL_LOCK_POLL: Duration = Duration::from_millis(25);
 /// each deadlock (Python `_SCHEMA_INIT_MAX_ATTEMPTS`).
 pub const INSTALL_MAX_ATTEMPTS: u32 = 5;
 
-/// The most actions under the lock: apply the pending migrations, then write
-/// the family row. A state read follows each action.
+/// The most actions under the lock: apply the pending migrations, then
+/// complete the install (publish the readers, write the family row). A state
+/// read follows each action.
 const LOCKED_ACTION_BOUND: usize = 2;
 
 /// The session advisory lock key of every installer, Python's and the
@@ -357,6 +364,22 @@ static PUBLISH_HISTORY_READERS: TypedStatement = TypedStatement::new(
     &[],
 );
 
+/// Whether every history reader that `horsies_publish_history_readers`
+/// publishes exists (Python `read_database_state`, the reader column of
+/// `_CATALOG_SQL`). The list is the baseline's own
+/// (`horsies_history_reader_signatures()`, baseline `0008`), so the
+/// statement runs only on a database whose bookkeeping holds this build's
+/// whole chain.
+static READ_READERS_PUBLISHED: TypedStatement = TypedStatement::new(
+    "read_readers_published",
+    "SELECT NOT EXISTS (
+         SELECT 1
+         FROM horsies_history_reader_signatures() AS s
+         WHERE to_regprocedure(s.signature) IS NULL
+     ) AS readers_published",
+    &[],
+);
+
 /// One try of the install lock; it never waits.
 static TRY_INSTALL_LOCK: TypedStatement = TypedStatement::new(
     "try_install_lock",
@@ -417,6 +440,29 @@ enum SchemaFacts {
     Ledger(Bookkeeping),
 }
 
+/// Whether the history readers of a database exist (Python
+/// `ReaderPresence`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReaderPresence {
+    /// Every reader of `horsies_history_reader_signatures()` exists.
+    Published,
+    /// A reader is missing: an install stopped between migration 1000 and
+    /// the publication (Python's install published in a transaction of its
+    /// own), or a reader was dropped out of band.
+    Missing,
+}
+
+/// The classification of the facts of a database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Classification {
+    /// The state needs no other fact.
+    Settled(DatabaseState),
+    /// The bookkeeping holds this build's whole chain, each migration
+    /// recorded as succeeded with this build's checksum. The presence of the
+    /// history readers is read next ([`READ_READERS_PUBLISHED`]).
+    ChainCurrent { family: RecordedFamily },
+}
+
 /// What a database holds, as the install sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DatabaseState {
@@ -431,7 +477,10 @@ pub(crate) enum DatabaseState {
     },
     /// The bookkeeping holds this build's whole chain, each recorded as
     /// succeeded with this build's checksum.
-    Current { family: RecordedFamily },
+    Current {
+        family: RecordedFamily,
+        readers: ReaderPresence,
+    },
     /// A database this build does not install into.
     Unsupported(SchemaRefusal),
 }
@@ -512,8 +561,10 @@ enum InstallAction {
     Ready,
     /// Apply the migrations of the chain from this index on.
     ApplyFrom(usize),
-    /// Write this client's family row.
-    RecordFamily,
+    /// Publish the history readers, then write this client's family row
+    /// when the database has none (Python `CompleteInstall`). Both steps are
+    /// idempotent.
+    CompleteInstall,
     /// Change nothing and refuse.
     Refuse(InstallRefusal),
 }
@@ -628,49 +679,56 @@ impl From<SchemaInstallError> for BrokerError {
 
 /// Classifies the facts of one database against `chain` (Python
 /// `classify_database`, with a chain of migrations in place of one).
-fn classify(facts: SchemaFacts, chain: &[EmbeddedMigration]) -> DatabaseState {
+fn classify(facts: SchemaFacts, chain: &[EmbeddedMigration]) -> Classification {
     match facts {
         SchemaFacts::NoLedger { horsies_tables, .. } if horsies_tables.is_empty() => {
-            DatabaseState::Empty
+            Classification::Settled(DatabaseState::Empty)
         }
         SchemaFacts::NoLedger {
             schema_version_table: true,
             horsies_tables,
-        } => DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
+        } => Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
             tables: horsies_tables,
-        }),
+        })),
         SchemaFacts::NoLedger {
             schema_version_table: false,
             horsies_tables,
-        } => DatabaseState::Unsupported(SchemaRefusal::UnknownHorsiesObjects {
-            tables: horsies_tables,
-        }),
+        } => Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::UnknownHorsiesObjects {
+                tables: horsies_tables,
+            },
+        )),
         SchemaFacts::Ledger(bookkeeping) => classify_bookkeeping(bookkeeping, chain),
     }
 }
 
 /// Classifies the bookkeeping rows: a version above the chain, then rows
 /// that do not start the chain, then a failed or changed row.
-fn classify_bookkeeping(bookkeeping: Bookkeeping, chain: &[EmbeddedMigration]) -> DatabaseState {
+fn classify_bookkeeping(bookkeeping: Bookkeeping, chain: &[EmbeddedMigration]) -> Classification {
     let Bookkeeping { applied, family } = bookkeeping;
     let own = newest_version(chain);
     let versions: Vec<i64> = applied.iter().map(|row| row.version).collect();
     if let Some(&stored) = versions.last().filter(|stored| **stored > own) {
-        return DatabaseState::Unsupported(SchemaRefusal::SchemaNewer { stored, own });
+        return Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored,
+            own,
+        }));
     }
     if !starts_the_chain(&versions, chain) {
-        return DatabaseState::Unsupported(SchemaRefusal::ForeignMigrations { versions });
+        return Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::ForeignMigrations { versions },
+        ));
     }
     match (
         first_broken_row(&applied, chain),
         applied.len() == chain.len(),
     ) {
-        (Some(refusal), _) => DatabaseState::Unsupported(refusal),
-        (None, true) => DatabaseState::Current { family },
-        (None, false) => DatabaseState::Behind {
+        (Some(refusal), _) => Classification::Settled(DatabaseState::Unsupported(refusal)),
+        (None, true) => Classification::ChainCurrent { family },
+        (None, false) => Classification::Settled(DatabaseState::Behind {
             applied: applied.len(),
             family,
-        },
+        }),
     }
 }
 
@@ -720,10 +778,13 @@ fn decide(state: &DatabaseState, own: ClientFamily) -> InstallAction {
                 InstallAction::ApplyFrom(*applied)
             }
         },
-        DatabaseState::Current { family } => match family {
-            RecordedFamily::Recorded(stored) if *stored != own => other_family(*stored, own),
-            RecordedFamily::Recorded(_) => InstallAction::Ready,
-            RecordedFamily::NotRecorded => InstallAction::RecordFamily,
+        DatabaseState::Current { family, readers } => match (family, readers) {
+            (RecordedFamily::Recorded(stored), _) if *stored != own => other_family(*stored, own),
+            (RecordedFamily::Recorded(_), ReaderPresence::Published) => InstallAction::Ready,
+            (RecordedFamily::Recorded(_), ReaderPresence::Missing)
+            | (RecordedFamily::NotRecorded, ReaderPresence::Published | ReaderPresence::Missing) => {
+                InstallAction::CompleteInstall
+            }
         },
         DatabaseState::Unsupported(refusal) => {
             InstallAction::Refuse(InstallRefusal::Schema(refusal.clone()))
@@ -798,7 +859,7 @@ async fn install_once(
     match decide(&state, own) {
         InstallAction::Ready => return Ok(()),
         InstallAction::Refuse(refusal) => return Err(refusal.into()),
-        InstallAction::ApplyFrom(_) | InstallAction::RecordFamily => {}
+        InstallAction::ApplyFrom(_) | InstallAction::CompleteInstall => {}
     }
     let mut session = LockSession::acquire(pool, lock, log).await?;
     let installed = install_under_lock(&mut session.connection, own, log).await;
@@ -859,14 +920,14 @@ async fn install_under_lock(
             InstallAction::Ready => return Ok(()),
             InstallAction::Refuse(refusal) => return Err(refusal.into()),
             InstallAction::ApplyFrom(first) => apply_pending(connection, first, own, log).await?,
-            InstallAction::RecordFamily => record_family(connection, own, log).await?,
+            InstallAction::CompleteInstall => complete_install(connection, own, log).await?,
         }
         state = read_state(connection, log).await?;
     }
     match decide(&state, own) {
         InstallAction::Ready => Ok(()),
         InstallAction::Refuse(refusal) => Err(refusal.into()),
-        action @ (InstallAction::ApplyFrom(_) | InstallAction::RecordFamily) => panic!(
+        action @ (InstallAction::ApplyFrom(_) | InstallAction::CompleteInstall) => panic!(
             "the schema install still decides {action:?} for {state:?} after \
              {LOCKED_ACTION_BOUND} actions under the install lock"
         ),
@@ -875,7 +936,8 @@ async fn install_under_lock(
 
 /// Reads and classifies the horsies objects of the current schema (Python
 /// `read_database_state`). One statement on an empty database, two
-/// otherwise. Changes nothing.
+/// otherwise, three on a database that holds this build's chain. Changes
+/// nothing.
 async fn read_state(
     connection: &mut PooledConnection,
     log: StatementLog,
@@ -900,7 +962,28 @@ async fn read_state(
             SchemaFacts::Ledger(read_bookkeeping(connection, log, &READ_BOOKKEEPING).await?)
         }
     };
-    Ok(classify(facts, embedded_migrations()))
+    match classify(facts, embedded_migrations()) {
+        Classification::Settled(state) => Ok(state),
+        Classification::ChainCurrent { family } => Ok(DatabaseState::Current {
+            family,
+            readers: read_reader_presence(connection, log).await?,
+        }),
+    }
+}
+
+/// Reads whether every history reader exists ([`READ_READERS_PUBLISHED`]).
+/// Changes nothing.
+async fn read_reader_presence(
+    connection: &mut PooledConnection,
+    log: StatementLog,
+) -> Result<ReaderPresence, SchemaInstallError> {
+    let statement = &READ_READERS_PUBLISHED;
+    let rows = query_on(connection, log, &statement.bind().finish()).await?;
+    let published: bool = column(&one_row(rows, statement)?, statement, "readers_published")?;
+    Ok(match published {
+        true => ReaderPresence::Published,
+        false => ReaderPresence::Missing,
+    })
 }
 
 fn catalog_row(row: &Row) -> Result<CatalogRow, RowDecodeError> {
@@ -1084,6 +1167,40 @@ async fn publish_history_readers(
             reason: format!("unknown publication outcome {other:?}"),
         })),
     }
+}
+
+/// Completes the install of a database that holds this build's chain
+/// (Python `CompleteInstall`): publishes the history readers in one READ
+/// COMMITTED transaction (`horsies_publish_history_readers` writes the
+/// lookup manifest and the four readers, or answers `ALREADY_CURRENT` and
+/// changes nothing), then writes this client's family row when the database
+/// has none ([`record_family`]).
+///
+/// Errors: `Statement` or `RowDecode` from the publication (its transaction
+/// is rolled back, so nothing changed) or from the family write (the
+/// publication stays committed; the next install writes the row).
+async fn complete_install(
+    connection: &mut PooledConnection,
+    own: ClientFamily,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    let mut transaction = connection.begin(IsolationLevel::ReadCommitted).await?;
+    match publish_history_readers(&mut transaction, log).await {
+        Ok(published) => {
+            transaction.commit().await?;
+            tracing::info!(
+                outcome = published.as_str(),
+                "history readers published by the install of a current schema",
+            );
+        }
+        Err(failure) => {
+            // The failure is the answer, as in `apply_migration`.
+            let _rolled_back: RollbackOutcome = transaction.rollback().await;
+            return Err(failure);
+        }
+    }
+    record_family(connection, own, log).await?;
+    Ok(())
 }
 
 /// Writes this client's family row when the database has none (Python

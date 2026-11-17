@@ -372,25 +372,27 @@ fn a_schema_without_a_ledger_is_empty_zero_x_or_unknown() {
     let chain = test_chain();
     assert_eq!(
         classify(no_ledger(false, &[]), &chain),
-        DatabaseState::Empty
+        Classification::Settled(DatabaseState::Empty)
     );
     assert_eq!(
         classify(
             no_ledger(true, &["horsies_schema_version", "horsies_tasks"]),
             &chain
         ),
-        DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
             tables: vec![
                 "horsies_schema_version".to_owned(),
                 "horsies_tasks".to_owned()
             ],
-        }),
+        })),
     );
     assert_eq!(
         classify(no_ledger(false, &["horsies_tasks"]), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::UnknownHorsiesObjects {
-            tables: vec!["horsies_tasks".to_owned()],
-        }),
+        Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::UnknownHorsiesObjects {
+                tables: vec!["horsies_tasks".to_owned()],
+            }
+        )),
     );
 }
 
@@ -401,10 +403,10 @@ fn a_version_above_the_chain_is_newer() {
     applied.push(foreign(1003));
     assert_eq!(
         classify(ledger(applied, RUST), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
             stored: 1003,
             own: 1002,
-        }),
+        })),
     );
 }
 
@@ -425,7 +427,9 @@ fn bookkeeping_that_does_not_start_the_chain_is_foreign() {
     for (applied, versions) in cases {
         assert_eq!(
             classify(ledger(applied, RUST), &chain),
-            DatabaseState::Unsupported(SchemaRefusal::ForeignMigrations { versions }),
+            Classification::Settled(DatabaseState::Unsupported(
+                SchemaRefusal::ForeignMigrations { versions }
+            )),
         );
     }
 }
@@ -437,18 +441,20 @@ fn a_failed_row_is_incomplete_and_a_changed_checksum_is_edited() {
     failed[1].run = RecordedRun::Failed;
     assert_eq!(
         classify(ledger(failed, RUST), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::MigrationIncomplete { version: 1001 }),
+        Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::MigrationIncomplete { version: 1001 }
+        )),
     );
 
     let mut edited: Vec<AppliedMigration> = chain.iter().map(succeeded).collect();
     edited[0].checksum = vec![0];
     assert_eq!(
         classify(ledger(edited, RUST), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::MigrationEdited {
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::MigrationEdited {
             version: 1000,
             stored_checksum: vec![0],
             own_checksum: chain[0].checksum.to_vec(),
-        }),
+        })),
     );
 }
 
@@ -463,14 +469,14 @@ fn a_start_of_the_chain_is_behind_and_the_whole_chain_is_current() {
             ),
             &chain
         ),
-        DatabaseState::Behind {
+        Classification::Settled(DatabaseState::Behind {
             applied: 2,
             family: RecordedFamily::NotRecorded,
-        },
+        }),
     );
     assert_eq!(
         classify(ledger(chain.iter().map(succeeded).collect(), RUST), &chain),
-        DatabaseState::Current { family: RUST },
+        Classification::ChainCurrent { family: RUST },
     );
 }
 
@@ -511,20 +517,50 @@ fn each_state_decides_its_action() {
         (
             DatabaseState::Current {
                 family: RecordedFamily::Recorded(Python),
+                readers: ReaderPresence::Published,
             },
             Python,
             InstallAction::Ready,
         ),
         (
             DatabaseState::Current {
+                family: RecordedFamily::Recorded(Python),
+                readers: ReaderPresence::Missing,
+            },
+            Python,
+            InstallAction::CompleteInstall,
+        ),
+        (
+            DatabaseState::Current {
                 family: RecordedFamily::NotRecorded,
+                readers: ReaderPresence::Published,
             },
             Rust,
-            InstallAction::RecordFamily,
+            InstallAction::CompleteInstall,
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::NotRecorded,
+                readers: ReaderPresence::Missing,
+            },
+            Rust,
+            InstallAction::CompleteInstall,
         ),
         (
             DatabaseState::Current {
                 family: RecordedFamily::Recorded(Rust),
+                readers: ReaderPresence::Published,
+            },
+            Python,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: Rust,
+                own: Python,
+            }),
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(Rust),
+                readers: ReaderPresence::Missing,
             },
             Python,
             InstallAction::Refuse(InstallRefusal::OtherFamily {
@@ -1009,7 +1045,7 @@ async fn a_database_of_the_other_family_is_refused_before_any_write() {
 }
 
 /// A database that holds the chain with no family row gets this client's
-/// row, and no migration runs again (Python `RecordFamily`).
+/// row, and no migration runs again (Python `CompleteInstall`).
 #[tokio::test]
 #[serial]
 async fn a_database_with_no_family_row_gets_this_client_s_row() {
@@ -1028,6 +1064,158 @@ async fn a_database_with_no_family_row_gets_this_client_s_row() {
 
     assert_eq!(family_row(&database).await.as_deref(), Some("PYTHON"));
     assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
+/// The signatures of the history readers that do not exist, in order.
+async fn missing_readers(database: &MigrationTestDatabase) -> Vec<String> {
+    database
+        .client()
+        .query(
+            "SELECT s.signature FROM horsies_history_reader_signatures() AS s \
+             WHERE to_regprocedure(s.signature) IS NULL ORDER BY 1",
+            &[],
+        )
+        .await
+        .expect("read the reader signatures")
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+/// The leaf names of the lookup manifest, in probe order.
+async fn manifest_leaves(database: &MigrationTestDatabase) -> Vec<String> {
+    database
+        .client()
+        .query(
+            "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
+            &[],
+        )
+        .await
+        .expect("read the manifest")
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+/// A database that holds the chain and its family row with readers missing
+/// and an empty lookup manifest (an install that stopped before the
+/// publication, as Python's install left it) gets the readers and the
+/// manifest row of the static forever leaf, and no migration runs again
+/// (Python `CompleteInstall`;
+/// `test_an_install_that_stopped_before_the_publication_is_completed`).
+#[tokio::test]
+#[serial]
+async fn a_database_whose_readers_are_missing_gets_them_published() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Python, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute(
+            "DROP FUNCTION horsies_task_detail_staged(uuid); \
+             DROP FUNCTION horsies_task_result_staged(uuid); \
+             DELETE FROM horsies_task_lookup_manifest;",
+        )
+        .await;
+    assert_eq!(
+        missing_readers(&database).await,
+        vec![
+            "horsies_task_detail_staged(uuid)".to_owned(),
+            "horsies_task_result_staged(uuid)".to_owned(),
+        ]
+    );
+    let before = installed_on(&database).await;
+
+    database
+        .install(ClientFamily::Python, InstallLockPlan::fleet())
+        .await
+        .expect("complete the install");
+
+    assert!(missing_readers(&database).await.is_empty());
+    assert_eq!(
+        manifest_leaves(&database).await,
+        vec!["horsies_task_history_forever_open".to_owned()]
+    );
+    let current: bool = database
+        .client()
+        .query_one("SELECT horsies_history_readers_current()", &[])
+        .await
+        .expect("read the reader stamps")
+        .get(0);
+    assert!(current);
+    assert_eq!(installed_on(&database).await, before);
+    assert_eq!(family_row(&database).await.as_deref(), Some("PYTHON"));
+    database.drop().await;
+}
+
+/// A database with readers missing and no family row gets both, the
+/// readers first (Python `CompleteInstall`).
+#[tokio::test]
+#[serial]
+async fn a_database_with_no_readers_and_no_family_row_gets_both() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute(
+            "DROP FUNCTION horsies_task_history_duplicate_staged(uuid); \
+             DELETE FROM horsies_task_lookup_manifest; \
+             DELETE FROM horsies_client_family;",
+        )
+        .await;
+    let before = installed_on(&database).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("complete the install");
+
+    assert!(missing_readers(&database).await.is_empty());
+    assert_eq!(
+        manifest_leaves(&database).await,
+        vec!["horsies_task_history_forever_open".to_owned()]
+    );
+    assert_eq!(family_row(&database).await.as_deref(), Some("RUST"));
+    assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
+/// A database of the other family with readers missing is refused and
+/// changed in nothing: the family is checked before the publication.
+#[tokio::test]
+#[serial]
+async fn a_database_of_the_other_family_with_readers_missing_is_refused_unchanged() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute("DROP FUNCTION horsies_task_detail_staged(uuid);")
+        .await;
+
+    let refused = database
+        .install(ClientFamily::Python, InstallLockPlan::fleet())
+        .await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(SchemaInstallError::OtherFamily {
+                stored: ClientFamily::Rust,
+                own: ClientFamily::Python,
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        missing_readers(&database).await,
+        vec!["horsies_task_detail_staged(uuid)".to_owned()]
+    );
     database.drop().await;
 }
 
