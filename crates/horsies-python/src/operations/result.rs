@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{BrokerErrorCode, RawResultRecord};
+use horsies_core::{BrokerErrorCode, RawResultRead, RawResultRecord};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -50,7 +50,9 @@ impl RawResultRecordRecord {
     }
 }
 
-/// Neither the live table nor the task history holds the task.
+/// Neither the live table nor the task history holds the task. The core's
+/// absence reason is not kept: Python's `TASK_NOT_FOUND` carries the task id
+/// only.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct RawResultAbsent {
@@ -93,10 +95,10 @@ pub fn result_wait_bound(timeout_ms: Option<u64>) -> BlockingBound {
 /// The outcome of a read. Pure.
 fn read_outcome(
     task_id: Uuid,
-    read: Result<Option<RawResultRecord>, horsies_core::BrokerOperationError>,
+    read: Result<RawResultRead, horsies_core::BrokerOperationError>,
 ) -> RawResultOutcome {
     match read {
-        Ok(Some(record)) => match RawResultRecordRecord::from_core(record) {
+        Ok(RawResultRead::Found(record)) => match RawResultRecordRecord::from_core(record) {
             Ok(found) => RawResultOutcome::Found(found),
             Err(error) => RawResultOutcome::Failed(BrokerFailure {
                 code: BrokerErrorCode::InvalidJsonPayload.to_string(),
@@ -104,7 +106,9 @@ fn read_outcome(
                 retryable: false,
             }),
         },
-        Ok(None) => RawResultOutcome::Absent(RawResultAbsent { task_id }),
+        Ok(RawResultRead::Absent { reason: _ }) => {
+            RawResultOutcome::Absent(RawResultAbsent { task_id })
+        }
         Err(error) => RawResultOutcome::Failed(BrokerFailure::from(error)),
     }
 }
@@ -137,7 +141,7 @@ pub async fn raw_result_record_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerOperationError, TaskStatus};
+    use horsies_core::{BrokerOperationError, TaskAbsenceReason, TaskStatus};
     use serde_json::{Map, Value};
 
     use super::*;
@@ -152,7 +156,7 @@ mod tests {
         let _absent_before = envelope.insert("ok".to_owned(), Value::from(3));
         let RawResultOutcome::Found(found) = read_outcome(
             task(),
-            Ok(Some(RawResultRecord {
+            Ok(RawResultRead::Found(RawResultRecord {
                 task_id: task(),
                 task_name: "add".to_owned(),
                 status: TaskStatus::Completed,
@@ -169,7 +173,7 @@ mod tests {
     fn a_wait_that_ended_at_its_limit_gives_the_status_and_no_result() {
         let RawResultOutcome::Found(found) = read_outcome(
             task(),
-            Ok(Some(RawResultRecord {
+            Ok(RawResultRead::Found(RawResultRecord {
                 task_id: task(),
                 task_name: "add".to_owned(),
                 status: TaskStatus::Running,
@@ -185,7 +189,12 @@ mod tests {
     #[test]
     fn a_task_held_nowhere_is_absent() {
         assert!(matches!(
-            read_outcome(task(), Ok(None)),
+            read_outcome(
+                task(),
+                Ok(RawResultRead::Absent {
+                    reason: TaskAbsenceReason::PredatesRetainedHistory
+                })
+            ),
             RawResultOutcome::Absent(RawResultAbsent { task_id }) if task_id == task()
         ));
     }

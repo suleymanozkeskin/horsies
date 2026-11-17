@@ -10,13 +10,13 @@
 //! `PYTHON`.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use horsies_core::core::lifecycle::OwnedClaim;
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::{BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::bridge::blocking::{call_blocking, call_blocking_within};
 use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
+use crate::child_spec::{PythonChildSpecSource, RegisteredSource};
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
@@ -70,6 +71,7 @@ use crate::operations::workflow_reads::{
     workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
 };
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
+use crate::operations::workflow_start::{start_workflow_operation, WorkflowStartRequest};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
@@ -137,12 +139,28 @@ fn handle_profile(text: &str) -> Result<PoolProfile, String> {
 #[pyclass(module = "horsies._core", name = "CoreHandle", frozen)]
 pub struct CoreHandle {
     connection: BrokerConnection,
+    /// The child spec source of the handle's workflow operations, set once
+    /// by `register_child_spec_source`.
+    child_spec_source: OnceLock<RegisteredSource>,
 }
 
 impl CoreHandle {
     /// A clone of the connection, for an operation future.
     pub fn connection(&self) -> BrokerConnection {
         self.connection.clone()
+    }
+
+    /// The child spec source of one operation on `core`.
+    ///
+    /// Failure exits: `RuntimeError` when no source is registered (a defect
+    /// of the client: the handle's workflow operations build children).
+    fn child_spec_source(&self, core: &'static Core) -> PyResult<PythonChildSpecSource> {
+        match self.child_spec_source.get() {
+            Some(callable) => Ok(PythonChildSpecSource::new(core, Arc::clone(callable))),
+            None => Err(PyRuntimeError::new_err(
+                "CoreHandle has no child spec source; call register_child_spec_source first",
+            )),
+        }
     }
 }
 
@@ -162,7 +180,21 @@ impl CoreHandle {
             .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
         Ok(Self {
             connection: BrokerConnection::new(manifest, profile),
+            child_spec_source: OnceLock::new(),
         })
+    }
+
+    /// Register the child spec source of the handle's workflow operations:
+    /// a callable that takes a `ChildSpecRequest` and returns
+    /// `ChildSpecBuilt` or `ChildSpecRefused`. The core calls it on the
+    /// callback thread for each sub-workflow child that an operation builds.
+    /// A second registration raises `RuntimeError`. Starts nothing.
+    fn register_child_spec_source(&self, source: Py<PyAny>) -> PyResult<()> {
+        self.child_spec_source
+            .set(Arc::new(source))
+            .map_err(|_already| {
+                PyRuntimeError::new_err("CoreHandle has a child spec source already")
+            })
     }
 
     /// The version of the manifest this handle was built from.
@@ -653,6 +685,28 @@ impl CoreHandle {
             "CoreHandle.pause_workflow_async",
             CallKind::Write,
             pause_workflow_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// Start one workflow (`horsies_workflow_start`): `WorkflowStarted`,
+    /// `WorkflowExists`, `WorkflowIdTaken` or `WorkflowStartFailed`. Writes;
+    /// the children of its sub-workflow roots come from the child spec
+    /// source. A build that raised `KeyboardInterrupt` or `SystemExit`
+    /// raises it again. Awaitable only: its caller, `start_workflow_async`,
+    /// is a coroutine. With no child spec source it raises `RuntimeError`.
+    fn start_workflow_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, WorkflowStartRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.start_workflow_async",
+            CallKind::Write,
+            start_workflow_operation(self.connection(), request.get().parts(), source),
         )
     }
 

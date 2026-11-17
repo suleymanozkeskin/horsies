@@ -825,6 +825,7 @@ Each entry: Title -- summary -> URL
 - Database Schema -- PostgreSQL tables -> /horsies/internals/database-schema/
 - Performance -- measured per-statement latencies of the hot path -> /horsies/internals/performance/
 - Serialization -- JSON codec for args/results -> /horsies/internals/serialization/
+- Operational Indexes -- the two indexes of each task history leaf, and adding an index for your own query -> /horsies/internals/operational-indexes/
 
 ### Migrations
 - Migrating to 0.1.2 -- strict-serde breaking changes from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
@@ -906,6 +907,7 @@ deploy, rolling deploy, rename task, remove task, rename parameter, in-flight ro
 testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/
 PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/
 performance, latency, hot path, statement cost -> /horsies/internals/performance/
+index, history leaf, CREATE INDEX CONCURRENTLY -> /horsies/internals/operational-indexes/
 migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/
 migration 0.6.0, upgrade from 0.5.x, schema v52, stop all processes -> /horsies/migrations/migration-to-0-6-0/

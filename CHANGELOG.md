@@ -221,13 +221,14 @@ unless it starts with "Added".
   `PAYLOAD_TOO_LARGE`. In a worker child a send goes through the child's
   own producer pool.
 - **`TaskSendError` is the closed catalog of Python's send codes:**
-  `SendSuppressed`, `ValidationFailed`, `EnqueueFailed { retryable }` (the
-  row may or may not exist), `PayloadMismatch`, `IdempotencyKeyConflict {
-  owner_task_id }` and `PayloadTooLarge { size_bytes, limit_bytes }`, each
-  with only the facts of its state. `retry_send` and `retry_schedule`
-  accept only `EnqueueFailed` and `IdempotencyKeyConflict`, send the same
-  task id and payload, and refuse the error of another task or of the
-  other method.
+  `SendSuppressed`, `AsyncContext { task_id, payload }` (a blocking send on
+  a thread that runs a tokio runtime; nothing was written),
+  `ValidationFailed`, `EnqueueFailed { retryable }` (the row may or may not
+  exist), `PayloadMismatch`, `IdempotencyKeyConflict { owner_task_id }` and
+  `PayloadTooLarge { size_bytes, limit_bytes }`, each with only the facts of
+  its state. `retry_send` and `retry_schedule` accept only `AsyncContext`,
+  `EnqueueFailed` and `IdempotencyKeyConflict`, send the same task id and
+  payload, and refuse the error of another task or of the other method.
 - **A resend is a repeat.** With `resend_on_transient_err`, a retryable
   `ENQUEUE_FAILED` is sent again up to 3 times after 200, 400 and 800 ms,
   as `SendKind::Repeat`: a send whose commit reply was lost answers with
@@ -244,7 +245,10 @@ unless it starts with "Added".
   sub-second part was dropped.
 - **`TaskHandle::get` takes a `WaitLimit` and returns
   `Result<TaskOutcome<T, E>, ReadError>`.** `TaskResult<T>` is removed. The
-  outer error is the read failing: `WaitTimedOut`, `TaskNotFound`,
+  outer error is the read failing: `WaitTimedOut`, `TaskNotFound { reason }`
+  (`TaskAbsenceReason`: `PredatesRetainedHistory` for a task that retention
+  can have removed, `WithinRetainedHistory` for an id that no retained
+  history held, `NotClassified` for an id that is not a UUIDv7),
   `ResultNotAvailable`, `StoredResultUnreadable`, `UnknownUserCode` (a
   stored user code that `E` does not name), `WaitInsideTask` and
   `Database`, each with Python's code from `ReadError::code`. The inner

@@ -11,19 +11,20 @@ use crate::broker::BrokerError;
 /// Categorized task send failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
-/// `EVENT_LOOP_LIMIT` and `LOOP_RUNNER_FAILED` are produced by the Python
-/// client only; [`TaskSendError`] has no variant for them.
+/// (`python/horsies/core/models/task_send_types.py`). `EVENT_LOOP_LIMIT`
+/// and `LOOP_RUNNER_FAILED` are produced by the Python client only;
+/// [`TaskSendError`] has no variant for them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
 #[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
     SendSuppressed,
-    /// A sync send or schedule (or a sync retry) was called from inside a
-    /// running event loop; the blocking enqueue would stall the loop, so
-    /// nothing was written. A sync retry from the same loop returns this code
-    /// again; the `*_async` forms complete the dispatch. Python client only.
+    /// A sync (Python) or blocking (Rust) send, schedule or retry was called
+    /// on a thread that runs an event loop (Python) or a tokio runtime
+    /// (Rust); the blocking enqueue would stall it, so nothing was written.
+    /// A blocking retry on the same thread returns this code again; the
+    /// async forms complete the dispatch with the same task id.
     AsyncContext,
     /// Programmer error (bad args, serialization failure, unresolved queue).
     ValidationFailed,
@@ -90,13 +91,25 @@ pub struct TaskSendPayload {
 }
 
 /// Error from task send/schedule operations: one variant per
-/// [`TaskSendErrorCode`] that the core produces, each with only the facts of
-/// its state (Python `python/horsies/core/models/task_send_types.py:107-252`).
+/// [`TaskSendErrorCode`] that the core or a client's blocking form
+/// produces, each with only the facts of its state (Python
+/// `python/horsies/core/models/task_send_types.py`).
 #[derive(Debug, Clone)]
 pub enum TaskSendError {
     /// Sends are suppressed in this process. Nothing was serialized or
     /// written. The retry methods refuse it.
     SendSuppressed { message: String },
+    /// A blocking send, schedule or retry was called on a thread that runs
+    /// an event loop or a tokio runtime. The payload is prepared and nothing
+    /// was written. The retry methods accept it: an async retry completes
+    /// the dispatch with the same task id and payload; a blocking retry on
+    /// the same thread returns this error again. A client produces it, never
+    /// the core's enqueue.
+    AsyncContext {
+        task_id: Uuid,
+        payload: Box<TaskSendPayload>,
+        message: String,
+    },
     /// The input or the options were refused before anything was written.
     /// The retry methods refuse it.
     ValidationFailed { message: String },
@@ -146,6 +159,7 @@ impl TaskSendError {
     pub fn code(&self) -> TaskSendErrorCode {
         match self {
             Self::SendSuppressed { .. } => TaskSendErrorCode::SendSuppressed,
+            Self::AsyncContext { .. } => TaskSendErrorCode::AsyncContext,
             Self::ValidationFailed { .. } => TaskSendErrorCode::ValidationFailed,
             Self::EnqueueFailed { .. } => TaskSendErrorCode::EnqueueFailed,
             Self::PayloadMismatch { .. } => TaskSendErrorCode::PayloadMismatch,
@@ -156,12 +170,16 @@ impl TaskSendError {
 
     /// Whether the condition may clear, so the same send can succeed later.
     /// Only an enqueue failure carries a driver classification; a key
-    /// conflict clears when the reservation ends; every refusal stays.
+    /// conflict clears when the reservation ends; every refusal stays. An
+    /// async context does not clear on its thread (Python
+    /// `TaskSendAsyncContext`, which carries no retry flag): the async forms
+    /// complete the send.
     pub fn retryable(&self) -> bool {
         match self {
             Self::EnqueueFailed { retryable, .. } => *retryable,
             Self::IdempotencyKeyConflict { .. } => true,
-            Self::SendSuppressed { .. }
+            Self::AsyncContext { .. }
+            | Self::SendSuppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadMismatch { .. }
             | Self::PayloadTooLarge { .. } => false,
@@ -172,6 +190,7 @@ impl TaskSendError {
     pub fn message(&self) -> &str {
         match self {
             Self::SendSuppressed { message }
+            | Self::AsyncContext { message, .. }
             | Self::ValidationFailed { message }
             | Self::EnqueueFailed { message, .. }
             | Self::PayloadMismatch { message, .. }
@@ -183,7 +202,8 @@ impl TaskSendError {
     /// The task id of the send, when the send got one.
     pub fn task_id(&self) -> Option<Uuid> {
         match self {
-            Self::EnqueueFailed { task_id, .. }
+            Self::AsyncContext { task_id, .. }
+            | Self::EnqueueFailed { task_id, .. }
             | Self::PayloadMismatch { task_id, .. }
             | Self::IdempotencyKeyConflict { task_id, .. } => Some(*task_id),
             Self::SendSuppressed { .. }
@@ -194,12 +214,16 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `python/horsies/core/models/task_send_types.py:255-260`) without the
-    /// Python-only codes: an enqueue failure and a key conflict. A refusal
-    /// is never replayed, because the same input meets the same refusal.
+    /// `python/horsies/core/models/task_send_types.py:201-206`) without the
+    /// Python-only `LOOP_RUNNER_FAILED`: an async context, an enqueue failure
+    /// and a key conflict. A refusal is never replayed, because the same
+    /// input meets the same refusal.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
         match self {
-            Self::EnqueueFailed {
+            Self::AsyncContext {
+                task_id, payload, ..
+            }
+            | Self::EnqueueFailed {
                 task_id, payload, ..
             }
             | Self::IdempotencyKeyConflict {
@@ -400,6 +424,31 @@ mod tests {
             assert!(!error.retryable(), "{refusal}");
             assert!(error.resend_target().is_none(), "{refusal}");
         }
+    }
+
+    /// Python `TaskSendRetryable` holds `TaskSendAsyncContext`: a blocking
+    /// send on a runtime thread keeps its prepared task id and payload, and
+    /// an async retry sends them.
+    #[test]
+    fn an_async_context_keeps_its_payload_and_is_accepted_for_a_resend() {
+        let task_id = Uuid::from_u128(3);
+        let payload = sample_payload();
+        let sent_at = payload.sent_at;
+        let error = TaskSendError::AsyncContext {
+            task_id,
+            payload: Box::new(payload),
+            message: "blocking send on a runtime thread".to_owned(),
+        };
+
+        assert_eq!(error.code(), TaskSendErrorCode::AsyncContext);
+        assert_eq!(error.code().to_string(), "ASYNC_CONTEXT");
+        assert!(!error.retryable());
+        assert_eq!(error.task_id(), Some(task_id));
+        assert_eq!(error.message(), "blocking send on a runtime thread");
+        let target = error.resend_target().expect("an async context is accepted");
+        assert_eq!(target.task_id, task_id);
+        assert_eq!(target.payload.sent_at, sent_at);
+        assert!(!format!("{error}").contains("sensitive data"));
     }
 
     #[test]

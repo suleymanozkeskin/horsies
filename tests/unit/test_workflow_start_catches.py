@@ -9,6 +9,11 @@ either part, except a database or driver error of the statement, is a defect
 and propagates. The build asserts the facts that spec construction and
 prevalidation guarantee, and it takes the node queue from the rule that
 ``app.workflow()`` uses.
+
+The tests drive the Python start caller before the core switch
+(``tests/dualrun/reference/workflow_start_caller.py``), the reference side of
+the start's dual-run; ``test_workflow_start_through_core.py`` tests the
+production start.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.task_decorator import TaskFunction
 from horsies.core.types.result import Ok, is_ok
-from horsies.core.workflows.lifecycle import start_workflow_async
+from tests.dualrun.reference.workflow_start_caller import start_workflow_async
 from tests.broker_resources_support import attach_resources, fake_resources
 from tests.workflow_start_support import (
     node_rows,
@@ -151,7 +156,7 @@ class TestPrevalidationCatch:
         attach_resources(broker, fake_resources())
 
         with patch(
-            'horsies.core.workflows.lifecycle.validate_workflow_generic_output_match',
+            'tests.dualrun.reference.workflow_start_caller.validate_workflow_generic_output_match',
             side_effect=defect,
         ):
             with pytest.raises(type(defect)) as exc_info:
@@ -184,7 +189,7 @@ class TestTransactionValueError:
         defect = ValueError(DEFECT_MARKER)
 
         with patch(
-            'horsies.core.workflows.lifecycle.start_parameters',
+            'tests.dualrun.reference.workflow_start_caller.start_parameters',
             side_effect=defect,
         ):
             with pytest.raises(ValueError) as exc_info:
