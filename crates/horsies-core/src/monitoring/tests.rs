@@ -1020,7 +1020,6 @@ async fn live_and_history_aggregates_merge_before_caps() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("list");
