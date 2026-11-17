@@ -1714,10 +1714,7 @@ impl PostgresBroker {
             return Ok(rows);
         }
 
-        let Some(detail) = self.fetch_history_detail(task_id).await? else {
-            return Ok(Vec::new());
-        };
-        let TaskDetailResult::History(detail) = detail else {
+        let TaskDetailResult::History(detail) = self.fetch_history_detail(task_id).await? else {
             return Ok(Vec::new());
         };
         Ok(detail
@@ -1961,15 +1958,15 @@ impl PostgresBroker {
                     .await
                     .map_err(task_info_history_error)?;
                 match detail {
-                    Some(TaskDetailResult::History(detail)) => history_task_info(
+                    TaskDetailResult::History(detail) => history_task_info(
                         detail,
                         include_result,
                         include_failed_reason,
                         include_attempts,
                     )
                     .map(Some),
-                    Some(TaskDetailResult::Live { .. }) | None => Ok(None),
-                    Some(TaskDetailResult::Absent { .. }) => Ok(None),
+                    TaskDetailResult::Live { .. } => Ok(None),
+                    TaskDetailResult::Absent { .. } => Ok(None),
                 }
             }
         }
@@ -2591,9 +2588,9 @@ impl PostgresBroker {
     /// find: absent, live again, or the history row's result.
     async fn confirm_result_absence(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
         match self.fetch_history_detail(task_id).await? {
-            None | Some(TaskDetailResult::Absent { .. }) => Ok(ResultRowProbe::Absent),
-            Some(TaskDetailResult::Live { .. }) => Ok(ResultRowProbe::Live),
-            Some(TaskDetailResult::History(detail)) => {
+            TaskDetailResult::Absent { .. } => Ok(ResultRowProbe::Absent),
+            TaskDetailResult::Live { .. } => Ok(ResultRowProbe::Live),
+            TaskDetailResult::History(detail) => {
                 Ok(ResultRowProbe::Row(history_result_row(detail)?))
             }
         }
@@ -2657,10 +2654,7 @@ impl PostgresBroker {
         raw_result_from_history_detail(task_id, detail)
     }
 
-    async fn fetch_history_detail(
-        &self,
-        task_id: Uuid,
-    ) -> Result<Option<TaskDetailResult>, BrokerError> {
+    async fn fetch_history_detail(&self, task_id: Uuid) -> Result<TaskDetailResult, BrokerError> {
         let open = self.core.pools()?;
         read_history_detail(open.main(), self.statement_log, task_id).await
     }
@@ -2827,12 +2821,12 @@ enum RawResultProbe {
 
 fn raw_result_from_history_detail(
     task_id: Uuid,
-    detail: Option<TaskDetailResult>,
+    detail: TaskDetailResult,
 ) -> BrokerResult<RawResultProbe> {
     match detail {
-        None | Some(TaskDetailResult::Absent { .. }) => Ok(RawResultProbe::Absent),
-        Some(TaskDetailResult::Live { .. }) => Ok(RawResultProbe::Retry),
-        Some(TaskDetailResult::History(detail)) => {
+        TaskDetailResult::Absent { .. } => Ok(RawResultProbe::Absent),
+        TaskDetailResult::Live { .. } => Ok(RawResultProbe::Retry),
+        TaskDetailResult::History(detail) => {
             // Parsed at the history read (`HistoryTaskDetail.status`).
             let status: crate::core::TaskStatus = detail.status;
             if !status.is_terminal() {
@@ -4861,8 +4855,7 @@ mod get_result_wait_tests {
     fn staged_detail_live_race_retries_instead_of_reporting_absence() {
         let task_id = Uuid::new_v4();
         let probe =
-            raw_result_from_history_detail(task_id, Some(TaskDetailResult::Live { task_id }))
-                .unwrap();
+            raw_result_from_history_detail(task_id, TaskDetailResult::Live { task_id }).unwrap();
         assert!(matches!(probe, RawResultProbe::Retry));
     }
 
