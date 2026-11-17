@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Final, assert_never
 from uuid import UUID
@@ -66,7 +66,7 @@ ENQUEUE_TASK_SQL = text("""
         :key_kind,
         CAST(:key_digest AS BYTEA),
         CAST(:key_scope_version AS SMALLINT),
-        CAST(:key_window_s AS INTEGER),
+        CAST(:key_window AS INTERVAL),
         :send_kind
     )
 """)
@@ -123,12 +123,13 @@ class Unkeyed:
 
 @dataclass(frozen=True, slots=True)
 class Keyed:
-    """The send reserves its scoped key digest for ``window_s`` seconds after
-    its task finishes."""
+    """The send reserves its scoped key digest for ``window`` after its task
+    finishes. The window is sent as an ``interval``, exact to the
+    microsecond."""
 
     digest: bytes
     scope_version: int
-    window_s: int
+    window: timedelta
 
 
 type EnqueueKey = Unkeyed | Keyed
@@ -174,14 +175,14 @@ def _key_params(key: EnqueueKey) -> dict[str, Any]:
                 'key_kind': 'UNKEYED',
                 'key_digest': None,
                 'key_scope_version': None,
-                'key_window_s': None,
+                'key_window': None,
             }
-        case Keyed(digest=digest, scope_version=scope_version, window_s=window_s):
+        case Keyed(digest=digest, scope_version=scope_version, window=window):
             return {
                 'key_kind': 'KEYED',
                 'key_digest': digest,
                 'key_scope_version': scope_version,
-                'key_window_s': window_s,
+                'key_window': window,
             }
         case _ as unreachable:
             assert_never(unreachable)

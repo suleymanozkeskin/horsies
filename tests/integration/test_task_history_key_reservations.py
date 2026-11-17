@@ -10,6 +10,7 @@ terminal time — the functions take time as data, so no test sleeps.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from hashlib import sha256
 from uuid import UUID, uuid4
 
@@ -39,7 +40,7 @@ history_schema = task_history_schema_fixture('task_history_it_reservations')
 KEY_DIGEST = sha256(b'scoped-key').digest()
 FINGERPRINT = sha256(b'command').digest()
 OTHER_FINGERPRINT = sha256(b'different-command').digest()
-HOUR_SECONDS = 3_600
+ONE_HOUR = timedelta(hours=1)
 
 
 async def claim(
@@ -52,7 +53,7 @@ async def claim(
         connection,
         key_digest=KEY_DIGEST,
         key_scope_version=1,
-        reservation_window_seconds=HOUR_SECONDS,
+        reservation_window=ONE_HOUR,
         fingerprint_version=1,
         fingerprint=fingerprint,
         task_id=UUID(task_id),
@@ -104,7 +105,7 @@ class TestClaimReplayConflict:
                     connection,
                     key_digest=KEY_DIGEST,
                     key_scope_version=1,
-                    reservation_window_seconds=31 * 86_400,
+                    reservation_window=timedelta(days=31),
                     fingerprint_version=1,
                     fingerprint=FINGERPRINT,
                     task_id=uuid4(),
@@ -187,7 +188,7 @@ class TestCleanup:
                 connection,
                 key_digest=sha256(b'live-key').digest(),
                 key_scope_version=1,
-                reservation_window_seconds=HOUR_SECONDS,
+                reservation_window=ONE_HOUR,
                 fingerprint_version=1,
                 fingerprint=FINGERPRINT,
                 task_id=UUID(live),
