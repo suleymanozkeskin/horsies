@@ -297,6 +297,15 @@ written in Rust, on a new baseline schema.
   log format writes the message only; a handler with its own formatter can
   read the attributes.
 
+- **`echo=True` logs the statements of the core on `horsies.sql`.** Each
+  statement that the core runs is one INFO record on the logger
+  `horsies.sql`: the SQL text is the message, the statement name is the
+  attribute `statement`, and bound values are not shown. A broker built with
+  `echo=True` sets `horsies.sql` to INFO and, when that logger has no
+  handler, adds one stdout handler per process, as SQLAlchemy's `echo` does
+  for `sqlalchemy.engine.Engine`. The Rust client logs the same events on the
+  `tracing` target `horsies.sql`.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
