@@ -271,7 +271,7 @@ export default defineConfig({
 								{ label: 'Task Errors', slug: 'rust/tasks/errors' },
 								{ label: 'Sending Tasks', slug: 'rust/tasks/sending-tasks' },
 								{ label: 'Retrieving Results', slug: 'rust/tasks/retrieving-results' },
-								{ label: 'Blocking API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Blocking API', slug: 'rust/tasks/blocking-api' },
 							],
 						},
 						{
@@ -311,9 +311,9 @@ export default defineConfig({
 						{
 							label: 'Operations',
 							items: [
-								{ label: 'Rerun in Your Transaction', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Async Frameworks', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Testing', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Rerun in Your Transaction', slug: 'rust/operations/rerun-in-your-transaction' },
+								{ label: 'Async Frameworks', slug: 'rust/guides/async-frameworks' },
+								{ label: 'Testing', slug: 'rust/operations/testing' },
 								{ label: 'CLI Reference', slug: 'rust/cli' },
 							],
 						},

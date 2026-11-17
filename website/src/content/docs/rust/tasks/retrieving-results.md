@@ -51,6 +51,7 @@ async fn print_outcome(handle: &TaskHandle<String, std::convert::Infallible>) ->
 | `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of this task's types; `cause` names no value | Kept: returns the same |
 | `UnknownUserCode { task_id, code, code_type }` | `RESULT_DESERIALIZATION_ERROR` | The stored error has a user code that `E` does not name | Kept: returns the same |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read. Compose the tasks with a workflow | – |
+| `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread where a tokio runtime is current. Nothing was read. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread) | – |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `retryable` is the classification of the cause | May succeed |
 
 `ReadError::code()` returns the library code of the failure.
