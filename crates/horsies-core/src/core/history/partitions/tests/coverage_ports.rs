@@ -101,12 +101,14 @@ fn ensured(outcome: CoverageOutcome) -> CoverageEnsured {
     }
 }
 
-/// `test_coverage_creating_leaves_in_two_classes_publishes_once`: a pass that
-/// creates the leaves of two classes publishes the readers once; the manifest
-/// rows share one timestamp and have contiguous positions.
+/// `test_a_created_leaf_is_published_by_its_own_creation`: a pass that
+/// creates the leaves of two classes publishes each created leaf in its own
+/// creation call, so the readers are current at the end and the last step
+/// does not publish; the manifest rows share one timestamp and have
+/// contiguous positions.
 #[tokio::test]
 #[serial]
-async fn coverage_creating_leaves_in_two_classes_publishes_once() {
+async fn coverage_creating_leaves_in_two_classes_leaves_the_readers_current() {
     let database = TestDatabase::create_with_connections(4).await;
     let publisher = CountingStagedPublisher::default();
     let outcome = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[period(7)], &publisher)
@@ -114,8 +116,8 @@ async fn coverage_creating_leaves_in_two_classes_publishes_once() {
         .expect("coverage pass");
     let report = ensured(outcome);
     assert_eq!(report.created_history_leaves, 8);
-    assert!(report.republished);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    assert!(!report.republished);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 0);
     assert_eq!(class_leaf_count(&database.pool, "standard_30d").await, 4);
     assert_eq!(class_leaf_count(&database.pool, "standard_7d").await, 4);
 
