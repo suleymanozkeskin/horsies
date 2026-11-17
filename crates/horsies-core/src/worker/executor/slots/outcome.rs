@@ -897,7 +897,8 @@ impl OutcomeWriter {
     /// - A task whose node is not linked is cancelled as an owned orphan when
     ///   the app turns the self-heal on; with it off the row stays CLAIMED
     ///   for inspection.
-    /// - Every other stop wrote what its case needs in the child.
+    /// - Every other stop wrote what its case needs in the child; an
+    ///   orphan that the child's stop function cancelled owes nothing more.
     async fn after_stop(&self, task: &ClaimedTask, reason: StopReason) -> Settlement {
         match (reason, task.kind.is_workflow_task(), self.orphan_self_heal) {
             (StopReason::TaskExpired, true, _) => {
@@ -926,7 +927,10 @@ impl OutcomeWriter {
                 Settlement::NothingOwed
             }
             (
-                StopReason::TaskExpired | StopReason::ClaimLost | StopReason::WorkflowStopped,
+                StopReason::TaskExpired
+                | StopReason::ClaimLost
+                | StopReason::WorkflowStopped
+                | StopReason::OrphanCancelled,
                 _,
                 _,
             ) => Settlement::NothingOwed,
