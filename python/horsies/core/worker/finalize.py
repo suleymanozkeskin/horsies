@@ -32,7 +32,6 @@ from horsies.core.history.identity.uuid7 import UUID
 from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
     read_task_detail,
-    staged_detail_published,
 )
 from horsies.core.lifecycle.classify import (
     AbortedBeforeResult,
@@ -1768,8 +1767,6 @@ class FinalizeMixin:
         except ValueError:
             return None
         connection = await session.connection()
-        if not await staged_detail_published(connection):
-            return None
         detail = await read_task_detail(connection, task_id=history_task_id)
         match detail:
             case HistoryTaskDetail():

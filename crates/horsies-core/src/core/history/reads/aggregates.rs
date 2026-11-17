@@ -1,116 +1,13 @@
-//! Time-scoped aggregates and planner estimates over history.
-
-use std::sync::LazyLock;
+//! Planner estimates over history: the row estimate of an
+//! `EXPLAIN (FORMAT JSON)` text, which the unfiltered task list total reads
+//! (`monitoring::function_rows`, `ListTotals`).
 
 use serde_json::Value;
 
 use crate::core::history::errors::HistoryError;
-use crate::core::history::names::TASK_HISTORY_PARENT;
 
-use super::pages::{
-    history_scope_conditions, window_conditions, HistoryScope, HistoryStatement, HistoryWindow,
-};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HistoryStatusAggregate {
-    window: HistoryWindow,
-}
-
-impl HistoryStatusAggregate {
-    pub fn new(window: HistoryWindow) -> Self {
-        Self { window }
-    }
-}
-
-pub fn history_status_aggregate_statement(query: HistoryStatusAggregate) -> HistoryStatement {
-    let (conditions, parameters) = window_conditions(query.window);
-    HistoryStatement::new(
-        format!(
-            "SELECT status, terminalization_kind, count(*) AS terminal_count FROM {TASK_HISTORY_PARENT} WHERE {} GROUP BY status, terminalization_kind ORDER BY status, terminalization_kind",
-            conditions.join(" AND ")
-        ),
-        parameters,
-    )
-}
-
-pub fn history_scoped_status_counts_statement(
-    window: HistoryWindow,
-    scope: &HistoryScope,
-) -> HistoryStatement {
-    let (conditions, parameters) = history_scope_conditions(window, scope);
-    HistoryStatement::new(
-        format!(
-            "SELECT status, count(*) AS terminal_count FROM {TASK_HISTORY_PARENT} WHERE {} GROUP BY status ORDER BY status",
-            conditions.join(" AND ")
-        ),
-        parameters,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryBreakdownGroup {
-    TaskName,
-    QueueName,
-    Worker,
-}
-
-impl HistoryBreakdownGroup {
-    pub const ALL: [Self; 3] = [Self::TaskName, Self::QueueName, Self::Worker];
-
-    fn column(self) -> &'static str {
-        match self {
-            Self::TaskName => "task_name",
-            Self::QueueName => "queue_name",
-            Self::Worker => "last_claimed_worker_id",
-        }
-    }
-}
-
-pub fn history_breakdown_statement(
-    window: HistoryWindow,
-    scope: &HistoryScope,
-    group: HistoryBreakdownGroup,
-) -> HistoryStatement {
-    let (conditions, parameters) = history_scope_conditions(window, scope);
-    let column = group.column();
-    HistoryStatement::new(
-        format!(
-            "SELECT COALESCE({column}, 'unknown') AS group_value, status, count(*) AS status_count, count(*) FILTER (WHERE retry_count > 0) AS retried_count FROM {TASK_HISTORY_PARENT} WHERE {} GROUP BY COALESCE({column}, 'unknown'), status",
-            conditions.join(" AND ")
-        ),
-        parameters,
-    )
-}
-
-pub fn history_count_statement(window: HistoryWindow, scope: &HistoryScope) -> HistoryStatement {
-    let (conditions, parameters) = history_scope_conditions(window, scope);
-    HistoryStatement::new(
-        format!(
-            "SELECT count(*) FROM {TASK_HISTORY_PARENT} WHERE {}",
-            conditions.join(" AND ")
-        ),
-        parameters,
-    )
-}
-
-pub static HISTORY_NONEMPTY_PROBE_SQL: LazyLock<String> = LazyLock::new(history_nonempty_probe_sql);
-
-fn history_nonempty_probe_sql() -> String {
-    format!("SELECT EXISTS (SELECT 1 FROM {TASK_HISTORY_PARENT})")
-}
-
-pub fn history_estimate_statement(window: HistoryWindow, scope: &HistoryScope) -> HistoryStatement {
-    let (conditions, parameters) = history_scope_conditions(window, scope);
-    HistoryStatement::new(
-        format!(
-            "EXPLAIN (FORMAT JSON) SELECT 1 FROM {TASK_HISTORY_PARENT} WHERE {}",
-            conditions.join(" AND ")
-        ),
-        parameters,
-    )
-}
-
-pub fn plan_rows_from_explain(payload: &Value) -> Result<i64, HistoryError> {
+/// The top plan row estimate of an `EXPLAIN (FORMAT JSON)` value.
+fn plan_rows_from_explain(payload: &Value) -> Result<i64, HistoryError> {
     let rows = payload
         .as_array()
         .and_then(|plans| plans.first())
@@ -143,6 +40,9 @@ pub fn plan_rows_from_explain(payload: &Value) -> Result<i64, HistoryError> {
     }
 }
 
+/// The top plan row estimate of an `EXPLAIN (FORMAT JSON)` text. Errors: a
+/// text that is not JSON, or a JSON value without a numeric top
+/// `Plan Rows`.
 pub fn plan_rows_from_explain_text(payload: &str) -> Result<i64, HistoryError> {
     let parsed: Value = serde_json::from_str(payload)
         .map_err(|_| HistoryError::contract("EXPLAIN payload is not valid JSON"))?;

@@ -145,9 +145,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;
     module.add_class::<operations::arguments::StartAt>()?;
-    module.add_class::<operations::arguments::RetentionDefault>()?;
-    module.add_class::<operations::arguments::RetentionForever>()?;
-    module.add_class::<operations::arguments::RetentionPeriod>()?;
     module.add_class::<operations::cancel::TaskCancelledRecord>()?;
     module.add_class::<operations::cancel::CancelRefusedWorkflowTask>()?;
     module.add_class::<operations::cancel::CancelRefusedStatus>()?;
@@ -189,6 +186,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::release::ReleasedRow>()?;
     module.add_class::<operations::release::NotHeldRow>()?;
     module.add_class::<operations::release::ReleaseFailed>()?;
+    module.add_class::<operations::result::RawResultRecordRecord>()?;
+    module.add_class::<operations::result::RawResultAbsent>()?;
     module.add_class::<operations::schema::SchemaInstalled>()?;
     module.add_class::<operations::schema::SchemaInstallNotRun>()?;
     module.add_class::<operations::schema::SchemaStatusRecord>()?;

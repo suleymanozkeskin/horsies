@@ -263,7 +263,6 @@ fn the_applied_send(outcomes: &[ConcurrentOutcome]) -> (Uuid, i32) {
 /// it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "waits on #937"]
 async fn concurrent_sends_of_one_key_apply_once_and_replay_the_rest() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -291,7 +290,6 @@ async fn concurrent_sends_of_one_key_apply_once_and_replay_the_rest() {
 /// command is a key conflict that names it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "waits on #937"]
 async fn concurrent_sends_of_two_commands_are_classified_by_the_winner() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;

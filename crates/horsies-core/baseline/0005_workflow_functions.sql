@@ -1053,9 +1053,12 @@ $$;
 -- One level of promotion: the join verdict of every PENDING node of p_workflow_id that depends on a node of
 -- p_sources or is in p_candidates, written in two updates. Returns the indexes that went SKIPPED (an impossible
 -- join, or join all with a FAILED or SKIPPED dependency and no allow_failed_deps) and those that went ENQUEUED (a met
--- join). A node with workflow_ctx_from waits until its context nodes are terminal. The verdict table is Python's
+-- join). A node with workflow_ctx_from waits until its context nodes are terminal. A candidate with no dependencies
+-- is judged like any other: 0 of 0 dependencies are terminal, so join all is met and the node is ENQUEUED (it
+-- recovers a root that a start left PENDING); it is never a dependent of p_sources. The verdict table is Python's
 -- _evaluate_join and _plan_level (core/workflows/engine.py:2223-2344); the ctx gate is
--- try_make_ready_and_enqueue's (core/workflows/engine.py:2671-2683).
+-- try_make_ready_and_enqueue's (core/workflows/engine.py:2671-2683). Python's try_make_ready_and_enqueue leaves a
+-- node with no dependencies PENDING; the core's rule (enqueue it) is the decided one.
 -- Precondition: the caller holds the workflow row FOR UPDATE and the workflow is RUNNING.
 -- Locks: the node rows that the two updates write (the workflow row is held by the caller).
 CREATE FUNCTION horsies_workflow_promote_level(
@@ -1100,7 +1103,6 @@ BEGIN
         ) c
         WHERE d.workflow_id = p_workflow_id
           AND d.status = 'PENDING'
-          AND cardinality(d.dependencies) > 0
           AND (d.dependencies && p_sources OR d.task_index = ANY(p_candidates))
     ),
     skip_write AS (
@@ -1874,7 +1876,9 @@ $$;
 -- Internal: the result bytes of a phase-2 record, from the history row at its locator (both partition keys given,
 -- so the parent probe prunes to one leaf) or from its quarantine copy, checked against the record. Returns failure
 -- NULL and the payload, or a failure (SOURCE_ABSENT, SOURCE_STATE_CONFLICT, SOURCE_VERSION_CONFLICT,
--- SOURCE_DIGEST_MISMATCH) and payload NULL. Reads only.
+-- SOURCE_DIGEST_MISMATCH) and payload NULL. SOURCE_VERSION_CONFLICT: the source's history schema version differs
+-- from the record's or is not 1, or its result envelope version is not 1 (the only format this reader knows). Reads
+-- only.
 -- Locks: none (the caller holds the pending row). Python: the source read of horsies_phase2_consume
 -- (0003_interim_functions.sql).
 CREATE FUNCTION horsies_workflow_phase2_source(
@@ -1887,14 +1891,16 @@ DECLARE
     v_source record;
 BEGIN
     IF p_pending.recovery_source = 'HISTORY' THEN
-        SELECT h.task_id, h.result_payload AS payload, h.result_digest AS digest, h.history_schema_version AS version
+        SELECT h.task_id, h.result_payload AS payload, h.result_digest AS digest, h.history_schema_version AS version,
+               h.result_envelope_version AS envelope_version
         INTO v_source
         FROM horsies_task_history h
         WHERE h.retention_class_key = p_pending.history_class
           AND h.terminal_at = p_pending.history_anchor
           AND h.task_id = p_pending.task_id;
     ELSE
-        SELECT q.task_id, q.result_payload AS payload, q.result_digest AS digest, q.history_schema_version AS version
+        SELECT q.task_id, q.result_payload AS payload, q.result_digest AS digest, q.history_schema_version AS version,
+               q.result_envelope_version AS envelope_version
         INTO v_source
         FROM horsies_workflow_phase2_quarantine q
         WHERE q.task_id = p_pending.quarantine_task_id;
@@ -1903,7 +1909,7 @@ BEGIN
         WHEN NOT FOUND THEN 'SOURCE_ABSENT'
         WHEN v_source.task_id <> p_pending.task_id THEN 'SOURCE_STATE_CONFLICT'
         WHEN v_source.version IS DISTINCT FROM p_pending.history_schema_version OR v_source.version <> 1
-            THEN 'SOURCE_VERSION_CONFLICT'
+             OR v_source.envelope_version <> 1 THEN 'SOURCE_VERSION_CONFLICT'
         WHEN v_source.digest IS DISTINCT FROM p_pending.result_digest OR v_source.payload IS NULL
              OR sha256(v_source.payload) <> p_pending.result_digest THEN 'SOURCE_DIGEST_MISMATCH'
     END;
@@ -1918,8 +1924,9 @@ $$;
 -- 2. Lock the workflow row FOR UPDATE, the node row, the pending row.
 -- 3. When p_wake: pg_notify('task_queue_' || <queue of the node row>, 'capacity'), delivered at commit.
 -- 4. Load the result from the history row at the locator (one pruned leaf) or from the quarantine copy; check task
---    identity, history schema version (1) and digest. A mismatch returns SOURCE_ABSENT, SOURCE_STATE_CONFLICT,
---    SOURCE_VERSION_CONFLICT or SOURCE_DIGEST_MISMATCH and writes nothing (the record is kept).
+--    identity, history schema version (1), result envelope version (1) and digest. A mismatch returns SOURCE_ABSENT,
+--    SOURCE_STATE_CONFLICT, SOURCE_VERSION_CONFLICT or SOURCE_DIGEST_MISMATCH and writes nothing (the record is
+--    kept).
 -- 5. Write the node where it is not terminal: COMPLETED for COMPLETE_LOCKED, FAILED for the other kinds, the result,
 --    completed_at. Delete the pending row and the quarantine copy.
 -- Dispositions: APPLIED (node written, workflow live), APPLIED_WORKFLOW_ENDED (node written; the workflow is
@@ -3608,7 +3615,8 @@ $$;
 ------------------------------------------------------------------------------------------------------------------------
 
 -- Step function of recovery case 0: a PENDING node of a RUNNING workflow whose dependencies are all terminal (a join
--- that two concurrent steps both missed). In the caller's transaction (BEGIN; this; owed child starts; COMMIT).
+-- that two concurrent steps both missed), or that has no dependencies (a root that a start left PENDING: it goes
+-- ENQUEUED). In the caller's transaction (BEGIN; this; owed child starts; COMMIT).
 -- Steps: lock the workflow row FOR UPDATE; the join verdict of the node (horsies_workflow_promote with the node as
 -- the candidate: SKIPPED with the skip cascade, ENQUEUED with its task row minted, or a child start owed); then the
 -- completion check (horsies_workflow_try_complete).

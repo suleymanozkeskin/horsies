@@ -1,4 +1,8 @@
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -11,6 +15,7 @@ use crate::core::app::{PreparedSchedules, ScheduleSendFacts};
 use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
 
 use super::calculator::{next_run_at, should_run_now};
+use super::config_digest::config_digest;
 use super::state;
 
 /// The prefix of the hash input of a slot task id. It names the layout, so
@@ -205,55 +210,253 @@ impl SlotOutcome {
     }
 }
 
-/// Checks that run before the scheduler writes anything: the schedule
-/// section is valid, every enabled schedule has its prepared send facts, and
-/// every enabled pattern has a slot after `now`.
+/// Checks that run before the scheduler reads or writes anything: the
+/// schedule section is valid, and every enabled schedule has its prepared
+/// send facts. Pure.
 fn check_schedules_at_start(
     schedule_config: &ScheduleConfig,
     prepared: &PreparedSchedules,
-    now: DateTime<Utc>,
 ) -> Result<(), SchedulerStartError> {
     schedule_config
         .validate()
         .map_err(SchedulerStartError::InvalidScheduleConfig)?;
-    for schedule in schedule_config.schedules.iter().filter(|s| s.enabled) {
-        if !prepared.contains_key(&schedule.name) {
-            return Err(SchedulerStartError::NotPrepared {
-                schedule: schedule.name.clone(),
-            });
-        }
-        if next_run_at(&schedule.pattern, now, &schedule.timezone).is_none() {
-            return Err(SchedulerStartError::NoNextSlot {
-                schedule: schedule.name.clone(),
-                after: now,
-            });
-        }
+    match schedule_config
+        .schedules
+        .iter()
+        .filter(|s| s.enabled)
+        .find(|s| !prepared.contains_key(&s.name))
+    {
+        Some(schedule) => Err(SchedulerStartError::NotPrepared {
+            schedule: schedule.name.clone(),
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Spawn the scheduler service loop.
+/// Refuse an enabled schedule whose pattern has no slot after
+/// `database_now`, the database time of the start read: its `next_run_at`
+/// (NOT NULL) cannot be stored. Pure.
+fn check_next_slots(
+    schedules: &[TaskSchedule],
+    database_now: DateTime<Utc>,
+) -> Result<(), SchedulerStartError> {
+    match schedules
+        .iter()
+        .filter(|s| s.enabled)
+        .find(|s| next_run_at(&s.pattern, database_now, &s.timezone).is_none())
+    {
+        Some(schedule) => Err(SchedulerStartError::NoNextSlot {
+            schedule: schedule.name.clone(),
+            after: database_now,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Asks a scheduler to stop at its next tick boundary. Idempotent, returns
+/// at once, and may be called from any thread. A fire in flight runs to its
+/// end.
+#[derive(Clone, Debug)]
+pub struct SchedulerStop {
+    token: CancellationToken,
+}
+
+impl SchedulerStop {
+    pub fn request_stop(&self) {
+        self.token.cancel();
+    }
+}
+
+/// The scheduler of one schedule config, before its start.
 ///
-/// The scheduler:
-/// 1. Refuses to start, writing nothing, when the schedule section is invalid
-///    or an enabled pattern has no next slot, or when the broker's client
-///    family check fails. The join handle then yields the
-///    [`SchedulerStartError`]; the host exits non-zero.
-/// 2. Initializes schedule state for all configured schedules; one schedule's
-///    failure is logged and the others go on (the existence heal retries it).
-/// 3. Runs one tick at once, then one per `check_interval_seconds`: each tick
-///    enqueues the due slots of each due schedule.
+/// - [`Self::start`]: the start checks, the client family check and the
+///   state start. A refusal writes nothing.
+/// - [`ActiveScheduler::tick`]: one tick: the due read, the existence heal
+///   on its cadence, one fire per due schedule.
+/// - [`Self::run`]: the start, then one tick at once and one per
+///   `check_interval_seconds` until a stop request ([`SchedulerStop`]).
 ///
-/// Multiple scheduler instances can coexist — each due schedule is guarded by
-/// a per-schedule transaction-scoped advisory try-lock (matching Python's
-/// `pg_advisory_xact_lock` key derivation), and enqueues are idempotent via
-/// slot-based task ids.
-///
-/// The `app_config` is used to resolve queue priorities when enqueueing
-/// scheduled tasks, matching Python's `effective_priority()` behaviour.
 /// `prepared` comes from `Horsies::prepare_schedules`, which checks the
 /// schedules against the task registry (task registered, queue, input type,
-/// input size) and resolves each fired slot's queue and task options.
+/// input size) and resolves each fired slot's queue and task options. The
+/// `app_config` gives each slot's queue priority and retention.
+pub struct SchedulerService {
+    broker: Arc<PostgresBroker>,
+    schedule_config: ScheduleConfig,
+    app_config: AppConfig,
+    prepared: PreparedSchedules,
+    stop: CancellationToken,
+}
+
+/// What a scheduler start leaves.
+pub enum SchedulerStarted {
+    /// The master switch is off or no schedule is configured: there is
+    /// nothing to tick, and the start wrote nothing.
+    Idle,
+    /// The state rows are started; the scheduler ticks.
+    Active(ActiveScheduler),
+}
+
+/// A started scheduler.
+pub struct ActiveScheduler {
+    broker: Arc<PostgresBroker>,
+    schedule_config: ScheduleConfig,
+    app_config: AppConfig,
+    prepared: PreparedSchedules,
+    lock_pool: sqlx::PgPool,
+    existence_cadence: ExistenceCheckCadence,
+    stop: CancellationToken,
+}
+
+/// Why one tick fired nothing. The failure of one due schedule is logged
+/// and does not end the tick.
+#[derive(Debug, thiserror::Error)]
+pub enum SchedulerTickError {
+    /// The due read failed, so no schedule fired in this tick. The next tick
+    /// reads again.
+    #[error("the due schedule read failed: {0}")]
+    DueRead(#[source] sqlx::Error),
+}
+
+impl SchedulerService {
+    /// A scheduler of `schedule_config`. Starts nothing and connects to
+    /// nothing.
+    pub fn new(
+        broker: Arc<PostgresBroker>,
+        schedule_config: ScheduleConfig,
+        app_config: AppConfig,
+        prepared: PreparedSchedules,
+    ) -> Self {
+        Self {
+            broker,
+            schedule_config,
+            app_config,
+            prepared,
+            stop: CancellationToken::new(),
+        }
+    }
+
+    /// The stop request of this scheduler, for any later stage of it.
+    pub fn stop_handle(&self) -> SchedulerStop {
+        SchedulerStop {
+            token: self.stop.clone(),
+        }
+    }
+
+    /// Start the scheduler:
+    /// 1. With the master switch off or no schedule: [`SchedulerStarted::Idle`].
+    /// 2. The schedule section is valid and every enabled schedule has its
+    ///    send facts; no database call before this check.
+    /// 3. The client family check of the broker.
+    /// 4. The state start: one read with the database time; a refusal of an
+    ///    enabled pattern with no slot after that time; one write of the new
+    ///    and changed rows. A failed read or write is logged and the start
+    ///    goes on: the tick's existence heal creates the missing rows.
+    ///
+    /// Failure exits: [`SchedulerStartError`]. A refusal writes nothing.
+    pub async fn start(self) -> Result<SchedulerStarted, SchedulerStartError> {
+        let Self {
+            broker,
+            schedule_config,
+            app_config,
+            prepared,
+            stop,
+        } = self;
+        if !schedule_config.enabled || schedule_config.schedules.is_empty() {
+            tracing::info!("scheduler disabled or no schedules configured");
+            return Ok(SchedulerStarted::Idle);
+        }
+        check_schedules_at_start(&schedule_config, &prepared)?;
+        // The state start is the first schedule-state write. The slot
+        // enqueue checks the family again inside the broker's send.
+        broker
+            .ensure_client_family_for_write()
+            .await
+            .map_err(SchedulerStartError::ClientFamily)?;
+        initialize_schedules(broker.pool(), &schedule_config.schedules).await?;
+        let lock_pool = scheduler_lock_pool(broker.pool());
+        let existence_cadence = ExistenceCheckCadence::new(schedule_config.check_interval_seconds);
+        tracing::info!("scheduler started");
+        Ok(SchedulerStarted::Active(ActiveScheduler {
+            broker,
+            schedule_config,
+            app_config,
+            prepared,
+            lock_pool,
+            existence_cadence,
+            stop,
+        }))
+    }
+
+    /// The start, then the tick loop until a stop request. Failure exits:
+    /// those of [`Self::start`]; the loop logs each tick's failure and goes
+    /// on.
+    pub async fn run(self) -> Result<(), SchedulerStartError> {
+        match self.start().await? {
+            SchedulerStarted::Idle => Ok(()),
+            SchedulerStarted::Active(active) => {
+                active.run().await;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl ActiveScheduler {
+    /// The stop request of this scheduler.
+    pub fn stop_handle(&self) -> SchedulerStop {
+        SchedulerStop {
+            token: self.stop.clone(),
+        }
+    }
+
+    /// One tick: the due read, the existence heal on its cadence, then one
+    /// fire per due schedule. A panic inside one schedule's fire is caught
+    /// at that fire, logged with the schedule and the cause, and the tick
+    /// goes on with the next schedule.
+    ///
+    /// Failure exits: [`SchedulerTickError::DueRead`].
+    pub async fn tick(&mut self) -> Result<(), SchedulerTickError> {
+        check_and_enqueue(
+            &self.lock_pool,
+            &self.broker,
+            &self.schedule_config.schedules,
+            self.schedule_config.check_interval_seconds,
+            &self.app_config,
+            &self.prepared,
+            &mut self.existence_cadence,
+        )
+        .await
+        .map_err(SchedulerTickError::DueRead)
+    }
+
+    /// One tick at once, then one per `check_interval_seconds`, until a stop
+    /// request. A stop request ends the wait between two ticks; a tick in
+    /// flight runs to its end. A failed tick is logged and the next one
+    /// runs.
+    pub async fn run(mut self) {
+        let check_interval =
+            Duration::from_secs(u64::from(self.schedule_config.check_interval_seconds));
+        while !self.stop.is_cancelled() {
+            if let Err(error) = self.tick().await {
+                tracing::error!(error = %error, "scheduler check failed");
+            }
+            tokio::select! {
+                _ = self.stop.cancelled() => break,
+                _ = tokio::time::sleep(check_interval) => {}
+            }
+        }
+        self.lock_pool.close().await;
+        tracing::info!("scheduler stopped");
+    }
+}
+
+/// Spawn [`SchedulerService::run`] with `cancel` as its stop request.
+///
+/// The join handle yields the [`SchedulerStartError`] of a refused start;
+/// the host exits non-zero. Each due schedule is guarded by a per-schedule
+/// transaction-scoped advisory try-lock, and enqueues are idempotent through
+/// slot-based task ids.
 pub fn spawn_scheduler(
     broker: Arc<PostgresBroker>,
     schedule_config: ScheduleConfig,
@@ -261,68 +464,14 @@ pub fn spawn_scheduler(
     prepared: PreparedSchedules,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), SchedulerStartError>> {
-    tokio::spawn(run_scheduler(
+    let service = SchedulerService {
         broker,
         schedule_config,
         app_config,
         prepared,
-        cancel,
-    ))
-}
-
-/// The body of [`spawn_scheduler`]: start checks, the client family check,
-/// state initialization, then the tick loop until `cancel` fires.
-async fn run_scheduler(
-    broker: Arc<PostgresBroker>,
-    schedule_config: ScheduleConfig,
-    app_config: AppConfig,
-    prepared: PreparedSchedules,
-    cancel: CancellationToken,
-) -> Result<(), SchedulerStartError> {
-    if !schedule_config.enabled || schedule_config.schedules.is_empty() {
-        tracing::info!("scheduler disabled or no schedules configured");
-        return Ok(());
-    }
-
-    check_schedules_at_start(&schedule_config, &prepared, Utc::now())?;
-    // The state initialization is the first schedule-state write. The slot
-    // enqueue checks the family again inside the broker's send.
-    broker
-        .ensure_client_family_for_write()
-        .await
-        .map_err(SchedulerStartError::ClientFamily)?;
-    initialize_schedules(broker.pool(), &schedule_config.schedules).await;
-
-    let lock_pool = scheduler_lock_pool(broker.pool());
-    tracing::info!("scheduler started");
-    let check_interval = Duration::from_secs(u64::from(schedule_config.check_interval_seconds));
-    let mut existence_cadence = ExistenceCheckCadence::new(schedule_config.check_interval_seconds);
-
-    // Main loop: the first tick runs at once (Python `run_forever`).
-    while !cancel.is_cancelled() {
-        if let Err(e) = check_and_enqueue(
-            &lock_pool,
-            &broker,
-            &schedule_config.schedules,
-            schedule_config.check_interval_seconds,
-            &app_config,
-            &prepared,
-            &mut existence_cadence,
-        )
-        .await
-        {
-            tracing::error!(error = %e, "scheduler check failed");
-        }
-
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = tokio::time::sleep(check_interval) => {}
-        }
-    }
-
-    lock_pool.close().await;
-    tracing::info!("scheduler stopped");
-    Ok(())
+        stop: cancel,
+    };
+    tokio::spawn(service.run())
 }
 
 fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
@@ -342,11 +491,15 @@ fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
 /// 2. One write of the new and changed rows, each with its first run computed
 ///    from that database time. A changed row keeps its run record.
 ///
-/// Rows of names that are not in this config are kept and logged. A schedule
-/// whose pattern has no run after the database time is left out and logged.
-/// A database error of either statement is logged and start goes on: the
+/// Rows of names that are not in this config are kept and logged. An
+/// enabled schedule whose pattern has no run after the database time is
+/// refused before the write ([`SchedulerStartError::NoNextSlot`]). A
+/// database error of either statement is logged and start goes on: the
 /// tick's existence heal creates the missing rows.
-async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule]) {
+async fn initialize_schedules(
+    pool: &sqlx::PgPool,
+    schedules: &[TaskSchedule],
+) -> Result<(), SchedulerStartError> {
     let read = match state::read_start_states(pool).await {
         Ok(read) => read,
         Err(e) => {
@@ -354,9 +507,10 @@ async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule]) {
                 error = %e,
                 "failed to read schedule states at start; the existence heal creates missing rows",
             );
-            return;
+            return Ok(());
         }
     };
+    check_next_slots(schedules, read.database_now)?;
 
     // Schedule-state rows whose name is absent from this process's config are
     // left intact, not deleted: another scheduler (rolling deploy, shared DB)
@@ -382,7 +536,7 @@ async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule]) {
 
     let writes = start_writes(schedules, &stored, read.database_now);
     if writes.is_empty() {
-        return;
+        return Ok(());
     }
     match state::store_start_states(pool, &writes).await {
         Ok(written) => log_start_writes(&writes, &written, &stored),
@@ -391,6 +545,7 @@ async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule]) {
             "failed to store schedule states at start; the existence heal creates missing rows",
         ),
     }
+    Ok(())
 }
 
 /// The start write's rows: each enabled schedule whose stored digest is
@@ -585,26 +740,88 @@ async fn check_and_enqueue(
             }
         };
 
-        let schedule_result = process_schedule(
+        let schedule_result = FireBoundary::new(process_schedule(
             broker,
             schedule,
             now,
             check_interval_seconds,
             app_config,
             prepared,
-        )
+        ))
         .await;
 
         if let Err(e) = state::release_schedule_lock(lock_tx).await {
             tracing::error!(schedule = %schedule.name, error = %e, "failed to release schedule lock");
         }
 
-        if let Err(e) = schedule_result {
-            tracing::error!(schedule = %schedule.name, error = %e, "schedule processing failed");
+        match schedule_result {
+            FireEnded::Returned(Ok(())) => {}
+            FireEnded::Returned(Err(e)) => {
+                tracing::error!(schedule = %schedule.name, error = %e, "schedule processing failed");
+            }
+            FireEnded::Panicked { cause } => tracing::error!(
+                schedule = %schedule.name,
+                cause = %cause,
+                "panic in the fire of a schedule; the scheduler goes on with the next schedule",
+            ),
         }
     }
 
     Ok(())
+}
+
+/// How the fire of one due schedule ended.
+enum FireEnded<T> {
+    Returned(T),
+    /// The fire panicked; `cause` is the panic text.
+    Panicked {
+        cause: String,
+    },
+}
+
+/// The panic boundary of one schedule's fire. A panic is a defect, but one
+/// broken schedule does not stop the others: the boundary turns a panic in
+/// a poll of the fire into [`FireEnded::Panicked`], and the tick goes on with
+/// the next schedule (Python's per-schedule seam catches every exception).
+/// The panicked fire is not polled again.
+struct FireBoundary<F> {
+    fire: Pin<Box<F>>,
+}
+
+impl<F: Future> FireBoundary<F> {
+    fn new(fire: F) -> Self {
+        Self {
+            fire: Box::pin(fire),
+        }
+    }
+}
+
+impl<F: Future> Future for FireBoundary<F> {
+    type Output = FireEnded<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let fire = self.fire.as_mut();
+        match std::panic::catch_unwind(AssertUnwindSafe(|| fire.poll(context))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(output)) => Poll::Ready(FireEnded::Returned(output)),
+            Err(payload) => Poll::Ready(FireEnded::Panicked {
+                cause: panic_text(payload.as_ref()),
+            }),
+        }
+    }
+}
+
+/// The text of a panic payload: `panic!` with a literal gives `&str`, with
+/// format arguments `String`.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    match (
+        payload.downcast_ref::<&str>(),
+        payload.downcast_ref::<String>(),
+    ) {
+        (Some(text), _) => (*text).to_owned(),
+        (None, Some(text)) => text.clone(),
+        (None, None) => "the panic payload is not text".to_owned(),
+    }
 }
 
 /// Fire the due slots of one schedule and move its state row.
@@ -1047,30 +1264,11 @@ async fn enqueue_scheduled_task(
         })
 }
 
-/// The part of a schedule that decides its slots: pattern and timezone.
-#[derive(serde::Serialize)]
-struct ScheduleTiming<'a> {
-    pattern: &'a crate::core::config::SchedulePattern,
-    timezone: &'a str,
-}
-
-/// SHA-256 of the schedule's pattern and timezone, for change detection
-/// (Python `_compute_config_hash`). A change of input, queue or catch-up
-/// settings does not move `next_run_at`.
-///
-/// Stable across toolchain upgrades (C20): SHA-256 over serde_json text of a
-/// struct with a fixed field order.
+/// SHA-256 of the schedule's pattern and timezone in Python's digest text
+/// (`config_digest`), for change detection. A change of input, queue or
+/// catch-up settings does not move `next_run_at`.
 fn compute_config_hash(schedule: &TaskSchedule) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-
-    let timing = ScheduleTiming {
-        pattern: &schedule.pattern,
-        timezone: &schedule.timezone,
-    };
-    // The pattern types hold only strings, integers, enums and times: they
-    // always serialize. A failure here is a defect, not an operational error.
-    let text = serde_json::to_vec(&timing).expect("schedule pattern serializes to JSON");
-    Sha256::digest(&text).into()
+    config_digest(&schedule.pattern, &schedule.timezone)
 }
 
 #[cfg(test)]
@@ -1224,10 +1422,9 @@ mod tests {
 
     #[test]
     fn compute_config_hash_is_stable_sha256() {
-        // C20: the config hash must use a stable algorithm (SHA-256), not the
-        // toolchain-dependent DefaultHasher. SHA-256 hex is 64 lowercase chars;
-        // the old u64 DefaultHasher output was 16 — pinning the length and a
-        // golden value guards against a regression to an unstable hasher.
+        // The config hash is SHA-256 of Python's digest text, not a
+        // toolchain-dependent hasher; the golden value is the digest that
+        // Python's `_compute_config_hash` stores for the same schedule.
         let schedule = TaskSchedule {
             name: "test".to_owned(),
             task_name: "my_task".to_owned(),
@@ -1245,12 +1442,12 @@ mod tests {
             max_catch_up_runs: 100,
         };
         let hash = compute_config_hash(&schedule);
-        // Golden value pins the exact algorithm + serialization basis:
-        // SHA-256 of {"pattern":{"type":"interval","seconds":60},"timezone":"UTC"}.
+        // SHA-256 of
+        // {"pattern":{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null},"timezone":"UTC"}.
         let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
             hex,
-            "b896b67f1120471246f798d1f83ba3b4601931e97069ae773d2bf0c1880f705f",
+            "a7bba31d521252fd1fb6e910224d2c9a13daa9d45b4c3a1c4569f7b76a2e92e1",
         );
     }
 
@@ -1401,11 +1598,9 @@ mod tests {
     #[test]
     fn start_checks_accept_valid_schedules() {
         let config = ScheduleConfig::new(vec![interval_schedule_secs("fine", 60)]);
-        assert!(
-            check_schedules_at_start(&config, &prepared_for(&config.schedules), Utc::now()).is_ok()
-        );
+        assert!(check_schedules_at_start(&config, &prepared_for(&config.schedules)).is_ok());
         assert!(matches!(
-            check_schedules_at_start(&config, &PreparedSchedules::new(), Utc::now()),
+            check_schedules_at_start(&config, &PreparedSchedules::new()),
             Err(SchedulerStartError::NotPrepared { ref schedule }) if schedule == "fine"
         ));
     }
@@ -2052,7 +2247,9 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        initialize_schedules(&pool, &schedules).await;
+        initialize_schedules(&pool, &schedules)
+            .await
+            .expect("every pattern has a next slot");
         let after: DateTime<Utc> = sqlx::query_scalar("SELECT statement_timestamp()")
             .fetch_one(&pool)
             .await
@@ -2493,3 +2690,67 @@ mod tests {
 
 #[cfg(test)]
 mod slot_fire_spec_tests;
+
+#[cfg(test)]
+mod start_and_boundary_tests {
+    use super::*;
+    use crate::core::config::{IntervalSchedule, SchedulePattern};
+
+    async fn panicking_fire() -> u8 {
+        panic!("planned fire panic")
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_one_fire_is_caught_at_its_boundary() {
+        match FireBoundary::new(panicking_fire()).await {
+            FireEnded::Panicked { cause } => assert_eq!(cause, "planned fire panic"),
+            FireEnded::Returned(value) => panic!("the fire panics, but it returned {value}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fire_that_returns_passes_its_outcome_through_the_boundary() {
+        assert!(matches!(
+            FireBoundary::new(async { 7_u8 }).await,
+            FireEnded::Returned(7)
+        ));
+    }
+
+    /// An interval with no unit has no next slot: a pattern that never fires
+    /// again.
+    fn schedule_without_next_slot(name: &str, enabled: bool) -> TaskSchedule {
+        TaskSchedule::new(
+            name,
+            "my_task",
+            SchedulePattern::Interval(IntervalSchedule::default()),
+        )
+        .enabled(enabled)
+    }
+
+    #[test]
+    fn an_enabled_pattern_without_a_slot_after_the_database_time_is_refused() {
+        let database_now = Utc::now();
+        let schedules = vec![
+            TaskSchedule::new(
+                "fires",
+                "my_task",
+                SchedulePattern::Interval(IntervalSchedule {
+                    seconds: Some(60),
+                    ..IntervalSchedule::default()
+                }),
+            ),
+            schedule_without_next_slot("never", true),
+        ];
+        assert!(matches!(
+            check_next_slots(&schedules, database_now),
+            Err(SchedulerStartError::NoNextSlot { ref schedule, after })
+                if schedule == "never" && after == database_now
+        ));
+    }
+
+    #[test]
+    fn a_disabled_pattern_without_a_next_slot_is_not_checked() {
+        let schedules = vec![schedule_without_next_slot("off", false)];
+        assert!(check_next_slots(&schedules, Utc::now()).is_ok());
+    }
+}

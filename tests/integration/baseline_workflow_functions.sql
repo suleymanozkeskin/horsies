@@ -950,6 +950,55 @@ END $$;
 
 DO $$
 DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000422';
+    v_task uuid;
+    v_row horsies_workflow_step_row;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]');
+    v_task := wft_task_of(v_wf, 0);
+    PERFORM wft_phase1(v_task, wft_ok('1'));
+    UPDATE horsies_task_history SET result_envelope_version = 2 WHERE task_id = v_task;
+    SELECT * INTO v_row FROM horsies_workflow_node_finish(v_task, TRUE, 'READ') WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'SOURCE_VERSION_CONFLICT',
+                      'retaining: a history source of result envelope version 2 is a version conflict');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'ENQUEUED'
+                      AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = v_task),
+                      'retaining: unknown envelope version in history, node not written, record kept');
+    UPDATE horsies_task_history SET result_envelope_version = 1 WHERE task_id = v_task;
+    SELECT * INTO v_row FROM horsies_workflow_node_finish(v_task, TRUE, 'READ') WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'APPLIED' AND (wft_node(v_wf, 0)).status = 'COMPLETED',
+                      'the same history source of result envelope version 1 applies');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000423';
+    v_task uuid;
+    v_row horsies_workflow_step_row;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]');
+    v_task := wft_task_of(v_wf, 0);
+    PERFORM wft_phase1(v_task, wft_ok('1'));
+    PERFORM wft_check((horsies_phase2_quarantine_one(v_task)).verdict = 'REPOINTED',
+                      'quarantine source: the copy is taken');
+    UPDATE horsies_workflow_phase2_quarantine SET result_envelope_version = 2 WHERE task_id = v_task;
+    SELECT * INTO v_row FROM horsies_workflow_node_finish(v_task, TRUE, 'READ') WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'SOURCE_VERSION_CONFLICT',
+                      'retaining: a quarantine source of result envelope version 2 is a version conflict');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'ENQUEUED'
+                      AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending
+                                  WHERE task_id = v_task AND recovery_source = 'QUARANTINE')
+                      AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_quarantine WHERE task_id = v_task),
+                      'retaining: unknown envelope version in quarantine, node not written, record and copy kept');
+    UPDATE horsies_workflow_phase2_quarantine SET result_envelope_version = 1 WHERE task_id = v_task;
+    SELECT * INTO v_row FROM horsies_workflow_node_finish(v_task, TRUE, 'READ') WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'APPLIED' AND (wft_node(v_wf, 0)).status = 'COMPLETED'
+                      AND NOT EXISTS (SELECT 1 FROM horsies_workflow_phase2_quarantine WHERE task_id = v_task),
+                      'the same quarantine source of result envelope version 1 applies and drops the copy');
+END $$;
+
+DO $$
+DECLARE
     v_wf uuid := '00000000-0000-7000-8000-000000000431';
     v_result json;
 BEGIN
@@ -2208,6 +2257,37 @@ BEGIN
     PERFORM wft_check(v_row.disposition = 'APPLIED' AND v_row.workflow_status = 'FAILED'
                       AND v_row.advance_child_workflow_id = v_child,
                       'case 0: a step that ends a child names it for the parent advance');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000c14';
+    v_lost_task uuid;
+    v_row horsies_workflow_step_row;
+BEGIN
+    -- Root node 1 was left PENDING with no task by its start (simulated: its minted task row is gone).
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1},{"idx":2,"deps":[0]}]');
+    v_lost_task := wft_task_of(v_wf, 1);
+    UPDATE horsies_workflow_tasks SET status = 'PENDING', task_id = NULL, started_at = NULL
+    WHERE workflow_id = v_wf AND task_index = 1;
+    DELETE FROM horsies_tasks WHERE id = v_lost_task;
+
+    PERFORM wft_check(wft_finish(v_wf, 0, wft_ok('1')) = 'APPLIED', 'case 0 root: node 0 finishes');
+    PERFORM wft_check((wft_node(v_wf, 2)).status = 'ENQUEUED' AND (wft_node(v_wf, 1)).status = 'PENDING'
+                      AND (wft_node(v_wf, 1)).task_id IS NULL,
+                      'case 0 root: a node with no dependencies is not a dependent of a finished source');
+
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate(v_wf, 1) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'APPLIED' AND v_row.detail = 'ENQUEUED'
+                      AND (wft_node(v_wf, 1)).status = 'ENQUEUED' AND (wft_node(v_wf, 1)).started_at IS NOT NULL,
+                      'case 0 root: a PENDING node with no dependencies is APPLIED, ENQUEUED (join all, 0 of 0)');
+    PERFORM wft_check(EXISTS (SELECT 1 FROM horsies_tasks t
+                              WHERE t.id = (wft_node(v_wf, 1)).task_id AND t.status = 'PENDING'
+                                AND t.is_workflow_task AND t.id <> v_lost_task),
+                      'case 0 root: the promotion mints the task row of the node');
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate(v_wf, 1) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STALE' AND v_row.detail = 'ENQUEUED',
+                      'case 0 root: a second pass finds the node ENQUEUED (STALE)');
 END $$;
 
 DO $$
