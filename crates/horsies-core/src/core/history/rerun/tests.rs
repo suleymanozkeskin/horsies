@@ -661,7 +661,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .get_raw_result_record(live, Some(std::time::Duration::ZERO))
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(live_snapshot.task_id, live);
     assert_eq!(live_snapshot.task_name, "p8.live");
     assert_eq!(live_snapshot.status, TaskStatus::Pending);
@@ -685,7 +685,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .get_task_info_with_attempts(live, false, false, true)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(live_info.task_id, live);
     assert_eq!(live_info.status, TaskStatus::Pending);
     assert_eq!(
@@ -1272,7 +1272,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(completed, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(raw.task_id, completed);
     assert_eq!(raw.task_name, "p8.rerun");
     assert_eq!(raw.status, TaskStatus::Completed);
@@ -1289,7 +1289,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_task_info_with_attempts(completed, true, true, true)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(info.status, TaskStatus::Completed);
     assert_eq!(
         info.execution,
@@ -1306,7 +1306,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(failed, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(failed_raw.status, TaskStatus::Failed);
     let expected_error =
         TaskError::builtin(OperationalErrorCode::TaskException, "p8 terminal source");
@@ -1332,7 +1332,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(expired, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(expired_raw.status, TaskStatus::Expired);
     assert_eq!(expired_raw.raw_result, Some(expected_error_envelope));
     let expired_error = broker
@@ -1355,14 +1355,14 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(cancelled, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(cancelled_raw.status, TaskStatus::Cancelled);
     assert!(cancelled_raw.raw_result.is_none());
     assert!(broker
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .unwrap()
-        .is_none());
+        .is_absent());
 
     sqlx::query(
         "UPDATE horsies_task_history SET result_digest = decode(repeat('00', 32), 'hex')
@@ -1468,7 +1468,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .unwrap()
-        .is_none());
+        .is_absent());
 }
 
 #[tokio::test]

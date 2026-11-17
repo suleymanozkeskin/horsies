@@ -4,6 +4,7 @@
 import asyncio
 import datetime
 import uuid
+from collections.abc import Callable
 from typing import Literal, final
 
 
@@ -93,11 +94,11 @@ class CoreHandle:
         """The schema state of the database. Reads only."""
     def schema_status_async(self) -> asyncio.Future[SchemaStatusRecord]:
         """The awaitable form of the method above."""
-    def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
+    def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
         """Enqueue one task, in one statement. Installs the schema once per handle first. Writes; a
         resend with send_kind REPEAT is safe.
         """
-    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
+    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
         """The awaitable form of the method above."""
     def requeue_stale_claimed_async(self, stale_after_ms: int) -> asyncio.Future[StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed]:
         """One stale CLAIMED requeue pass. Writes; each batch commits alone. A threshold that
@@ -150,6 +151,16 @@ class CoreHandle:
     def cancel_owned_orphan_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
         """Cancel one claimed workflow task that this claim holds and that no runnable node
         links. Writes, in one statement. A naive claimed_at raises TypeError.
+        """
+    def register_child_spec_source(self, source: Callable[[ChildSpecRequest], ChildSpecBuilt | ChildSpecRefused]) -> None:
+        """Register the child spec source of the handle's workflow operations. The core calls it
+        on the callback thread for each sub-workflow child that an operation builds. A second
+        registration raises RuntimeError. Starts nothing.
+        """
+    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed]:
+        """Start one workflow. Writes; the children of its sub-workflow roots come from the child
+        spec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no
+        child spec source it raises RuntimeError.
         """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
@@ -483,6 +494,17 @@ class Enqueued:
 @final
 class SendSuppressed:
     """Sends are suppressed. Nothing was written."""
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class SendAsyncContext:
+    """A blocking send ran on a thread that runs an event loop or a tokio runtime. Nothing was
+    written. A client produces it before the send, never the core's enqueue.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
     @property
     def message(self) -> str: ...
 
@@ -1836,6 +1858,114 @@ class WorkflowNodesRead:
     def workflow_id(self) -> uuid.UUID: ...
     @property
     def nodes(self) -> list[StoredNodeRecord]: ...
+
+
+@final
+class ChildSpecSourceRow:
+    """One dependency of the node whose result an args_from member of the child's input takes."""
+    @property
+    def task_index(self) -> int: ...
+    @property
+    def node_id(self) -> str | None: ...
+    @property
+    def status(self) -> str: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def definition_key(self) -> str | None: ...
+    @property
+    def result(self) -> str | None: ...
+
+
+@final
+class ChildSpecRequest:
+    """The sub-workflow node whose child the Python client builds."""
+    @property
+    def parent_workflow_id(self) -> uuid.UUID: ...
+    @property
+    def parent_workflow_name(self) -> str: ...
+    @property
+    def task_index(self) -> int: ...
+    @property
+    def child_depth(self) -> int: ...
+    @property
+    def definition_key(self) -> str | None: ...
+    @property
+    def params(self) -> Literal['GIVEN', 'NOT_GIVEN']: ...
+    @property
+    def node_input(self) -> str: ...
+    @property
+    def args_from(self) -> str | None: ...
+    @property
+    def sources(self) -> list[ChildSpecSourceRow]: ...
+
+
+@final
+class ChildSpecBuilt:
+    """The child built: its spec as workflow spec data."""
+    def __init__(self, *, spec_json: str) -> None: ...
+    @property
+    def spec_json(self) -> str: ...
+
+
+@final
+class ChildSpecRefused:
+    """The child cannot start: its node fails. message is the error text for the log;
+    failure_result is the result envelope that the node stores.
+    """
+    def __init__(self, *, message: str, failure_result: str) -> None: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def failure_result(self) -> str: ...
+
+
+@final
+class WorkflowStartRequest:
+    """One frozen workflow start. spec_json is the workflow spec data of the spec; spec data
+    that the core refuses raises ValueError with the field path. A naive sent_at raises
+    TypeError.
+    """
+    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool) -> None: ...
+
+
+@final
+class WorkflowStarted:
+    """The tree was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowExists:
+    """A workflow with this id and this name exists, or the row with the id was gone by the
+    read of its name. Nothing was written.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowIdTaken:
+    """A workflow with this id exists under another name. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def existing_name(self) -> str: ...
+
+
+@final
+class WorkflowStartFailed:
+    """The connect, the schema install, the client family check, the statement or an owed
+    child start failed, or a child build did not run. Nothing committed, or the commit
+    outcome is unknown: a resend with the same id then finds the workflow.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
 
 
 @final

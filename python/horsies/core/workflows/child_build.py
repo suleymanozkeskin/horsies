@@ -430,6 +430,27 @@ def build_child(
             ),
             OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED,
         )
+    return build_child_within_depth(broker, node, dependency_results, child_depth)
+
+
+def build_child_within_depth(
+    broker: PostgresBroker,
+    node: ChildOfNode,
+    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    child_depth: int,
+) -> ChildBuild:
+    """``build_child`` after its depth check, for a child at ``child_depth``,
+    which is within ``MAX_SUBWORKFLOW_DEPTH``: the load of the definition,
+    the input, ``build_with``, then the node rows. Does no I/O; it runs the
+    child's ``build_with``.
+
+    Raises:
+        SerializationError: as ``build_child``.
+    """
+    assert child_depth <= MAX_SUBWORKFLOW_DEPTH, (
+        f'the child of {node.workflow_name}:{node.task_index} is at depth {child_depth}, '
+        f'past the limit {MAX_SUBWORKFLOW_DEPTH}; the depth check comes first'
+    )
     workflow_def = _load_definition(node.sub_definition_key)
     if workflow_def is None:
         logger.error(

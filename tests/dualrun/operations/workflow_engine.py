@@ -14,6 +14,13 @@ from tests.dualrun.operations.table import DualRunOperation, PoolMode
 
 WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     DualRunOperation(
+        name='workflow start',
+        production_path='horsies.core.workflows.lifecycle:start_workflow_async',
+        reference_path='tests.dualrun.reference.workflow_start_caller:start_workflow_async',
+        mode=PoolMode(),
+        core_methods=('start_workflow_async',),
+    ),
+    DualRunOperation(
         name='workflow pause',
         production_path='horsies.core.workflows.lifecycle:pause_workflow',
         reference_path='tests.dualrun.reference.workflow_pause_caller:pause_workflow',

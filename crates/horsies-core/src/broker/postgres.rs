@@ -13,7 +13,7 @@ use crate::core::history::enqueue::{parse_optional_object, prepare_enqueue_facts
 use crate::core::history::identity::keys::{
     reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
 };
-use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
+use crate::core::history::reads::detail::{HistoryTaskDetail, TaskAbsenceReason, TaskDetailResult};
 use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
@@ -43,7 +43,8 @@ use crate::broker::health::{
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
-    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
+    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
+    TaskInfoRead,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskResultRow};
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
@@ -1739,7 +1740,8 @@ impl PostgresBroker {
     /// A terminal history row is resolved through the staged detail reader.
     /// When `timeout` expires for a live non-terminal task, the latest status is
     /// returned with no result. A task absent from both live and retained
-    /// history returns `Ok(None)`. A limit above
+    /// history returns [`RawResultRead::Absent`] with the reason of the
+    /// history read. A limit above
     /// [`MAX_WAIT_LIMIT_MS`](crate::broker::wait_limit::MAX_WAIT_LIMIT_MS) is
     /// `INVALID_INPUT` before any read. A listener that cannot start makes the
     /// wait poll.
@@ -1747,21 +1749,21 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
         timeout: Option<Duration>,
-    ) -> BrokerResult<Option<RawResultRecord>> {
+    ) -> BrokerResult<RawResultRead> {
         let start = Instant::now();
         let limit =
             WaitLimit::parse(timeout).map_err(|refused| invalid_input(refused.to_string()))?;
         match Box::pin(self.raw_result_probe(task_id)).await? {
-            RawResultProbe::Record(record) => return Ok(Some(record)),
-            RawResultProbe::Absent => return Ok(None),
+            RawResultProbe::Record(record) => return Ok(RawResultRead::Found(record)),
+            RawResultProbe::Absent(reason) => return Ok(RawResultRead::Absent { reason }),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
         let mut wait_mode = self.result_wait_mode(task_id).await;
 
         match Box::pin(self.raw_result_probe(task_id)).await? {
-            RawResultProbe::Record(record) => return Ok(Some(record)),
-            RawResultProbe::Absent => return Ok(None),
+            RawResultProbe::Record(record) => return Ok(RawResultRead::Found(record)),
+            RawResultProbe::Absent(reason) => return Ok(RawResultRead::Absent { reason }),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
@@ -1770,9 +1772,9 @@ impl PostgresBroker {
             if deadline.is_some_and(|at| Instant::now() >= at) {
                 return match Box::pin(self.raw_result_probe(task_id)).await? {
                     RawResultProbe::Record(record) | RawResultProbe::Waiting(record) => {
-                        Ok(Some(record))
+                        Ok(RawResultRead::Found(record))
                     }
-                    RawResultProbe::Absent => Ok(None),
+                    RawResultProbe::Absent(reason) => Ok(RawResultRead::Absent { reason }),
                     RawResultProbe::Retry => {
                         tokio::task::yield_now().await;
                         continue;
@@ -1785,8 +1787,8 @@ impl PostgresBroker {
                 .unwrap_or(interval);
             wait_mode.pause(wait).await;
             match Box::pin(self.raw_result_probe(task_id)).await? {
-                RawResultProbe::Record(record) => return Ok(Some(record)),
-                RawResultProbe::Absent => return Ok(None),
+                RawResultProbe::Record(record) => return Ok(RawResultRead::Found(record)),
+                RawResultProbe::Absent(reason) => return Ok(RawResultRead::Absent { reason }),
                 RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
             }
         }
@@ -1832,20 +1834,59 @@ impl PostgresBroker {
         task_id: Uuid,
         include_result: bool,
         include_failed_reason: bool,
-    ) -> BrokerResult<Option<TaskInfo>> {
+    ) -> BrokerResult<TaskInfoRead> {
         self.get_task_info_with_attempts(task_id, include_result, include_failed_reason, false)
             .await
     }
 
     /// Fetch task metadata and optionally compose execution attempts from the
     /// live attempt table or the immutable history snapshot.
+    ///
+    /// A task that neither the live table nor the task history holds is
+    /// [`TaskInfoRead::Absent`] with the reason of the history read. When
+    /// the live read finds no row and the history read then finds the task
+    /// live (a send of that id committed between the two statements), the
+    /// read runs again, at most [`TASK_INFO_READ_PASSES`] times in all; a
+    /// task that moves on every pass is `TASK_INFO_QUERY_FAILED`, retryable.
     pub async fn get_task_info_with_attempts(
         &self,
         task_id: Uuid,
         include_result: bool,
         include_failed_reason: bool,
         include_attempts: bool,
-    ) -> BrokerResult<Option<TaskInfo>> {
+    ) -> BrokerResult<TaskInfoRead> {
+        for _pass in 0..TASK_INFO_READ_PASSES {
+            match Box::pin(self.task_info_pass(
+                task_id,
+                include_result,
+                include_failed_reason,
+                include_attempts,
+            ))
+            .await?
+            {
+                TaskInfoPass::Read(read) => return Ok(read),
+                TaskInfoPass::BecameLive => {}
+            }
+        }
+        Err(BrokerOperationError {
+            code: BrokerErrorCode::TaskInfoQueryFailed,
+            message: format!(
+                "task {task_id} was absent from the live table and live in the history read \
+                 on {TASK_INFO_READ_PASSES} passes in a row"
+            ),
+            retryable: true,
+        })
+    }
+
+    /// One pass of [`Self::get_task_info_with_attempts`]: the live row, else
+    /// the history record or the absence reason.
+    async fn task_info_pass(
+        &self,
+        task_id: Uuid,
+        include_result: bool,
+        include_failed_reason: bool,
+        include_attempts: bool,
+    ) -> BrokerResult<TaskInfoPass> {
         let row = self
             .read_main(
                 &GET_TASK_INFO.bind().value(&task_id).finish(),
@@ -1874,7 +1915,7 @@ impl PostgresBroker {
                             .map_err(task_info_history_error)?,
                     );
                 }
-                Ok(Some(info))
+                Ok(TaskInfoPass::Read(TaskInfoRead::Found(Box::new(info))))
             }
             None => {
                 let detail = Box::pin(self.fetch_history_detail(task_id))
@@ -1887,9 +1928,11 @@ impl PostgresBroker {
                         include_failed_reason,
                         include_attempts,
                     )
-                    .map(Some),
-                    TaskDetailResult::Live { .. } => Ok(None),
-                    TaskDetailResult::Absent { .. } => Ok(None),
+                    .map(|info| TaskInfoPass::Read(TaskInfoRead::Found(Box::new(info)))),
+                    TaskDetailResult::Live { .. } => Ok(TaskInfoPass::BecameLive),
+                    TaskDetailResult::Absent { reason, .. } => {
+                        Ok(TaskInfoPass::Read(TaskInfoRead::Absent { reason }))
+                    }
                 }
             }
         }
@@ -2739,7 +2782,19 @@ enum RawResultProbe {
     Record(RawResultRecord),
     Waiting(RawResultRecord),
     Retry,
-    Absent,
+    Absent(TaskAbsenceReason),
+}
+
+/// The passes of a task info read whose live read and history read race a
+/// send of the same id.
+const TASK_INFO_READ_PASSES: u32 = 3;
+
+/// The end of one task info pass.
+enum TaskInfoPass {
+    Read(TaskInfoRead),
+    /// The live read found no row, and the history read found the task
+    /// live: a send of the id committed between the two statements.
+    BecameLive,
 }
 
 fn raw_result_from_history_detail(
@@ -2747,7 +2802,7 @@ fn raw_result_from_history_detail(
     detail: TaskDetailResult,
 ) -> BrokerResult<RawResultProbe> {
     match detail {
-        TaskDetailResult::Absent { .. } => Ok(RawResultProbe::Absent),
+        TaskDetailResult::Absent { reason, .. } => Ok(RawResultProbe::Absent(reason)),
         TaskDetailResult::Live { .. } => Ok(RawResultProbe::Retry),
         TaskDetailResult::History(detail) => {
             // Parsed at the history read (`HistoryTaskDetail.status`).
@@ -3719,17 +3774,17 @@ mod tests {
         }
     }
 
-    /// Verify that get_task_info returns BrokerResult<Option<TaskInfo>>
+    /// Verify that get_task_info returns BrokerResult<TaskInfoRead>
     /// and accepts include_result / include_failed_reason filter params.
     #[test]
     fn get_task_info_return_type_contract() {
         #[allow(unused, unreachable_code)]
         async fn _check(broker: &PostgresBroker) {
-            let _result: BrokerResult<Option<TaskInfo>> =
+            let _result: BrokerResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), false, false).await;
-            let _result: BrokerResult<Option<TaskInfo>> =
+            let _result: BrokerResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), true, false).await;
-            let _result: BrokerResult<Option<TaskInfo>> =
+            let _result: BrokerResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), true, true).await;
         }
     }
@@ -4153,6 +4208,29 @@ mod get_result_wait_tests {
         let probe =
             raw_result_from_history_detail(task_id, TaskDetailResult::Live { task_id }).unwrap();
         assert!(matches!(probe, RawResultProbe::Retry));
+    }
+
+    /// The absence reason of the history read reaches the raw result read:
+    /// a task that retention can have removed differs from an id that no
+    /// retained history held.
+    #[test]
+    fn an_absent_history_detail_keeps_its_reason() {
+        let task_id = Uuid::new_v4();
+        for reason in [
+            TaskAbsenceReason::PredatesRetainedHistory,
+            TaskAbsenceReason::WithinRetainedHistory,
+            TaskAbsenceReason::NotClassified,
+        ] {
+            let probe = raw_result_from_history_detail(
+                task_id,
+                TaskDetailResult::Absent { task_id, reason },
+            )
+            .unwrap();
+            assert!(
+                matches!(probe, RawResultProbe::Absent(kept) if kept == reason),
+                "{reason:?}"
+            );
+        }
     }
 
     #[tokio::test]
