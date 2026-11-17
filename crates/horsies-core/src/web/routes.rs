@@ -29,8 +29,9 @@ use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
 use super::app::WebState;
 use super::common::{
     pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool, parse_group_by,
-    parse_i64, parse_path_uuid, parse_sort_by, parse_sort_direction, parse_statuses, query_failed,
-    validate_f64_range, validate_i64_range, ApiError, QueryValues,
+    parse_i64, parse_path_uuid, parse_sort_by, parse_sort_direction, parse_statuses,
+    parse_workflow_path_uuid, query_failed, validate_f64_range, validate_i64_range, ApiError,
+    QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
 
@@ -433,7 +434,7 @@ async fn read_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<crate::monitoring::WorkflowRunDetail>, ApiError> {
-    let workflow_id = parse_path_uuid("workflow_id", &workflow_id)?;
+    let workflow_id = parse_workflow_path_uuid(&workflow_id)?;
     get_workflow_run(&state.broker, workflow_id)
         .await
         .map_err(|error| query_failed("Workflow run", error))?
@@ -708,7 +709,7 @@ async fn cancel_task(
 }
 
 fn workflow_action_id(workflow_id: &str) -> Result<Uuid, Response> {
-    parse_path_uuid("workflow_id", workflow_id).map_err(IntoResponse::into_response)
+    parse_workflow_path_uuid(workflow_id).map_err(IntoResponse::into_response)
 }
 
 async fn pause_workflow(
