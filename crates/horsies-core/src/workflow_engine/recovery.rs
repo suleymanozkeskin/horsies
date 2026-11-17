@@ -568,7 +568,7 @@ impl StepDisposition for EnqueueReadyDisposition {
 
 /// What the tree pass's completion check did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TreeCompletion {
+pub(crate) enum TreeCompletion {
     /// The check wrote COMPLETED or FAILED.
     Written { advance: ParentAdvance },
     /// The workflow is gone, not RUNNING, or has a live node; nothing written.
@@ -1547,7 +1547,7 @@ async fn recover_tree_case2_3(
 ///
 /// Errors: [`WorkflowError::Broker`] for a failed statement (nothing committed, or a lost `COMMIT` reply:
 /// `OutcomeUnknown`); [`WorkflowError::StepContract`] for a row that does not decode (rolled back).
-async fn complete_in_tree(
+pub(crate) async fn complete_in_tree(
     broker: &PostgresBroker,
     workflow_id: Uuid,
 ) -> Result<TreeCompletion, WorkflowError> {

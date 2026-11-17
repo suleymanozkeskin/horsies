@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::json;
 use serial_test::serial;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::terminalize;
@@ -117,6 +117,50 @@ fn query_vocabulary_and_bounds_are_exhaustive() {
             .split(|character: char| character == ',' || character.is_whitespace())
             .any(|column| column == payload_column));
     }
+}
+
+/// The definition of `horsies_monitoring_task_list` as the baseline ships
+/// it: from `CREATE FUNCTION` to the end of its body.
+fn task_list_function_definition() -> &'static str {
+    let (_, text) = crate::broker::migrations::BASELINE_SQL_FILE_TEXTS
+        .iter()
+        .find(|(name, _)| *name == "0007_scheduler_monitoring_functions.sql")
+        .expect("the baseline has the monitoring functions file");
+    let start = text
+        .find("CREATE FUNCTION horsies_monitoring_task_list(")
+        .expect("the file defines the task list function");
+    let definition = &text[start..];
+    let end = definition
+        .find("\n$$;")
+        .expect("the task list function body ends");
+    &definition[..end]
+}
+
+/// The task list function reads no payload column on either side (the live
+/// input and options, the history result, attempt and rerun-input
+/// envelopes), and its unfiltered history estimate is a plain
+/// `EXPLAIN (FORMAT JSON)` of the window read: it plans the read and does
+/// not run it (no `ANALYZE`).
+#[test]
+fn the_task_list_function_reads_no_payload_and_does_not_run_its_estimate() {
+    let definition = task_list_function_definition();
+    let words: BTreeSet<String> = definition
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .map(str::to_ascii_lowercase)
+        .collect();
+
+    for payload_column in [
+        "input",
+        "task_options",
+        "result_payload",
+        "attempt_snapshot",
+        "rerun_input_inline",
+    ] {
+        assert!(!words.contains(payload_column), "{payload_column}");
+    }
+    assert!(!words.contains("analyze"));
+    assert!(definition
+        .contains("EXECUTE 'EXPLAIN (FORMAT JSON) SELECT 1 FROM horsies_task_history AS h '\n"));
 }
 
 #[test]
@@ -1110,10 +1154,10 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
         complete_task(&pool, history.id).await;
     }
 
+    let window = test_window();
     let unfiltered = list_tasks(
         &broker,
-        &TaskListQuery::new(test_window())
-            .with_sort(TaskSortField::EnqueuedAt, SortDirection::Ascending),
+        &TaskListQuery::new(window).with_sort(TaskSortField::EnqueuedAt, SortDirection::Ascending),
     )
     .await
     .expect("unfiltered W2 list");
@@ -1123,20 +1167,21 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     .fetch_one(&pool)
     .await
     .expect("read live estimate");
-    let history_statement = crate::core::history::reads::aggregates::history_estimate_statement(
-        test_window(),
-        &crate::core::history::reads::pages::HistoryScope::default(),
-    );
-    let history_payload: serde_json::Value = history_statement
-        .query()
-        .fetch_one(&pool)
-        .await
-        .expect("read history estimate")
-        .try_get(0)
-        .expect("decode history estimate payload");
-    let history_estimate =
-        crate::core::history::reads::aggregates::plan_rows_from_explain(&history_payload)
-            .expect("decode history estimate");
+    // The history side of an unfiltered total is the planner's estimate of
+    // the window read that `horsies_monitoring_task_list` explains.
+    let history_payload: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (FORMAT JSON) SELECT 1 FROM horsies_task_history AS h
+         WHERE h.terminal_at >= $1 AND h.terminal_at < $2",
+    )
+    .bind(window.lower())
+    .bind(window.upper())
+    .fetch_one(&pool)
+    .await
+    .expect("read history estimate");
+    let history_estimate = crate::core::history::reads::aggregates::plan_rows_from_explain_text(
+        &history_payload.to_string(),
+    )
+    .expect("decode history estimate");
     assert_eq!(unfiltered.total, live_estimate + history_estimate);
     let pending = list_tasks(
         &broker,
