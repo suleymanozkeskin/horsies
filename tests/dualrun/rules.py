@@ -131,7 +131,20 @@ class JsonTime:
     rule: TimeOrderOnly | TimeWithin
 
 
-JsonLeafRule = NormalisedId | JsonTime | Ignored
+@dataclass(frozen=True, slots=True)
+class IdsInText:
+    """A text that names ids of ``family`` in their canonical UUID form.
+
+    Each lower-case canonical UUID inside the text (``8-4-4-4-12`` hex
+    digits, with no letter, digit or hyphen next to it) is an id of
+    ``family``: it takes its label from the label book of the snapshot, as
+    an id in a column does. The text around the ids compares exactly.
+    """
+
+    family: IdFamily
+
+
+JsonLeafRule = NormalisedId | IdsInText | JsonTime | Ignored
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,7 +441,7 @@ def _path_defects(table: str, column: str, path: JsonPath) -> list[CatalogDefect
                     pass
             if rule.bound < timedelta(0):
                 defects.append(NegativeBound(table=table, column=column))
-        case Ignored() | JsonTime() | NormalisedId():
+        case Ignored() | JsonTime() | NormalisedId() | IdsInText():
             pass
     return defects
 

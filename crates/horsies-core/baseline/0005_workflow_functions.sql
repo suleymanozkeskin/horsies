@@ -205,11 +205,123 @@ BEGIN
 END;
 $$;
 
+-- p_keys as Python's repr writes a list of str: '[' and ']' around the items, ', ' between them. Each item is quoted
+-- as Python quotes a str: with "'", or with '"' when the text holds a "'" and no '"'. Inside the quotes a backslash,
+-- the quote character, tab, newline and carriage return are escaped as Python escapes them, and the other characters
+-- from U+0000 to U+001F and from U+007F to U+009F as \xNN. Python's repr also escapes the other characters that
+-- str.isprintable() refuses (for example U+00A0, U+2028); this function writes those unchanged.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_python_str_list(p_keys text[]) RETURNS text
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT '[' || coalesce(string_agg(quoted.item_text, ', ' ORDER BY item.item_position), '') || ']'
+    FROM unnest(p_keys) WITH ORDINALITY AS item(value, item_position)
+    CROSS JOIN LATERAL (
+        SELECT CASE
+            WHEN strpos(item.value, chr(39)) > 0 AND strpos(item.value, chr(34)) = 0 THEN chr(34)
+            ELSE chr(39)
+        END AS mark
+    ) AS quote
+    CROSS JOIN LATERAL (
+        SELECT quote.mark || coalesce(string_agg(
+            CASE
+                WHEN c.ch = chr(92) THEN chr(92) || chr(92)
+                WHEN c.ch = chr(39) AND quote.mark = chr(39) THEN chr(92) || chr(39)
+                WHEN c.ch = chr(9) THEN chr(92) || 't'
+                WHEN c.ch = chr(10) THEN chr(92) || 'n'
+                WHEN c.ch = chr(13) THEN chr(92) || 'r'
+                WHEN ascii(c.ch) < 32 OR ascii(c.ch) BETWEEN 127 AND 159
+                    THEN chr(92) || 'x' || lpad(to_hex(ascii(c.ch)), 2, '0')
+                ELSE c.ch
+            END,
+            '' ORDER BY c.char_position
+        ), '') || quote.mark AS item_text
+        FROM regexp_split_to_table(item.value, '') WITH ORDINALITY AS c(ch, char_position)
+        WHERE c.ch <> ''
+    ) AS quoted
+$$;
+
+-- The cause of a stored result text that horsies_workflow_result_kind reads as 'UNREADABLE', in the words and the
+-- order of the checks of Python's _decode_err_only (core/workflows/engine.py:324-377), loads_json
+-- (core/codec/json_io.py:97-137) and validate_task_result_envelope (core/codec/typed.py:1133-1180):
+-- 1. text that the json input refuses: 'Stored task result is not JSON: JSON parse failed: <the database's text>';
+--    Python writes the text of its json module there, which the database cannot give;
+-- 2. a top-level object that repeats a key: 'Stored task result is not JSON: JSON parse failed: JSON object repeats
+--    a key';
+-- 3. a value that is not an object: 'Stored task result does not decode: TaskResult envelope must be a JSON object;
+--    got <Python type name>';
+-- 4. no __h_task_result__ marker, or a marker other than true: 'Stored task result does not decode: TaskResult
+--    envelope missing '__h_task_result__' marker (or marker is not True); got keys <sorted keys>';
+-- 5. a missing ok or err key: 'Stored task result does not decode: TaskResult envelope missing required keys
+--    <sorted missing keys>; got <sorted keys>';
+-- 6. another key: 'Stored task result does not decode: unexpected keys in TaskResult envelope: <sorted other keys>';
+-- 7. both slots set: 'Stored task result does not decode: TaskResult envelope has both ok and err populated; exactly
+--    one must be set';
+-- 8. an err slot that is not an object with an error_code: 'Stored task error does not decode: the err slot is not
+--    an object with an error_code'; Python writes the text of its model validation there.
+-- Key lists are sorted by code point and written by horsies_workflow_python_str_list.
+-- Precondition: horsies_workflow_result_kind(p_result) is 'UNREADABLE'. The parse runs in a subtransaction, so this
+-- serves cold paths only (the workflow error of a failed node).
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_unreadable_result_cause(p_result text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_shape_prefix CONSTANT text := 'Stored task result does not decode: ';
+    v_value json;
+    v_keys text[];
+    v_missing text[];
+    v_extra text[];
+BEGIN
+    BEGIN
+        v_value := p_result::json;
+    EXCEPTION
+        WHEN invalid_text_representation THEN
+            RETURN 'Stored task result is not JSON: JSON parse failed: ' || SQLERRM;
+    END;
+    IF json_typeof(v_value) <> 'object' THEN
+        RETURN c_shape_prefix || 'TaskResult envelope must be a JSON object; got '
+            || horsies_workflow_json_type_name(v_value);
+    END IF;
+    v_keys := ARRAY(
+        SELECT DISTINCT k.key COLLATE "C" FROM json_object_keys(v_value) AS k(key) ORDER BY 1
+    );
+    IF (SELECT count(*) FROM json_object_keys(v_value)) <> cardinality(v_keys) THEN
+        RETURN 'Stored task result is not JSON: JSON parse failed: JSON object repeats a key';
+    END IF;
+    IF json_typeof(v_value -> '__h_task_result__') IS DISTINCT FROM 'boolean'
+        OR (v_value ->> '__h_task_result__') <> 'true' THEN
+        RETURN c_shape_prefix || 'TaskResult envelope missing ''__h_task_result__'' marker (or marker is not True); '
+            || 'got keys ' || horsies_workflow_python_str_list(v_keys);
+    END IF;
+    v_missing := ARRAY(
+        SELECT e.key FROM unnest(ARRAY['__h_task_result__', 'err', 'ok']) AS e(key)
+        WHERE e.key <> ALL (v_keys) ORDER BY e.key COLLATE "C"
+    );
+    IF cardinality(v_missing) > 0 THEN
+        RETURN c_shape_prefix || 'TaskResult envelope missing required keys '
+            || horsies_workflow_python_str_list(v_missing) || '; got ' || horsies_workflow_python_str_list(v_keys);
+    END IF;
+    v_extra := ARRAY(
+        SELECT k.key FROM unnest(v_keys) AS k(key)
+        WHERE k.key NOT IN ('__h_task_result__', 'err', 'ok') ORDER BY k.key COLLATE "C"
+    );
+    IF cardinality(v_extra) > 0 THEN
+        RETURN c_shape_prefix || 'unexpected keys in TaskResult envelope: '
+            || horsies_workflow_python_str_list(v_extra);
+    END IF;
+    IF json_typeof(v_value -> 'ok') <> 'null' AND json_typeof(v_value -> 'err') <> 'null' THEN
+        RETURN c_shape_prefix || 'TaskResult envelope has both ok and err populated; exactly one must be set';
+    END IF;
+    RETURN 'Stored task error does not decode: the err slot is not an object with an error_code';
+END;
+$$;
+
 -- The error of a stored node result, as the bare error object text, for the workflow error column. Python:
--- _decode_err_only (core/workflows/engine.py:284-337) and _recovered_failure_result
+-- _decode_err_only (core/workflows/engine.py:324-377) and _recovered_failure_result
 -- (core/workflows/phase2_recovery.py:233-292). Returns the err slot text unchanged for 'ERROR'; NULL for 'VALUE',
--- 'ABSENT' and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); a RESULT_DESERIALIZATION_ERROR
--- object for 'UNREADABLE'.
+-- 'ABSENT' and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); for 'UNREADABLE', a
+-- RESULT_DESERIALIZATION_ERROR object whose message is the cause (horsies_workflow_unreadable_result_cause).
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_err_slot(p_result text) RETURNS text
     LANGUAGE plpgsql IMMUTABLE
@@ -220,7 +332,7 @@ BEGIN
             RETURN (p_result::json -> 'err')::text;
         WHEN 'UNREADABLE' THEN
             RETURN horsies_task_error_object(
-                'RESULT_DESERIALIZATION_ERROR', 'Stored task result does not decode as a task result envelope', NULL
+                'RESULT_DESERIALIZATION_ERROR', horsies_workflow_unreadable_result_cause(p_result), NULL
             );
         WHEN 'VALUE', 'ABSENT', 'OUTPUTLESS' THEN
             RETURN NULL;

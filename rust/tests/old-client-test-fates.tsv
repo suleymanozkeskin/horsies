@@ -1,5 +1,5 @@
 # One fate for every test function of the old rust/tests crates (#1410).
-# fate: PORTED (detail: the new test), COVERED_BY_CORE (detail: the core test), DELETED (detail: the decision or the covering test).
+# fate: PORTED (detail: the new test), COVERED_BY_CORE (detail: the core test), DELETED (detail: the decision or the covering test), TO_PORT (detail: the issue that ports it).
 file	test	fate	detail
 worker/tests/layer0_migration_isolation.rs	horsies_migrate_does_not_write_to_sqlx_migrations	DELETED	clean-slate baseline: the install writes no sqlx table; horsies-core broker::migrations::tests::an_empty_database_gets_the_chain_the_guard_row_and_the_family
 worker/tests/layer0_migration_isolation.rs	horsies_migrate_on_clean_db_does_not_create_sqlx_table	DELETED	clean-slate baseline: the install writes no sqlx table; horsies-core broker::migrations::tests::an_empty_database_gets_the_chain_the_guard_row_and_the_family
@@ -115,3 +115,91 @@ worker/tests/layer8_health.rs	test_ping_workers_rejects_zero_timeout	PORTED	work
 worker/tests/layer8_health.rs	test_ping_workers_collects_pong_and_targets_worker	PORTED	worker/tests/layer8_health.rs::test_ping_workers_collects_pong_and_targets_worker (snapshots of live workers in place of inserted rows)
 worker/tests/layer8_health.rs	test_list_worker_states_fresh_stale_and_single_snapshot	COVERED_BY_CORE	horsies-core broker::worker_state_read_tests::the_list_holds_the_latest_snapshot_of_each_worker
 worker/tests/layer8_health.rs	test_ping_workers_rejects_zero_min_responses	DELETED	min_responses is Option<NonZeroUsize> in the client API, so zero does not compile; the core boundary: horsies-core broker::postgres::broker_operation_error_tests::ping_workers_refuses_zero_min_responses_as_invalid_input
+queue_mismatch/tests/scenario_1_default_with_queue.rs	registration_fails_with_queue_in_default_mode	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_1_registration_fails_with_queue_in_default_mode
+queue_mismatch/tests/scenario_1_default_with_queue.rs	check_never_reached	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_1_check_never_reached
+queue_mismatch/tests/scenario_1_default_with_queue.rs	worker_never_starts	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_1_worker_never_starts
+queue_mismatch/tests/scenario_2_custom_no_queue.rs	registration_fails_without_queue_in_custom_mode	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_2_registration_fails_without_queue_in_custom_mode
+queue_mismatch/tests/scenario_2_custom_no_queue.rs	check_never_reached	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_2_check_never_reached
+queue_mismatch/tests/scenario_2_custom_no_queue.rs	worker_config_subscribes_to_custom_queues	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_2_worker_config_subscribes_to_custom_queues
+queue_mismatch/tests/scenario_3_custom_unknown_queue.rs	registration_fails_with_unknown_queue	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_3_registration_fails_with_unknown_queue
+queue_mismatch/tests/scenario_3_custom_unknown_queue.rs	error_lists_valid_queues	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_3_error_lists_valid_queues
+queue_mismatch/tests/scenario_3_custom_unknown_queue.rs	check_also_catches_unknown_queue_via_raw_register	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_3_check_also_catches_unknown_queue_via_raw_register
+queue_mismatch/tests/scenario_3_custom_unknown_queue.rs	worker_never_starts_with_unknown_queue	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_3_worker_never_starts_with_unknown_queue
+queue_mismatch/tests/scenario_4_custom_valid_queue.rs	registration_succeeds_with_valid_queue	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_4_registration_succeeds_with_valid_queue
+queue_mismatch/tests/scenario_4_custom_valid_queue.rs	check_passes	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_4_check_passes
+queue_mismatch/tests/scenario_4_custom_valid_queue.rs	worker_config_is_valid	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_4_worker_config_is_valid
+queue_mismatch/tests/scenario_5_default_no_queue.rs	registration_succeeds_without_queue	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_5_registration_succeeds_without_queue
+queue_mismatch/tests/scenario_5_default_no_queue.rs	check_passes	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_5_check_passes
+queue_mismatch/tests/scenario_5_default_no_queue.rs	worker_startup_reaches_broker	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_5_worker_startup_reaches_broker
+queue_mismatch/tests/scenario_6_mixed_valid_invalid.rs	first_valid_second_invalid_poisons_startup	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_6_first_valid_second_invalid_poisons_startup
+queue_mismatch/tests/scenario_6_mixed_valid_invalid.rs	check_fails_if_bad_task_bypassed_register	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_6_check_fails_if_bad_task_bypassed_register
+queue_mismatch/tests/scenario_6_mixed_valid_invalid.rs	worker_never_starts_due_to_poisoned_registration	PORTED	queue_mismatch/tests/queue_mismatch_guard.rs::scenario_6_worker_never_starts_due_to_poisoned_registration
+queue_mismatch/tests/report.rs	print_report	DELETED	printed the outcome table of the six scenarios; each outcome is a test of queue_mismatch/tests/queue_mismatch_guard.rs
+worker/tests/layer4_workflow_structure.rs	test_linear_workflow	PORTED	worker/tests/layer4_workflow_structure.rs::test_linear_workflow
+worker/tests/layer4_workflow_structure.rs	test_fanout_parallel_execution	PORTED	worker/tests/layer4_workflow_structure.rs::test_fanout_parallel_execution
+worker/tests/layer4_workflow_structure.rs	test_fanin_waits_for_all	PORTED	worker/tests/layer4_workflow_structure.rs::test_fanin_waits_for_all
+worker/tests/layer4_workflow_structure.rs	test_diamond_structure	PORTED	worker/tests/layer4_workflow_structure.rs::test_diamond_structure
+worker/tests/layer4_workflow_structure.rs	test_single_node_workflow	PORTED	worker/tests/layer4_workflow_structure.rs::test_single_node_workflow
+worker/tests/layer4_workflow_structure.rs	test_linear_failure_cascades_to_skip	PORTED	worker/tests/layer4_workflow_structure.rs::test_linear_failure_cascades_to_skip
+worker/tests/layer4_workflow_structure.rs	test_workflow_fails_with_error	PORTED	worker/tests/layer4_workflow_structure.rs::test_workflow_fails_with_error
+worker/tests/layer4_workflow_structure.rs	test_fanout_one_branch_fails	PORTED	worker/tests/layer4_workflow_structure.rs::test_fanout_one_branch_fails
+worker/tests/layer4_workflow_structure.rs	test_fanin_one_dep_fails_skips_aggregator	PORTED	worker/tests/layer4_workflow_structure.rs::test_fanin_one_dep_fails_skips_aggregator
+worker/tests/layer4_workflow_structure.rs	test_workflow_cancellation	PORTED	worker/tests/layer4_workflow_structure.rs::test_workflow_cancellation
+worker/tests/layer4_workflow_structure.rs	test_workflow_task_expired_while_claimed_before_start	PORTED	worker/tests/layer4_workflow_structure.rs::test_workflow_task_expired_while_claimed_before_start
+worker/tests/layer5_workflow_dataflow.rs	test_args_from_single_dependency	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_args_from_single_dependency
+worker/tests/layer5_workflow_dataflow.rs	test_args_from_multiple_dependencies	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_args_from_multiple_dependencies
+worker/tests/layer5_workflow_dataflow.rs	test_failed_propagation_via_args_from	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_failed_propagation_via_args_from
+worker/tests/layer5_workflow_dataflow.rs	test_skipped_propagation	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_skipped_propagation
+worker/tests/layer5_workflow_dataflow.rs	test_args_from_transitive_chain	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_args_from_transitive_chain
+worker/tests/layer5_workflow_dataflow.rs	test_args_from_failed_dep_skips_and_fails	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_args_from_failed_dep_skips_and_fails
+worker/tests/layer5_workflow_dataflow.rs	test_dual_injection_same_node	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_dual_injection_same_node
+worker/tests/layer5_workflow_dataflow.rs	test_workflow_ctx_single_dependency	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_workflow_ctx_single_dependency
+worker/tests/layer5_workflow_dataflow.rs	test_workflow_ctx_multiple_dependencies	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_workflow_ctx_multiple_dependencies
+worker/tests/layer5_workflow_dataflow.rs	test_mixed_args_from_and_ctx	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_mixed_args_from_and_ctx
+worker/tests/layer5_workflow_dataflow.rs	test_args_from_dict_serialization	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_args_from_dict_serialization
+worker/tests/layer5_workflow_dataflow.rs	test_join_ctx_gating	PORTED	worker/tests/layer5_workflow_dataflow.rs::test_join_ctx_gating
+worker/tests/wrapped_input_strict.rs	wrapped_input_args_from_deserializes_under_strict	PORTED	worker/tests/layer5_workflow_dataflow.rs::wrapped_input_args_from_deserializes_under_strict
+worker/tests/wrapped_input_strict.rs	wrapped_input_extra_kwarg_rejected_at_execution	PORTED	worker/tests/layer5_workflow_dataflow.rs::wrapped_input_extra_kwarg_is_refused_at_build
+worker/tests/layer6_workflow_advanced.rs	test_quorum_ctx_gating	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_quorum_impossible_skips	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_subworkflow_mixed_explicit_and_args_from	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_subworkflow_complete_does_not_rewrite_terminal_parent_node	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_join_any_all_deps_fail_skips	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_pause_blocks_ready_transitions	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_resume_continues_workflow	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_pause_then_cancel	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_success_policy_satisfied	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_success_policy_not_met	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_success_policy_multiple_cases	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_on_error_pause_stops_workflow	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_on_error_pause_resume_completes	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_recovery_preserves_results	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_recovery_preserves_failed_state	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_recovery_recomputes_first_failed_error	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_pause_idempotent	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_resume_on_running_noop	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_success_policy_not_met_error_content	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_workflow_task_retries	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_workflow_task_retries_exhausted	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_workflow_recovers_after_worker_crash	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_workflow_task_inherits_retry_from_registration	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	filter_nonrunnable_does_not_touch_other_workers_paused_task	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	pause_workflow_cancels_claimed_not_started_task	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	filter_nonrunnable_does_not_touch_other_workers_cancelled_task	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	filter_nonrunnable_cancels_own_paused_task	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_cancel_cancels_running_backing_task_with_enqueued_wf_task	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_cancel_makes_queued_backing_task_unclaimable	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_backing_task_lock_blocks_concurrent_claim	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer6_workflow_advanced.rs	test_cancel_cascades_to_child_workflow	TO_PORT	#1754; the old test is at worker/old/layer6_workflow_advanced.rs
+worker/tests/layer7_subworkflows.rs	subworkflow_success_full_surface_matrix	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	subworkflow_failure_fail_policy_preserves_error_everywhere	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	subworkflow_failure_pause_policy_preserves_error_after_resume	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	successful_subworkflow_is_available_through_workflow_ctx	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	failed_subworkflow_flows_through_args_from_and_workflow_ctx	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	outputless_success_policy_keeps_failed_subworkflow_result	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	parallel_subworkflows_preserve_independent_success_and_failure	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	nested_subworkflow_success_records_depth_root_and_result	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	nested_subworkflow_failure_surfaces_each_child_error	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	subworkflow_build_with_args_from_receives_typed_task_result	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	subworkflow_static_kwargs_preserve_build_with_types	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
