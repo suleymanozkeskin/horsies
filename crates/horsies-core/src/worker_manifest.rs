@@ -2,10 +2,12 @@
 //!
 //! One manifest holds everything the worker needs: the database settings,
 //! every worker profile of the app with the profile that the start asks for,
-//! the queues and claim settings of the app, the execution class of each
-//! registered task, and how a child starts. The client resolves its user
-//! config (Pydantic in Python) into it; the core picks and checks the
-//! profile ([`select_worker_profile`]), so one resolver serves every client.
+//! the queues and claim settings of the app, the recovery, retention,
+//! resilience and payload settings of the worker's loops (`sections`), the
+//! execution class of each registered task, and how a child and the preload
+//! process start. The client resolves its user config (Pydantic in Python)
+//! into it; the core picks and checks the profile
+//! ([`select_worker_profile`]), so one resolver serves every client.
 //!
 //! As the producer manifest ([`crate::manifest`]), it holds values only: no
 //! field has a default, and an unknown field is refused. A manifest that the
@@ -14,7 +16,8 @@
 //!
 //! The JSON form of each choice is an object with a `kind` key whose value is
 //! the variant name in SCREAMING_SNAKE_CASE: `{"kind": "TASKS", "tasks": 100}`.
-//! A duration is a whole number of milliseconds.
+//! A duration is a whole number of milliseconds, except where a field name
+//! gives another unit.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -132,6 +135,19 @@ bounded_count!(
     Milliseconds(BoundedU32<1, { u32::MAX }>) as "MILLISECONDS"
 );
 
+mod sections;
+
+pub use sections::{
+    AuditIntervalMs, CheckIntervalMs, ClaimedStaleThresholdMs, DeleteBatchSize,
+    HeartbeatIntervalMs, HeartbeatLeafHorizonHours, HistoryLeafHorizonDays,
+    MaintenanceIntervalSeconds, PausedAgeMicros, PausedWorkflowExpiry, PayloadBytes, PayloadLimit,
+    PayloadManifest, PollIntervalMs, QueueRetention, RecoveryGraceMs, RecoveryManifest,
+    RecoveryPassLimit, ResilienceManifest, RetentionManifest, RetentionPeriodDays,
+    RetryAttemptCount, RetryAttemptLimit, RetryInitialMs, RetryMaxMs, SnapshotIntervalMs,
+    StaleThresholdMs, SweepIntervalSeconds, TerminalRecordRetention, TerminalRecordRetentionHours,
+    WorkerStateRetention, WorkerStateRetentionHours, MAX_PAUSED_AGE_MICROS, MAX_PAYLOAD_BYTES,
+};
+
 /// The manifest version. Only the parser constructs it, and it accepts only
 /// [`WORKER_MANIFEST_VERSION`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +256,10 @@ pub struct WorkerManifest {
     /// The profile that the start asks for (`horsies worker --profile`).
     pub profile: ProfileRequest,
     pub claim: WorkerClaimManifest,
+    pub recovery: RecoveryManifest,
+    pub retention: RetentionManifest,
+    pub resilience: ResilienceManifest,
+    pub payload: PayloadManifest,
     /// The execution class of each task that the worker registered, by task
     /// name.
     pub tasks: BTreeMap<String, Execution>,
@@ -558,13 +578,28 @@ pub struct WorkerClaimManifest {
     pub cluster_wide_cap: ClusterWideCap,
 }
 
-/// The program that starts each child and its first arguments. The core
-/// appends the descriptor number of the child's socket and the worker pid.
+/// The program that starts each child and its first arguments, the
+/// interpreter flags included. The core appends the descriptor number of
+/// the child's socket and the worker pid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChildCommandManifest {
     pub program: String,
     pub args: Vec<String>,
+}
+
+/// How the preload process of a worker starts (Linux). A profile whose
+/// `preload` is `LIBRARY` or `APP` runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum PreloadLaunch {
+    /// The program and its first arguments. The core appends the descriptor
+    /// number of the preload's socket, the worker pid and the preload mode
+    /// (`library` or `app`).
+    Command { command: ChildCommandManifest },
+    /// The child program has no preload process: every child starts with
+    /// `exec`.
+    NoPreloadProgram,
 }
 
 /// What a child runs.
@@ -606,6 +641,7 @@ pub enum WorkerLogLevel {
 #[serde(deny_unknown_fields)]
 pub struct ChildLaunchManifest {
     pub command: ChildCommandManifest,
+    pub preload: PreloadLaunch,
     pub program: ChildProgram,
     pub log_level: WorkerLogLevel,
 }

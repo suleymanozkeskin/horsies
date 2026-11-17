@@ -395,11 +395,11 @@ async fn seed_running_task(pool: &PgPool, class_key: &str, worker_id: &str) -> U
 async fn a_finished_row_lands_in_the_leaf_of_its_class() {
     let database = RetentionDatabase::create().await;
     let coverage = ensure_partition_coverage_in_pool(
-        &database.pool,
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
         2,
         2,
         &[period(7)],
-        &StagedLoaderPublisher,
     )
     .await
     .expect("coverage pass");

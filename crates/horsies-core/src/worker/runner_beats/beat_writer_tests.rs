@@ -21,7 +21,6 @@ use super::{
     LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
 };
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 
 const WORKER_ID: &str = "beat-spec-worker-1";
@@ -96,11 +95,11 @@ async fn migrated_pool_with_heartbeat_leaves() -> PgPool {
     // The heartbeat table has no default partition: the current hour needs
     // its leaf, as at worker start.
     ensure_startup_coverage_in_pool(
-        &pool,
+        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        crate::broker::core_rows::StatementLog::Off,
         COVERAGE_HORIZON,
         COVERAGE_HORIZON,
         &[],
-        &StagedLoaderPublisher,
     )
     .await
     .expect("partition coverage");

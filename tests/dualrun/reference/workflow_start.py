@@ -169,7 +169,7 @@ def _node_parameters(
                 )
                 task_id: str | None = None
                 if not dependencies:
-                    task_id = mint_task_id()
+                    task_id = str(mint_task_id())
                     task_input = dict(stored_kwargs(node))
                     task_input['__h_workflow_meta__'] = {
                         'workflow_id': workflow_id,

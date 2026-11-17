@@ -27,7 +27,7 @@ use std::time::Duration;
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-use super::dispatch::{AttemptEnd, ClaimedTask, Settlement};
+use super::dispatch::{AttemptEnd, ClaimedTask, Settlement, TimeoutCancel};
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
 };
@@ -258,20 +258,51 @@ pub fn killed_child_write(
     }
 }
 
-/// The `TASK_TIMEOUT` write of an attempt that reached `timeout`. Pure.
+/// The `TASK_TIMEOUT` write of an attempt that reached `timeout`, with
+/// Python's error `data`: `task_id`, `timeout_ms`, and, for a shared async
+/// run that its child ended, `cancel_end` (Python `_settle_timed_out_row`).
+/// Pure.
 pub fn timeout_write(
     task: &ClaimedTask,
     worker_id: &str,
     timeout: TaskTimeoutMs,
     placement: RetryPlacement,
+    cancel: TimeoutCancel,
 ) -> FinishFailedAttempt {
-    killed_child_write(
-        task,
-        worker_id,
-        OutcomeCode::TaskTimeout.into(),
-        format!("task exceeded timeout_ms={}", timeout.get()),
-        placement,
-    )
+    let code: BuiltInTaskCode = OutcomeCode::TaskTimeout.into();
+    let code_text = code.value();
+    let message = format!("Task exceeded timeout_ms={}", timeout.get());
+    let mut error = TaskError::builtin(code, message.clone());
+    error.data = Some(timeout_data(task.task_id, timeout, cancel));
+    FinishFailedAttempt {
+        task_id: task.task_id,
+        fence: fence(task, worker_id),
+        retry: retry_request(task, Some(&code_text), placement),
+        result_json: error_envelope(error),
+        error_code: Some(code_text),
+        failed_reason: None,
+        attempt: AttemptFailure {
+            kind: AttemptFailureKind::Failed,
+            error_message: Some(message),
+            failed_reason: None,
+        },
+    }
+}
+
+/// The `data` of a `TASK_TIMEOUT` error. `cancel_end` is set only for a
+/// shared async run that its child ended. Pure.
+fn timeout_data(task_id: Uuid, timeout: TaskTimeoutMs, cancel: TimeoutCancel) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "task_id": task_id.to_string(),
+        "timeout_ms": timeout.get(),
+    });
+    match cancel {
+        TimeoutCancel::Ended(end) => {
+            data["cancel_end"] = serde_json::Value::from(end.as_str());
+        }
+        TimeoutCancel::NoSignal | TimeoutCancel::EndedByKill => {}
+    }
+    data
 }
 
 /// The crash-recovery write of an attempt that reached `timeout` and whose
@@ -439,7 +470,11 @@ impl OutcomeWriter {
                 )
                 .await
             }
-            AttemptEnd::TimedOut { timeout, retry } => self.timed_out(task, timeout, retry).await,
+            AttemptEnd::TimedOut {
+                timeout,
+                retry,
+                cancel,
+            } => self.timed_out(task, timeout, retry, cancel).await,
             AttemptEnd::KilledForLoop {
                 code,
                 retry,
@@ -489,8 +524,9 @@ impl OutcomeWriter {
         task: &ClaimedTask,
         timeout: TaskTimeoutMs,
         placement: RetryPlacement,
+        cancel: TimeoutCancel,
     ) -> Settlement {
-        let write = timeout_write(task, &self.worker_id, timeout, placement);
+        let write = timeout_write(task, &self.worker_id, timeout, placement, cancel);
         let settled = self
             .phase_one(
                 task,
