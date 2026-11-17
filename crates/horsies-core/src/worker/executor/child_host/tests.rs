@@ -84,6 +84,7 @@ fn every_end_has_its_protocol_code() {
     assert_eq!(ChildHostExit::BadArguments.code(), 73);
     assert_eq!(ChildHostExit::BootFailed.code(), 75);
     assert_eq!(ChildHostExit::ProtocolMismatch.code(), 78);
+    assert_eq!(ChildHostExit::ChildHookFailed.code(), 173);
 }
 
 fn envelope_of(end: RunEnd) -> String {

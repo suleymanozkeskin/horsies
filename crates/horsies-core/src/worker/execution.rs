@@ -8,7 +8,6 @@
 //! the worker's outcome writer share:
 //!
 //! - **Phase 1a** — `build_task_input`: the stored input, with workflow context
-//! - **Phase 1b** — `execute_task`: async/blocking invocation with panic isolation
 //! - **Phase 2a** — `schedule_retry_for_task`: atomic requeue + attempt record
 //! - **Finalize Phase 1** — `persist_terminal_state`: terminal DB write
 //! - **Finalize Phase 2** — `finalize_workflow_phase`: workflow callback + NOTIFY
@@ -39,8 +38,7 @@ use crate::core::lifecycle::{
     WorkflowSuccessOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
-use crate::core::task::fn_trait::RegisteredTask;
+use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 use crate::db::{
@@ -243,94 +241,6 @@ pub(crate) fn build_task_input(
 
 fn serialization_error(message: String) -> TaskError {
     TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
-}
-
-// ---------------------------------------------------------------------------
-// Phase 1b: Task execution (with panic isolation)
-// ---------------------------------------------------------------------------
-
-/// Execute a registered task function with panic isolation.
-///
-/// Async tasks are spawned into a new tokio task for cancellation safety.
-/// Blocking tasks use `spawn_blocking` with `catch_unwind` for panic safety.
-///
-/// `timeout` is the per-task `timeout_ms` deadline (if any), measured around
-/// user-code execution. On expiry the task resolves to `OutcomeCode::TaskTimeout`
-/// and the normal finalize path decides fail-vs-retry (via `auto_retry_for`).
-/// Async tasks are aborted on timeout; blocking threads cannot be aborted and
-/// run to completion with their result discarded (see `TaskOptions::timeout_ms`).
-pub(crate) async fn execute_task(
-    task_fn: RegisteredTask,
-    task_input: Vec<u8>,
-    timeout: Option<Duration>,
-) -> TaskResult<Vec<u8>> {
-    match task_fn {
-        RegisteredTask::Async { task: f, .. } => {
-            let mut handle = tokio::spawn(async move { f.execute(&task_input).await });
-            let join = match timeout {
-                Some(dur) => {
-                    tokio::select! {
-                        joined = &mut handle => joined,
-                        _ = tokio::time::sleep(dur) => {
-                            // Cancel the running future at its next await point;
-                            // unlike a blocking thread, an async task is abortable.
-                            handle.abort();
-                            return task_timeout_error(dur);
-                        }
-                    }
-                }
-                None => handle.await,
-            };
-            match join {
-                Ok(r) => r,
-                Err(join_err) if join_err.is_cancelled() => {
-                    task_timeout_error(timeout.unwrap_or_default())
-                }
-                Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledException,
-                    format!("async task panicked: {}", join_err),
-                )),
-            }
-        }
-        RegisteredTask::Blocking { task: f, .. } => {
-            let handle = tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.execute(&task_input)))
-            });
-            let join = match timeout {
-                Some(dur) => {
-                    tokio::select! {
-                        joined = handle => joined,
-                        _ = tokio::time::sleep(dur) => {
-                            // A blocking thread cannot be aborted in-process: it
-                            // runs to completion and its result is discarded. We
-                            // only stop awaiting it and finalize as TASK_TIMEOUT.
-                            return task_timeout_error(dur);
-                        }
-                    }
-                }
-                None => handle.await,
-            };
-            match join {
-                Ok(Ok(r)) => r,
-                Ok(Err(_panic)) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledException,
-                    "blocking task panicked".to_owned(),
-                )),
-                Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledException,
-                    format!("blocking task join error: {}", join_err),
-                )),
-            }
-        }
-    }
-}
-
-/// Build the `TASK_TIMEOUT` error for a task that exceeded its `timeout_ms`.
-fn task_timeout_error(timeout: Duration) -> TaskResult<Vec<u8>> {
-    TaskResult::Err(TaskError::builtin(
-        OutcomeCode::TaskTimeout,
-        format!("task exceeded timeout_ms={}", timeout.as_millis()),
-    ))
 }
 
 // ---------------------------------------------------------------------------
