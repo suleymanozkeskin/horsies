@@ -1,7 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod attempt_writes;
-pub mod bound_handle;
 pub mod child_writes;
 pub mod claims;
 pub mod class_budgets;
@@ -35,8 +34,6 @@ mod pgbouncer_contract_tests;
 pub mod pools;
 pub mod postgres;
 pub mod process_listener;
-#[cfg(test)]
-mod result_envelope_tests;
 pub mod result_types;
 pub mod row;
 #[cfg(test)]
@@ -61,7 +58,6 @@ mod workflow_reads;
 pub mod workflow_start;
 pub(crate) mod workflow_stop_before_start;
 
-pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
 pub use class_coverage::{
     BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
@@ -95,7 +91,7 @@ pub use result_types::{
     StoredEnvelopeRefused, StoredEnvelopeText, TaskInfoRead,
 };
 pub use row::heartbeat::HeartbeatRow;
-pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow};
+pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow};
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
 pub use slot_health::{
     ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,

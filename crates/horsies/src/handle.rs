@@ -534,6 +534,60 @@ mod tests {
         };
         assert_eq!(error.code().text(), "TASK_CANCELLED");
         assert_eq!(error.data(), Some(&json!({"task_id": task().to_string()})));
+        // A result stored for a cancelled task is not read.
+        let Ok(TaskOutcome::Failed(stored)) = outcome(record(
+            TaskStatus::Cancelled,
+            Some(json!({"__h_task_result__": true, "ok": 3, "err": null})),
+        )) else {
+            panic!("a cancelled task with a stored result is a failed outcome");
+        };
+        assert_eq!(stored.code().text(), "TASK_CANCELLED");
+    }
+
+    /// A stored result that is not a result envelope (the legacy
+    /// `__task_result__` shape, or an object with no marker) is unreadable,
+    /// not decoded (Python `test_legacy_pydantic_result_envelope_rejected`,
+    /// `test_invalid_task_result_structure_returns_err`).
+    #[test]
+    fn a_stored_result_that_is_not_an_envelope_is_unreadable() {
+        let legacy = json!({
+            "__task_result__": true,
+            "ok": {
+                "__pydantic_model__": true,
+                "module": "nonexistent.module.that.does.not.exist",
+                "qualname": "FakeModel",
+                "data": {"field": "value"},
+            },
+            "err": null,
+        });
+        for stored in [legacy, json!({"random": 1})] {
+            let read = outcome(record(TaskStatus::Completed, Some(stored.clone())));
+            assert!(
+                matches!(read, Err(ReadError::StoredResultUnreadable { .. })),
+                "{stored}: {read:?}"
+            );
+        }
+    }
+
+    /// An EXPIRED task reads its stored `TASK_EXPIRED` error, as a COMPLETED
+    /// or a FAILED task reads its stored result.
+    #[test]
+    fn an_expired_task_reads_its_stored_error() {
+        let envelope = json!({
+            "__h_task_result__": true,
+            "ok": null,
+            "err": {
+                "exception": null,
+                "error_code": {"__builtin_task_code__": "TASK_EXPIRED"},
+                "data": null,
+                "message": "expired"
+            }
+        });
+        let Ok(TaskOutcome::Failed(error)) = outcome(record(TaskStatus::Expired, Some(envelope)))
+        else {
+            panic!("an expired task with a stored error is a failed outcome");
+        };
+        assert_eq!(error.code().text(), "TASK_EXPIRED");
     }
 
     #[test]
