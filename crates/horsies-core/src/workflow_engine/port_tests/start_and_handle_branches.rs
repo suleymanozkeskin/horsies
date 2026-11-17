@@ -241,7 +241,6 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
 /// (`test_workflow_handle_missing_workflow.py`).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1239"]
 async fn results_of_a_missing_workflow_is_workflow_not_found() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();
@@ -257,7 +256,6 @@ async fn results_of_a_missing_workflow_is_workflow_not_found() {
 /// (`test_workflow_handle_missing_workflow.py`).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1239"]
 async fn tasks_of_a_missing_workflow_is_workflow_not_found() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();

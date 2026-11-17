@@ -227,6 +227,14 @@ const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     keyword("include_running", "bool"),
 ];
 const WORKFLOW_ID_PARAMETERS: &[StubParameter] = &[positional("workflow_id", "uuid.UUID")];
+const WAIT_WORKFLOW_RESULT_PARAMETERS: &[StubParameter] = &[
+    positional("workflow_id", "uuid.UUID"),
+    keyword("timeout_ms", "int | None"),
+];
+const WORKFLOW_NODE_RESULT_PARAMETERS: &[StubParameter] = &[
+    positional("workflow_id", "uuid.UUID"),
+    positional("node_id", "str"),
+];
 const DELETE_EXPIRED_WORKFLOWS_PARAMETERS: &[StubParameter] = &[
     positional("older_than_hours", "int"),
     positional("batch_size", "int"),
@@ -392,6 +400,14 @@ const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
 const CANCEL_WORKFLOW_OUTCOME: &str =
     "WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed";
+const WORKFLOW_STATUS_OUTCOME: &str = "WorkflowStatusRead | WorkflowAbsent | HandleFailed";
+const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEndedRead | \
+     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed";
+const WORKFLOW_NODE_RESULTS_OUTCOME: &str =
+    "WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed";
+const WORKFLOW_NODE_RESULT_OUTCOME: &str =
+    "StoredNodeResultRecord | NodeResultNotStored | HandleFailed";
+const WORKFLOW_NODES_OUTCOME: &str = "WorkflowNodesRead | WorkflowAbsent | HandleFailed";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -469,7 +485,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 32] = [
+const CORE_HANDLE_METHODS: [StubFunction; 37] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -637,6 +653,36 @@ const CORE_HANDLE_METHODS: [StubFunction; 32] = [
         parameters: EXPIRE_PAUSED_WORKFLOWS_PARAMETERS,
         returns: TypeText::FutureOf("PausedExpired | PausedExpiryFailed"),
         doc: "Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,\noldest first. Writes; each candidate commits alone.",
+    },
+    StubFunction {
+        name: "workflow_status_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(WORKFLOW_STATUS_OUTCOME),
+        doc: "The status of one workflow. Reads only.",
+    },
+    StubFunction {
+        name: "wait_workflow_result_async",
+        parameters: WAIT_WORKFLOW_RESULT_PARAMETERS,
+        returns: TypeText::FutureOf(WAIT_WORKFLOW_RESULT_OUTCOME),
+        doc: "Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a\ncancelled await drops the wait and its subscription. A negative timeout raises\nOverflowError.",
+    },
+    StubFunction {
+        name: "workflow_node_results_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(WORKFLOW_NODE_RESULTS_OUTCOME),
+        doc: "The nodes of one workflow that store a result. Reads only.",
+    },
+    StubFunction {
+        name: "workflow_node_result_async",
+        parameters: WORKFLOW_NODE_RESULT_PARAMETERS,
+        returns: TypeText::FutureOf(WORKFLOW_NODE_RESULT_OUTCOME),
+        doc: "The stored result of one node. Reads only.",
+    },
+    StubFunction {
+        name: "workflow_nodes_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(WORKFLOW_NODES_OUTCOME),
+        doc: "The nodes of one workflow in index order. Reads only.",
     },
     StubFunction {
         name: "task_info",
@@ -1813,7 +1859,7 @@ const MONITORING_CLASSES: [StubClass; 12] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 10] = [
+const WORKFLOW_CLASSES: [StubClass; 20] = [
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -1891,6 +1937,116 @@ const WORKFLOW_CLASSES: [StubClass; 10] = [
         doc: "The paused expiry call failed. The candidates before a failed one are expired; a\nstatement whose reply was lost may have committed.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowStatusRead",
+        doc: "The stored status of a workflow.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property(
+                "status",
+                "Literal['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'PAUSED', 'CANCELLED', 'EXPIRED']",
+            ),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowCompletedRead",
+        doc: "The workflow is COMPLETED, with its stored result envelope (None only when a write\noutside the library stored it so).",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("result_json", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowEndedRead",
+        doc: "The workflow is FAILED, CANCELLED or EXPIRED, with its stored error.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("status", "Literal['FAILED', 'CANCELLED', 'EXPIRED']"),
+            property("error_json", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowPausedRead",
+        doc: "The workflow is PAUSED.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WaitTimedOut",
+        doc: "The workflow is PENDING or RUNNING after the timeout.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StoredNodeResultRecord",
+        doc: "One node that stores a result.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("node_id", "str | None"),
+            property("task_name", "str"),
+            property("result_json", "str"),
+            property("is_subworkflow", "bool"),
+            property("sub_definition_key", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNodeResultsRead",
+        doc: "The nodes of a workflow that store a result; empty when none does.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("nodes", "list[StoredNodeResultRecord]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeResultNotStored",
+        doc: "No node of this id stores a result, or no workflow has the id; the read does not tell\nthe two apart.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("node_id", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StoredNodeRecord",
+        doc: "One node of a workflow, with its stored values as text.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("node_id", "str | None"),
+            property("task_index", "int"),
+            property("task_name", "str"),
+            property("status", "str"),
+            property("result_json", "str | None"),
+            property("started_at", "datetime.datetime | None"),
+            property("completed_at", "datetime.datetime | None"),
+            property("sub_workflow_id", "uuid.UUID | None"),
+            property("sub_workflow_summary_json", "str | None"),
+            property("is_subworkflow", "bool"),
+            property("sub_definition_key", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNodesRead",
+        doc: "The nodes of a workflow in index order; empty when it has none.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("nodes", "list[StoredNodeRecord]"),
+        ],
         methods: &[],
     },
 ];

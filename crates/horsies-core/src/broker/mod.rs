@@ -55,6 +55,7 @@ pub mod wait_limit;
 mod worker_state_read_tests;
 mod workflow_claim_settle;
 mod workflow_operations;
+mod workflow_reads;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
