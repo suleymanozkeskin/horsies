@@ -1,15 +1,25 @@
 # pyright: reportPrivateUsage=false
-"""Dual-run of the failed-attempt switch: the read before the finish against the retry facts of the claim.
+"""Dual-runs of the failed attempt.
 
-Reference: ``tests/dualrun/reference/failed_attempt.py``. Candidates: the
-finalize of a reported failure (``FinalizeMixin._persist_failed_attempt``)
-and the end of an attempt whose child ended without a result
-(``DispatchMixin._write_ended_attempt``), each with the ``DispatchClaim`` that
-the claim returned. The seed holds one row per case: RUNNING rows whose
-policy retries, does not retry, is spent or would retry past the deadline; a
-CLAIMED row this claim holds; rows of another claim; and a workflow task.
-Both sides must write the same attempts, retries, releases and history rows,
-and report the same outcome.
+The seed holds one row per case: RUNNING rows whose policy retries, does not
+retry, is spent or would retry past the deadline; a CLAIMED row this claim
+holds; rows of another claim; and a workflow task. Two pairs, with the same
+seed:
+
+1. The SQL redesign: the read before the finish against the retry facts of
+   the claim. Reference: ``tests/dualrun/reference/failed_attempt.py``.
+   Candidates: the finalize of a reported failure
+   (``FinalizeMixin._persist_failed_attempt``) and the end of an attempt
+   whose child ended without a result (``DispatchMixin._write_ended_attempt``),
+   each with the ``DispatchClaim`` that the claim returned. Both sides must
+   write the same attempts, retries, releases and history rows, and report
+   the same outcome.
+2. The caller switch: the same two callers on SQLAlchemy against the core.
+   Reference: ``tests/dualrun/reference/failed_attempt_caller.py``, the method
+   bodies before the switch. Candidate: the methods as shipped, which call
+   ``CoreHandle.finish_failed_attempt_async`` and
+   ``finish_ended_attempt_async``. The snapshots and the outcomes must be
+   equal.
 """
 
 from __future__ import annotations
@@ -20,11 +30,16 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import Any, Final, assert_never
+from typing import Any, Final, Literal, assert_never
 
 import psycopg
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from horsies._core import CoreHandle
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.broker import PostgresConfig
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.lifecycle.classify import ErrorProduced, WorkerLevelFailure
@@ -51,6 +66,7 @@ from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import failed_attempt as reference
+from tests.dualrun.reference import failed_attempt_caller
 from tests.dualrun.seeds import (
     SeedCoverage,
     SeedStatus,
@@ -260,10 +276,20 @@ def _reference_side(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
 
 
 class _Probe(DispatchMixin, FinalizeMixin):
-    def __init__(self, sf: async_sessionmaker[AsyncSession], worker_id: str) -> None:
+    def __init__(
+        self,
+        sf: async_sessionmaker[AsyncSession],
+        worker_id: str,
+        broker: PostgresBroker,
+    ) -> None:
         self.sf = sf
         self.worker_instance_id = worker_id
         self.wakes: list[str] = []
+        self._broker = broker
+
+    @property
+    def core_handle(self) -> CoreHandle:
+        return self._broker._core_handle
 
     def _wake_when_retry_due(self, scheduled: RetryScheduled, request: RetryRequest) -> None:
         self.wakes.append(scheduled.task_id)
@@ -289,25 +315,32 @@ def _outcome_name(
             assert_never(unreachable)
 
 
-async def _persist(probe: _Probe, case: _Case, worker_id: str) -> None:
+async def _persist(
+    probe: _Probe, case: _Case, worker_id: str, implementation: _Implementation = 'shipped',
+) -> None:
     failure = _finalize_failure(case, worker_id)
     report = (
         ErrorProduced(error=_task_failure(case))
         if case.task_error
         else WorkerLevelFailure(detail='worker failed')
     )
-    result = await probe._persist_failed_attempt(
-        FailLockedTask(
-            task_id=case.task_id,
-            fence=PriorLockedRead(worker_id=worker_id),
-            result_json=failure.result_json,
-            error_code=failure.error_code,
-            failed_reason=failure.failed_reason,
-        ),
-        report,
-        claim=case.claim,
-        child=_Phase1Input(ok=True, result_json_str=failure.result_json, failed_reason=None),
+    command = FailLockedTask(
+        task_id=case.task_id,
+        fence=PriorLockedRead(worker_id=worker_id),
+        result_json=failure.result_json,
+        error_code=failure.error_code,
+        failed_reason=failure.failed_reason,
     )
+    child = _Phase1Input(ok=True, result_json_str=failure.result_json, failed_reason=None)
+    match implementation:
+        case 'shipped':
+            result = await probe._persist_failed_attempt(
+                command, report, claim=case.claim, child=child,
+            )
+        case 'python':
+            result = await failed_attempt_caller.persist_failed_attempt(
+                probe, command, report, claim=case.claim, child=child,
+            )
     match result:
         case Ok():
             pass
@@ -315,17 +348,39 @@ async def _persist(probe: _Probe, case: _Case, worker_id: str) -> None:
             raise AssertionError(f'the finalize of {case.name} failed: {error}')
 
 
-async def _candidate_async(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
+type _Implementation = Literal['shipped', 'python']
+"""``shipped``: the methods as shipped, on the core. ``python``: the method
+bodies before the switch, on SQLAlchemy."""
+
+
+async def _write_ended(
+    probe: _Probe, case: _Case, implementation: _Implementation,
+) -> _AttemptUnclaimed | _AttemptFinished:
+    match implementation:
+        case 'shipped':
+            return await probe._write_ended_attempt(
+                case.task_id, _crash(case), case.claim, case.placement
+            )
+        case 'python':
+            return await failed_attempt_caller.write_ended_attempt(
+                probe, case.task_id, _crash(case), case.claim, case.placement
+            )
+
+
+async def _candidate_async(
+    database: DualRunDatabase, seed: _Seed, implementation: _Implementation = 'shipped',
+) -> dict[str, str]:
     engine = create_async_engine(sqlalchemy_url(database))
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database.url)))
     try:
-        probe = _Probe(async_sessionmaker(engine, expire_on_commit=False), seed.worker_id)
+        probe = _Probe(
+            async_sessionmaker(engine, expire_on_commit=False), seed.worker_id, broker,
+        )
         outcomes: dict[str, str] = {}
         for case in seed.finalized:
-            await _persist(probe, case, seed.worker_id)
+            await _persist(probe, case, seed.worker_id, implementation)
         for case in seed.ended:
-            match await probe._write_ended_attempt(
-                case.task_id, _crash(case), case.claim, case.placement
-            ):
+            match await _write_ended(probe, case, implementation):
                 case _AttemptUnclaimed():
                     outcomes[case.name] = 'RELEASED'
                 case _AttemptFinished(outcome=outcome):
@@ -336,11 +391,16 @@ async def _candidate_async(database: DualRunDatabase, seed: _Seed) -> dict[str, 
         }
         return outcomes
     finally:
+        _ = await broker.close_async()
         await engine.dispose()
 
 
 def _candidate_side(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
     return asyncio.run(_candidate_async(database, seed))
+
+
+def _python_caller_side(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
+    return asyncio.run(_candidate_async(database, seed, 'python'))
 
 
 def _finalize_report(outcome: str) -> str:
@@ -393,3 +453,22 @@ def test_failed_attempts_write_what_the_read_and_finish_wrote(
         name: _finalize_report(outcome) if name.startswith('finalize.') else outcome
         for name, outcome in run.reference.report.items()
     }
+
+
+def test_the_core_failed_attempts_write_what_the_python_callers_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _ok(
+        dual_run(
+            empty_database,
+            _seed,
+            OperationSide(name='Python callers on SQLAlchemy', act=_python_caller_side),
+            OperationSide(name='CoreHandle failed-attempt writes', act=_candidate_side),
+            SeedCoverage.HISTORY_AND_BEATS,
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.candidate.report == run.reference.report
+    assert run.reference.report['ended.claimed'] == 'RELEASED'
+    assert run.reference.report['finalize.retry'] == 'RETRY_SCHEDULED'

@@ -47,4 +47,18 @@ LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('mark_stale_running_async',),
     ),
+    DualRunOperation(
+        name='failed attempt of a reported result',
+        production_path='horsies.core.worker.finalize:FinalizeMixin._persist_failed_attempt',
+        reference_path='tests.dualrun.reference.failed_attempt_caller:persist_failed_attempt',
+        mode=PoolMode(),
+        core_methods=('finish_failed_attempt_async',),
+    ),
+    DualRunOperation(
+        name='end of an attempt without a result',
+        production_path='horsies.core.worker.dispatch:DispatchMixin._write_ended_attempt',
+        reference_path='tests.dualrun.reference.failed_attempt_caller:write_ended_attempt',
+        mode=PoolMode(),
+        core_methods=('finish_ended_attempt_async',),
+    ),
 )
