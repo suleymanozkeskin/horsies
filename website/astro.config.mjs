@@ -249,6 +249,7 @@ export default defineConfig({
 							label: 'Operations',
 							items: [
 								{ label: 'Rerun in Your Transaction', slug: 'operations/rerun-in-your-transaction' },
+								{ label: 'Code Change Examples', slug: 'operations/code-change-examples' },
 								{ label: 'Async Frameworks', slug: 'guides/async-frameworks' },
 								{ label: 'Testing', slug: 'operations/testing' },
 								{ label: 'CLI Reference', slug: 'cli' },
