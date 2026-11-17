@@ -620,7 +620,7 @@ struct FacetRow {
 }
 
 /// Build [`Facets`] from the rows of the facets function, as Python's
-/// `task_facets` (`horsies/monitoring/queries.py:942-1007`): the code list
+/// `task_facets` (`python/horsies/monitoring/queries.py:942-1007`): the code list
 /// follows the selected categories and holds at most [`ERROR_FACET_CAP`]
 /// codes; the category totals cover every category, selected or not.
 fn facets_from_rows(
@@ -1008,7 +1008,7 @@ async fn live_attempts(
 
 /// The history row of a task, or `None`. A history status that is not a
 /// task status is a contract error of the detail read, as Python's detail
-/// decode (`horsies/core/history/reads/detail.py:248-259`).
+/// decode (`python/horsies/core/history/reads/detail.py:248-259`).
 async fn history_detail_or_none(
     connection: &mut PgConnection,
     task_id: Uuid,

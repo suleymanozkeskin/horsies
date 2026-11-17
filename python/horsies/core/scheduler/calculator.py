@@ -1,4 +1,4 @@
-# horsies/core/scheduler/calculator.py
+# python/horsies/core/scheduler/calculator.py
 from __future__ import annotations
 import calendar
 from datetime import date, datetime, timedelta, timezone

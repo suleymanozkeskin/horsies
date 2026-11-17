@@ -1,4 +1,4 @@
-# horsies/core/scheduler/__init__.py
+# python/horsies/core/scheduler/__init__.py
 """
 Scheduler module for executing scheduled tasks.
 

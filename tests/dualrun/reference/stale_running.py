@@ -1,6 +1,6 @@
 """Stale RUNNING recovery, before ``horsies_stale_running_scan`` and ``horsies_finish_stale_attempt``.
 
-``PostgresBroker.mark_stale_tasks_as_failed`` (``horsies/core/brokers/postgres.py``)
+``PostgresBroker.mark_stale_tasks_as_failed`` (``python/horsies/core/brokers/postgres.py``)
 scanned the candidate ids with ``SELECT_STALE_RUNNING_TASKS_SQL`` (no row
 bound; the transaction rolled back). Per candidate, in one transaction: the
 task advisory lock, ``SELECT_STALE_TASK_FOR_UPDATE_SQL``, the retry decision

@@ -1,4 +1,4 @@
-# horsies/core/models/resilience.py
+# python/horsies/core/models/resilience.py
 from __future__ import annotations
 
 from typing import Annotated, Self

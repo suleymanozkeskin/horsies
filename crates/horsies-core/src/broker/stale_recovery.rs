@@ -1,5 +1,5 @@
 //! The stale recovery statements of the reaper, one statement each on a core
-//! pool (`horsies/core/baseline/sql/0004_lifecycle_functions.sql`):
+//! pool (`crates/horsies-core/baseline/0004_lifecycle_functions.sql`):
 //!
 //! - `horsies_stale_running_scan`: the candidates of one stale RUNNING pass,
 //!   with the facts that the retry decision and the crash result need. It
@@ -17,7 +17,7 @@
 //! ([`BrokerError::Statement`]).
 //!
 //! Python reference: `mark_stale_tasks_as_failed`
-//! (`horsies/core/brokers/postgres.py:3129-3423`) and `requeue_stale_claimed`
+//! (`python/horsies/core/brokers/postgres.py:3129-3423`) and `requeue_stale_claimed`
 //! (`:3505-3530`).
 
 use chrono::{DateTime, Utc};
@@ -305,7 +305,7 @@ pub(crate) async fn finish_stale_attempt(
 
 /// Wake the queue of a retried row: `pg_notify('task_queue_<queue>',
 /// 'retry:<task id>')`, as Python's stale recovery does after its retry
-/// commits (`horsies/core/brokers/postgres.py:3307-3323`).
+/// commits (`python/horsies/core/brokers/postgres.py:3307-3323`).
 ///
 /// One statement on `pool`, checked out as reserved work. The wake is
 /// best-effort: a worker that misses it finds the row at its next poll.

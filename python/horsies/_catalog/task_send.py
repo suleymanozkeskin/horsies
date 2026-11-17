@@ -12,7 +12,7 @@ class TaskSendErrorCode(str, Enum):
     """Categorized task send failure codes.
 
     The members are Python's, in Python's order
-    (`horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
+    (`python/horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
     `EVENT_LOOP_LIMIT` and `LOOP_RUNNER_FAILED` are produced by the Python
     client only; [`TaskSendError`] has no variant for them.
     """

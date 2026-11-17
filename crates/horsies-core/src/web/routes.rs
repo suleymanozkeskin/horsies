@@ -505,7 +505,7 @@ async fn read_schedules(
 
 /// Pending streams per (queue, class) with their oldest wait and coverage,
 /// and the budget load of each live worker (Python `read_class_report`,
-/// `horsies/web/routes/workers.py:84-94`). A failed or refused read is 503.
+/// `python/horsies/web/routes/workers.py:84-94`). A failed or refused read is 503.
 async fn read_class_report(
     State(state): State<WebState>,
 ) -> Result<Json<ClassReportInfo>, ApiError> {
@@ -517,11 +517,11 @@ async fn read_class_report(
 
 /// A snapshot older than this is stale: the worker stopped reporting. The
 /// fleet check counts the same workers as live (Python
-/// `STALE_SNAPSHOT_THRESHOLD_S`, `horsies/web/routes/workers.py:31-35`).
+/// `STALE_SNAPSHOT_THRESHOLD_S`, `python/horsies/web/routes/workers.py:31-35`).
 const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
 
 /// One entry of the worker list (Python `read_workers`,
-/// `horsies/web/routes/workers.py:96-133`).
+/// `python/horsies/web/routes/workers.py:96-133`).
 ///
 /// The snapshot age, the staleness and the uptime are measured to `read_at`,
 /// the database clock of the list statement: `snapshot_at` and

@@ -12,7 +12,7 @@ class WorkflowStartErrorCode(str, Enum):
     """Categorized workflow start failure codes.
 
     The members are Python's, in Python's order
-    (`horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
+    (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
     `EVENT_LOOP_LIMIT` and `ASYNC_CONTEXT` are produced by the Python client
     only.
     """

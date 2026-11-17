@@ -232,7 +232,7 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
 """)
 
 # The bounded lookup lives in horsies_find_non_runnable_workflow_tasks
-# (horsies/core/baseline/sql/0003_interim_functions.sql).
+# (crates/horsies-core/baseline/0003_interim_functions.sql).
 GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
     SELECT id, status
     FROM horsies_find_non_runnable_workflow_tasks(CAST(:ids AS uuid[]))

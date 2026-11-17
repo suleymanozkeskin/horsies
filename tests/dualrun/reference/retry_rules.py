@@ -1,6 +1,6 @@
 """The retry rules of the stale RUNNING recovery before the switch.
 
-A copy of ``horsies/core/utils/retry.py`` as the old recovery called it: a
+A copy of ``python/horsies/core/utils/retry.py`` as the old recovery called it: a
 stored retry policy that does not validate falls back to defaults (intervals,
 backoff, jitter) instead of failing the task at claim. The reference side of
 ``tests/dualrun/test_stale_running.py`` sends these rules.

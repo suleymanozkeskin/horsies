@@ -612,6 +612,12 @@ const CLASSES: [StubClass; 32] = {
 
 const FUNCTIONS: &[StubFunction] = &[
     StubFunction {
+        name: "baseline_sql_files",
+        parameters: &[],
+        returns: TypeText::Plain("list[tuple[str, str]]"),
+        doc: "The baseline SQL files as (file name, text) pairs, in run order. Starts nothing.",
+    },
+    StubFunction {
         name: "core_state",
         parameters: &[],
         returns: TypeText::Plain("Literal['not_started', 'running', 'stopped', 'inherited']"),

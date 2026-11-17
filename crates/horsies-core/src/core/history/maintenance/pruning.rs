@@ -122,7 +122,7 @@ impl PrunePass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidateScope {
     /// Period-class leaves, for the history sweep. Python
-    /// `EXPIRED_HISTORY_LEAVES_SQL` (`horsies/core/history/maintenance/pruning.py:77-87`).
+    /// `EXPIRED_HISTORY_LEAVES_SQL` (`python/horsies/core/history/maintenance/pruning.py:77-87`).
     History,
     /// Period and heartbeat leaves, for the finalize pre-phase, which must see
     /// every parent. Python `EXPIRED_FINITE_LEAVES_SQL` (`pruning.py:92-106`).

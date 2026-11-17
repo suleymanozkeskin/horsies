@@ -117,7 +117,7 @@ pub(super) fn given_params_node(
 /// parent passes through `args_from` and writes what it saw into the input of
 /// its one task. The builder runs in the engine, so `value` is the result
 /// envelope itself, not the wrap that crosses to a worker (Python
-/// `horsies/core/workflows/engine.py:1171-1185`; the core's
+/// `python/horsies/core/workflows/engine.py:1171-1185`; the core's
 /// `child_build_input`).
 fn failed_input_definition() -> RegisteredWorkflowDefinition {
     RegisteredWorkflowDefinition {
@@ -589,7 +589,7 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
         assert_subworkflow_error(&args_from_inner(&input, "child_result"), Some(child_id));
     let _through_ctx = assert_subworkflow_error(&ctx_result(&input, "node_0"), Some(child_id));
     // The context holds the stored summary text as a JSON string (Python
-    // `_build_workflow_context_data`, `horsies/core/workflows/engine.py:1666-1677`;
+    // `_build_workflow_context_data`, `python/horsies/core/workflows/engine.py:1666-1677`;
     // the baseline `horsies_workflow_task_input`); the worker parses it.
     let summary_text = input[WORKFLOW_CTX_KWARG]["summaries_by_id"]["node_0"]
         .as_str()

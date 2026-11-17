@@ -1,5 +1,5 @@
 //! The terminal-transition vocabulary (parity with Python's
-//! `horsies/core/lifecycle/`).
+//! `python/horsies/core/lifecycle/`).
 //!
 //! Every way a task reaches a terminal status is one of fifteen commands
 //! (`commands`), each with the ownership fence its site requires (`fences`),

@@ -1,4 +1,4 @@
--- Cases for horsies/core/baseline/sql/0006_history_functions.sql, one session.
+-- Cases for crates/horsies-core/baseline/0006_history_functions.sql, one session.
 --
 -- Run on a database that holds the baseline migration, in one transaction that the caller rolls back:
 --   psql -v ON_ERROR_STOP=1 --single-transaction -f history_functions_cases.sql

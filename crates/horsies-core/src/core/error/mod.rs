@@ -543,7 +543,7 @@ mod tests {
 
     // --- ErrorCode category helper tests ---
 
-    /// Python `horsies/core/errors.py`: `HRS-021` is
+    /// Python `python/horsies/core/errors.py`: `HRS-021` is
     /// `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` and `HRS-026` is
     /// `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; `HRS-032` is
     /// `WORKFLOW_INVALID_ID`, which the core does not raise.

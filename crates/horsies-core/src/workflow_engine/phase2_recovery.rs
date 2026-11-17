@@ -1267,7 +1267,7 @@ mod tests {
     /// The quarantine step of the recovery loop on the baseline function
     /// (#861): a row whose consumption keeps retaining is quarantined at the
     /// attempt bound, and its pending row points at the verified copy.
-    /// Python: `horsies/core/workflows/phase2_recovery.py:681-725`
+    /// Python: `python/horsies/core/workflows/phase2_recovery.py:681-725`
     /// (`_quarantine_exhausted_row`). The history row and the pending row
     /// agree on schema version 2: the consumer refuses it
     /// (`SOURCE_VERSION_CONFLICT`), and the copy check accepts it. Two earlier

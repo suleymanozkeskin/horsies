@@ -1,4 +1,4 @@
-# horsies/core/scheduler/state.py
+# python/horsies/core/scheduler/state.py
 from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass

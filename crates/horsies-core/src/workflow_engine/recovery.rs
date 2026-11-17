@@ -477,7 +477,7 @@ WHERE id = $1
 /// `horsies_workflow_node_tasks_insert` casts it: a text that the timestamptz
 /// input cannot read raises (22007 or 22008) and nothing is inserted. Python
 /// passes `str()` of the member to its insert
-/// (`horsies/core/workflows/engine.py:831-835`).
+/// (`python/horsies/core/workflows/engine.py:831-835`).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -1548,7 +1548,7 @@ pub(crate) enum ReadyNodeRecovery {
     /// The promotion refused the node ([`engine::NodeRefusal`]): its own data does not read
     /// (`WORKER_SERIALIZATION_ERROR`), or its `args_from` names a member of its static input
     /// (`WORKFLOW_ENQUEUE_FAILED`). The node failed alone and nothing was enqueued (Python's case 1 through
-    /// `enqueue_workflow_task`, `horsies/core/workflows/engine.py:634-705`).
+    /// `enqueue_workflow_task`, `python/horsies/core/workflows/engine.py:634-705`).
     FailedNotPrepared,
 }
 
@@ -1557,7 +1557,7 @@ pub(crate) enum ReadyNodeRecovery {
 /// Errors: an insert that raises (a stored `good_until` that the database cannot read, 22007 or 22008)
 /// rolls back and is returned: the node stays READY with no task, and the recovery pass counts the error
 /// toward the failure limit (Python's case 1 raises from the insert,
-/// `horsies/core/workflows/engine.py:831-835`).
+/// `python/horsies/core/workflows/engine.py:831-835`).
 async fn enqueue_ready_task(
     pool: &PgPool,
     row: &ReadyTaskRow,
@@ -1661,7 +1661,7 @@ async fn enqueue_ready_task(
 /// parse or do not merge with the node's deadline, a database error;
 /// [`crate::workflow_engine::start::ChildStartStop::Failed`]) rolls back and is returned: the node stays
 /// READY with no child, and the recovery pass counts the error toward the failure limit (Python
-/// `_child_task_options_json` raises, `horsies/core/workflows/engine.py:425-475`).
+/// `_child_task_options_json` raises, `python/horsies/core/workflows/engine.py:425-475`).
 async fn start_stuck_subworkflow(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
@@ -1717,7 +1717,7 @@ async fn start_stuck_subworkflow(
     };
     // A child that cannot be built or started, or an `args_from` key that names a member of
     // the static input, fails its node alone with WORKFLOW_ENQUEUE_FAILED (Python
-    // `horsies/core/workflows/engine.py:1151-1215`).
+    // `python/horsies/core/workflows/engine.py:1151-1215`).
     let fail_not_started = |refusal: engine::NodeRefusal| {
         engine::fail_workflow_node(
             pool,
@@ -3397,7 +3397,7 @@ mod cap_tests {
     /// Recovery case 1 enqueues a READY node with the reader of a task row. A stored retry policy that does
     /// not read, or stored options that are not a JSON object, fail that node alone with
     /// `WORKER_SERIALIZATION_ERROR`, the node index and the workflow id in `data`, and no task row (Python's
-    /// case 1 through `enqueue_workflow_task`, `horsies/core/workflows/engine.py:634-705`, `:798-818`); the
+    /// case 1 through `enqueue_workflow_task`, `python/horsies/core/workflows/engine.py:634-705`, `:798-818`); the
     /// workflow, with `on_error = fail` and no other node, ends FAILED. A reader that guesses a limit
     /// enqueues the node instead.
     #[tokio::test]
@@ -3488,7 +3488,7 @@ mod cap_tests {
     /// casts the text and raises (22007), the transaction rolls back, and the node stays READY with no task
     /// while the workflow stays RUNNING. The error is persistent, so the recovery pass counts it toward the
     /// failure limit (Python `_build_enqueued_task_params` passes `str()` of the member to its insert,
-    /// `horsies/core/workflows/engine.py:831-835`).
+    /// `python/horsies/core/workflows/engine.py:831-835`).
     #[tokio::test]
     #[serial]
     async fn a_stored_deadline_that_does_not_read_raises_and_keeps_the_ready_node() {
@@ -3564,7 +3564,7 @@ mod cap_tests {
     /// Recovery case 0 marks a PENDING node READY with its task row, in one transaction: a task insert that
     /// raises (a stored `good_until` that the database cannot read) rolls the READY mark back, and the node
     /// stays PENDING with no task. Python runs each case 0 candidate in a savepoint
-    /// (`horsies/core/workflows/recovery.py:93-94`, `:712-760`). A READY node left behind would be selected
+    /// (`python/horsies/core/workflows/recovery.py:93-94`, `:712-760`). A READY node left behind would be selected
     /// again by case 1 in the same pass.
     #[tokio::test]
     #[serial]

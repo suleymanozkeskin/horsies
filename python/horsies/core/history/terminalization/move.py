@@ -1,7 +1,7 @@
 """Names of the terminal-write functions of the baseline schema.
 
 The functions themselves are SQL in the baseline migration
-(``horsies/core/baseline/sql/0003_interim_functions.sql``): the single-row
+(``crates/horsies-core/baseline/0003_interim_functions.sql``): the single-row
 move ``horsies_move_task_to_history``, the operations that call it, and the
 batch moves. This module holds the names and values that Python callers
 pass to them.

@@ -592,7 +592,7 @@ impl OutcomeWriter {
     }
 
     /// Cancel a claimed workflow task whose node is not linked to it, fenced
-    /// to this claim (Python `horsies/core/worker/finalize.py:1216-1260`,
+    /// to this claim (Python `python/horsies/core/worker/finalize.py:1216-1260`,
     /// the `CancelOwnedOrphan` decision of `_persist_task_terminal_state`).
     /// The function judges the link again under its own lock: a task that
     /// is no longer a terminable owned orphan is left as it is. Nothing is
@@ -640,7 +640,7 @@ impl OutcomeWriter {
 
     /// The success of a plain task: its row joins the next batch of the
     /// finalize batcher (Python `_complete_plain_success`,
-    /// `horsies/core/worker/finalize.py:1386-1436`). Returns after the
+    /// `python/horsies/core/worker/finalize.py:1386-1436`). Returns after the
     /// statement of the row's batch returned. A plain success owes no phase
     /// 2: its capacity wake commits with the row.
     ///
@@ -803,7 +803,7 @@ impl OutcomeWriter {
     }
 
     /// Release a claim that no child took (Python `_requeue_claimed_task`,
-    /// `horsies/core/worker/dispatch.py:254-295`): `horsies_release_claims`
+    /// `python/horsies/core/worker/dispatch.py:254-295`): `horsies_release_claims`
     /// with placement `SAME_CLASS`, fenced to this worker and this claim
     /// generation. The row goes back to the queue in its class; a row in any
     /// other state is left alone. A database error that may clear sends the
@@ -849,7 +849,7 @@ impl OutcomeWriter {
     }
 
     /// The child stopped before RUNNING; no task code ran (Python
-    /// `horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`).
+    /// `python/horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`).
     ///
     /// - An expired workflow task replays phase 2.
     /// - An unconfirmed start releases the claim at once with the fenced

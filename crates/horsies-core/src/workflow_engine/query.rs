@@ -98,7 +98,7 @@ pub async fn get_workflow_status(
 }
 
 /// Repoll interval of a workflow result wait with no listener (Python's
-/// 1 s, `horsies/core/models/workflow/handle.py`, `WorkflowHandle.get`).
+/// 1 s, `python/horsies/core/models/workflow/handle.py`, `WorkflowHandle.get`).
 pub(crate) const WORKFLOW_RESULT_REPOLL_POLLING: Duration = Duration::from_secs(1);
 
 /// Get the typed result of a workflow, optionally waiting for completion.

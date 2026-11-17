@@ -1,4 +1,4 @@
-# horsies/core/scheduler/service.py
+# python/horsies/core/scheduler/service.py
 from __future__ import annotations
 import asyncio
 import hashlib

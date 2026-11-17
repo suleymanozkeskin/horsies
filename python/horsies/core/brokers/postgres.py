@@ -1521,14 +1521,7 @@ class PostgresBroker:
                 Nothing was changed.
             psycopg.Error: a statement failed (after the deadlock retries).
         """
-        match load_baseline_migration():
-            case Err(unreadable):
-                raise RuntimeError(
-                    f'baseline schema file {unreadable.file_name} is unreadable: '
-                    f'{unreadable.cause}'
-                )
-            case Ok(migration):
-                pass
+        migration = load_baseline_migration()
         for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
             match await self._install_once(migration, engine):
                 case Ok():

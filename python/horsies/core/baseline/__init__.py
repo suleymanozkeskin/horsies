@@ -1,1 +1,1 @@
-"""The baseline schema: migration 1000, shipped as SQL files in this package."""
+"""The baseline schema, migration 1000. Its SQL files are compiled into ``horsies._core``."""

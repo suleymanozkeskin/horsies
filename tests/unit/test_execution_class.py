@@ -59,7 +59,7 @@ from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
 
-_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / 'horsies'
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / 'python' / 'horsies'
 
 
 def _app() -> Horsies:

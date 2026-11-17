@@ -322,7 +322,7 @@ fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
 
 /// Store the state row of each enabled schedule that is new or whose pattern
 /// or timezone changed, in two statements (Python `_initialize_schedules`,
-/// `horsies/core/scheduler/service.py`):
+/// `python/horsies/core/scheduler/service.py`):
 ///
 /// 1. One read of every row's name and digest, with the database time.
 /// 2. One write of the new and changed rows, each with its first run computed

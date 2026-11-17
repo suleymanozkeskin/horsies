@@ -34,7 +34,7 @@ pub enum TaskActionErrorCode {
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the transaction did not commit. Not retryable: a repeat gives the
     /// same result until the stored row changes (Python
-    /// `horsies/monitoring/task_actions.py:69-197`).
+    /// `python/horsies/monitoring/task_actions.py:69-197`).
     StoredDataInvalid,
 }
 
@@ -73,8 +73,8 @@ const TASK_LOCK_SEED: i64 = 731;
 /// The task advisory lock, by the key every move function takes. It runs
 /// before the row lock of `LOCK_TASK_SQL`, in the same transaction, so the
 /// cancel takes the two locks in the order of the move functions and cannot
-/// deadlock with a finalize (Python `horsies/core/lifecycle/persistence.py:
-/// 245-256`, `horsies/monitoring/task_actions.py:377-378`).
+/// deadlock with a finalize (Python `python/horsies/core/lifecycle/persistence.py:
+/// 245-256`, `python/horsies/monitoring/task_actions.py:377-378`).
 const LOCK_TASK_ADVISORY_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, $2))";
 
 const LOCK_TASK_SQL: &str = "SELECT status,

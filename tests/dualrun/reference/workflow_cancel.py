@@ -1,6 +1,6 @@
 """Workflow cancel, before ``horsies_workflow_cancel``.
 
-``horsies/core/models/workflow/handle.py`` (``WorkflowHandle.cancel_async``)
+``python/horsies/core/models/workflow/handle.py`` (``WorkflowHandle.cancel_async``)
 sent, in one session transaction, for the root: the workflow row lock, the
 backing task locks, the node locks, the backing task locks again, the
 CANCELLED write, the status read; when the root is CANCELLED, the cancel of

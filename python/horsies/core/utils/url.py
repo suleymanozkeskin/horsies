@@ -1,4 +1,4 @@
-# horsies/core/utils/url.py
+# python/horsies/core/utils/url.py
 """URL helpers: the database URL scheme check, the SQLAlchemy URL, safe
 logging, and driver URL normalization."""
 

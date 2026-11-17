@@ -1,4 +1,4 @@
-# horsies/core/utils/db.py
+# python/horsies/core/utils/db.py
 """Shared database helpers: transient error classification, engine hooks,
 and the worker's ways to write without a transaction.
 

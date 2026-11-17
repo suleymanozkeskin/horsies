@@ -76,6 +76,9 @@ pub use crate::broker::{
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
+// The baseline SQL files, which horsies._core hands to the Python install.
+pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
+
 // lifecycle operations of a client handle (`PostgresBroker::release_claims`,
 // `PostgresBroker::requeue_stale_claimed`)
 pub use crate::broker::claims::{

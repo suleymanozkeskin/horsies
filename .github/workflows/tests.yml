@@ -135,7 +135,7 @@ jobs:
           # Same rule as the webui job: an unknown base runs rather than skips.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- showcase/ horsies/; then
+          elif git diff --quiet "$base" HEAD -- showcase/ python/horsies/ crates/horsies-python/ crates/horsies-core/ crates/horsies-macros/ Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -154,7 +154,8 @@ jobs:
       # No --live: this validates config, imports, every workflow DAG, and each
       # registered builder without a database. It is what keeps the showcase
       # compiling against the library as the library changes, which is why a
-      # change under horsies/ also triggers this job.
+      # change to python/horsies/ or to the crates of horsies._core also
+      # triggers this job.
       - name: Validate showcase app
         if: steps.changed.outputs.run == 'true'
         run: uv run horsies check showcase.acme.app:app
@@ -259,10 +260,12 @@ jobs:
           else
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
           fi
-          # A PR that changes only Rust files (crates/, rust/, the Cargo and
-          # toolchain files) cannot change a Python result: the Python jobs
-          # are skipped for it.
-          if git diff --quiet "$base" HEAD -- . ':(exclude)crates/' ':(exclude)rust/' ':(exclude)Cargo.toml' ':(exclude)Cargo.lock' ':(exclude)rust-toolchain.toml' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
+          # horsies._core is built from crates/horsies-python, crates/horsies-core
+          # and crates/horsies-macros with the root Cargo and toolchain files, so
+          # a change there can change a Python result. A PR that changes only the
+          # frozen Rust client, the generator, rust/, or the format and lint
+          # settings cannot: the Python jobs are skipped for it.
+          if git diff --quiet "$base" HEAD -- . ':(exclude)crates/horsies/' ':(exclude)crates/horsies-codegen/' ':(exclude)rust/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
             echo 'run_python=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_python=true' >> "$GITHUB_OUTPUT"

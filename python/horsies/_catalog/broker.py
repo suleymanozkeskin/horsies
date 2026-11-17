@@ -12,7 +12,7 @@ class BrokerErrorCode(str, Enum):
     """Categorized broker operation failure codes.
 
     The members are Python's, in Python's order
-    (`horsies/core/brokers/result_types.py`). The nine operation codes from
+    (`python/horsies/core/brokers/result_types.py`). The nine operation codes from
     `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
     Python, `BrokerOperationFailed`. A client produces `NO_BROKER` and
     `NO_TYPE_AVAILABLE`; only the Python client produces `EVENT_LOOP_LIMIT`,

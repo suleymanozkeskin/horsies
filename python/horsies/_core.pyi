@@ -337,6 +337,10 @@ class TaskInfoNotFound:
     def task_id(self) -> uuid.UUID: ...
 
 
+def baseline_sql_files() -> list[tuple[str, str]]:
+    """The baseline SQL files as (file name, text) pairs, in run order. Starts nothing."""
+
+
 def core_state() -> Literal['not_started', 'running', 'stopped', 'inherited']:
     """The state of the core in this process. Starts nothing."""
 
