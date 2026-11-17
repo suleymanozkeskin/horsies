@@ -2,7 +2,7 @@
 //! `tests/integration/test_worker_connection_check.py` (the two live tests),
 //! `tests/unit/test_worker_profile_fit.py` (`TestReadServerConnectionLimit`,
 //! `TestConnectionNeed`, `TestCheckLiveWorkerConnections`) and
-//! `horsies/core/worker/profile_fit.py` (the terms and the texts). The
+//! `python/horsies/core/worker/profile_fit.py` (the terms and the texts). The
 //! listener term is the core's one connection per process.
 
 use std::collections::BTreeMap;
@@ -518,7 +518,7 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
 // --- the fit at worker boot ---------------------------------------------------
 //
 // Python `tests/unit/test_cli.py::TestBootConnectionFit` and
-// `horsies/core/cli.py:691-745`: the worker reads the limit before it starts,
+// `python/horsies/core/cli.py:691-745`: the worker reads the limit before it starts,
 // logs the fit of its profile, and starts in every case.
 
 /// `test_a_profile_above_the_limit_warns_and_the_worker_starts`, with the

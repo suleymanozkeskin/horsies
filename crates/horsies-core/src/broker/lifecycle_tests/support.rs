@@ -1,7 +1,7 @@
 //! Seeds and reads that the lifecycle ports share.
 //!
 //! Every seed names every column of its baseline table
-//! (`horsies/core/baseline/sql/0001_tables.sql`). The baseline has no column
+//! (`crates/horsies-core/baseline/0001_tables.sql`). The baseline has no column
 //! defaults, so a seed that leaves a column out does not insert.
 //!
 //! Times that a guard compares with the database clock (`started_at`,

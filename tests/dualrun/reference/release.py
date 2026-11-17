@@ -1,8 +1,8 @@
 """Release and return as ISOLATED, before ``horsies_release_claims``.
 
-``horsies/core/worker/dispatch.py`` (``_requeue_claimed_task``) sent
+``python/horsies/core/worker/dispatch.py`` (``_requeue_claimed_task``) sent
 ``UNCLAIM_CLAIMED_TASK_SQL`` in a session transaction per row.
-``horsies/core/worker/claiming.py`` (``_return_row_as_isolated``) sent
+``python/horsies/core/worker/claiming.py`` (``_return_row_as_isolated``) sent
 ``RETURN_CLAIMED_TASK_AS_ISOLATED_SQL`` per row and, when it updated a row,
 the ``class:<id>`` wake of its queue, in one transaction per row.
 """

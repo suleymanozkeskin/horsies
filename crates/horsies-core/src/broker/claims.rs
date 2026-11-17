@@ -11,7 +11,7 @@
 //! And one read with no 0004 function:
 //! - [`count_queue_starts`]: the start check of soft-cap mode, the count of
 //!   each capped queue that has held rows (Python `COUNT_QUEUE_STARTS_SQL`,
-//!   `horsies/core/worker/sql.py`).
+//!   `python/horsies/core/worker/sql.py`).
 //!
 //! Each is one statement in autocommit on a [`CorePool`], so its locks end
 //! with the statement. The claim pass and the start check are batch work
@@ -402,7 +402,7 @@ fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
     let required = |name: &str| format!("a CLAIMED row of horsies_claim has no {name}");
     let id = row.id.ok_or_else(|| required("id"))?;
     let execution_text = row.execution.ok_or_else(|| required("execution"))?;
-    // Python `parse_row_class` (`horsies/core/worker/row_class.py:75-88`):
+    // Python `parse_row_class` (`python/horsies/core/worker/row_class.py:75-88`):
     // the refusal names the task and the stored value.
     let execution = Execution::from_stored(&execution_text).ok_or_else(|| {
         format!(

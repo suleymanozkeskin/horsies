@@ -2,7 +2,7 @@
 //!
 //! The worker routes read the broker's typed worker-health methods; these
 //! functions turn their results into the wire models of the monitoring UI
-//! (Python `horsies/monitoring/execution_classes.py`). Pure, no I/O.
+//! (Python `python/horsies/monitoring/execution_classes.py`). Pure, no I/O.
 
 use crate::broker::{
     ClassReport, PendingStream, SlotHealth, StreamCoverageState, StreamWait, WorkerClassLoad,

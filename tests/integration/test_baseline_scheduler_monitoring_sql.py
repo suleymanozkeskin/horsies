@@ -21,7 +21,6 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
-from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
@@ -35,11 +34,7 @@ CASE_FILES: Final = {
 """Each case file with its number of cases. A case added to a file changes it."""
 
 def _migration() -> BaselineMigration:
-    match load_baseline_migration():
-        case Ok(loaded):
-            return loaded
-        case Err(unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    return load_baseline_migration()
 
 
 @pytest_asyncio.fixture

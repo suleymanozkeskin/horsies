@@ -249,7 +249,7 @@ fn runtime_threads(kind: ChildKind) -> usize {
 /// profile ([`kept_open_of`], [`PostgresBroker::connect_child`]). Pure.
 ///
 /// Python's child pool takes the same settings as psycopg connect kwargs
-/// (`horsies/core/worker/child_pool.py:123-132`, the `kwargs` of
+/// (`python/horsies/core/worker/child_pool.py:123-132`, the `kwargs` of
 /// `PostgresConfig.pooled_connect_args`). In PgBouncer transaction mode the
 /// config also names the parent's session URL, which
 /// [`PostgresConfig::validate`] requires in that mode.
@@ -281,7 +281,7 @@ fn child_broker_config(
 }
 
 /// The connections that a child pool keeps open: its `min_size` (Python
-/// `ConnectionPool(min_size=...)`, `horsies/core/worker/child_pool.py:123-132`
+/// `ConnectionPool(min_size=...)`, `python/horsies/core/worker/child_pool.py:123-132`
 /// and `:169-178`, opened at `:136` and `:179`). Pure.
 fn kept_open_of(pool: ChildPool) -> KeptOpen {
     let min_size = u32::try_from(pool.min_size.get())
@@ -296,7 +296,7 @@ fn kept_open_of(pool: ChildPool) -> KeptOpen {
 /// applies no migration. Its main pool keeps `min_size` connections open and,
 /// with `check`, pings every pooled connection at checkout (Python
 /// `check=ConnectionPool.check_connection`,
-/// `horsies/core/worker/child_pool.py:122` and `:168`). Errors: the text of a
+/// `python/horsies/core/worker/child_pool.py:122` and `:168`). Errors: the text of a
 /// refused config or of a failed connect; a `min_size` above `max_size` is a
 /// refused config, as Python's `ValueError`.
 async fn connect(init: &InitFrame) -> Result<PostgresBroker, String> {

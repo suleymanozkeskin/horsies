@@ -20,7 +20,6 @@ import pytest_asyncio
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.lifecycle.operations import TerminalizationKind, equivalence_class_of
-from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
@@ -40,11 +39,7 @@ _PASSED_PREFIX: Final = 'ok: '
 
 
 def _migration() -> BaselineMigration:
-    match load_baseline_migration():
-        case Ok(loaded):
-            return loaded
-        case Err(unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    return load_baseline_migration()
 
 
 @pytest_asyncio.fixture

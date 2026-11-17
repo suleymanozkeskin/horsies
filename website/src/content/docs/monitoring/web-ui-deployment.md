@@ -289,7 +289,7 @@ schema.** It reports `ABSENT` and stops. Start a horsies app or worker instead.
 
 ## Static assets
 
-The SPA is served from `horsies/web/static/`, which CI builds into the wheel. If
+The SPA is served from `horsies/web/static/` in the package, which CI builds into the wheel. If
 that directory is missing — a source checkout, or a build that skipped the
 frontend step — `/api/*` continues to work and `GET /` returns 503:
 

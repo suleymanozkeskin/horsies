@@ -496,7 +496,7 @@ impl RunningChildren {
 }
 
 /// Python's line for the tasks whose children the drain deadline killed
-/// (`horsies/core/worker/worker.py`, `Worker.stop`: `'Drain exceeded %.0fs
+/// (`python/horsies/core/worker/worker.py`, `Worker.stop`: `'Drain exceeded %.0fs
 /// (hung task?); killed tasks: %s'` with the list of the task ids), or
 /// `None` when it killed none: Python logs only a list with an id. Pure.
 fn drain_kill_line(drain: Duration, killed: &[Uuid]) -> Option<String> {
@@ -2276,7 +2276,7 @@ mod tests {
         let _: fn(&Worker) -> &str = |w| w.worker_id();
     }
 
-    /// Python `horsies/core/cli.py:886` and `:955`: the memory fit of the
+    /// Python `python/horsies/core/cli.py:886` and `:955`: the memory fit of the
     /// profile is logged before the database start, the connection fit after
     /// it and before the banner and the claim loop; neither returns an error.
     #[test]
