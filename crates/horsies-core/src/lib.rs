@@ -77,7 +77,7 @@ pub use crate::broker::{
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
 // lifecycle operations of a client handle (`PostgresBroker::release_claims`,
-// `PostgresBroker::requeue_stale_claimed`)
+// `PostgresBroker::requeue_stale_claimed`, `PostgresBroker::cancel_task`)
 pub use crate::broker::claims::{
     ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
     MAX_RELEASED_CLAIMS,
@@ -86,6 +86,7 @@ pub use crate::broker::stale_recovery::{
     StaleClaimsRequeueFailed, StaleClaimsRequeuePass, ThresholdMs, ThresholdOutOfRange,
     STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
 };
+pub use crate::broker::{CancelAnswer, CancelTaskError};
 
 // Child mode of a Rust worker binary: the entry checks `child_mode` first
 // and, in child mode, exits with the code of `run_child_host`. Task bodies

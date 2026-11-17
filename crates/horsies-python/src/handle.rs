@@ -22,6 +22,7 @@ use crate::bridge::blocking::call_blocking;
 use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
+use crate::operations::cancel::cancel_task_operation;
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::schema::{install_operation, schema_status_operation};
@@ -302,6 +303,30 @@ impl CoreHandle {
             "CoreHandle.release_claims_async",
             CallKind::Write,
             release_claims_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// Cancel one plain task (`horsies_cancel_task`): `TaskCancelledRecord`,
+    /// `CancelRefusedWorkflowTask`, `CancelRefusedStatus`, `CancelTaskAbsent`,
+    /// `CancelFailed`, or `CancelStoredDataInvalid`. A RUNNING task is
+    /// cancelled only with `include_running`. Writes, in one statement.
+    /// Awaitable only: its caller, `horsies.monitoring.task_actions.cancel_task`,
+    /// is a coroutine. An outcome that contradicts the function raises
+    /// `PanicException`.
+    #[pyo3(signature = (task_id, *, include_running))]
+    fn cancel_task_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        include_running: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.cancel_task_async",
+            CallKind::Write,
+            cancel_task_operation(self.connection(), task_id, include_running),
         )
     }
 
