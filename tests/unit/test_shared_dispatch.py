@@ -155,6 +155,7 @@ def _request(timeout_ms: int = MIN_TASK_TIMEOUT_MS) -> SharedRunRequest:
         is_workflow_task=False,
         claim=CLAIM,
         work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=DEFAULT_CANCEL_GRACE_MS),
+        orphan_self_heal=True,
     )
 
 
@@ -326,6 +327,7 @@ class TestDispatch:
             is_workflow_task=False,
             claim=replace(CLAIM, task_options=SHARED_OPTIONS),
             work=SeatTask(timeout_ms=2000, cancel_grace_ms=700),
+            orphan_self_heal=False,
         )
         worker._finalize_shared_after.assert_called_once_with(
             worker._slots.submit_shared.return_value,

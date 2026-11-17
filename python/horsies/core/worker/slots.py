@@ -454,6 +454,7 @@ class SharedRunRequest:
     is_workflow_task: bool
     claim: DispatchClaim
     work: SeatWork
+    orphan_self_heal: bool
 
     def __post_init__(self) -> None:
         match self.work:
@@ -482,6 +483,7 @@ class SharedRunRequest:
             is_workflow_task=self.is_workflow_task,
             claimed_at=self.claim.claimed_at,
             work=self.work,
+            orphan_self_heal=self.orphan_self_heal,
         )
 
 

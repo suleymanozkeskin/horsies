@@ -21,7 +21,8 @@
 //! check; 1 on any other end; 2 for arguments that do not parse or a
 //! removed flag; a child exits with the code of `ChildHostExit`.
 
-mod logging;
+// The shipped binary's commands (`crate::tools`) log through it too.
+pub(crate) mod logging;
 mod removed_flags;
 
 use std::ffi::OsString;
@@ -115,10 +116,11 @@ enum Command {
     },
 }
 
-/// The `--loglevel` values, Python's names.
+/// The `--loglevel` values, Python's names. The shipped binary's `web`
+/// takes them too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "UPPER")]
-enum LogLevel {
+pub(crate) enum LogLevel {
     Debug,
     Info,
     Warning,
@@ -128,7 +130,7 @@ enum LogLevel {
 
 impl LogLevel {
     /// The level of the worker's children.
-    fn child_level(self) -> WorkerLogLevel {
+    pub(crate) fn child_level(self) -> WorkerLogLevel {
         match self {
             Self::Debug => WorkerLogLevel::Debug,
             Self::Info => WorkerLogLevel::Info,

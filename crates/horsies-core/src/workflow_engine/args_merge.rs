@@ -177,7 +177,10 @@ pub(crate) fn merge_args_from_sync(
 
     insert_args_from_entries(&mut object, args_from_map, dep_results)?;
 
-    Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
+    // The codec's encoder writes each float as Python's `json.dumps` does.
+    Ok(ArgsFromMerge::Merged(crate::core::codec::to_json_string(
+        &object,
+    )?))
 }
 
 /// Insert one `args_from` entry per kwarg of `args_from_map` into `kwargs`.
@@ -416,7 +419,8 @@ pub(crate) fn child_build_input(
         })?;
     let args_from_members: Vec<(String, serde_json::Value)> = args_from_keys
         .iter()
-        .filter_map(|key| object.remove(key).map(|value| (key.clone(), value)))
+        // `shift_remove` keeps the order of the members that stay.
+        .filter_map(|key| object.shift_remove(key).map(|value| (key.clone(), value)))
         .collect();
     let mut members: Vec<(&String, &serde_json::Value)> = object.iter().collect();
     members.extend(args_from_members.iter().map(|(key, value)| (key, value)));

@@ -1,8 +1,10 @@
 """The child's workflow-node handoff on the CLAIMED -> RUNNING transition.
 
 ``_confirm_ownership_and_set_running`` moves the linked node to RUNNING in
-the same transaction as the task. A retried attempt finds its node already
-RUNNING; that node must keep its tuple and its first ``started_at``.
+the same statement as the task. A retried attempt finds its node already
+RUNNING; that node must keep its tuple and its first ``started_at``. A node
+that is not linked fails the workflow check; with the orphan self-heal of
+the run on, the stop before start cancels the task instead.
 """
 
 from __future__ import annotations
@@ -177,6 +179,7 @@ async def test_a_start_writes_one_runner_beat(
         WORKER_ID,
         True,
         claimed_at=claimed_at,
+        orphan_self_heal=False,
     )
 
     assert result is None
@@ -194,7 +197,11 @@ async def test_a_start_that_does_not_apply_writes_no_beat(
     task_id, claimed_at = await _arrange(session, broker, 'ENQUEUED')
 
     result = _confirm_ownership_and_set_running(
-        task_id, WORKER_ID, True, claimed_at=claimed_at + timedelta(seconds=1),
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at + timedelta(seconds=1),
+        orphan_self_heal=False,
     )
 
     assert result == (False, '', 'CLAIM_LOST')
@@ -216,6 +223,7 @@ async def test_a_failed_workflow_check_keeps_no_beat(
         WORKER_ID,
         True,
         claimed_at=claimed_at,
+        orphan_self_heal=False,
     )
 
     assert result == WORKFLOW_CHECK_FAILED
@@ -238,6 +246,7 @@ async def test_running_node_keeps_its_tuple_and_first_start(
         WORKER_ID,
         True,
         claimed_at=claimed_at,
+        orphan_self_heal=False,
     )
 
     assert result is None
@@ -264,6 +273,7 @@ async def test_waiting_node_moves_to_running_with_a_new_start(
         WORKER_ID,
         True,
         claimed_at=claimed_at,
+        orphan_self_heal=False,
     )
 
     assert result is None
@@ -290,6 +300,7 @@ async def test_terminal_node_fails_the_workflow_check(
         WORKER_ID,
         True,
         claimed_at=claimed_at,
+        orphan_self_heal=False,
     )
 
     assert result == WORKFLOW_CHECK_FAILED
@@ -314,7 +325,48 @@ async def test_missing_node_fails_the_workflow_check(
         WORKER_ID,
         True,
         claimed_at=claimed_at,
+        orphan_self_heal=False,
     )
 
     assert result == WORKFLOW_CHECK_FAILED
     assert await _task_status(session, task_id) == 'CLAIMED'
+
+
+@pytest.mark.parametrize('node_status', [None, 'COMPLETED'], ids=['missing', 'terminal'])
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_node_that_is_not_linked_with_the_self_heal_on_cancels_the_task(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    clean_workflow_tables: None,  # noqa: ARG001
+    node_status: str | None,
+) -> None:
+    """The stop before start cancels the orphan (ORPHAN_CANCELLED) in the
+    statement after the start: the row moves to history as CANCELLED
+    (CANCEL_ORPHAN), with no beat."""
+    task_id, claimed_at = await _arrange(session, broker, node_status)
+
+    result = _confirm_ownership_and_set_running(
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at,
+        orphan_self_heal=True,
+    )
+
+    assert result == (False, '', 'ORPHAN_CANCELLED')
+    live = await session.scalar(
+        text('SELECT COUNT(*) FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
+        {'id': task_id},
+    )
+    history = (
+        await session.execute(
+            text("""
+                SELECT status::text, terminalization_kind::text
+                FROM horsies_task_history WHERE task_id = CAST(:id AS uuid)
+            """),
+            {'id': task_id},
+        )
+    ).one()
+    assert live == 0
+    assert tuple(history) == ('CANCELLED', 'CANCEL_ORPHAN')
+    assert await _beat_count(session, task_id) == 0

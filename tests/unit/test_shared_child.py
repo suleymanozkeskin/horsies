@@ -173,6 +173,7 @@ def _frame(
         is_workflow_task=False,
         claimed_at=CLAIMED_AT,
         work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms),
+        orphan_self_heal=True,
     )
 
 
@@ -1588,6 +1589,7 @@ class TestParentDefects:
             is_workflow_task=False,
             timeout=NoTimeout(),
             claimed_at=CLAIMED_AT,
+            orphan_self_heal=True,
         )
         self._serve_until_exit(2, [isolated])
         assert exits[0][1] == child_main.BAD_PARENT_FRAME_EXIT_CODE

@@ -8,8 +8,9 @@ turns it on. The child pools are the pools a child opens: autocommit, with
 the checkout check off.
 
 A one-statement write is one round trip: no pre-ping, no BEGIN, no COMMIT.
-A write that needs several statements to commit together (the RUNNING
-transition of a workflow task) keeps its transaction.
+The start of a run in a child and its miss path go through the core handle
+of the child (``proxied_child_core``): one statement for the start, and one
+for the path of a miss.
 """
 
 # pyright: reportPrivateUsage=false
@@ -17,7 +18,7 @@ transition of a workflow task) keeps its transaction.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from datetime import datetime, timezone
 from typing import Any, Final
 from unittest.mock import AsyncMock
@@ -40,6 +41,7 @@ from horsies.core.worker.child_pool import (
 from horsies.core.worker.child_runner import (
     StartAllowed,
     StartCheck,
+    StartWithin,
     StatementsBound,
     StatementsLimit,
     StatementsUnbounded,
@@ -67,6 +69,7 @@ from tests.integration.autocommit_support import (
     steady_state_turns,
     upstream_of,
 )
+from tests.fixtures.child_core import child_core_handle_for
 from tests.integration.round_trip_proxy import RoundTripProxy, Turn
 from tests.integration.test_workflow_node_handoff import (
     WORKER_ID as NODE_WORKER_ID,
@@ -128,8 +131,26 @@ def sync_child_pool(proxy: RoundTripProxy, db_url: str) -> Generator[None]:
     _cleanup_worker_pool()
 
 
+@pytest.fixture
+def proxied_child_core(
+    proxy: RoundTripProxy,
+    db_url: str,
+    sync_child_pool: None,  # noqa: ARG001
+) -> Generator[None]:
+    """The core handle of a child, on the proxy. The handle of the suite
+    comes back after the test. The sync pool of the child is on the proxy as
+    well, for the reference start of a dual-run; it opens no connection
+    unless that start runs."""
+    with child_core_handle_for(proxied_url(db_url, proxy)):
+        yield
+
+
 def _allowed() -> StartCheck:
     return StartAllowed()
+
+
+def _within_a_minute() -> StartCheck:
+    return StartWithin(milliseconds=60_000)
 
 
 SYNC_CHILD_KINDS: Final = pytest.mark.parametrize(
@@ -238,14 +259,17 @@ async def test_a_plain_success_finalize_is_one_statement(
     assert await _history_rows(session, task_id) == 1
 
 
-async def test_an_orphan_cancel_is_one_statement(
+async def test_a_workflow_check_failure_finalize_sends_nothing(
     proxy: RoundTripProxy,
     proxied: ProxiedWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A claimed workflow task with no node, reported WORKFLOW_CHECK_FAILED,
-    is cancelled by one function call in autocommit."""
+    """A claimed workflow task with no node, reported WORKFLOW_CHECK_FAILED
+    (the orphan self-heal of the run was off), is left CLAIMED: the worker
+    sends no statement. With the self-heal on, the child's stop before start
+    cancels the orphan
+    (``test_a_stop_before_start_is_one_statement_after_the_start``)."""
 
     async def arrange() -> Case:
         return await insert_task(session, status='CLAIMED', is_workflow_task=True)
@@ -266,7 +290,40 @@ async def test_an_orphan_cancel_is_one_statement(
 
     (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 
-    assert len(turns) == ONE_STATEMENT, turns
+    assert turns == (), turns
+    row = await _row(session, task_id)
+    assert row is not None and row.status == 'CLAIMED'
+
+
+async def test_a_stop_before_start_is_one_statement_after_the_start(
+    proxy: RoundTripProxy,
+    proxied_child_core: None,  # noqa: ARG001
+    broker: PostgresBroker,  # noqa: ARG001
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A claimed workflow task with no node: the start misses with
+    NODE_NOT_LINKED, and the stop before start cancels the orphan
+    (``horsies_workflow_task_stop_before_start``, ORPHAN_CANCELLED): two
+    statements in all, each its own transaction."""
+
+    async def arrange() -> Case:
+        return await insert_task(session, status='CLAIMED', is_workflow_task=True)
+
+    async def act(case: Case) -> None:
+        task_id, claimed_at = case
+        stopped = _confirm_until_not_resumed(
+            task_id,
+            WORKER_ID,
+            True,
+            claimed_at,
+            orphan_self_heal=True,
+        )
+        assert stopped == (False, '', 'ORPHAN_CANCELLED')
+
+    (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
+
+    assert len(turns) == 2 * ONE_STATEMENT, turns
     assert await _row(session, task_id) is None
     assert await _history_status(session, task_id) == 'CANCELLED'
 
@@ -333,13 +390,13 @@ async def test_the_delayed_retry_wake_is_one_statement(
 
 async def test_a_shared_async_running_update_is_one_statement(
     proxy: RoundTripProxy,
-    async_child_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    proxied_child_core: None,  # noqa: ARG001
     broker: PostgresBroker,  # noqa: ARG001
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """A plain task's RUNNING update, with its first beat, is one round trip
-    on the autocommit pool."""
+    through the core handle of the child."""
 
     async def arrange() -> Case:
         return await insert_task(session, status='CLAIMED')
@@ -347,11 +404,11 @@ async def test_a_shared_async_running_update_is_one_statement(
     async def act(case: Case) -> None:
         task_id, claimed_at = case
         started = await confirm_until_not_resumed(
-            async_child_pool,
             task_id,
             WORKER_ID,
             False,
             claimed_at,
+            orphan_self_heal=True,
         )
         assert started is None
 
@@ -385,13 +442,13 @@ async def test_a_shared_async_finalizing_marker_is_one_statement(
 
 async def test_a_shared_async_workflow_start_is_one_statement(
     proxy: RoundTripProxy,
-    async_child_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    proxied_child_core: None,  # noqa: ARG001
     broker: PostgresBroker,  # noqa: ARG001
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """The RUNNING write of a workflow task and its node write are one
-    horsies_start_attempt statement on the autocommit pool."""
+    horsies_start_attempt statement through the core handle of the child."""
     claimed_at = datetime.now(timezone.utc)
     task_id = await _seed_claimed_workflow_task(session, claimed_at)
     await _seed_running_workflow_with_node(session, task_id, 'ENQUEUED')
@@ -399,11 +456,11 @@ async def test_a_shared_async_workflow_start_is_one_statement(
 
     async def act(case: Case) -> None:
         started = await confirm_until_not_resumed(
-            async_child_pool,
             case[0],
             NODE_WORKER_ID,
             True,
             case[1],
+            orphan_self_heal=True,
         )
         assert started is None
 
@@ -419,14 +476,18 @@ async def test_a_shared_async_workflow_start_is_one_statement(
 # ---------------------------------------------------------------------------
 
 
-@SYNC_CHILD_KINDS
+@pytest.mark.parametrize(
+    'start_check',
+    [_allowed, _within_a_minute],
+    ids=['isolated', 'shared_thread'],
+)
 async def test_a_sync_running_update_is_one_statement(
     proxy: RoundTripProxy,
-    sync_child_pool: None,  # noqa: ARG001
+    proxied_child_core: None,  # noqa: ARG001
     broker: PostgresBroker,  # noqa: ARG001
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
-    statements: StatementsLimit,
+    start_check: Callable[[], StartCheck],
 ) -> None:
     async def arrange() -> Case:
         return await insert_task(session, status='CLAIMED')
@@ -438,8 +499,8 @@ async def test_a_sync_running_update_is_one_statement(
             WORKER_ID,
             False,
             claimed_at,
-            start_check=_allowed,
-            statements=statements,
+            orphan_self_heal=True,
+            start_check=start_check,
         )
         assert started is None
 
@@ -475,7 +536,7 @@ async def test_a_sync_finalizing_marker_is_one_statement(
 
 async def test_a_sync_workflow_start_is_one_statement(
     proxy: RoundTripProxy,
-    sync_child_pool: None,  # noqa: ARG001
+    proxied_child_core: None,  # noqa: ARG001
     broker: PostgresBroker,  # noqa: ARG001
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
@@ -486,7 +547,13 @@ async def test_a_sync_workflow_start_is_one_statement(
     await session.commit()
 
     async def act(case: Case) -> None:
-        started = _confirm_until_not_resumed(case[0], NODE_WORKER_ID, True, case[1])
+        started = _confirm_until_not_resumed(
+            case[0],
+            NODE_WORKER_ID,
+            True,
+            case[1],
+            orphan_self_heal=True,
+        )
         assert started is None
 
     turns = await recorded_turns(proxy, act, (task_id, claimed_at))

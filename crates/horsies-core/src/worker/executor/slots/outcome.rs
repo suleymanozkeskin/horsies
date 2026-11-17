@@ -64,25 +64,10 @@ pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
 /// Sends of the release of a claim that no child took, the first included.
 pub const RELEASE_SENDS: u32 = 3;
 
-/// Whether the worker cancels a claimed workflow task whose node is not
-/// linked to it (the app's `auto_terminate_orphaned_workflow_tasks`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrphanSelfHeal {
-    /// Cancel the task with `horsies_cancel_owned_orphan`.
-    On,
-    /// Leave the row CLAIMED for inspection.
-    Off,
-}
-
-impl OrphanSelfHeal {
-    /// The setting of `auto_terminate_orphaned_workflow_tasks`.
-    pub fn of_recovery_flag(auto_terminate_orphaned_workflow_tasks: bool) -> Self {
-        match auto_terminate_orphaned_workflow_tasks {
-            true => Self::On,
-            false => Self::Off,
-        }
-    }
-}
+// Whether the worker cancels a claimed workflow task whose node is not
+// linked to it (the app's `auto_terminate_orphaned_workflow_tasks`). The stop
+// before start of a workflow task takes the same setting.
+pub use crate::broker::OrphanSelfHeal;
 
 /// The stage of an outcome write. Each stage has its own retry bound
 /// (Python `_max_retries_of`).

@@ -1,6 +1,6 @@
 # pyright: reportPrivateUsage=false
-"""The callers of the pending expiry, the orphan audit and the orphan
-self-heal, before they called the core.
+"""The callers of the pending expiry and the orphan audit, before they
+called the core.
 
 - ``PostgresBroker.expire_pending_tasks`` and
   ``PostgresBroker.audit_orphaned_workflow_tasks``
@@ -10,15 +10,14 @@ self-heal, before they called the core.
   engine: the expiry one transaction per batch, until a batch was short, at
   most ``_EXPIRE_MAX_BATCHES_PER_PASS`` batches; the audit one page and its
   cursor counts in one transaction.
-- The orphan self-heal of the worker's finalize
-  (``FinalizeMixin._cancel_owned_orphan``,
-  ``python/horsies/core/worker/finalize.py``) sent
-  ``horsies_cancel_owned_orphan`` through ``apply_in_autocommit`` on the
-  worker's session factory.
 
-The functions below are those bodies. Each takes the broker or the worker as
-its first parameter, so the dual-run rebinding can put it in the place of the
-method.
+The orphan self-heal of the worker's finalize is not a caller any more: the
+child's stop before start cancels the orphan
+(``tests/dualrun/reference/stop_before_start_caller.py`` keeps the parent's
+cancel of before the switch).
+
+The functions below are those bodies. Each takes the broker as its first
+parameter, so the dual-run rebinding can put it in the place of the method.
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ from horsies.core.brokers.postgres import (
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
-    CancelOwnedOrphan,
     ExpirePendingTasks,
 )
 from horsies.core.lifecycle.outcomes import (
@@ -47,12 +45,10 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     SourceStateConflict,
     TaskAbsent,
-    TerminalizationOutcome,
 )
-from horsies.core.lifecycle.persistence import apply_batch_async, apply_in_autocommit
+from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.worker.finalize import FinalizeMixin
 
 
 async def expire_pending_tasks(self: PostgresBroker) -> BrokerResult[int]:
@@ -196,12 +192,3 @@ async def audit_orphaned_workflow_tasks(
             f'audit_orphaned_workflow_tasks failed: {exc}',
             exc,
         )
-
-
-async def cancel_owned_orphan(
-    self: FinalizeMixin,
-    command: CancelOwnedOrphan,
-) -> TerminalizationOutcome:
-    """``horsies_cancel_owned_orphan`` in autocommit on the worker's session
-    factory; the outcome as the function reported it."""
-    return await apply_in_autocommit(self.sf, command)

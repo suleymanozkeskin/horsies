@@ -36,7 +36,6 @@ export default defineConfig({
 		'/rust/monitoring/broker-methods': '/horsies/rust/monitoring/health-reads/',
 		'/rust/workers/concurrency': '/horsies/workers/concurrency/',
 		'/rust/internals/serialization': '/horsies/internals/serialization/',
-		'/rust/cli': '/horsies/rust/',
 		'/rust/concepts/workflows/subworkflows': '/horsies/rust/',
 		'/rust/concepts/workflows/typed-node-builder': '/horsies/rust/',
 		'/rust/concepts/workflows/workflow-api': '/horsies/rust/',
@@ -319,7 +318,7 @@ export default defineConfig({
 								{ label: 'Rerun in Your Transaction', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 								{ label: 'Async Frameworks', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 								{ label: 'Testing', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'CLI Reference', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'CLI Reference', slug: 'rust/cli' },
 							],
 						},
 						{
