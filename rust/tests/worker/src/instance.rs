@@ -178,7 +178,8 @@ impl Instance {
 }
 
 /// Python `instance_recovery.py`: 1 s heartbeats and checks, the smallest
-/// stale thresholds that the validation admits.
+/// stale thresholds that the validation admits, and a worker state
+/// snapshot each second.
 pub fn fast_recovery() -> RecoveryConfig {
     RecoveryConfig {
         runner_heartbeat_interval_ms: 1_000,
@@ -187,6 +188,7 @@ pub fn fast_recovery() -> RecoveryConfig {
         claimed_stale_threshold_ms: 2_000,
         crashed_worker_recovery_grace_ms: 2_000,
         check_interval_ms: 1_000,
+        worker_state_snapshot_interval_ms: 1_000,
         ..RecoveryConfig::default()
     }
 }

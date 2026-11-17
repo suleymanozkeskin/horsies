@@ -97,3 +97,21 @@ worker/tests/layer2_cluster.rs	test_softcap_expired_claim_requeued	PORTED	worker
 worker/tests/layer2_cluster.rs	test_softcap_db_ledger_race_single_execution	PORTED	worker/tests/layer2_cluster.rs::test_softcap_db_ledger_race_single_execution
 worker/tests/layer2_cluster.rs	test_softcap_owner_transition_after_worker_crash	PORTED	worker/tests/layer2_cluster.rs::test_softcap_owner_transition_after_worker_crash
 worker/tests/layer2_cluster.rs	test_requeue_db_error_age_guard_recovery	COVERED_BY_CORE	horsies-core worker::heartbeat::tests::the_claimer_loop_renews_only_young_claims_of_its_own_worker (the fault that the old test injected into the worker binary has no seam in the core worker parent; the age guard of the renewal is tested in the core)
+worker/tests/layer3_scheduler.rs	test_schedule_persistence	PORTED	worker/tests/layer3_scheduler.rs::test_schedule_persistence
+worker/tests/layer3_scheduler.rs	test_schedule_executes_after_due_time	PORTED	worker/tests/layer3_scheduler.rs::test_schedule_executes_after_due_time
+worker/tests/layer3_scheduler.rs	test_schedule_does_not_execute_early	PORTED	worker/tests/layer3_scheduler.rs::test_schedule_does_not_execute_early
+worker/tests/layer3_scheduler.rs	test_repeating_schedule	PORTED	worker/tests/layer3_scheduler.rs::test_repeating_schedule
+worker/tests/layer3_scheduler.rs	test_disabled_schedule_does_not_fire	PORTED	worker/tests/layer3_scheduler.rs::test_disabled_schedule_does_not_fire
+worker/tests/layer3_scheduler.rs	test_schedule_with_args_passes_arguments	PORTED	worker/tests/layer3_scheduler.rs::test_schedule_with_args_passes_arguments
+worker/tests/layer3_scheduler.rs	test_config_hash_change_recalculates_next_run	PORTED	worker/tests/layer3_scheduler.rs::test_config_hash_change_recalculates_next_run
+worker/tests/layer3_scheduler.rs	test_catch_up_missed_enqueues_missed_runs	PORTED	worker/tests/layer3_scheduler.rs::test_catch_up_missed_enqueues_missed_runs
+worker/tests/layer3_scheduler.rs	test_scheduler_restart_reuses_existing_state	PORTED	worker/tests/layer3_scheduler.rs::test_scheduler_restart_reuses_existing_state
+worker/tests/layer3_scheduler.rs	test_cron_schedule_fires_on_due_minute	PORTED	worker/tests/layer3_scheduler.rs::test_cron_schedule_fires_on_due_minute
+worker/tests/layer8_health.rs	test_ping_database_returns_latency	PORTED	worker/tests/layer8_health.rs::test_ping_database_returns_latency (snapshots of live workers in place of inserted rows)
+worker/tests/layer8_health.rs	test_list_worker_states_latest_per_worker_includes_idle	PORTED	worker/tests/layer8_health.rs::test_list_worker_states_latest_per_worker_includes_idle (snapshots of live workers in place of inserted rows)
+worker/tests/layer8_health.rs	test_get_worker_state_latest_and_unknown	PORTED	worker/tests/layer8_health.rs::test_get_worker_state_latest_and_unknown (snapshots of live workers in place of inserted rows)
+worker/tests/layer8_health.rs	test_get_worker_state_history_newest_first_and_limit	PORTED	worker/tests/layer8_health.rs::test_get_worker_state_history_newest_first_and_limit (snapshots of live workers in place of inserted rows)
+worker/tests/layer8_health.rs	test_ping_workers_rejects_zero_timeout	PORTED	worker/tests/layer8_health.rs::test_ping_workers_rejects_zero_timeout (snapshots of live workers in place of inserted rows)
+worker/tests/layer8_health.rs	test_ping_workers_collects_pong_and_targets_worker	PORTED	worker/tests/layer8_health.rs::test_ping_workers_collects_pong_and_targets_worker (snapshots of live workers in place of inserted rows)
+worker/tests/layer8_health.rs	test_list_worker_states_fresh_stale_and_single_snapshot	COVERED_BY_CORE	horsies-core broker::worker_state_read_tests::the_list_holds_the_latest_snapshot_of_each_worker
+worker/tests/layer8_health.rs	test_ping_workers_rejects_zero_min_responses	DELETED	min_responses is Option<NonZeroUsize> in the client API, so zero does not compile; the core boundary: horsies-core broker::postgres::broker_operation_error_tests::ping_workers_refuses_zero_min_responses_as_invalid_input
