@@ -37,7 +37,6 @@ from horsies.core.models.workflow.handle_types import (
     HandleStoredDataInvalid,
     HandleWorkflowNotFound,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 
 WORKFLOW_ID = 'wf-1'
 
@@ -197,11 +196,13 @@ class TestPauseWorkflowResult:
         with the record's cause and retry rule."""
         from horsies.core.workflows.lifecycle import pause_workflow
 
+        cause = core.CoreConnectionError('pause_workflow', 'connection refused', True)
         broker = _pause_broker(_record(
             core.HandleFailed,
             code='DB_OPERATION_FAILED',
             message='connection refused',
             retryable=True,
+            exception=cause,
         ))
         result = await pause_workflow(broker, PAUSE_WORKFLOW_ID)
 
@@ -211,8 +212,7 @@ class TestPauseWorkflowResult:
         assert err.workflow_id == PAUSE_WORKFLOW_ID
         assert err.retryable is True
         assert 'connection refused' in err.message
-        assert isinstance(err.exception, CoreOperationFailed)
-        assert err.exception.subject == 'pause_workflow'
+        assert err.exception is cause
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_stored_data_invalid_returns_its_error(self) -> None:
@@ -319,9 +319,13 @@ class TestResumeThroughCore:
     async def test_recovery_failed_after_the_commit_returns_its_error(self) -> None:
         from horsies.core.workflows.lifecycle import resume_workflow
 
+        cause = core.CoreConnectionError(
+            'resume_workflow', 'the recovery pass for its tree failed', False,
+        )
         broker = _resume_broker(_record(
             core.WorkflowResumeRecoveryFailed,
             message='the recovery pass for its tree failed',
+            exception=cause,
         ))
         result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
 
@@ -329,8 +333,7 @@ class TestResumeThroughCore:
         err = result.err_value
         assert isinstance(err, HandleResumeRecoveryFailed)
         assert err.retryable is False
-        assert isinstance(err.exception, CoreOperationFailed)
-        assert err.exception.subject == 'resume_workflow'
+        assert err.exception is cause
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_failure_record_returns_db_operation_failed(self) -> None:
