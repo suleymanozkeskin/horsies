@@ -672,10 +672,11 @@ pub async fn get_workflow_result_for<T: DeserializeOwned>(
 /// - `WORKFLOW_NOT_FOUND`: no workflow has the id (Python's rule; a workflow with no node is
 ///   `Ok` of no task).
 /// - `DB_OPERATION_FAILED`: the read failed (retryable by the core's rule).
-/// - `STORED_DATA_INVALID`, not retryable: a stored node status outside the enum, or a stored sub-workflow
-///   summary that is not JSON (`sub_workflow_summary JSON corrupt for node ...`) or that breaks Python's
-///   summary rules (`sub_workflow_summary invalid for node ...`, [`SubWorkflowSummary::from_stored_value`]).
-///   A summary is never read as another status.
+/// - `STORED_DATA_INVALID`, not retryable: a stored node status outside the enum (the message names the
+///   workflow, the node and the value, `parse_task_status`), or a stored sub-workflow summary that is
+///   not JSON (`sub_workflow_summary JSON corrupt for node ...`) or that breaks Python's summary rules
+///   (`sub_workflow_summary invalid for node ...`, [`SubWorkflowSummary::from_stored_value`]). A summary
+///   is never read as another status.
 pub async fn get_workflow_tasks(
     broker: &PostgresBroker,
     workflow_id: Uuid,
@@ -697,8 +698,7 @@ pub async fn get_workflow_tasks(
 
 /// One node row as a [`WorkflowTaskInfo`]. Errors as [`get_workflow_tasks`]. Pure.
 fn workflow_task_info(workflow_id: Uuid, row: StoredNode) -> HandleResult<WorkflowTaskInfo> {
-    let status = parse_task_status(&row.status)
-        .map_err(|error| handle_operation_error(&error, workflow_id))?;
+    let status = parse_task_status(workflow_id, row.node_id.as_deref(), &row.status)?;
     // Python reads a summary only when the column is a non-empty text (`if row.sub_workflow_summary:`).
     let sub_workflow_summary = match row.sub_workflow_summary.as_deref() {
         None | Some("") => None,
@@ -1064,8 +1064,18 @@ fn parse_workflow_status(s: &str) -> Result<WorkflowStatus, WorkflowError> {
     WorkflowStatus::try_from(s).map_err(WorkflowError::InvalidStatus)
 }
 
-fn parse_task_status(s: &str) -> Result<WorkflowTaskStatus, WorkflowError> {
-    match s {
+/// The status that a node row stores (Python `stored_node_status`, `core/models/workflow/enums.py`).
+///
+/// A value outside [`WorkflowTaskStatus`] is `STORED_DATA_INVALID`, not retryable: the same read meets the
+/// same row. The message names the workflow, the node (`None` for a row with no node id, as Python
+/// formats it) and the value in Python's `repr`. The baseline CHECK `horsies_workflow_tasks_status_known`
+/// forbids such a value, so the row is corrupt. Pure.
+fn parse_task_status(
+    workflow_id: Uuid,
+    node_id: Option<&str>,
+    stored: &str,
+) -> HandleResult<WorkflowTaskStatus> {
+    match stored {
         "PENDING" => Ok(WorkflowTaskStatus::Pending),
         "READY" => Ok(WorkflowTaskStatus::Ready),
         "ENQUEUED" => Ok(WorkflowTaskStatus::Enqueued),
@@ -1073,7 +1083,19 @@ fn parse_task_status(s: &str) -> Result<WorkflowTaskStatus, WorkflowError> {
         "COMPLETED" => Ok(WorkflowTaskStatus::Completed),
         "FAILED" => Ok(WorkflowTaskStatus::Failed),
         "SKIPPED" => Ok(WorkflowTaskStatus::Skipped),
-        unknown => Err(WorkflowError::InvalidStatus(unknown.to_owned())),
+        unknown => Err(HandleOperationError {
+            code: HandleErrorCode::StoredDataInvalid,
+            message: format!(
+                "workflow {workflow_id} node {} stores status {}, which is not a \
+                 WorkflowTaskStatus member; the CHECK horsies_workflow_tasks_status_known \
+                 must forbid it",
+                node_id.unwrap_or("None"),
+                crate::core::python_text::python_repr(unknown),
+            ),
+            retryable: false,
+            workflow_id,
+            cause: crate::failure_cause::FailureCause::ContractViolation,
+        }),
     }
 }
 
@@ -1362,6 +1384,40 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains(&Uuid::nil().to_string()));
+    }
+
+    #[test]
+    fn a_node_status_outside_the_enum_is_stored_data_invalid_and_names_its_subject() {
+        let workflow_id = Uuid::nil();
+
+        let refused = parse_task_status(workflow_id, Some("node-9"), "BOGUS")
+            .expect_err("a status outside the enum is refused");
+
+        assert_eq!(refused.code, HandleErrorCode::StoredDataInvalid);
+        assert!(!refused.retryable);
+        assert_eq!(refused.workflow_id, workflow_id);
+        assert_eq!(
+            refused.cause,
+            crate::failure_cause::FailureCause::ContractViolation
+        );
+        assert_eq!(
+            refused.message,
+            "workflow 00000000-0000-0000-0000-000000000000 node node-9 stores status 'BOGUS', \
+             which is not a WorkflowTaskStatus member; the CHECK \
+             horsies_workflow_tasks_status_known must forbid it",
+        );
+    }
+
+    #[test]
+    fn a_node_status_outside_the_enum_on_a_row_with_no_node_id_names_the_node_none() {
+        let refused = parse_task_status(Uuid::nil(), None, "BOGUS")
+            .expect_err("a status outside the enum is refused");
+
+        assert!(
+            refused.message.contains(" node None stores status 'BOGUS'"),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]
