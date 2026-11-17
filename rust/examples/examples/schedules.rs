@@ -1,176 +1,92 @@
-//! Schedule example: configure scheduled tasks and run the scheduler.
+//! Schedules: the scheduler sends a task on a pattern. A schedule's input is
+//! the task's stored input, one member per parameter; the check decodes it
+//! with the task's input type before the scheduler starts.
 //!
-//! This example is **standalone** — it runs its own worker + scheduler
-//! because the scheduler IS the sender (it enqueues tasks on a timer).
+//! ```text
+//! cargo run -p horsies-examples --example schedules -- check
+//! cargo run -p horsies-examples --example schedules -- scheduler
+//! cargo run -p horsies-examples --example schedules -- worker --profile default
+//! ```
 //!
-//! Run with:
-//!   cargo run --example schedules -p horsies-examples
+//! `demo` runs the same check in code and prints the schedules.
 
-use horsies_examples::common;
-
-use std::sync::Arc;
-use std::time::Duration;
-
-use chrono::NaiveTime;
-use tokio_util::sync::CancellationToken;
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::process::ExitCode;
 
 use horsies::{
-    mask_database_url, spawn_scheduler, DailySchedule, Horsies, IntervalSchedule, ScheduleConfig,
-    SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, Worker, WorkerConfig,
+    task, AppConfig, Horsies, HorsiesError, HourlySchedule, IntervalSchedule, ScheduleConfig,
+    SchedulePattern, TaskError, TaskSchedule,
+};
+use horsies_examples::{
+    app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
 };
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+#[task("record_heartbeat")]
+async fn record_heartbeat(source: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("heartbeat from {source}"))
+}
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ── 1. Database URL and base config from common module ────────────
-    let db_url = common::db_url();
-    eprintln!("Using database: {}\n", mask_database_url(&db_url));
+#[task("compact_logs")]
+async fn compact_logs(keep_days: u32) -> Result<u32, TaskError<Infallible>> {
+    Ok(keep_days)
+}
 
-    // Start from custom mode config and attach schedule
-    let mut config = common::custom_mode::app_config(&db_url);
-
-    // ── 2. Build schedule configuration ────────────────────────────────
-    let schedule_config = ScheduleConfig::new(vec![
-        // Fires every 3 seconds -- short enough to see activity during
-        // the 10-second demo window.
+fn schedules() -> ScheduleConfig {
+    ScheduleConfig::new(vec![
         TaskSchedule::new(
-            "fast_interval",
-            "sync_inventory",
+            "heartbeat-every-10s",
+            "record_heartbeat",
             SchedulePattern::Interval(IntervalSchedule {
-                seconds: Some(3),
-                ..Default::default()
+                seconds: Some(10),
+                ..IntervalSchedule::default()
             }),
         )
-        .queue(common::custom_mode::LOW),
-        // Daily at 02:00 -- won't fire during the demo, but shows
-        // how to configure a daily schedule.
+        .input(serde_json::json!({ "source": "scheduler" })),
         TaskSchedule::new(
-            "daily_report",
-            "generate_report",
-            SchedulePattern::Daily(DailySchedule {
-                time: NaiveTime::from_hms_opt(2, 0, 0).expect("valid time"),
+            "compact-hourly",
+            "compact_logs",
+            SchedulePattern::Hourly(HourlySchedule {
+                minute: 5,
+                second: 0,
             }),
         )
-        .queue(common::custom_mode::LOW),
-        // Weekly on Sunday at 03:00 -- configuration demo only.
-        TaskSchedule::new(
-            "weekly_cleanup",
-            "cleanup_data",
-            SchedulePattern::Weekly(WeeklySchedule {
-                days: vec![Weekday::Sunday],
-                time: NaiveTime::from_hms_opt(3, 0, 0).expect("valid time"),
-            }),
-        )
-        .queue(common::custom_mode::LOW),
+        .input(serde_json::json!({ "keep_days": 7 })),
     ])
-    // The scheduler polls for due schedules at this interval.
-    .check_interval_seconds(1);
+}
 
-    config.schedule = Some(schedule_config.clone());
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig {
+        schedule: Some(schedules()),
+        worker_profiles: BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]),
+        ..AppConfig::for_database_url(database_url())
+    };
+    let mut app = Horsies::new(config)?;
+    let _record_heartbeat = record_heartbeat::register(&mut app)?;
+    let _compact_logs = compact_logs::register(&mut app)?;
+    Ok(app)
+}
 
-    // ── 3. Create Horsies app and register tasks ───────────────────────
-    let mut app = Horsies::new(config.clone()).expect("valid AppConfig");
-    common::tasks::schedules::register(&mut app)?;
-
-    // ── 4. Validate schedules ──────────────────────────────────────────
-    app.validate_schedules()
-        .expect("all schedules reference registered tasks");
-    eprintln!("Schedule validation passed.\n");
-
-    // ── 5. Print schedule details ──────────────────────────────────────
-    eprintln!("Configured schedules:");
-    for sched in &schedule_config.schedules {
-        let pattern_desc = match &sched.pattern {
-            SchedulePattern::Interval(iv) => {
-                format!("every {}s", iv.total_seconds())
-            }
-            SchedulePattern::Hourly(h) => {
-                format!("hourly at :{:02}:{:02}", h.minute, h.second)
-            }
-            SchedulePattern::Daily(d) => {
-                format!("daily at {}", d.time)
-            }
-            SchedulePattern::Weekly(w) => {
-                format!("weekly {:?} at {}", w.days, w.time)
-            }
-            SchedulePattern::Monthly(m) => {
-                format!("monthly day {} at {}", m.day, m.time)
-            }
-            SchedulePattern::Cron(cron) => {
-                format!(
-                    "cron ({} min / {} hour terms)",
-                    cron.minute.len(),
-                    cron.hour.len()
-                )
-            }
-        };
-        eprintln!(
-            "  {:20} -> {:25} | {}",
-            sched.name, sched.task_name, pattern_desc,
+async fn demo(app: Horsies) -> DemoResult {
+    let passed = app.check()?;
+    println!("{passed}");
+    for schedule in app
+        .config()
+        .schedule
+        .iter()
+        .flat_map(|config| &config.schedules)
+    {
+        println!(
+            "{} sends {} with {}",
+            schedule.name, schedule.task_name, schedule.input
         );
     }
-    eprintln!();
-
-    // ── 6. Connect broker, migrate, and decompose the app ──────────────
-    eprintln!("Connecting to PostgreSQL...");
-    let (_, task_registry, workflow_registry, broker) = app.into_parts().await?;
-    eprintln!("Running migrations...");
-    broker.migrate().await?;
-    eprintln!("Broker ready.\n");
-
-    // ── 7. Start a worker in the background ────────────────────────────
-    let mut worker_config = WorkerConfig::default();
-
-    // Serve all custom queues
-    if let Some(ref queues) = config.custom_queues {
-        worker_config.queues = queues.iter().map(|q| q.name.clone()).collect();
-    }
-    worker_config.apply_queue_config(&config);
-
-    let worker = Worker::new(
-        broker.clone(),
-        Arc::new(task_registry),
-        Arc::new(workflow_registry),
-        config.clone(),
-        worker_config,
-    )?;
-
-    let worker_cancel = worker.cancel_token();
-
-    let worker_handle = tokio::spawn(async move {
-        if let Err(e) = worker.run().await {
-            eprintln!("Worker error: {}", e);
-        }
-    });
-
-    eprintln!("Worker started.\n");
-
-    // ── 8. Start the scheduler in the background ───────────────────────
-    let scheduler_cancel = CancellationToken::new();
-
-    let scheduler_handle =
-        spawn_scheduler(broker, schedule_config, config, scheduler_cancel.clone());
-
-    eprintln!("Scheduler started.  Waiting 12 seconds for scheduled tasks to fire...\n");
-
-    // ── 9. Let the system run for ~12 seconds ─────────────────────────
-    tokio::time::sleep(Duration::from_secs(12)).await;
-
-    // ── 10. Shut down ──────────────────────────────────────────────────
-    eprintln!("\nShutting down...");
-    scheduler_cancel.cancel();
-    worker_cancel.cancel();
-
-    // Wait for both to finish (with a timeout).
-    let _ = tokio::time::timeout(Duration::from_secs(5), scheduler_handle).await;
-    let _ = tokio::time::timeout(Duration::from_secs(5), worker_handle).await;
-
-    eprintln!("Done. The fast_interval schedule should have fired several times above.");
-    eprintln!("The daily_report and weekly_cleanup schedules are configured but did not");
-    eprintln!("fire because their next run times are far in the future.");
-
     Ok(())
+}
+
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => main_of(app, demo),
+        Err(error) => app_refused(&error),
+    }
 }

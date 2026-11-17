@@ -18,6 +18,7 @@ use super::metadata::{
 };
 use super::values::{DispatchNumber, RefusalReason, TaskInputText};
 use super::PROTOCOL_VERSION;
+use crate::broker::OrphanSelfHeal;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::{PostgresConfig, PostgresConfigError};
 use crate::core::mask_database_url;
@@ -289,6 +290,10 @@ pub struct RunFrame {
     pub worker_id: String,
     /// The claim generation: the `claimed_at` that the claim returned.
     pub claimed_at: DateTime<Utc>,
+    /// Whether the stop before start of a workflow task cancels the task
+    /// when no node links it live (the app's
+    /// `auto_terminate_orphaned_workflow_tasks`).
+    pub orphan_self_heal: OrphanSelfHeal,
     pub work: IsolatedWork,
     pub input: TaskInputText,
 }
@@ -302,6 +307,8 @@ pub struct SharedRunFrame {
     pub task_name: String,
     pub worker_id: String,
     pub claimed_at: DateTime<Utc>,
+    /// As [`RunFrame::orphan_self_heal`].
+    pub orphan_self_heal: OrphanSelfHeal,
     pub work: SharedWork,
     pub input: TaskInputText,
 }
@@ -356,6 +363,7 @@ enum ParentWire<'a> {
         task_name: &'a str,
         worker_id: &'a str,
         claimed_at: String,
+        orphan_self_heal: bool,
         work: IsolatedWorkWire<'a>,
     },
     SharedRun {
@@ -364,6 +372,7 @@ enum ParentWire<'a> {
         task_name: &'a str,
         worker_id: &'a str,
         claimed_at: String,
+        orphan_self_heal: bool,
         work: SharedWorkWire<'a>,
     },
     Stop,
@@ -472,6 +481,14 @@ enum SharedWorkWire<'a> {
     Refusal {
         refusal: RefusalWire<'a>,
     },
+}
+
+/// The wire flag of an orphan self-heal: `true` for on. Pure.
+fn self_heal_flag(self_heal: OrphanSelfHeal) -> bool {
+    match self_heal {
+        OrphanSelfHeal::On => true,
+        OrphanSelfHeal::Off => false,
+    }
 }
 
 /// The claim generation as RFC 3339 text with every sub-second digit it
@@ -615,6 +632,7 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_name: &run.task_name,
                 worker_id: &run.worker_id,
                 claimed_at: claim_time_text(&run.claimed_at),
+                orphan_self_heal: self_heal_flag(run.orphan_self_heal),
                 work: isolated_work_wire(&run.work),
             },
             run.input.as_str().as_bytes(),
@@ -626,6 +644,7 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_name: &run.task_name,
                 worker_id: &run.worker_id,
                 claimed_at: claim_time_text(&run.claimed_at),
+                orphan_self_heal: self_heal_flag(run.orphan_self_heal),
                 work: shared_work_wire(&run.work),
             },
             run.input.as_str().as_bytes(),
@@ -900,6 +919,7 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         "task_name",
         "worker_id",
         "claimed_at",
+        "orphan_self_heal",
         "work",
     ])?;
     Ok(RunFrame {
@@ -907,6 +927,7 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         task_name: fields.owned_text("task_name")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
+        orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
         work: decode_isolated_work(&fields.object("work")?)?,
         input: TaskInputText::new(text_body(body)?),
     })
@@ -920,6 +941,7 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         "task_name",
         "worker_id",
         "claimed_at",
+        "orphan_self_heal",
         "work",
     ])?;
     Ok(SharedRunFrame {
@@ -928,6 +950,7 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         task_name: fields.owned_text("task_name")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
+        orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
         work: decode_shared_work(&fields.object("work")?)?,
         input: TaskInputText::new(text_body(body)?),
     })
