@@ -116,15 +116,17 @@ def _test_app() -> Horsies:
 TEST_WORKER_ID = 'w-finalize-test'
 
 
-def _make_worker(engine: AsyncEngine) -> Worker:
-    """Construct a Worker wired to the test DB."""
+def _make_worker(engine: AsyncEngine, *, broker: PostgresBroker | None = None) -> Worker:
+    """Construct a Worker wired to the test DB. A test that runs the phase 2
+    of a workflow task passes the broker: phase 2 builds child starts
+    through it, as a running worker does."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
         dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg, broker=broker)
     worker._app = _test_app()
     worker.worker_instance_id = TEST_WORKER_ID
     return worker
@@ -312,12 +314,13 @@ def _make_finalize_error(task_id: str, stage: str) -> _FinalizeError:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_happy_path_success_completes_and_clears(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Future resolves ok → phase-1 COMPLETED, phase-2 runs, retry attempts cleared."""
     task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker=broker)
     result_json = _serialize_ok('hello')
     handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 
@@ -545,13 +548,14 @@ async def test_child_lost_marks_non_retryable_running_task_failed(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_child_lost_after_the_return_writes_what_the_body_returned(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """The body returned with work left on its task loop, and its child was
     killed because that work did not stop. The row gets what the body
     returned, not WORKER_CRASHED and not TASK_TIMEOUT."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker=broker)
     task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
     returned = SeatFinished(
         ok=True, result_json=_serialize_ok('kept'), failed_reason=None
@@ -845,12 +849,13 @@ async def test_task_expired_workflow_task_loader_error_propagates(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_full_success_clears_both_retry_stages(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Full success path (phase-1 Ok(tr) + phase-2 Ok) clears both stages."""
     task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker=broker)
     result_json = _serialize_ok(42)
     handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 
