@@ -697,9 +697,9 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
     transaction.commit().await.expect("commit purged setup");
 
     detach_expired_leaf(
-        &database.pool,
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        StatementLog::Off,
         &DetachExpiredHistoryLeaf::new(old_leaf.clone(), Some(5_000)).expect("detach command"),
-        &StagedLoaderPublisher,
     )
     .await
     .expect("detach old P4 leaf");

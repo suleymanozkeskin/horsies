@@ -1,22 +1,26 @@
-//! Contained finalize-first pruning driver.
+//! Contained finalize-first pruning driver, on the core pools.
+//!
+//! Python: `python/horsies/core/history/maintenance/pruning.py`. The pass
+//! report names each refusal by the class name of the Python outcome and
+//! counts a leaf as Python does, so both clients report the same facts.
 
-use sqlx::PgPool;
-
+use crate::broker::core_rows::StatementLog;
 use crate::core::history::commands::{
     DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, FinalizeInterruptedLeafDetach,
     InspectHistoryLeaf, LeafRef, DETACH_STATEMENT_TIMEOUT_MS,
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::heartbeats::partitioning::{sweep_heartbeat_leaves, HeartbeatLeafSwept};
+use crate::core::history::maintenance::coverage::maintenance_connection;
 use crate::core::history::outcomes::{LeafDrop, LeafInspection};
 use crate::core::history::partitions::manager::{
-    detach_expired_leaf, drop_detached_leaf, finalize_interrupted_detach, inspect_leaf,
-    DetachExpiredLeafOutcome, FinalizeInterruptedLeafOutcome,
+    detach_expired_leaf, drop_detached_leaf_in_pool, finalize_interrupted_detach,
+    inspect_leaf_in_pool, DetachExpiredLeafOutcome, FinalizeInterruptedLeafOutcome,
 };
-use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::partitions::retirement::{
-    read_prune_candidates, CandidateAttachment, PruneCandidates, RetiredClassKind,
+    read_prune_candidates, CandidateAttachment, PruneCandidates, RetiredClassKind, PRUNE_CANDIDATES,
 };
+use crate::db::CorePool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryLeafSwept {
@@ -43,19 +47,27 @@ pub struct LeafSweep<E> {
     pub reach: PruneReach,
 }
 
-/// Whether one swept leaf counts toward `MAX_PRUNE_LEAVES_PER_PASS`: this
-/// pass detached it or dropped it. A busy, blocked or not-expired leaf does
-/// not count, and neither does a leaf an earlier pass detached whose drop is
-/// refused now.
+/// Whether one swept leaf counts toward `MAX_PRUNE_LEAVES_PER_PASS` (Python
+/// `counts_toward_prune_bound`): the leaf has no parent after its detach
+/// (this pass detached it, or an earlier pass did), or this pass dropped it.
+/// A busy, blocked or not-expired leaf does not count, so leaves that stay
+/// refused at the old end of the catalog cannot hold back the newer expired
+/// leaves.
 pub(crate) fn sweep_counts_toward_bound(
     detach: &DetachExpiredLeafOutcome,
     drop: Option<&LeafDrop>,
 ) -> bool {
-    match (detach, drop) {
-        (DetachExpiredLeafOutcome::Detached { .. }, _) => true,
-        (_, Some(LeafDrop::Dropped { .. })) => true,
-        (DetachExpiredLeafOutcome::Inspection(_), _)
-        | (DetachExpiredLeafOutcome::Busy { .. }, _) => false,
+    match (detach.left_detached(), drop) {
+        (true, _) | (false, Some(LeafDrop::Dropped { .. })) => true,
+        (
+            false,
+            None
+            | Some(
+                LeafDrop::Busy { .. }
+                | LeafDrop::RefusedLoaderReferences { .. }
+                | LeafDrop::Inspection(_),
+            ),
+        ) => false,
     }
 }
 
@@ -77,21 +89,28 @@ pub struct PrunePass {
     pub finalized_leaves: Vec<String>,
     pub heartbeat_swept: Vec<HeartbeatLeafSwept>,
     pub history_swept: Vec<HistoryLeafSwept>,
+    /// `leaf: Outcome` for each swept leaf that was not dropped, and
+    /// `finalize leaf: Outcome` for each pending detach that did not end
+    /// detached; `Outcome` is the class name of the Python outcome.
     pub refusals: Vec<String>,
+    /// `leaf: cause`, `heartbeat leaf: cause` and `finalize leaf: cause` for
+    /// each leaf whose step failed.
     pub errors: Vec<String>,
     pub reach: PruneReach,
 }
 
 impl PrunePass {
+    /// The swept leaves that have no parent after their detach (Python
+    /// `detached_count`): detached by this pass or by an earlier one.
     pub fn detached_count(&self) -> usize {
         self.heartbeat_swept
             .iter()
-            .filter(|entry| matches!(entry.detach, DetachExpiredLeafOutcome::Detached { .. }))
+            .filter(|entry| entry.detach.left_detached())
             .count()
             + self
                 .history_swept
                 .iter()
-                .filter(|entry| matches!(entry.detach, DetachExpiredLeafOutcome::Detached { .. }))
+                .filter(|entry| entry.detach.left_detached())
                 .count()
     }
 
@@ -117,10 +136,14 @@ impl PrunePass {
 }
 
 /// The candidates of one pass: one `horsies_prune_candidates` read of at most
-/// `MAX_PRUNE_CANDIDATES_PER_PASS` leaves. Reads only.
-async fn pass_candidates(pool: &PgPool) -> Result<PruneCandidates, HistoryError> {
-    let mut connection = pool.acquire().await?;
-    read_prune_candidates(&mut connection, MAX_PRUNE_CANDIDATES_PER_PASS).await
+/// `MAX_PRUNE_CANDIDATES_PER_PASS` leaves, on a connection of `pool`. Reads
+/// only.
+pub(crate) async fn pass_candidates(
+    pool: &CorePool,
+    log: StatementLog,
+) -> Result<PruneCandidates, HistoryError> {
+    let mut connection = maintenance_connection(pool, &PRUNE_CANDIDATES).await?;
+    read_prune_candidates(&mut connection, log, MAX_PRUNE_CANDIDATES_PER_PASS).await
 }
 
 /// `Truncated` when any part of a pass was truncated.
@@ -148,9 +171,9 @@ struct Finalized {
 /// blocked leaf that stays pending until its blockers drain. A database
 /// error of one leaf is reported as `finalize leaf: cause`. Finalizations do
 /// not count toward the acted-leaf bound.
-async fn finalize_interrupted_detaches<P: LoaderPublication>(
-    pool: &PgPool,
-    publisher: &P,
+async fn finalize_interrupted_detaches(
+    pool: &CorePool,
+    log: StatementLog,
     candidates: &PruneCandidates,
 ) -> Finalized {
     let mut finalized = Finalized {
@@ -178,13 +201,15 @@ async fn finalize_interrupted_detaches<P: LoaderPublication>(
                 continue;
             }
         };
-        match finalize_interrupted_detach(pool, &command, publisher).await {
+        match finalize_interrupted_detach(pool, log, &command).await {
             Ok(FinalizeInterruptedLeafOutcome::Inspection(LeafInspection::Detached { .. })) => {
                 finalized.leaves.push(leaf.leaf_name().to_owned());
             }
-            Ok(outcome) => finalized
-                .refusals
-                .push(format!("finalize {}: {outcome:?}", leaf.leaf_name())),
+            Ok(outcome) => finalized.refusals.push(format!(
+                "finalize {}: {}",
+                leaf.leaf_name(),
+                outcome.outcome_name()
+            )),
             Err(error) => finalized
                 .errors
                 .push(format!("finalize {}: {error}", leaf.leaf_name())),
@@ -193,47 +218,40 @@ async fn finalize_interrupted_detaches<P: LoaderPublication>(
     finalized
 }
 
-/// Detach one expired period-class leaf and drop it once detached. A leaf
-/// left detached by an earlier crash is dropped too.
-async fn sweep_history_leaf<P: LoaderPublication>(
-    pool: &PgPool,
+/// Detach one expired PERIOD or HEARTBEAT leaf and drop it once detached
+/// (Python `_sweep_history_leaf`). A leaf that an earlier crash left
+/// detached is found by a second inspection and dropped too. The detach and
+/// the drop each run on their own connection of `pool`; the drop commits
+/// alone.
+///
+/// Errors: the first failed step's `HistoryError`; the steps before it stay
+/// committed.
+pub(crate) async fn sweep_retention_leaf(
+    pool: &CorePool,
+    log: StatementLog,
     leaf: &LeafRef,
-    publisher: &P,
-) -> Result<HistoryLeafSwept, HistoryError> {
+) -> Result<(DetachExpiredLeafOutcome, Option<LeafDrop>), HistoryError> {
     let detach_command =
         DetachExpiredHistoryLeaf::new(leaf.clone(), Some(DETACH_STATEMENT_TIMEOUT_MS))
             .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let detach = detach_expired_leaf(pool, &detach_command, publisher).await?;
-    let detached = match &detach {
-        DetachExpiredLeafOutcome::Detached { .. }
-        | DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
-        DetachExpiredLeafOutcome::Busy { .. } | DetachExpiredLeafOutcome::Inspection(_) => {
-            let mut connection = pool.acquire().await?;
-            matches!(
-                inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
-                LeafInspection::Detached { .. }
-            )
-        }
+    let detach = detach_expired_leaf(pool, log, &detach_command).await?;
+    let detached = match detach.left_detached() {
+        true => true,
+        // A crash between detach and drop leaves a detached leaf that this
+        // sweep must still drop: inspect again for that state.
+        false => matches!(
+            inspect_leaf_in_pool(pool, log, &InspectHistoryLeaf::new(leaf.clone())).await?,
+            LeafInspection::Detached { .. }
+        ),
     };
     let drop = match detached {
-        true => {
-            let mut transaction = pool.begin().await?;
-            let outcome = drop_detached_leaf(
-                &mut transaction,
-                &DropDetachedHistoryLeaf::new(leaf.clone()),
-            )
-            .await?;
-            transaction.commit().await?;
-            Some(outcome)
-        }
+        true => Some(
+            drop_detached_leaf_in_pool(pool, log, &DropDetachedHistoryLeaf::new(leaf.clone()))
+                .await?,
+        ),
         false => None,
     };
-    Ok(HistoryLeafSwept {
-        leaf_name: leaf.leaf_name().to_owned(),
-        class_key: leaf.class_key().to_owned(),
-        detach,
-        drop,
-    })
+    Ok((detach, drop))
 }
 
 /// Detach and drop the given expired period-class leaves, in the given
@@ -241,9 +259,9 @@ async fn sweep_history_leaf<P: LoaderPublication>(
 /// whose sweep fails counts, since its effects are unknown; its error goes to
 /// the error list and the sweep goes on with the next leaf. `Truncated` when
 /// the bound left leaves for the next pass.
-pub(crate) async fn sweep_history_leaves<P: LoaderPublication>(
-    pool: &PgPool,
-    publisher: &P,
+pub(crate) async fn sweep_history_leaves(
+    pool: &CorePool,
+    log: StatementLog,
     leaves: &[LeafRef],
     max_acted_leaves: usize,
 ) -> LeafSweep<HistoryLeafSwept> {
@@ -256,13 +274,15 @@ pub(crate) async fn sweep_history_leaves<P: LoaderPublication>(
             reach = PruneReach::Truncated;
             break;
         }
-        match sweep_history_leaf(pool, leaf, publisher).await {
-            Ok(entry) => {
-                acted += usize::from(sweep_counts_toward_bound(
-                    &entry.detach,
-                    entry.drop.as_ref(),
-                ));
-                swept.push(entry);
+        match sweep_retention_leaf(pool, log, leaf).await {
+            Ok((detach, drop)) => {
+                acted += usize::from(sweep_counts_toward_bound(&detach, drop.as_ref()));
+                swept.push(HistoryLeafSwept {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                    class_key: leaf.class_key().to_owned(),
+                    detach,
+                    drop,
+                });
             }
             Err(error) => {
                 acted += 1;
@@ -279,77 +299,60 @@ pub(crate) async fn sweep_history_leaves<P: LoaderPublication>(
 }
 
 /// Read the candidates of one pass and sweep its period-class leaves, oldest
-/// first, until `max_acted_leaves` leaves count toward the bound. A failed
-/// candidate read sweeps nothing and is reported as
-/// `discover history: cause`. `Truncated` when the candidate read or the
-/// leaf bound left expired leaves for the next pass.
-pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
-    pool: &PgPool,
-    publisher: &P,
+/// first, until `max_acted_leaves` leaves count toward the bound. `Truncated`
+/// when the candidate read or the leaf bound left expired leaves for the next
+/// pass.
+///
+/// Errors: the failed candidate read (Python raises it); nothing was swept.
+pub(crate) async fn sweep_expired_history_leaves(
+    pool: &CorePool,
+    log: StatementLog,
     max_acted_leaves: usize,
-) -> LeafSweep<HistoryLeafSwept> {
-    let candidates = match pass_candidates(pool).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return LeafSweep {
-                swept: Vec::new(),
-                errors: vec![format!("discover history: {error}")],
-                acted: 0,
-                reach: PruneReach::WithinBounds,
-            }
-        }
-    };
+) -> Result<LeafSweep<HistoryLeafSwept>, HistoryError> {
+    let candidates = pass_candidates(pool, log).await?;
     let sweep = sweep_history_leaves(
         pool,
-        publisher,
+        log,
         &candidates.of_kind(RetiredClassKind::Period),
         max_acted_leaves,
     )
     .await;
-    LeafSweep {
+    Ok(LeafSweep {
         reach: combined_reach(&[candidates.reach, sweep.reach]),
         ..sweep
-    }
+    })
 }
 
-/// One pruning pass through a direct or session-capable pool: one candidate
-/// read (`horsies_prune_candidates`), then the finalization of the
-/// interrupted detaches, then the heartbeat and the period-class sweeps.
+/// One pruning pass on a direct or session-capable core pool (Python
+/// `prune_expired_partitions`): one candidate read
+/// (`horsies_prune_candidates`), then the finalization of the interrupted
+/// detaches, then the heartbeat and the period-class sweeps. Every checkout
+/// is reserved work.
 ///
 /// The finalize phase runs first across every finite class, because one
 /// pending finalization blocks all further detaches on its parent. The
 /// sweeps act on at most `MAX_PRUNE_LEAVES_PER_PASS` leaves, heartbeat leaves
 /// first. A database error of one leaf is reported and the pass goes on with
-/// the next leaf. A failed candidate read acts on nothing and is reported as
-/// `candidates: cause`.
-pub async fn prune_expired_partitions<P: LoaderPublication>(
-    pool: &PgPool,
-    publisher: &P,
-) -> PrunePass {
-    let candidates = match pass_candidates(pool).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return PrunePass {
-                finalized_leaves: Vec::new(),
-                heartbeat_swept: Vec::new(),
-                history_swept: Vec::new(),
-                refusals: Vec::new(),
-                errors: vec![format!("candidates: {error}")],
-                reach: PruneReach::WithinBounds,
-            }
-        }
-    };
-    let finalized = finalize_interrupted_detaches(pool, publisher, &candidates).await;
+/// the next leaf; each leaf's detach and drop commit alone.
+///
+/// Errors: the failed candidate read (Python raises it); nothing was acted
+/// on.
+pub(crate) async fn prune_expired_partitions(
+    pool: &CorePool,
+    log: StatementLog,
+) -> Result<PrunePass, HistoryError> {
+    let candidates = pass_candidates(pool, log).await?;
+    let finalized = finalize_interrupted_detaches(pool, log, &candidates).await;
     let heartbeat = sweep_heartbeat_leaves(
         pool,
-        publisher,
+        log,
         &candidates.of_kind(RetiredClassKind::Heartbeat),
         MAX_PRUNE_LEAVES_PER_PASS,
     )
     .await;
     let history = sweep_history_leaves(
         pool,
-        publisher,
+        log,
         &candidates.of_kind(RetiredClassKind::Period),
         MAX_PRUNE_LEAVES_PER_PASS.saturating_sub(heartbeat.acted),
     )
@@ -368,8 +371,8 @@ pub async fn prune_expired_partitions<P: LoaderPublication>(
     {
         match entry {
             (_, _, Some(LeafDrop::Dropped { .. })) => {}
-            (leaf, _, Some(drop)) => refusals.push(format!("{leaf}: {drop:?}")),
-            (leaf, detach, None) => refusals.push(format!("{leaf}: {detach:?}")),
+            (leaf, _, Some(drop)) => refusals.push(format!("{leaf}: {}", drop.outcome_name())),
+            (leaf, detach, None) => refusals.push(format!("{leaf}: {}", detach.outcome_name())),
         }
     }
     let mut errors = finalized.errors;
@@ -380,14 +383,14 @@ pub async fn prune_expired_partitions<P: LoaderPublication>(
             .map(|error| format!("heartbeat {error}")),
     );
     errors.extend(history.errors);
-    PrunePass {
+    Ok(PrunePass {
         finalized_leaves: finalized.leaves,
         heartbeat_swept: heartbeat.swept,
         history_swept: history.swept,
         refusals,
         errors,
         reach: combined_reach(&[candidates.reach, heartbeat.reach, history.reach]),
-    }
+    })
 }
 
 #[cfg(test)]

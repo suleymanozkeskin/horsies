@@ -10,7 +10,7 @@ use crate::broker::row::task::{
 };
 use crate::broker::task_lists::{ListEnd, ListRow};
 use crate::db::{
-    BoundStatement, CheckoutClass, CorePool, DiscardReason, FromSql, NotSentCause,
+    BoundStatement, CheckoutClass, CorePool, DiscardReason, FromSql, NotSentCause, PartitionDdl,
     PooledConnection, RollbackOutcome, Row, StatementBound, StatementFailure, Transaction,
     TypedStatement,
 };
@@ -40,6 +40,19 @@ impl StatementLog {
                 target: "horsies.sql",
                 statement = statement.name(),
                 sql = statement.sql(),
+                "statement",
+            ),
+        }
+    }
+
+    /// Logs one partition DDL statement before it runs.
+    pub(crate) fn log_ddl(self, ddl: &PartitionDdl) {
+        match self {
+            Self::Off => {}
+            Self::Debug => tracing::debug!(
+                target: "horsies.sql",
+                statement = ddl.name(),
+                sql = ddl.sql(),
                 "statement",
             ),
         }

@@ -1,9 +1,12 @@
 //! Retention retirement of PERIOD and HEARTBEAT leaves through the baseline
-//! functions of `0006_history_functions.sql`. Each function is one statement
-//! here, and its row is parsed into the outcome types:
+//! functions of `0006_history_functions.sql`. Each function is one typed
+//! statement of the core statement layer here, and its row is parsed into the
+//! outcome types:
 //!
 //! - `horsies_prune_candidates(p_limit)`: the expired leaves of one pass and
 //!   their attachment, in one read;
+//! - `horsies_inspect_history_leaf(p_leaf_name)`: the state of one leaf, in
+//!   one read;
 //! - `horsies_begin_leaf_detach(p_leaf_name)`: the inspection, the session
 //!   leaf lock (for `DETACHABLE` and `DETACH_INTERRUPTED` only) and the
 //!   inspection again under the lock; for a `DETACHED` leaf, the catalog
@@ -12,40 +15,73 @@
 //! - `horsies_record_leaf_detached(p_leaf_name)`: the catalog record of a
 //!   detach, and whether the published reader manifest still names the leaf;
 //! - `horsies_drop_detached_leaf(p_leaf_name)`: the drop, inside the caller's
-//!   transaction.
+//!   transaction (a core transaction, or a sqlx connection for the
+//!   single-connection form [`drop_detached_retention_leaf`]).
 //!
 //! The `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY | FINALIZE`
-//! statement stays with the caller (`partitions::manager`): it cannot run in
-//! a function. A row outside the documented values is
-//! `HistoryError::Contract`.
+//! statement stays with the caller (`partitions::manager`, as a
+//! [`crate::db::PartitionDdl`]): it cannot run in a function. A row outside
+//! the documented values is `HistoryError::Contract`.
 //!
 //! Python: `python/horsies/core/history/partitions/retirement.py`.
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgConnection};
 
+use crate::broker::core_rows::{column, one_row, query_in, query_on, RowDecodeError, StatementLog};
 use crate::core::history::commands::{LeafBounds, LeafRef};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::history::outcomes::{
     CatalogConflictKind, LeafAttachment, LeafDrop, LeafInspection,
 };
+use crate::db::{ParameterType, PooledConnection, Row, Transaction, TypedStatement};
 
-use super::locks::unlock_leaf_for_session;
+use super::locks::unlock_leaf_in_session;
 
-const PRUNE_CANDIDATES_SQL: &str = "SELECT leaf_name, class_key, class_kind, lower_anchor, \
-     upper_anchor, attachment FROM horsies_prune_candidates($1)";
+/// `horsies_prune_candidates`: `$1` the row limit. Reads only.
+pub(crate) static PRUNE_CANDIDATES: TypedStatement = TypedStatement::new(
+    "prune_candidates",
+    "SELECT leaf_name, class_key, class_kind, lower_anchor, upper_anchor, attachment \
+     FROM horsies_prune_candidates($1)",
+    &[ParameterType::Int4],
+);
 
-const BEGIN_LEAF_DETACH_SQL: &str = "SELECT outcome, class_key, parent_name, lower_anchor, \
-     upper_anchor, expires_at, blocker_count, attachment, conflict_kind \
-     FROM horsies_begin_leaf_detach($1)";
+/// `horsies_inspect_history_leaf`: `$1` the leaf name. Reads only. The
+/// `state` column is read as `outcome`, the column of the two functions that
+/// return an inspection row.
+pub(crate) static INSPECT_LEAF: TypedStatement = TypedStatement::new(
+    "inspect_history_leaf",
+    "SELECT state AS outcome, class_key, parent_name, lower_anchor, upper_anchor, expires_at, \
+     blocker_count, attachment, conflict_kind FROM horsies_inspect_history_leaf($1)",
+    &[ParameterType::Text],
+);
 
-const RECORD_LEAF_DETACHED_SQL: &str =
-    "SELECT outcome, manifest_names_leaf FROM horsies_record_leaf_detached($1)";
+/// `horsies_begin_leaf_detach`: `$1` the leaf name.
+pub(crate) static BEGIN_LEAF_DETACH: TypedStatement = TypedStatement::new(
+    "begin_leaf_detach",
+    "SELECT outcome, class_key, parent_name, lower_anchor, upper_anchor, expires_at, \
+     blocker_count, attachment, conflict_kind FROM horsies_begin_leaf_detach($1)",
+    &[ParameterType::Text],
+);
+
+/// `horsies_record_leaf_detached`: `$1` the leaf name.
+pub(crate) static RECORD_LEAF_DETACHED: TypedStatement = TypedStatement::new(
+    "record_leaf_detached",
+    "SELECT outcome, manifest_names_leaf FROM horsies_record_leaf_detached($1)",
+    &[ParameterType::Text],
+);
 
 const DROP_DETACHED_LEAF_SQL: &str = "SELECT outcome, class_key, parent_name, lower_anchor, \
      upper_anchor, expires_at, blocker_count, attachment, conflict_kind \
      FROM horsies_drop_detached_leaf($1)";
+
+/// `horsies_drop_detached_leaf`: `$1` the leaf name.
+pub(crate) static DROP_DETACHED_LEAF: TypedStatement = TypedStatement::new(
+    "drop_detached_leaf",
+    DROP_DETACHED_LEAF_SQL,
+    &[ParameterType::Text],
+);
 
 // ---------------------------------------------------------------------------
 // Candidates
@@ -98,7 +134,7 @@ impl PruneCandidates {
 }
 
 /// One row of `horsies_prune_candidates`, as stored.
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct CandidateRow {
     leaf_name: String,
     class_key: String,
@@ -110,12 +146,16 @@ struct CandidateRow {
 
 /// The oldest expired PERIOD and HEARTBEAT leaves, at most `bound`.
 ///
-/// One statement: `horsies_prune_candidates(bound + 1)`; a row beyond the
-/// bound makes the read `Truncated`. Reads only. A bound that does not fit
-/// the function's `integer` parameter, or a row outside the documented
-/// values, is `HistoryError::Contract`.
-pub async fn read_prune_candidates(
-    connection: &mut PgConnection,
+/// One statement on `connection`: `horsies_prune_candidates(bound + 1)`; a
+/// row beyond the bound makes the read `Truncated`. Reads only.
+///
+/// Errors: `HistoryError::Statement` when the statement failed;
+/// `HistoryError::RowDecode` for a column of another type;
+/// `HistoryError::Contract` for a bound that does not fit the function's
+/// `integer` parameter, or a row outside the documented values.
+pub(crate) async fn read_prune_candidates(
+    connection: &mut PooledConnection,
+    log: StatementLog,
     bound: usize,
 ) -> Result<PruneCandidates, HistoryError> {
     let limit = bound
@@ -126,11 +166,26 @@ pub async fn read_prune_candidates(
                 "prune candidate bound {bound} does not fit an integer limit"
             ))
         })?;
-    let rows: Vec<CandidateRow> = sqlx::query_as(PRUNE_CANDIDATES_SQL)
-        .bind(limit)
-        .fetch_all(connection)
-        .await?;
+    let statement = &PRUNE_CANDIDATES;
+    let rows = query_on(connection, log, &statement.bind().value(&limit).finish()).await?;
+    let rows = rows
+        .iter()
+        .map(candidate_row)
+        .collect::<Result<Vec<_>, _>>()?;
     prune_candidates_of(rows, bound)
+}
+
+/// One `horsies_prune_candidates` row, by column name.
+fn candidate_row(row: &Row) -> Result<CandidateRow, RowDecodeError> {
+    let statement = &PRUNE_CANDIDATES;
+    Ok(CandidateRow {
+        leaf_name: column(row, statement, "leaf_name")?,
+        class_key: column(row, statement, "class_key")?,
+        class_kind: column(row, statement, "class_kind")?,
+        lower_anchor: column(row, statement, "lower_anchor")?,
+        upper_anchor: column(row, statement, "upper_anchor")?,
+        attachment: column(row, statement, "attachment")?,
+    })
 }
 
 /// The candidates of the rows of one candidate read with `bound`. Pure.
@@ -188,8 +243,9 @@ fn prune_candidate_of(row: CandidateRow) -> Result<PruneCandidate, HistoryError>
 // Inspection rows
 // ---------------------------------------------------------------------------
 
-/// One row of `horsies_begin_leaf_detach` or `horsies_drop_detached_leaf`:
-/// the outcome and the inspection columns, as stored.
+/// One row of `horsies_begin_leaf_detach`, `horsies_drop_detached_leaf` or
+/// `horsies_inspect_history_leaf` (its `state` read as `outcome`): the outcome
+/// and the inspection columns, as stored.
 #[derive(Debug, Clone, FromRow)]
 pub(crate) struct LeafStateRow {
     pub(crate) outcome: String,
@@ -201,6 +257,51 @@ pub(crate) struct LeafStateRow {
     pub(crate) blocker_count: Option<i64>,
     pub(crate) attachment: Option<String>,
     pub(crate) conflict_kind: Option<String>,
+}
+
+/// One inspection row of `statement`, by column name.
+fn leaf_state_row(row: &Row, statement: &TypedStatement) -> Result<LeafStateRow, RowDecodeError> {
+    Ok(LeafStateRow {
+        outcome: column(row, statement, "outcome")?,
+        class_key: column(row, statement, "class_key")?,
+        parent_name: column(row, statement, "parent_name")?,
+        lower_anchor: column(row, statement, "lower_anchor")?,
+        upper_anchor: column(row, statement, "upper_anchor")?,
+        expires_at: column(row, statement, "expires_at")?,
+        blocker_count: column(row, statement, "blocker_count")?,
+        attachment: column(row, statement, "attachment")?,
+        conflict_kind: column(row, statement, "conflict_kind")?,
+    })
+}
+
+/// The state of one PERIOD or HEARTBEAT leaf (Python `inspect_leaf` for a
+/// retention leaf): one statement on `connection`,
+/// `horsies_inspect_history_leaf`. Reads only.
+///
+/// Errors: `HistoryError::Statement` when the statement failed (the function
+/// raises for a forever leaf, an unknown class kind and a missing class
+/// parent); `HistoryError::RowDecode` for a column of another type;
+/// `HistoryError::Contract` for a state outside the documented values, or a
+/// `LeafRef` whose class or bounds differ from the catalog row of its name
+/// (a caller defect).
+pub(crate) async fn inspect_retention_leaf(
+    connection: &mut PooledConnection,
+    log: StatementLog,
+    leaf: &LeafRef,
+) -> Result<LeafInspection, HistoryError> {
+    let statement = &INSPECT_LEAF;
+    let leaf_name = leaf.leaf_name();
+    let rows = query_on(
+        connection,
+        log,
+        &statement.bind().value(&leaf_name).finish(),
+    )
+    .await?;
+    let row = leaf_state_row(&one_row(rows, statement)?, statement)?;
+    match catalog_facet_mismatch(leaf, &row) {
+        Some(mismatch) => Err(HistoryError::contract(mismatch)),
+        None => inspection_of(leaf.leaf_name(), &row),
+    }
 }
 
 /// The conflict kind and its detail of one `CATALOG_CONFLICT` row of the
@@ -412,19 +513,31 @@ pub(crate) fn begin_outcome(
 /// to finalize. A `DETACHED` leaf gets its detach recorded, and the readers
 /// published when the manifest names it, in the same statement.
 ///
-/// One statement: `horsies_begin_leaf_detach`; the function releases a lock
-/// it took before a database error propagates. A `LeafRef` whose class or
-/// bounds differ from the catalog row of its name is a caller defect: the
-/// lock the call took is released (keyed by the catalog's facets, as the
-/// function took it) and the result is `HistoryError::Contract`.
+/// One statement on `connection`, in autocommit: `horsies_begin_leaf_detach`;
+/// the function releases a lock it took before a database error propagates.
+/// A `LeafRef` whose class or bounds differ from the catalog row of its name
+/// is a caller defect: the lock the call took is released (keyed by the
+/// catalog's facets, as the function took it) and the result is
+/// `HistoryError::Contract`.
+///
+/// Errors: `HistoryError::Statement`, `HistoryError::RowDecode`,
+/// `HistoryError::Contract`. After an error the session may still hold the
+/// lock (a failed release, or a locked row that does not parse): the caller
+/// closes the connection.
 pub(crate) async fn begin_leaf_detach(
-    connection: &mut PgConnection,
+    connection: &mut PooledConnection,
+    log: StatementLog,
     leaf: &LeafRef,
 ) -> Result<BeginDetach, HistoryError> {
-    let row: LeafStateRow = sqlx::query_as(BEGIN_LEAF_DETACH_SQL)
-        .bind(leaf.leaf_name())
-        .fetch_one(&mut *connection)
-        .await?;
+    let statement = &BEGIN_LEAF_DETACH;
+    let leaf_name = leaf.leaf_name();
+    let rows = query_on(
+        connection,
+        log,
+        &statement.bind().value(&leaf_name).finish(),
+    )
+    .await?;
+    let row = leaf_state_row(&one_row(rows, statement)?, statement)?;
     let Some(mismatch) = catalog_facet_mismatch(leaf, &row) else {
         return begin_outcome(leaf.leaf_name(), row);
     };
@@ -434,7 +547,7 @@ pub(crate) async fn begin_leaf_detach(
         row.lower_anchor,
     ) {
         ("DETACHABLE" | "DETACH_INTERRUPTED", Some(class_key), Some(lower)) => {
-            unlock_leaf_for_session(connection, class_key, lower).await?;
+            unlock_leaf_in_session(connection, log, class_key, lower).await?;
         }
         _ => {}
     }
@@ -494,14 +607,25 @@ pub(crate) struct DetachRecorded {
 /// One statement: `horsies_record_leaf_detached`. When the result says the
 /// manifest names the leaf, the caller publishes the readers in the same
 /// transaction. It does not commit.
+///
+/// Errors: `HistoryError::Statement` (the transaction is aborted),
+/// `HistoryError::RowDecode`, `HistoryError::Contract` for an unknown
+/// outcome.
 pub(crate) async fn record_leaf_detached(
-    connection: &mut PgConnection,
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
     leaf_name: &str,
 ) -> Result<DetachRecorded, HistoryError> {
-    let (outcome, manifest_names_leaf): (String, bool) = sqlx::query_as(RECORD_LEAF_DETACHED_SQL)
-        .bind(leaf_name)
-        .fetch_one(connection)
-        .await?;
+    let statement = &RECORD_LEAF_DETACHED;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement.bind().value(&leaf_name).finish(),
+    )
+    .await?;
+    let row = one_row(rows, statement)?;
+    let outcome: String = column(&row, statement, "outcome")?;
+    let manifest_names_leaf: bool = column(&row, statement, "manifest_names_leaf")?;
     Ok(DetachRecorded {
         record: DetachRecord::parse(leaf_name, &outcome)?,
         manifest_names_leaf,
@@ -571,6 +695,32 @@ pub(crate) async fn drop_detached_retention_leaf(
         .bind(leaf.leaf_name())
         .fetch_one(connection)
         .await?;
+    match catalog_facet_mismatch(leaf, &row) {
+        Some(mismatch) => Err(HistoryError::contract(mismatch)),
+        None => drop_outcome(leaf.leaf_name(), &row),
+    }
+}
+
+/// The core form of [`drop_detached_retention_leaf`]: the same statement and
+/// outcomes, inside the caller's core transaction. It does not commit.
+///
+/// Errors: `HistoryError::Statement` (the transaction is aborted),
+/// `HistoryError::RowDecode`, `HistoryError::Contract` (the transaction must
+/// roll back, which undoes a drop the call made).
+pub(crate) async fn drop_detached_leaf_in(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+    leaf: &LeafRef,
+) -> Result<LeafDrop, HistoryError> {
+    let statement = &DROP_DETACHED_LEAF;
+    let leaf_name = leaf.leaf_name();
+    let rows = query_in(
+        transaction,
+        log,
+        &statement.bind().value(&leaf_name).finish(),
+    )
+    .await?;
+    let row = leaf_state_row(&one_row(rows, statement)?, statement)?;
     match catalog_facet_mismatch(leaf, &row) {
         Some(mismatch) => Err(HistoryError::contract(mismatch)),
         None => drop_outcome(leaf.leaf_name(), &row),

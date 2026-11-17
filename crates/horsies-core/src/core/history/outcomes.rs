@@ -164,12 +164,45 @@ pub enum LeafCreation {
     },
 }
 
+impl LeafInspection {
+    /// The name of the state in a pruning pass report: the class name of the
+    /// Python outcome (`python/horsies/core/history/outcomes.py`), so both
+    /// clients report the same text.
+    pub fn outcome_name(&self) -> &'static str {
+        match self {
+            Self::Detachable { .. } => "LeafDetachable",
+            Self::NotExpired { .. } => "LeafNotExpired",
+            Self::PendingBlocked { .. } => "LeafPendingBlocked",
+            Self::DetachInterrupted { .. } => "LeafDetachInterrupted",
+            Self::Detached { .. } => "LeafDetached",
+            Self::Dropped { .. } => "LeafDropped",
+            Self::Missing { .. } => "LeafMissing",
+            Self::RetentionClassAbsent { .. } => "RetentionClassAbsent",
+            Self::ForeverClassLeaf { .. } => "ForeverClassLeaf",
+            Self::CatalogConflict { .. } => "LeafCatalogConflict",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeafDrop {
     Busy { leaf_name: String },
     Dropped { leaf_name: String },
     RefusedLoaderReferences { leaf_name: String },
     Inspection(LeafInspection),
+}
+
+impl LeafDrop {
+    /// The name of the drop outcome in a pruning pass report, as
+    /// [`LeafInspection::outcome_name`].
+    pub fn outcome_name(&self) -> &'static str {
+        match self {
+            Self::Busy { .. } => "LeafMaintenanceBusy",
+            Self::Dropped { .. } => "LeafDropped",
+            Self::RefusedLoaderReferences { .. } => "DropRefusedLoaderReferences",
+            Self::Inspection(inspection) => inspection.outcome_name(),
+        }
+    }
 }
 
 #[cfg(test)]
