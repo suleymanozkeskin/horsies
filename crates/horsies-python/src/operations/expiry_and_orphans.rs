@@ -1,4 +1,4 @@
-//! The expiry and orphan cancel of task rows through the core
+//! The expiry and orphan sweep of task rows through the core
 //! (`horsies_core::broker::expiry_and_orphans`):
 //!
 //! - the pending expiry pass (`PostgresBroker::expire_pending_tasks`):
@@ -10,8 +10,7 @@
 //!   `OrphanAuditLockBusy` (another sweep holds the cursor, SQLSTATE 55P03),
 //!   or `OrphanAuditFailed`;
 //! - the expiry of a claimed row before its start
-//!   (`PostgresBroker::expire_owned_claim`) and the cancel of an owned orphan
-//!   (`PostgresBroker::cancel_owned_orphan`): `TaskRowEnded`, one of the four
+//!   (`PostgresBroker::expire_owned_claim`): `TaskRowEnded`, one of the four
 //!   refusals of `attempt_records`, or `AttemptWriteFailed`.
 //!
 //! The Python client maps them to the results of its callers: `CLEANUP_FAILED`
@@ -19,7 +18,6 @@
 //! the single-row writes.
 
 use chrono::{DateTime, Utc};
-use horsies_core::core::lifecycle::OwnedClaim;
 use horsies_core::{
     BrokerError, OrphanAuditPage, PendingExpiryFailed as PassFailed, PendingExpiryPass, TaskRowEnd,
 };
@@ -204,9 +202,9 @@ pub async fn audit_orphaned_workflow_tasks_operation(
     orphan_audit_outcome(broker.audit_orphaned_workflow_tasks().await)
 }
 
-/// The row moved to history: `kind` is `EXPIRE_CLAIMED` (the expiry of a
-/// claimed row before its start) or `CANCEL_ORPHAN` (the cancel of an owned
-/// orphan). The observed fields are the row as the statement locked it.
+/// The row moved to history: `kind` is `EXPIRE_CLAIMED`, the expiry of a
+/// claimed row before its start. The observed fields are the row as the
+/// statement locked it.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct TaskRowEnded {
@@ -218,7 +216,7 @@ pub struct TaskRowEnded {
     pub observed_claimed_at: Option<DateTime<Utc>>,
 }
 
-/// The outcome of one single-row expiry or orphan cancel.
+/// The outcome of one single-row expiry.
 pub enum TaskRowEndRecord {
     Ended(TaskRowEnded),
     Refused(RefusalRecord),
@@ -282,21 +280,6 @@ pub async fn expire_owned_claim_operation(
         task_id,
         broker.expire_owned_claim(task_id, &worker_id).await,
     )
-}
-
-/// Cancel one claimed workflow task that `fence` holds and that no runnable
-/// node links. Writes, in one statement; a caller that leaves early does not
-/// stop it, and sees its outcome as unknown.
-pub async fn cancel_owned_orphan_operation(
-    connection: BrokerConnection,
-    task_id: Uuid,
-    fence: OwnedClaim,
-) -> TaskRowEndRecord {
-    let broker = match connection.broker().await {
-        Ok(broker) => broker,
-        Err(error) => return task_row_end_record(task_id, Err(error)),
-    };
-    task_row_end_record(task_id, broker.cancel_owned_orphan(task_id, &fence).await)
 }
 
 #[cfg(test)]

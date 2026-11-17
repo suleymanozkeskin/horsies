@@ -16,7 +16,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Final, Literal, assert_never, cast
+from typing import TYPE_CHECKING, Any, Literal, assert_never, cast
 
 from sqlalchemy import text
 
@@ -51,7 +51,6 @@ from horsies.core.lifecycle.classify import (
     terminalization_for_refused_retry,
 )
 from horsies.core.lifecycle.commands import (
-    CancelOwnedOrphan,
     CompleteLockedTask,
     CompleteTaskFused,
     FailLockedTask,
@@ -139,7 +138,6 @@ from horsies.core.worker.runtime import (
     _RequeueOutcome,
 )
 from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.lifecycle.core_records import task_row_end_of
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
@@ -213,9 +211,6 @@ def _node_finish_facts(
             return 'UNKNOWN'
         case _ as unreachable:
             assert_never(unreachable)
-
-_CANCEL_OWNED_ORPHAN_SUBJECT: Final = 'FinalizeMixin._cancel_owned_orphan'
-"""The subject of a failed orphan self-heal write."""
 
 GET_TASK_STATUS_SQL = text("""
     SELECT status, queue_name, is_workflow_task
@@ -1179,7 +1174,6 @@ class FinalizeMixin:
         routing facts of the task for phase 2; ``LostClaim`` and other refusals
         do not advance the workflow. ``Ok(None)``: nothing is owed to phase 2.
         """
-        recovery_cfg = self.cfg.recovery_config
         context = FinalizeContext(
             task_id=task_id,
             worker_id=self.worker_instance_id,
@@ -1187,10 +1181,6 @@ class FinalizeMixin:
             is_workflow_task=is_workflow_task,
             queue_name=queue_name,
             result_json=result_json_str,
-            orphan_self_heal_enabled=(
-                recovery_cfg is not None
-                and recovery_cfg.auto_terminate_orphaned_workflow_tasks
-            ),
         )
 
         tr: TaskResult[Any, TaskError] | None = None
@@ -1296,51 +1286,6 @@ class FinalizeMixin:
                 return _phase2_of_a_replay(
                     await self._load_persisted_terminal(task_id),
                 )
-            case ApplyTerminalization(command=CancelOwnedOrphan() as command):
-                try:
-                    outcome = await self._cancel_owned_orphan(command)
-                    match outcome:
-                        case Applied():
-                            terminated = True
-                        case (
-                            AlreadyApplied()
-                            | LostClaim()
-                            | SourceStateConflict()
-                            | TaskAbsent()
-                        ):
-                            terminated = False
-                        case _ as unreachable:
-                            assert_never(unreachable)
-                except Exception as exc:
-                    return Err(
-                        self._make_finalize_error(
-                            task_id=task_id,
-                            stage=_FINALIZE_STAGE_PHASE1,
-                            message='Failed to terminate orphaned workflow task',
-                            retryable=is_retryable_connection_error(exc),
-                            data={
-                                'exception_type': type(exc).__name__,
-                                'exception': str(exc)[:500],
-                                'outcome': {
-                                    'ok': ok,
-                                    'result_json_str': result_json_str,
-                                    'failed_reason': failed_reason,
-                                },
-                            },
-                        )
-                    )
-                if terminated:
-                    logger.info(
-                        'Task %s cancelled: orphaned workflow task '
-                        '(no live workflow_task linkage)',
-                        task_id,
-                    )
-                else:
-                    logger.debug(
-                        'Task %s was no longer a terminable owned orphan',
-                        task_id,
-                    )
-                return Ok(None)
             case ApplyTerminalization(command=CompleteTaskFused() as command):
                 fused_command = command
             case ApplyTerminalization(
@@ -1537,34 +1482,6 @@ class FinalizeMixin:
                 'outcome': outcome_data,
             },
         )
-
-    async def _cancel_owned_orphan(
-        self,
-        command: CancelOwnedOrphan,
-    ) -> TerminalizationOutcome:
-        """Cancel a claimed workflow task that no runnable node links, through
-        the core: ``horsies_cancel_owned_orphan``, one statement that commits
-        alone, fenced to this claim (worker and claim generation).
-
-        ``Applied``: the task moved to history as CANCELLED
-        (``CANCEL_ORPHAN``, ``WORKFLOW_CHECK_FAILED``). A refusal
-        (``AlreadyApplied``, ``LostClaim``, ``SourceStateConflict``,
-        ``TaskAbsent``) wrote nothing.
-
-        Raises:
-            CoreOperationFailed: the statement failed (``retryable`` is the
-                core's classification). A lost reply leaves the outcome
-                unknown; a replay of the same command reports a committed
-                cancel as ``AlreadyApplied``.
-            CoreError: the core of this process cannot run the call.
-            OutcomeDecodeError: a record outside the Python catalogs.
-        """
-        record = await self.core_handle.cancel_owned_orphan_async(
-            uuid.UUID(command.task_id),
-            worker_id=command.fence.worker_id,
-            claimed_at=command.fence.claimed_at,
-        )
-        return task_row_end_of(record, _CANCEL_OWNED_ORPHAN_SUBJECT)
 
     async def _persist_failed_attempt(
         self,

@@ -45,7 +45,12 @@ from horsies.core.models.workflow import (
 )
 from horsies._core import CoreHandle
 from horsies.core.brokers.postgres import PostgresBroker, WorkerProcessBroker
-from horsies.core.worker.child_pool import _cleanup_worker_pool
+from horsies.core.worker.child_pool import (
+    _cleanup_worker_pool,
+    _drop_child_core_handle,
+    _initialize_child_core_handle,
+)
+from tests.fixtures.child_core import TEST_CHILD_POOL
 from horsies.core.worker.worker import Worker
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
@@ -149,6 +154,20 @@ def cleanup_worker_pool_at_teardown() -> Generator[None, None, None]:
     """Close the per-process ConnectionPool created by _initialize_worker_pool()."""
     yield
     _cleanup_worker_pool()
+
+
+@pytest.fixture(scope='session', autouse=True)
+def child_core_handle() -> Generator[None, None, None]:
+    """The core handle of a worker's child for the suite database, for the
+    tests that run the start of a child in this process
+    (``_initialize_child_core_handle``). A test that needs another database
+    puts its own in place for a block (``child_core_handle_for``)."""
+    _initialize_child_core_handle(
+        PostgresConfig(database_url=SecretStr(DB_URL)),
+        TEST_CHILD_POOL,
+    )
+    yield
+    _drop_child_core_handle()
 
 
 @pytest_asyncio.fixture

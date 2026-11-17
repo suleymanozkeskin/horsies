@@ -109,6 +109,7 @@ def _frame() -> RunFrame:
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=CLAIMED_AT,
+        orphan_self_heal=True,
     )
 
 

@@ -469,6 +469,7 @@ def _run_child(
                 is_workflow_task=True,
                 claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
+                orphan_self_heal=True,
             )
         )
 

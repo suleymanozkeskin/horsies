@@ -39,7 +39,6 @@ from horsies.core.lifecycle.classify import (
     terminalization_for_refused_retry,
 )
 from horsies.core.lifecycle.commands import (
-    CancelOwnedOrphan,
     CompleteLockedTask,
     CompleteTaskFused,
     FailLockedTask,
@@ -65,7 +64,6 @@ def _context(**overrides: object) -> FinalizeContext:
         'is_workflow_task': False,
         'queue_name': 'default',
         'result_json': _RESULT,
-        'orphan_self_heal_enabled': True,
     }
     base.update(overrides)
     return FinalizeContext(**base)  # type: ignore[arg-type]
@@ -86,6 +84,7 @@ class TestSentinelParsing:
             ('OWNERSHIP_UNCONFIRMED', AbortReason.OWNERSHIP_UNCONFIRMED),
             ('WORKFLOW_STOPPED', AbortReason.WORKFLOW_STOPPED),
             ('WORKFLOW_CHECK_FAILED', AbortReason.WORKFLOW_CHECK_FAILED),
+            ('ORPHAN_CANCELLED', AbortReason.ORPHAN_CANCELLED),
             ('TASK_EXPIRED', AbortReason.TASK_EXPIRED),
         ],
     )
@@ -169,36 +168,41 @@ class TestExpiryRoutesByTaskKind:
 
 
 class TestOrphanedWorkflowTask:
-    def test_self_heal_enabled_cancels_the_orphan(self) -> None:
+    """The child's stop before start cancels an orphan when the self-heal of
+    its run is on (ORPHAN_CANCELLED); the finalize writes nothing for
+    either end."""
+
+    def test_an_orphan_that_the_child_cancelled_owes_nothing(self) -> None:
         decision = classify(
-            AbortedBeforeResult(reason=AbortReason.WORKFLOW_CHECK_FAILED),
+            AbortedBeforeResult(reason=AbortReason.ORPHAN_CANCELLED),
             _context(is_workflow_task=True),
         )
-        assert _command(decision) == CancelOwnedOrphan(
-            task_id='t1',
-            fence=OwnedClaim(worker_id='w1', claimed_at=_GENERATION),
+        assert decision == NoTerminalAction(
+            reason=FinalizeNoOpReason.ORPHAN_CANCELLED,
         )
 
     def test_self_heal_disabled_leaves_it_claimed(self) -> None:
         """Left for inspection: the reaper declines orphans as well."""
         decision = classify(
             AbortedBeforeResult(reason=AbortReason.WORKFLOW_CHECK_FAILED),
-            _context(is_workflow_task=True, orphan_self_heal_enabled=False),
+            _context(is_workflow_task=True),
         )
         assert decision == NoTerminalAction(
             reason=FinalizeNoOpReason.ORPHAN_SELF_HEAL_DISABLED,
         )
 
-    def test_orphan_cancel_fences_on_the_dispatched_generation(self) -> None:
-        """A re-claim since this dispatch is a different generation's row."""
-        dispatched = _GENERATION + timedelta(microseconds=1)
+    @pytest.mark.parametrize(
+        'reason',
+        [AbortReason.ORPHAN_CANCELLED, AbortReason.WORKFLOW_CHECK_FAILED],
+    )
+    def test_the_finalize_sends_no_orphan_cancel(self, reason: AbortReason) -> None:
+        """No decision of an orphan is a command: the orphan cancel moved to
+        the child's stop before start."""
         decision = classify(
-            AbortedBeforeResult(reason=AbortReason.WORKFLOW_CHECK_FAILED),
-            _context(claimed_at=dispatched),
+            AbortedBeforeResult(reason=reason),
+            _context(is_workflow_task=True),
         )
-        command = _command(decision)
-        assert isinstance(command, CancelOwnedOrphan)
-        assert command.fence == OwnedClaim(worker_id='w1', claimed_at=dispatched)
+        assert not isinstance(decision, ApplyTerminalization)
 
 
 class TestSuccess:
@@ -305,7 +309,6 @@ class TestEveryRowEndingCommandCarriesTheDispatchedClaim:
             (WorkerLevelFailure(detail='pool died'), False),
             (WorkerLevelFailure(detail='pool died'), True),
             (ResultUndecodable(detail='corrupt'), False),
-            (AbortedBeforeResult(reason=AbortReason.WORKFLOW_CHECK_FAILED), True),
         ],
         ids=[
             'plain-success',
@@ -313,7 +316,6 @@ class TestEveryRowEndingCommandCarriesTheDispatchedClaim:
             'plain-worker-failure',
             'workflow-worker-failure',
             'undecodable',
-            'orphan',
         ],
     )
     def test_a_classified_command(
@@ -328,7 +330,7 @@ class TestEveryRowEndingCommandCarriesTheDispatchedClaim:
         command = _command(classify(report, context))
         assert isinstance(
             command,
-            CompleteTaskFused | CompleteLockedTask | FailLockedTask | CancelOwnedOrphan,
+            CompleteTaskFused | CompleteLockedTask | FailLockedTask,
         )
         assert command.fence == OwnedClaim(worker_id='w1', claimed_at=self._DISPATCHED)
 
@@ -348,6 +350,7 @@ class TestDecisionsAreDataOnly:
     _REPORTS: tuple[ChildReport, ...] = (
         AbortedBeforeResult(reason=AbortReason.CLAIM_LOST),
         AbortedBeforeResult(reason=AbortReason.WORKFLOW_CHECK_FAILED),
+        AbortedBeforeResult(reason=AbortReason.ORPHAN_CANCELLED),
         AbortedBeforeResult(reason=AbortReason.TASK_EXPIRED),
         WorkerLevelFailure(detail='x'),
         ResultProduced(),
@@ -419,7 +422,6 @@ class TestDecisionsAreDataOnly:
             'is_workflow_task',
             'queue_name',
             'result_json',
-            'orphan_self_heal_enabled',
         }
         fields = {f.name for f in dataclasses.fields(_context())}
         assert fields == permitted

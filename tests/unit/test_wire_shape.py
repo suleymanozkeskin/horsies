@@ -1174,6 +1174,7 @@ def _run_child(app: Horsies, task_name: str) -> tuple[bool, str, str | None]:
                 is_workflow_task=False,
                 claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
+                orphan_self_heal=True,
             )
         )
 

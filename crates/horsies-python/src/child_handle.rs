@@ -29,6 +29,7 @@ use crate::operations::arguments::utc_instant;
 use crate::operations::expiry_and_orphans::expire_owned_claim_operation;
 use crate::operations::finalizing::{mark_finalizing_operation, marker_fence};
 use crate::operations::start::{start_attempt_operation, start_command, start_window};
+use crate::operations::stop_before_start::{self_heal_of, stop_before_start_operation, stop_fence};
 
 /// The pool profile of a child: `kept_open` connections kept open (0 keeps
 /// none) and, with `check_at_checkout`, a ping of every pooled connection at
@@ -186,6 +187,67 @@ impl CoreChildHandle {
             "CoreChildHandle.expire_owned_claim_async",
             CallKind::Write,
             expire_owned_claim_operation(self.connection.clone(), task_id, worker_id),
+        )
+    }
+
+    /// Stop a claimed workflow task whose start missed
+    /// (`horsies_workflow_task_stop_before_start`): `StoppedBeforeStart`,
+    /// `ResumedBeforeStart`, or `StopBeforeStartFailed`. Writes, in one
+    /// statement, checked out as reserved work. The function judges the task
+    /// again under its own locks: the expiry, the abandon of a PAUSED
+    /// workflow, the cancel of a CANCELLED one, a resume that came first,
+    /// and, with `orphan_self_heal`, the cancel of a task that no node links
+    /// live. Blocking, for the isolated child and the seats of a shared
+    /// thread child. A naive `claimed_at` raises `TypeError`.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at, orphan_self_heal))]
+    fn stop_workflow_task_before_start(
+        &self,
+        py: Python<'_>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+        orphan_self_heal: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let fence = stop_fence(worker_id, utc_instant(claimed_at)?);
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreChildHandle.stop_workflow_task_before_start",
+            CallKind::Write,
+            stop_before_start_operation(
+                self.connection.clone(),
+                task_id,
+                fence,
+                self_heal_of(orphan_self_heal),
+            ),
+        )
+    }
+
+    /// The awaitable form of `stop_workflow_task_before_start`, for a shared
+    /// async child.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at, orphan_self_heal))]
+    fn stop_workflow_task_before_start_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+        orphan_self_heal: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let fence = stop_fence(worker_id, utc_instant(claimed_at)?);
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreChildHandle.stop_workflow_task_before_start_async",
+            CallKind::Write,
+            stop_before_start_operation(
+                self.connection.clone(),
+                task_id,
+                fence,
+                self_heal_of(orphan_self_heal),
+            ),
         )
     }
 

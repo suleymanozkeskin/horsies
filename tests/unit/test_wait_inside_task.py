@@ -296,6 +296,7 @@ def test_a_child_start_marks_its_process_before_the_start_hooks(
             child_runner,
             '_initialize_worker_pool',
         ),
+        patch.object(child_runner, '_initialize_child_core_handle'),
     ):
         child_runner.finish_child_start(
             app, UNREACHABLE_URL, None, ResolvedPool(0, 2, True)

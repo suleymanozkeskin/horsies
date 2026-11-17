@@ -802,13 +802,13 @@ async def test_confirm_ownership_rejects_stale_claim_generation(
     _initialize_worker_pool(listener_of(broker).database_url)
 
     stale_result = _confirm_ownership_and_set_running(
-        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_STALE,
+        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_STALE, orphan_self_heal=True,
     )
     assert stale_result == (False, '', 'CLAIM_LOST')
     assert await _get_task_status(session, task_id) == 'CLAIMED'
 
     live_result = _confirm_ownership_and_set_running(
-        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_CURRENT,
+        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_CURRENT, orphan_self_heal=True,
     )
     assert live_result is None
     assert await _get_task_status(session, task_id) == 'RUNNING'
