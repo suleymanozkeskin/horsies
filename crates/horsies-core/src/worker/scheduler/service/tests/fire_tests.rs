@@ -8,8 +8,8 @@ use sqlx::PgPool;
 
 use super::*;
 use crate::db::{
-    parse_connection_url, ConnectPlan, ConnectionAge, ConnectionEnvironment, IdlePing, PoolPlan,
-    PoolRole, PoolSizing, Reserve, StatementProtocol, DEFAULT_SOCKET_SETTINGS,
+    parse_connection_url, CheckoutClass, ConnectPlan, ConnectionAge, ConnectionEnvironment,
+    IdlePing, PoolPlan, PoolRole, PoolSizing, Reserve, StatementProtocol, DEFAULT_SOCKET_SETTINGS,
 };
 
 const SCHEDULE_INTERVAL_SECONDS: u32 = 60;
