@@ -19,10 +19,13 @@ use super::support::*;
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
+use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
-    AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, TerminalizationCommand,
+    AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationCommand,
     TerminalizationKind, TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::monitoring::cancel_task;
@@ -358,8 +361,9 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
 
 /// Python `test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path`
 /// and `test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path`
-/// (the core has one start for every class): a start of an older generation
-/// returns no row and holds no row lock, so the holder of the task lock can
+/// (the core has one start for every class, `horsies_start_attempt`): a
+/// start of an older generation misses with `NOT_HELD`, takes no task lock
+/// and holds no row lock after it returns, so the holder of the task lock can
 /// lock the row, and the miss path then waits for the task lock.
 #[tokio::test]
 #[serial]
@@ -388,13 +392,18 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
 
     let started = tokio::time::timeout(
         SIDE_WAIT,
-        PostgresBroker::from_pool(pool.clone()).set_running(
-            task_id,
-            WORKER,
-            4242,
-            "lifecycle-host",
-            "lifecycle-process",
-            generation(),
+        start_attempt(
+            &core_pool_for_test_pool(&pool),
+            StatementLog::Off,
+            &StartAttempt::of_process(
+                task_id,
+                OwnedClaim {
+                    worker_id: WORKER.to_owned(),
+                    claimed_at: generation(),
+                },
+                4242,
+                "lifecycle-host".to_owned(),
+            ),
         ),
     )
     .await
@@ -428,7 +437,10 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
         .expect("join the miss path")
         .expect("miss path");
 
-    assert!(started.is_none(), "a start of an older generation ran");
+    assert!(
+        matches!(started, StartOutcome::Missed(StartMiss::NotHeld)),
+        "a start of an older generation ran: {started:?}"
+    );
     assert!(waited, "the miss path never waited for the task lock");
     assert_eq!(missed.len(), 1, "{missed:?}");
     cleanup(&pool, task_id, Some(workflow_id)).await;

@@ -71,11 +71,11 @@ pub use crate::core::{AppConfig, HorsiesError};
 // broker re-exports
 pub use crate::broker::{
     expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
-    CheckInterruption, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError,
-    ListenerPlanError, PostgresBroker, RawResultRecord, SchemaInitializationMode,
-    SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
-    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    CheckInterruption, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError,
+    PostgresBroker, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
+    TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
+    WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
@@ -131,6 +131,10 @@ pub use crate::worker::executor::child_host::{
     CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
 };
 
+// The parent-child frame codec, for the Python child program and the
+// preload process: they speak it through `horsies._core`.
+pub use crate::worker::executor::protocol as frame_protocol;
+
 // worker re-exports
 pub use crate::worker::{
     cli::LogLevel,
@@ -153,6 +157,12 @@ pub use crate::broker::{
 pub use crate::broker::{
     BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
     StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
+};
+
+// the stale and expired task lists of a client handle
+pub use crate::broker::task_lists::{
+    BoundedTaskList, StaleMinutes, StaleThresholdRefusal, MAX_STALE_THRESHOLD_MINUTES,
+    TASK_LIST_BOUND,
 };
 
 pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure};

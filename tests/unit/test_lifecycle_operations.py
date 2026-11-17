@@ -33,17 +33,20 @@ from horsies.core.lifecycle.operations import (
     kind_of,
 )
 from tests.lifecycle_matrix import MATRIX
-from tests.unit.test_lifecycle_commands import ONE_OF_EACH
+from tests.unit.test_lifecycle_commands import (
+    ONE_OF_EACH,
+    WRITERS_WITHOUT_A_COMMAND,
+)
 from tests.baseline_sql import baseline_function
 from tests.unit.test_lifecycle_matrix import FUNCTION_OF_WRITER
 
 pytestmark = [pytest.mark.unit]
 
 # Which command each writer becomes. Two failure writers share one command;
-# every other writer maps alone. This is the only place the correspondence is
-# written down, and the tests below read it rather than restating it.
+# every other writer maps alone, and the writers without a command map to
+# none. This is the only place the correspondence is written down, and the
+# tests below read it rather than restating it.
 COMMAND_BY_WRITER: dict[str, str] = {
-    'T01': 'CancelLockedTask',
     'T02': 'AbandonOwnedNodes',
     'T03': 'CancelOwnedNodes',
     'T04': 'FailLockedTask',
@@ -55,7 +58,6 @@ COMMAND_BY_WRITER: dict[str, str] = {
     'T10': 'AbandonOwnedNode',
     'T11': 'CancelOwnedNode',
     'T12': 'ExpireOwnedClaim',
-    'T13': 'FailStaleTask',
     'T14': 'ExpirePendingTasks',
     'T15': 'CancelOrphanedTasks',
     'T16': 'CancelNodesOfCancelledWorkflow',
@@ -67,10 +69,8 @@ EXPECTED_KINDS: dict[str, TerminalizationKind] = {
     'CompleteLockedTask': TerminalizationKind.COMPLETE_LOCKED,
     'CompleteTaskFused': TerminalizationKind.COMPLETE_FUSED,
     'FailLockedTask': TerminalizationKind.FAIL_RUNNING,
-    'FailStaleTask': TerminalizationKind.FAIL_STALE,
     'ExpireOwnedClaim': TerminalizationKind.EXPIRE_CLAIMED,
     'ExpirePendingTasks': TerminalizationKind.EXPIRE_PENDING,
-    'CancelLockedTask': TerminalizationKind.CANCEL_ADMIN,
     'CancelOwnedOrphan': TerminalizationKind.CANCEL_ORPHAN,
     'CancelOrphanedTasks': TerminalizationKind.CANCEL_ORPHAN_SWEEP,
     'AbandonOwnedNode': TerminalizationKind.PAUSE_ABANDON_CLAIM,
@@ -79,6 +79,12 @@ EXPECTED_KINDS: dict[str, TerminalizationKind] = {
     'CancelOwnedNode': TerminalizationKind.WORKFLOW_CANCEL_CLAIM,
     'CancelOwnedNodes': TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH,
     'CancelNodesOfCancelledWorkflow': TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW,
+}
+
+# The kind that the function of each writer without a command hardcodes.
+KIND_OF_WRITER_WITHOUT_A_COMMAND: dict[str, TerminalizationKind] = {
+    'T01': TerminalizationKind.CANCEL_ADMIN,
+    'T13': TerminalizationKind.FAIL_STALE,
 }
 
 # Fields that carry a value the caller supplies into the row's payload
@@ -116,15 +122,14 @@ def _caller_supplied_payload_columns(writer_id: str) -> set[str]:
 
 class TestEveryCommandHasADatabaseIdentity:
     def test_function_name_is_derived_from_the_variant(self) -> None:
-        """A variant without a function cannot ship unnoticed."""
+        """A variant without a function cannot ship unnoticed. The two
+        finalize decisions name the attempt writer that executes them."""
         expected = {
-            'CompleteLockedTask': 'horsies_complete_locked_task',
+            'CompleteLockedTask': 'horsies_finish_workflow_success',
             'CompleteTaskFused': 'horsies_complete_task_fused',
-            'FailLockedTask': 'horsies_fail_locked_task',
-            'FailStaleTask': 'horsies_fail_stale_task',
+            'FailLockedTask': 'horsies_finish_failed_attempt',
             'ExpireOwnedClaim': 'horsies_expire_owned_claim',
             'ExpirePendingTasks': 'horsies_expire_pending_tasks',
-            'CancelLockedTask': 'horsies_cancel_locked_task',
             'CancelOwnedOrphan': 'horsies_cancel_owned_orphan',
             'CancelOrphanedTasks': 'horsies_cancel_orphaned_tasks',
             'AbandonOwnedNode': 'horsies_abandon_owned_node',
@@ -172,11 +177,18 @@ class TestEveryCommandHasADatabaseIdentity:
 
     def test_kind_vocabulary_is_exactly_what_the_commands_write(self) -> None:
         """Every command writes exactly one kind, and every kind is written
-        by one command."""
+        by one command or by the function of one writer without a command."""
         variants = get_args(TerminalizationCommand.__value__)
         wire_kinds = set(TerminalizationKind)
-        assert len(wire_kinds) == len(variants)
-        assert {kind_of(c) for c in ONE_OF_EACH} == wire_kinds
+        without_a_command = set(KIND_OF_WRITER_WITHOUT_A_COMMAND.values())
+        assert len(wire_kinds) == len(variants) + len(without_a_command)
+        assert {kind_of(c) for c in ONE_OF_EACH} | without_a_command == wire_kinds
+
+    def test_a_writer_without_a_command_hardcodes_its_kind(self) -> None:
+        assert set(KIND_OF_WRITER_WITHOUT_A_COMMAND) == WRITERS_WITHOUT_A_COMMAND
+        for writer_id, kind in KIND_OF_WRITER_WITHOUT_A_COMMAND.items():
+            function = baseline_function(FUNCTION_OF_WRITER[writer_id])
+            assert f"'{kind.value}'" in function, writer_id
 
 
 class TestEquivalenceClasses:
@@ -242,7 +254,11 @@ class TestPayloadFieldsMatchTheStatements:
     """A command carries payload exactly where its statement takes one."""
 
     def test_every_writer_maps_to_a_command(self) -> None:
-        assert set(COMMAND_BY_WRITER) == {row.writer_id for row in MATRIX}
+        """Or is one of the writers that no client command executes."""
+        assert not set(COMMAND_BY_WRITER) & WRITERS_WITHOUT_A_COMMAND
+        assert set(COMMAND_BY_WRITER) | WRITERS_WITHOUT_A_COMMAND == {
+            row.writer_id for row in MATRIX
+        }
         assert set(COMMAND_BY_WRITER.values()) == set(_command_by_name())
 
     @pytest.mark.parametrize('writer_id', sorted(COMMAND_BY_WRITER))

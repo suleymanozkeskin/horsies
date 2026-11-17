@@ -116,12 +116,6 @@ SELECT expect_value(
         ARRAY['{"ok":2}'], 'w1', TRUE)),
     'APPLIED'
 );
-SELECT fixture_task('00000000-0000-7000-8000-000000000003', 'RUNNING', 'w1', FALSE);
-SELECT expect_value(
-    'complete_locked_task',
-    (SELECT outcome FROM horsies_complete_locked_task('00000000-0000-7000-8000-000000000003', 'w1', '{"ok":3}')),
-    'APPLIED'
-);
 
 -- Failed attempt: a retry, then the final failure with a stored rerun envelope.
 SELECT fixture_task('00000000-0000-7000-8000-000000000004', 'RUNNING', 'w1', FALSE);
@@ -157,30 +151,11 @@ SELECT expect_value(
     'true'
 );
 
--- Locked failure, stale failure, claimed expiry, administrative cancel.
-SELECT fixture_task('00000000-0000-7000-8000-000000000005', 'RUNNING', 'w1', FALSE);
-SELECT expect_value(
-    'fail_locked_task',
-    (SELECT outcome FROM horsies_fail_locked_task('00000000-0000-7000-8000-000000000005', 'w1', '{"e":1}', 'E', 'r')),
-    'APPLIED'
-);
-SELECT fixture_task('00000000-0000-7000-8000-000000000006', 'RUNNING', 'w1', FALSE);
-SELECT expect_value(
-    'fail_stale_task',
-    (SELECT outcome FROM horsies_fail_stale_task(
-        '00000000-0000-7000-8000-000000000006', 0, 0, '{"e":1}', 'E', 'r')),
-    'APPLIED'
-);
+-- Claimed expiry.
 SELECT fixture_task('00000000-0000-7000-8000-000000000007', 'CLAIMED', 'w1', FALSE, now() - interval '1 minute');
 SELECT expect_value(
     'expire_owned_claim',
     (SELECT outcome FROM horsies_expire_owned_claim('00000000-0000-7000-8000-000000000007', 'w1', '{"e":1}', 'E')),
-    'APPLIED'
-);
-SELECT fixture_task('00000000-0000-7000-8000-000000000008', 'PENDING', NULL, FALSE);
-SELECT expect_value(
-    'cancel_locked_task',
-    (SELECT outcome FROM horsies_cancel_locked_task('00000000-0000-7000-8000-000000000008', ARRAY['PENDING'])),
     'APPLIED'
 );
 

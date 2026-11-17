@@ -12,9 +12,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    broker, child_of, claim_pass, finish_node, node, node_status, node_task_input, ok, registry_of,
-    seed_node, seed_workflow, shared_pool, spec, start, sub_workflow_node, task_node, try_start,
-    workflow_status, IsolatedDatabase, NodeSeed, WorkflowSeed, PORT_QUEUE,
+    broker, child_of, claim_once, claim_pass, finish_node, node, node_status, node_task_input, ok,
+    registry_of, seed_node, seed_workflow, shared_pool, spec, start, sub_workflow_node, task_node,
+    try_start, workflow_status, IsolatedDatabase, NodeSeed, WorkflowSeed, PORT_QUEUE,
 };
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -1095,14 +1095,10 @@ async fn a_built_child_task_keeps_fifo_order_with_a_later_send_on_its_queue() {
     .execute(&db.pool)
     .await
     .expect("send a direct task after the child's task");
-    let mut one_at_a_time = claim_pass(SCRAPING_QUEUE);
-    one_at_a_time.processes = 1;
+    let mut one_at_a_time = claim_pass(SCRAPING_QUEUE, 1);
     one_at_a_time.max_claim_batch = 1;
 
-    let claimed = broker(&db.pool)
-        .claim_batch(&one_at_a_time)
-        .await
-        .expect("claim pass");
+    let claimed = claim_once(&db.pool, &one_at_a_time).await;
 
     let ids: Vec<Uuid> = claimed.iter().map(|row| row.id).collect();
     assert_eq!(ids, vec![scrape_task]);

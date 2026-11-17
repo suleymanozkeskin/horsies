@@ -32,11 +32,10 @@ BATCH_MOVE_BODY = baseline_function('horsies_move_tasks_to_history')
 """The batch move stage that every batch writer calls with the ids it locked."""
 _BATCH_MOVE_CALL = 'horsies_move_tasks_to_history('
 ATTEMPT_ENCODER_FUNCTION = 'horsies_encode_task_attempts'
-COMPLETE_LOCKED_FUNCTION = 'horsies_complete_locked_task'
 COMPLETE_FUSED_FUNCTION = 'horsies_complete_task_fused'
 COMPLETE_FUSED_BATCH_FUNCTION = 'horsies_complete_tasks_fused'
-FAIL_LOCKED_FUNCTION = 'horsies_fail_locked_task'
 FINISH_FAILED_ATTEMPT_FUNCTION = 'horsies_finish_failed_attempt'
+FINISH_STALE_ATTEMPT_FUNCTION = 'horsies_finish_stale_attempt'
 FINISH_WORKFLOW_SUCCESS_FUNCTION = 'horsies_finish_workflow_success'
 
 
@@ -48,27 +47,13 @@ def completion_family_fragments() -> list[str]:
     return [
         baseline_function(ATTEMPT_ENCODER_FUNCTION),
         MOVE_BODY,
-        baseline_function(COMPLETE_LOCKED_FUNCTION),
+        baseline_function(FINISH_WORKFLOW_SUCCESS_FUNCTION),
         baseline_function(COMPLETE_FUSED_FUNCTION),
     ]
 
 
 def failure_family_fragments() -> list[str]:
-    return _functions(FAIL_LOCKED_FUNCTION, 'horsies_fail_stale_task')
-
-
-def failed_attempt_fragments() -> list[str]:
-    return [
-        baseline_type('horsies_failed_attempt_outcome'),
-        baseline_function(FINISH_FAILED_ATTEMPT_FUNCTION),
-    ]
-
-
-def workflow_success_fragments() -> list[str]:
-    return [
-        baseline_type('horsies_workflow_success_outcome'),
-        baseline_function(FINISH_WORKFLOW_SUCCESS_FUNCTION),
-    ]
+    return _functions(FINISH_FAILED_ATTEMPT_FUNCTION, FINISH_STALE_ATTEMPT_FUNCTION)
 
 
 def expiry_family_fragments() -> list[str]:
@@ -77,7 +62,7 @@ def expiry_family_fragments() -> list[str]:
 
 def cancellation_family_fragments() -> list[str]:
     return _functions(
-        'horsies_cancel_locked_task',
+        'horsies_cancel_task',
         'horsies_cancel_owned_orphan',
         'horsies_cancel_orphaned_tasks',
     )
@@ -218,8 +203,6 @@ class TestLockOrderInvariant:
         [
             *completion_family_fragments()[2:],
             *failure_family_fragments(),
-            failed_attempt_fragments()[1],
-            workflow_success_fragments()[1],
             expiry_family_fragments()[0],
             *cancellation_family_fragments()[:2],
             *workflow_node_family_fragments()[:2],
@@ -331,9 +314,9 @@ class TestFailureFamily:
         stale = failure_family_fragments()[1]
         assert 'NULL::text, NULL::timestamptz' in stale
 
-    def test_locked_failure_passes_reason_and_code_to_the_move(self) -> None:
-        locked = failure_family_fragments()[0]
-        assert 'p_result, p_error_code, p_failed_reason' in locked
+    def test_the_failed_attempt_passes_reason_and_code_to_the_move(self) -> None:
+        failed = failure_family_fragments()[0]
+        assert 'p_result, p_error_code, p_failed_reason' in failed
 
 
 class TestNoCodecLiterals:
@@ -497,9 +480,12 @@ class TestCancellationFamily:
         assert "'COMPLETE_FUSED', 'CANCEL_ADMIN'" in MOVE_BODY
 
     def test_admin_wire_owns_the_literals(self) -> None:
+        """A workflow task is refused on the locked row, before the move."""
         admin = cancellation_family_fragments()[0]
         assert "'TASK_CANCELLED', 'Cancelled via monitoring API'" in admin
-        assert 't.is_workflow_task = FALSE' in admin
+        refusal = admin.index('IF v_task.is_workflow_task THEN')
+        assert "'WORKFLOW_TASK'::text" in admin[refusal:]
+        assert refusal < admin.index('horsies_move_task_to_history(')
 
     def test_node_lookup_shape_derives_from_deferral(self) -> None:
         strict = MOVE_BODY.index('IF v_requires_deferred_phase2 THEN')
@@ -740,9 +726,7 @@ class TestLockingReads:
     @pytest.mark.parametrize(
         'name',
         [
-            COMPLETE_LOCKED_FUNCTION,
             COMPLETE_FUSED_FUNCTION,
-            FAIL_LOCKED_FUNCTION,
             FINISH_FAILED_ATTEMPT_FUNCTION,
             FINISH_WORKFLOW_SUCCESS_FUNCTION,
         ],

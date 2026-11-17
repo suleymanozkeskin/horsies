@@ -39,7 +39,7 @@ from tests.perf.statistics import Verdict
 
 def _conditions(comparison: str, observations: int = 200) -> Conditions:
     return Conditions(
-        scenario='locked-completion',
+        scenario='owned-claim-expiry',
         description='a scenario built for these tests',
         server_version='PostgreSQL 16.4',
         fsync='off',
@@ -200,7 +200,7 @@ class TestCandidateContractChecks:
         candidate: Counts,
     ) -> tuple[str, ...]:
         return _contract_violations(
-            scenario=scenario_by_name('locked-completion'),
+            scenario=scenario_by_name('owned-claim-expiry'),
             conditions=_conditions('existing statement against function'),
             baseline=Measurement(samples_ms=[1.0], counts=baseline),
             candidate=Measurement(samples_ms=[1.0], counts=candidate),
@@ -250,7 +250,7 @@ class TestCandidateContractChecks:
 
     def test_missing_plan_evidence_fails(self) -> None:
         report = _contract_violations(
-            scenario=scenario_by_name('locked-completion'),
+            scenario=scenario_by_name('owned-claim-expiry'),
             conditions=_conditions('existing statement against function'),
             baseline=Measurement(samples_ms=[1.0], counts=_counts()),
             candidate=Measurement(samples_ms=[1.0], counts=_counts()),
@@ -298,10 +298,10 @@ class TestScenarioSelection:
 
 class TestObservationCount:
     def test_default_uses_the_declared_gate_minimum(self) -> None:
-        scenario = scenario_by_name('locked-completion')
+        scenario = scenario_by_name('owned-claim-expiry')
         assert _observations_for(scenario, 'gate', None) == 10_000
         assert _minimum_observations(scenario, 'gate') == 10_000
 
     def test_override_supports_an_inconclusive_retry(self) -> None:
-        scenario = scenario_by_name('locked-completion')
+        scenario = scenario_by_name('owned-claim-expiry')
         assert _observations_for(scenario, 'gate', 20_000) == 20_000

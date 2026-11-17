@@ -47,23 +47,18 @@ from .commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
     AbandonOwnedNodes,
-    CancelLockedTask,
     CancelNodesOfCancelledWorkflow,
     CancelOrphanedTasks,
     CancelOwnedNode,
     CancelOwnedNodes,
     CancelOwnedOrphan,
-    CompleteLockedTask,
     CompleteTaskFused,
     ExpireOwnedClaim,
     ExpirePendingTasks,
-    FailLockedTask,
-    FailStaleTask,
     TerminalizationCommand,
     fence_of,
 )
 from .fences import (
-    CallerHoldsRowLock,
     OwnedClaim,
     OwnedClaimBatch,
     PriorLockedRead,
@@ -91,12 +86,8 @@ from .outcomes import (
 logger = get_logger('lifecycle')
 
 type ExecutableCommand = (
-    CompleteLockedTask
-    | CompleteTaskFused
-    | FailLockedTask
-    | FailStaleTask
+    CompleteTaskFused
     | ExpireOwnedClaim
-    | CancelLockedTask
     | CancelOwnedOrphan
     | AbandonOwnedNode
     | CancelOwnedNode
@@ -105,8 +96,7 @@ type ExecutableCommand = (
 # The commands that are complete in one statement: the function checks the
 # full claim generation itself, writes the coupled rows (attempt, history,
 # capacity NOTIFY) in the same call, and writes nothing when it refuses. Only
-# these may run in autocommit. A locked command relies on the caller's
-# SELECT ... FOR UPDATE in the same transaction, so it is not one of them.
+# these may run in autocommit.
 type AutocommitCommand = CompleteTaskFused | CancelOwnedOrphan
 
 # Batch operations return zero or more rows, so they cannot share the
@@ -125,12 +115,7 @@ type ExecutableBatchCommand = (
 # faces post-cutover identity columns, and the varchar-signature
 # in-place program exists solely at drained moments (historical chain
 # positions and the offline cutover), never under running callers.
-_COMPLETE_LOCKED_TASK_SQL = text("""
-    SELECT * FROM horsies_complete_locked_task(
-        CAST(:task_id AS uuid), :worker_id, :result
-    )
-""")
-
+#
 # The last argument (wake) is TRUE: the function sends the capacity wake of
 # the locked row's queue.
 _COMPLETE_TASK_FUSED_SQL = text("""
@@ -160,22 +145,6 @@ _COMPLETE_TASKS_FUSED_SQL = text("""
     )
 """)
 
-_FAIL_LOCKED_TASK_SQL = text("""
-    SELECT * FROM horsies_fail_locked_task(
-        CAST(:task_id AS uuid), :worker_id,
-        :result, :error_code, :failed_reason
-    )
-""")
-
-_FAIL_STALE_TASK_SQL = text("""
-    SELECT * FROM horsies_fail_stale_task(
-        CAST(:task_id AS uuid),
-        CAST(:stale_after_ms AS INTEGER),
-        CAST(:finalizing_stale_after_ms AS INTEGER),
-        :result, :error_code, :failed_reason
-    )
-""")
-
 _EXPIRE_OWNED_CLAIM_SQL = text("""
     SELECT * FROM horsies_expire_owned_claim(
         CAST(:task_id AS uuid), :worker_id, :result, :error_code
@@ -185,13 +154,6 @@ _EXPIRE_OWNED_CLAIM_SQL = text("""
 _EXPIRE_PENDING_TASKS_SQL = text("""
     SELECT * FROM horsies_expire_pending_tasks(
         CAST(:batch_size AS INTEGER), :result, :error_code
-    )
-""")
-
-_CANCEL_LOCKED_TASK_SQL = text("""
-    SELECT * FROM horsies_cancel_locked_task(
-        CAST(:task_id AS uuid),
-        CAST(:permitted_source_statuses AS TEXT[])
     )
 """)
 
@@ -269,48 +231,12 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
     in how they await it.
     """
     match command:
-        case CompleteLockedTask(task_id=task_id, fence=fence, result_json=result):
-            return _COMPLETE_LOCKED_TASK_SQL, {
-                'task_id': task_id,
-                'worker_id': fence.worker_id,
-                'result': result,
-            }
         case CompleteTaskFused(task_id=task_id, fence=fence, result_json=result):
             return _COMPLETE_TASK_FUSED_SQL, {
                 'task_id': task_id,
                 'worker_id': fence.worker_id,
                 'claimed_at': fence.claimed_at,
                 'result': result,
-            }
-        case FailLockedTask(
-            task_id=task_id,
-            fence=fence,
-            result_json=result,
-            error_code=error_code,
-            failed_reason=failed_reason,
-        ):
-            return _FAIL_LOCKED_TASK_SQL, {
-                'task_id': task_id,
-                'worker_id': fence.worker_id,
-                'result': result,
-                'error_code': error_code,
-                'failed_reason': failed_reason,
-            }
-        case FailStaleTask(
-            task_id=task_id,
-            stale_after_ms=stale_after_ms,
-            finalizing_stale_after_ms=finalizing_stale_after_ms,
-            result_json=result,
-            error_code=error_code,
-            failed_reason=failed_reason,
-        ):
-            return _FAIL_STALE_TASK_SQL, {
-                'task_id': task_id,
-                'stale_after_ms': stale_after_ms,
-                'finalizing_stale_after_ms': finalizing_stale_after_ms,
-                'result': result,
-                'error_code': error_code,
-                'failed_reason': failed_reason,
             }
         case ExpireOwnedClaim(
             task_id=task_id,
@@ -323,16 +249,6 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
                 'worker_id': fence.worker_id,
                 'result': result,
                 'error_code': error_code,
-            }
-        case CancelLockedTask(
-            task_id=task_id,
-            permitted_source_statuses=permitted_source_statuses,
-        ):
-            return _CANCEL_LOCKED_TASK_SQL, {
-                'task_id': task_id,
-                'permitted_source_statuses': [
-                    status.value for status in permitted_source_statuses
-                ],
             }
         case CancelOwnedOrphan(task_id=task_id, fence=fence):
             return _CANCEL_OWNED_ORPHAN_SQL, {
@@ -998,7 +914,7 @@ def _logged_fence(
             }
         case None:
             return None, None
-        case CallerHoldsRowLock() | PriorLockedRead() | WorkerOwned() | OwnedClaim():
+        case PriorLockedRead() | WorkerOwned() | OwnedClaim():
             return type(fence).__name__, fence
         case _ as unreachable:
             assert_never(unreachable)

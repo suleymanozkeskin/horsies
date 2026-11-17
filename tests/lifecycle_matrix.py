@@ -16,14 +16,14 @@ Two test layers consume it:
   in both directions.
 
 Scope of a row: what the *function* does. Behavior contributed by its caller —
-attempt insertion issued separately in the same transaction, workflow
-phase 2 — is named where it exists but is characterized at the operation
-level, not asserted from the function text.
+workflow phase 2 — is named where it exists but is characterized at the
+operation level, not asserted from the function text.
 
 Notification: a move deletes the live row, so no status trigger fires; the
 move sends `task_done` and `horsies_task_status` for every row it moves, and
 every writer gets both without asking. `EmitsNotify.FUSED_CAPACITY_WAKE`
-marks the one function that also sends the capacity wake its caller passes.
+marks the functions that also send the capacity wake when their caller asks
+for it.
 
 Source of truth for the guards is the function text; the static checks keep
 this matrix and the baseline functions aligned.
@@ -41,9 +41,6 @@ class Fence(Enum):
     NONE = 'NONE'
     """No ownership predicate. Cross-worker by design."""
 
-    CALLER_ROW_LOCK = 'CALLER_ROW_LOCK'
-    """No predicate in the statement; the caller holds the row lock."""
-
     WORKER = 'WORKER'
     """Matches `claimed_by_worker_id` only."""
 
@@ -54,8 +51,9 @@ class Fence(Enum):
     """As above, with generations supplied per task through `unnest`."""
 
     PRIOR_LOCKED_SELECT = 'PRIOR_LOCKED_SELECT'
-    """Statement matches on worker; the generation fence is carried by the
-    `FOR UPDATE` select the caller issued immediately before."""
+    """The function locks the row (`FOR UPDATE`), then matches worker and
+    `claimed_at` generation. The client command carries the worker in its
+    fence (`PriorLockedRead`) and the generation beside it."""
 
 
 class Guard(Enum):
@@ -82,9 +80,6 @@ class Attempt(Enum):
     """Attempt-row behavior accompanying the transition."""
 
     NONE = 'NONE'
-    CALLER_INSERTS = 'CALLER_INSERTS'
-    """Caller writes the attempt separately in the same transaction."""
-
     FUSED_UPSERT = 'FUSED_UPSERT'
     """The statement itself upserts the attempt."""
 
@@ -150,7 +145,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         statement='_CANCEL_TASK_SQL',
         source_statuses=(),
         target_status='CANCELLED',
-        fence=Fence.CALLER_ROW_LOCK,
+        fence=Fence.NONE,
         guards=(),
         attempt=Attempt.NONE,
         writes_result=False,
@@ -200,10 +195,10 @@ MATRIX: tuple[TerminalWriter, ...] = (
         target_status='FAILED',
         fence=Fence.PRIOR_LOCKED_SELECT,
         guards=(),
-        attempt=Attempt.CALLER_INSERTS,
+        attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
+        emits_notify=EmitsNotify.FUSED_CAPACITY_WAKE,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailRunning',
@@ -216,10 +211,10 @@ MATRIX: tuple[TerminalWriter, ...] = (
         target_status='FAILED',
         fence=Fence.PRIOR_LOCKED_SELECT,
         guards=(),
-        attempt=Attempt.CALLER_INSERTS,
+        attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
+        emits_notify=EmitsNotify.FUSED_CAPACITY_WAKE,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailRunning',
@@ -232,7 +227,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         target_status='COMPLETED',
         fence=Fence.PRIOR_LOCKED_SELECT,
         guards=(),
-        attempt=Attempt.CALLER_INSERTS,
+        attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
         shape=Shape.SINGLE,
         emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
@@ -344,7 +339,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         target_status='FAILED',
         fence=Fence.NONE,
         guards=(Guard.STALENESS,),
-        attempt=Attempt.CALLER_INSERTS,
+        attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
         shape=Shape.SINGLE,
         emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,

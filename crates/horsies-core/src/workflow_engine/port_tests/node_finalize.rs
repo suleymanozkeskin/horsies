@@ -5,9 +5,9 @@
 //! `test_workflow_node_handoff.py`, `test_worker_finalize_workflow_phase.py`.
 //!
 //! The worker's finalize of a result is phase 1 (`persist_terminal_state`),
-//! then phase 2 (`finalize_workflow_phase`) when phase 1 owes it, as
-//! `execute_and_finalize` and `run_phase2` run them. A test that leaves a
-//! phase-2 record, a live claim or a trigger uses its own database.
+//! then phase 2 (`finalize_workflow_phase`) when phase 1 owes it, as the
+//! outcome writer and `run_phase2` run them. A test that leaves a phase-2
+//! record, a live claim or a trigger uses its own database.
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
@@ -26,15 +26,17 @@ use crate::broker::lifecycle_tests::support::{
     database_options, unpinged_single_connection_pool, WireProxy,
 };
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOutcome};
+use crate::core::task::Execution;
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::worker::execution::{
     finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
     PhaseTwoForm,
 };
+use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
 use crate::worker::retry::read_stored_options;
 use crate::workflow_engine::lifecycle::cancel_workflow;
 
@@ -52,17 +54,16 @@ const WAKE_CHANNEL: &str = "task_queue_port_finalize_wake";
 const SEEDED_NODE_QUEUE: &str = "default";
 const SEEDED_NODE_CHANNEL: &str = "task_queue_default";
 
-/// Node A of an A -> B workflow, RUNNING under [`WORKER`], with the facts
-/// that the claim and the start write give the worker.
+/// Node A of an A -> B workflow, RUNNING under [`WORKER`], with the claimed
+/// task that the claim gives the worker.
 struct RunningNode {
     workflow_id: Uuid,
-    claimed: ClaimedTaskRow,
-    running: SetRunningRow,
+    claimed: ClaimedTask,
 }
 
 impl RunningNode {
     fn task_id(&self) -> Uuid {
-        self.claimed.id
+        self.claimed.task_id
     }
 
     fn claimed_at(&self) -> DateTime<Utc> {
@@ -114,26 +115,38 @@ async fn run_node_a(pool: &PgPool, workflow_id: Uuid) -> RunningNode {
         ),
     )
     .await;
-    let claimed: ClaimedTaskRow = sqlx::query_as(
-        "SELECT id, task_name, input, queue_name, is_workflow_task, task_options, claimed_at
+    let (task_name, queue_name, claimed_at, execution, retry_count, max_retries, task_options): (
+        String,
+        String,
+        DateTime<Utc>,
+        String,
+        i32,
+        i32,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT task_name, queue_name, claimed_at, execution, retry_count, max_retries,
+                task_options
          FROM horsies_tasks WHERE id = $1",
     )
     .bind(task_id)
     .fetch_one(pool)
     .await
     .expect("read the claimed row");
-    let running: SetRunningRow = sqlx::query_as(
-        "SELECT id, started_at, retry_count, max_retries, good_until
-         FROM horsies_tasks WHERE id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(pool)
-    .await
-    .expect("read the running row");
     RunningNode {
         workflow_id,
-        claimed,
-        running,
+        claimed: ClaimedTask {
+            task_id,
+            task_name,
+            queue_name,
+            claimed_at,
+            execution: Execution::from_stored(&execution).expect("a stored execution class"),
+            kind: TaskKind::WorkflowTask,
+            retry: RetryFacts {
+                retry_count,
+                max_retries,
+            },
+            options: read_stored_options(task_options.as_deref()),
+        },
     }
 }
 
@@ -164,17 +177,14 @@ async fn finalize_on(
     node_a: &RunningNode,
     claimed_at: DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let claimed = ClaimedTaskRow {
+    let claimed = ClaimedTask {
         claimed_at,
         ..node_a.claimed.clone()
     };
     let outcome = persist_terminal_state(
         broker,
-        claimed.id,
-        TaskResult::Ok(ok_bytes()),
         &claimed,
-        &read_stored_options(claimed.task_options.as_deref()),
-        &node_a.running,
+        TaskResult::Ok(ok_bytes()),
         WORKER,
         &PayloadPolicy::default(),
     )
@@ -191,9 +201,9 @@ async fn finalize_on(
         finalize_workflow_phase(
             broker,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            claimed.id,
+            claimed.task_id,
             &claimed.queue_name,
-            claimed.is_workflow_task,
+            claimed.kind.is_workflow_task(),
             capacity_notified,
             form,
             &RetentionConfig::default(),
