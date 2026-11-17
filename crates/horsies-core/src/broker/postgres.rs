@@ -765,6 +765,29 @@ pub enum WorkflowStopBeforeStart {
     Resumed,
 }
 
+/// The stored values of one send command, checked: only the database can
+/// refuse it now (Python `SendCommand`). Built by
+/// [`PostgresBroker::prepare_send_command`].
+///
+/// The version-1 fingerprint leaves the task id and `sent_at` out, so one
+/// value serves every row of the command: each slot of a schedule fire.
+/// `stored_input` is the `input` text the row stores; `execution` and
+/// `max_retries` are read from `task_options`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendCommand {
+    pub task_name: String,
+    pub queue_name: String,
+    pub priority: i32,
+    pub stored_input: String,
+    pub task_options: Option<String>,
+    pub execution: crate::core::task::execution::Execution,
+    pub max_retries: i32,
+    pub retention_class_key: String,
+    pub retain_rerun_input: bool,
+    pub fingerprint_version: i16,
+    pub fingerprint: Vec<u8>,
+}
+
 /// PostgreSQL-backed task broker.
 ///
 /// Two sets of pools on the same URLs:
@@ -1536,6 +1559,56 @@ impl PostgresBroker {
             | EnqueueTaskOutcome::PayloadMismatch => {}
         }
         enqueue_result(outcome, task_id, task_name)
+    }
+
+    /// The stored values of an unkeyed send with no deadline and no delay,
+    /// without a write (Python `PostgresBroker.prepare_send_command`): the
+    /// values [`PostgresBroker::enqueue`] writes for the same arguments, with
+    /// the broker's default rerun-input posture. One command serves every row
+    /// of the send, for example each slot of a schedule fire: the version-1
+    /// fingerprint leaves the task id and `sent_at` out. Touches no database.
+    ///
+    /// Errors: `EnqueueContract`, the refusals of `enqueue` before its write:
+    /// an input that the rules refuse, options that do not parse or whose
+    /// retry policy does not fit, a value the fingerprint refuses.
+    pub fn prepare_send_command(
+        &self,
+        task_name: &str,
+        queue_name: &str,
+        priority: i32,
+        input: &str,
+        task_options: Option<&str>,
+        retention: EnqueueRetention,
+    ) -> Result<SendCommand, BrokerError> {
+        check_sent_input(input)?;
+        let max_retries = enqueue_max_retries(task_name, task_options)?;
+        let retention_class_key = retention.class_key();
+        let facts = prepare_enqueue_facts(
+            task_name,
+            queue_name,
+            priority,
+            input,
+            None,
+            None,
+            task_options,
+            Some(&retention_class_key),
+            self.retain_rerun_input_default,
+            None,
+        )
+        .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        Ok(SendCommand {
+            task_name: task_name.to_owned(),
+            queue_name: queue_name.to_owned(),
+            priority,
+            stored_input: input.to_owned(),
+            task_options: task_options.map(str::to_owned),
+            execution: facts.execution,
+            max_retries,
+            retention_class_key: facts.retention_class_key,
+            retain_rerun_input: facts.retain_rerun_input,
+            fingerprint_version: facts.command_fingerprint_version,
+            fingerprint: facts.command_fingerprint.to_vec(),
+        })
     }
 
     /// Run one collapsed claim pass via `horsies_claim` (parity with horsies
