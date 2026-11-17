@@ -158,7 +158,7 @@ Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, 
 | `HandleEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing ran. Only `resume()` and `resume_workflow()` return it |
 | `HandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 
-See [Errors Reference](/horsies/tasks/errors/#workflow-handle-errors-handleresult) for when each code occurs.
+See [Errors Reference](/horsies/tasks/errors/#workflow-handle-error-codes) for when each code occurs.
 
 **Usage:**
 
