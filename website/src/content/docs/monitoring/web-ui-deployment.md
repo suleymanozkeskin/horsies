@@ -15,8 +15,9 @@ horsies never owns identity. Every deployment supplies an authorization policy,
 and the library enforces the verdict it returns.
 
 The API is on the client pages: [Web UI Mount](/horsies/monitoring/web-ui-mount/)
-and [`horsies web`](/horsies/cli/#horsies-web) (Python). The Rust mount page is
-not written yet. The [Rust CLI runner](/horsies/rust/cli/) has no `web` command.
+and [`horsies web`](/horsies/cli/#horsies-web) (Python), and
+[Web UI Mount](/horsies/rust/monitoring/web-ui-mount/) and
+[`horsies web`](/horsies/rust/cli/#horsies-web) (Rust).
 
 ## Mounted mode
 
