@@ -7,23 +7,23 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    node, node_status, ok, registry_of, required, seed_node, seed_node_task, seed_workflow, spec,
-    start_claimed_task, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus,
+    child_specs_of, node, node_status, ok, required, seed_node, seed_node_task, seed_workflow,
+    spec, start_claimed_task, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus,
     NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::config::retention::RetentionConfig;
-use crate::core::{TaskError, WorkflowSpec, WorkflowSpecRegistry};
-use crate::workflow_engine::recovery::{recover_stuck_workflows, RecoveryReport};
+use crate::core::{TaskError, WorkflowSpec};
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::recovery::{recover_stuck_workflows_observed_with, RecoveryReport};
+use crate::workflow_engine::steps::ChildBuild;
 
 /// `workflow_recovery_failure_limit` of each pass.
 const LIMIT: u32 = 3;
 
-async fn pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> RecoveryReport {
-    recover_stuck_workflows(
+async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
+    recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        registry,
+        ChildBuild::Client(child_specs),
         LIMIT,
-        &RetentionConfig::default(),
     )
     .await
     .expect("the recovery pass returns its report")
@@ -50,12 +50,12 @@ fn recovery_child() -> WorkflowSpec {
 #[serial]
 async fn a_ready_node_with_no_task_is_enqueued_once() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "READY")).await;
 
-    let first = pass(&db.pool, &registry).await;
-    let second = pass(&db.pool, &registry).await;
+    let first = pass(&db.pool, &child_specs).await;
+    let second = pass(&db.pool, &child_specs).await;
 
     assert_eq!(first.total(), 1, "{first:?}");
     assert_eq!(second.total(), 0, "{second:?}");
@@ -86,11 +86,7 @@ async fn recovery_leaves_a_paused_workflow_alone() {
     )
     .await;
 
-    let _report = pass(
-        &db.pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let _report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "PENDING");
@@ -109,11 +105,7 @@ async fn recovery_completes_a_workflow_whose_nodes_all_ended_and_sets_completed_
     )
     .await;
 
-    let report = pass(
-        &db.pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
     assert_eq!(report.total(), 1, "{report:?}");
     let row = workflow(&db.pool, workflow_id).await;
@@ -151,11 +143,7 @@ async fn recovery_decides_by_the_success_policy() {
         cases.push((workflow_id, expected));
     }
 
-    let _report = pass(
-        &db.pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let _report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
     for (workflow_id, expected) in cases {
         assert_eq!(workflow_status(&db.pool, workflow_id).await, expected);
@@ -184,11 +172,7 @@ async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fa
     )
     .await;
 
-    let report = pass(
-        &db.pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
     assert_eq!(report.case0_pending_reevaluated, 1, "{report:?}");
     assert_eq!(report.total(), 1, "{report:?}");
@@ -216,11 +200,7 @@ async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
     )
     .await;
 
-    let report = pass(
-        &db.pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
     assert_eq!(report.total(), 1, "{report:?}");
     let row = node(&db.pool, workflow_id, 1).await;
@@ -239,7 +219,7 @@ async fn a_ready_sub_workflow_node_with_no_child_starts_its_child() {
         .definition_key
         .clone()
         .expect("the child has a definition key");
-    let registry = registry_of(&[child]);
+    let child_specs = child_specs_of(&[child]);
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().output(1)).await;
     seed_node(
         &db.pool,
@@ -252,7 +232,7 @@ async fn a_ready_sub_workflow_node_with_no_child_starts_its_child() {
     )
     .await;
 
-    let report = pass(&db.pool, &registry).await;
+    let report = pass(&db.pool, &child_specs).await;
 
     assert_eq!(report.total(), 1, "{report:?}");
     let sub = node(&db.pool, workflow_id, 1).await;
@@ -319,11 +299,7 @@ async fn a_completed_child_advances_its_parent_node() {
         seed_parent_of_an_ended_child(&db.pool, "COMPLETED", Some(ok_text(serde_json::json!(42))))
             .await;
 
-    let report = pass(
-        &db.pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
     assert!(report.total() >= 1, "{report:?}");
     assert_eq!(node_status(&db.pool, parent, 0).await, "COMPLETED");
@@ -344,11 +320,7 @@ async fn a_cancelled_or_failed_child_fails_its_parent_node() {
         parents.push((parent, child_status));
     }
 
-    let report = pass(
-        &db.pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
     assert!(report.total() >= 2, "{report:?}");
     for (parent, child_status) in parents {

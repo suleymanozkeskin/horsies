@@ -289,6 +289,9 @@ async fn handle_worker_ping(
 enum ClaimWake {
     Cancelled,
     CapacityReleased,
+    /// A child became ready to take a task after a boot: a recycled child,
+    /// a replacement after a loss, or a slot back from down (#1148).
+    ChildReady,
     DatabaseNotification,
     /// The listener reconnected: a notification may have been lost, so the
     /// loop claims at once.
@@ -357,15 +360,20 @@ impl ClaimWakes {
     }
 }
 
+/// The next wake of the claim loop: a stop, the end of an outcome write
+/// (`capacity_released`), a child ready after a boot (`board`), a queue
+/// notification, or the poll interval.
 async fn wait_for_claim_wake(
     cancel: &CancellationToken,
     capacity_released: &Notify,
+    board: &PoolBoard,
     claim_wakes: &ClaimWakes,
     poll_interval: Duration,
 ) -> ClaimWake {
     tokio::select! {
         _ = cancel.cancelled() => ClaimWake::Cancelled,
         _ = capacity_released.notified() => ClaimWake::CapacityReleased,
+        () = board.child_ready() => ClaimWake::ChildReady,
         event = claim_wakes.next() => ClaimWake::from_listener(event),
         _ = tokio::time::sleep(poll_interval) => ClaimWake::PollElapsed,
     }
@@ -1433,6 +1441,7 @@ impl Worker {
             match wait_for_claim_wake(
                 &self.cancel,
                 &self.capacity_released,
+                children.board(),
                 claim_wakes,
                 poll_interval,
             )
@@ -1448,7 +1457,10 @@ impl Worker {
                         .drain_pending(self.worker_config.coalesce_notifies)
                         .await;
                 }
-                ClaimWake::ListenerGap | ClaimWake::CapacityReleased | ClaimWake::PollElapsed => {}
+                ClaimWake::ListenerGap
+                | ClaimWake::CapacityReleased
+                | ClaimWake::ChildReady
+                | ClaimWake::PollElapsed => {}
             }
         }
     }
@@ -1888,14 +1900,12 @@ mod tests {
         FinalizeOutcome, FinalizeStage, Phase2Work,
     };
 
-    use crate::async_task_fn;
     use crate::broker::PostgresBroker;
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::{
         ensure_startup_coverage, StartupCoverageOutcome,
     };
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
-    use crate::core::registry::WorkflowSpecRegistry;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult, UserCode};
     use crate::workflow_engine::steps::ChildBuild;
@@ -1914,6 +1924,16 @@ mod tests {
         ClaimWakes {
             subscriptions: Vec::new(),
         }
+    }
+
+    /// A board of one isolated slot whose child never reports ready: its
+    /// child-ready wake fires only when a test notes one.
+    fn quiet_board() -> PoolBoard {
+        PoolBoard::new(crate::worker::executor::slots::ChildLayout {
+            isolated: 1,
+            shared_async: 0,
+            shared_thread: 0,
+        })
     }
 
     /// A worker on `broker` of one isolated child that boots, then exits at
@@ -1938,11 +1958,9 @@ mod tests {
             ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
         };
         let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
-        Worker::new(
+        Worker::of_child_specs(
             broker,
-            Arc::new(WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            )),
+            crate::test_support::child_specs::no_child_specs(),
             app_config,
             worker_config,
             SelectedProfile {
@@ -2051,6 +2069,7 @@ mod tests {
             wait_for_claim_wake(
                 &worker.cancel,
                 &worker.capacity_released,
+                &quiet_board(),
                 &claim_wakes,
                 Duration::from_secs(60),
             ),
@@ -2089,7 +2108,14 @@ mod tests {
         let released = Arc::new(Notify::new());
         let cancel = CancellationToken::new();
         let claim_wakes = no_claim_wakes();
-        let wait = wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60));
+        let board = quiet_board();
+        let wait = wait_for_claim_wake(
+            &cancel,
+            &released,
+            &board,
+            &claim_wakes,
+            Duration::from_secs(60),
+        );
         tokio::pin!(wait);
         assert!(wait.as_mut().now_or_never().is_none());
         released.notify_one();
@@ -2108,18 +2134,84 @@ mod tests {
         released.notify_one();
         let cancel = CancellationToken::new();
         let claim_wakes = no_claim_wakes();
+        let board = quiet_board();
         let wake = tokio::time::timeout(
             Duration::from_secs(1),
-            wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60)),
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            ),
         )
         .await
         .expect("release before waiting must not lose the wake");
         assert_eq!(wake, ClaimWake::CapacityReleased);
         assert!(
-            wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60),)
-                .now_or_never()
-                .is_none(),
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            )
+            .now_or_never()
+            .is_none(),
             "an idle worker must not keep waking"
+        );
+    }
+
+    /// #1148: a child ready after a boot wakes the claim loop before its
+    /// poll deadline, once. Ready children noted while the loop ran a pass
+    /// wake the next wait once, not once each.
+    #[tokio::test]
+    async fn a_child_ready_after_a_boot_wakes_the_claim_wait_once() {
+        let released = Notify::new();
+        let cancel = CancellationToken::new();
+        let claim_wakes = no_claim_wakes();
+        let board = quiet_board();
+        let wait = wait_for_claim_wake(
+            &cancel,
+            &released,
+            &board,
+            &claim_wakes,
+            Duration::from_secs(60),
+        );
+        tokio::pin!(wait);
+        assert!(wait.as_mut().now_or_never().is_none());
+        board.note_child_ready();
+        let wake = tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("a ready child must wake the claim loop before polling");
+        assert_eq!(wake, ClaimWake::ChildReady);
+
+        board.note_child_ready();
+        board.note_child_ready();
+        let wake = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("a ready child noted before the wait must not lose the wake");
+        assert_eq!(wake, ClaimWake::ChildReady);
+        assert!(
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            )
+            .now_or_never()
+            .is_none(),
+            "two ready children noted during one pass wake one wait"
         );
     }
 
@@ -2521,11 +2613,9 @@ mod tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy(url)
             .expect("a lazy pool opens no connection");
-        Worker::new(
+        Worker::of_child_specs(
             Arc::new(PostgresBroker::from_pool(pool)),
-            Arc::new(WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            )),
+            crate::test_support::child_specs::no_child_specs(),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
@@ -2560,11 +2650,9 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy(url)
             .expect("a lazy pool opens no connection");
-        let refused = Worker::new(
+        let refused = Worker::of_child_specs(
             Arc::new(PostgresBroker::from_pool(pool)),
-            Arc::new(WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            )),
+            crate::test_support::child_specs::no_child_specs(),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
@@ -3167,6 +3255,42 @@ mod tests {
         panic!("task panicked before finalize");
     }
 
+    /// A task of the tests: the async function `body` of no input, whose
+    /// value the task ends with as JSON, or whose error it ends with.
+    struct TestTask<F>(F);
+
+    impl<F, Fut> AsyncTaskFn for TestTask<F>
+    where
+        F: Fn(()) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, TaskError>> + Send + 'static,
+    {
+        fn execute(
+            &self,
+            _args: &[u8],
+        ) -> Pin<Box<dyn Future<Output = RawTaskResult> + Send + '_>> {
+            Box::pin(async move {
+                match (self.0)(()).await {
+                    Ok(value) => TaskResult::Ok(
+                        serde_json::to_vec(&value).expect("a text value encodes as JSON"),
+                    ),
+                    Err(error) => TaskResult::Err(error),
+                }
+            })
+        }
+    }
+
+    /// The registered task of `body` (see [`TestTask`]).
+    fn test_task<F, Fut>(body: F) -> RegisteredTask
+    where
+        F: Fn(()) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, TaskError>> + Send + 'static,
+    {
+        RegisteredTask::Async {
+            task: Arc::new(TestTask(body)),
+            meta: TaskMeta::for_input::<()>(),
+        }
+    }
+
     struct InvalidJsonTask;
 
     impl AsyncTaskFn for InvalidJsonTask {
@@ -3288,9 +3412,7 @@ mod tests {
         let end = run_in_process(broker, task_fn, &claimed, self_heal).await;
         let writer = OutcomeWriter::new(
             Arc::clone(broker),
-            crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            )),
+            crate::test_support::child_specs::no_child_specs(),
             "worker-1".to_owned(),
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
@@ -3366,7 +3488,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        run_finalize(&broker, async_task_fn!(succeed, ()), task_id).await;
+        run_finalize(&broker, test_task(succeed), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "COMPLETED");
@@ -3541,7 +3663,7 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
-        run_finalize(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
+        run_finalize(&broker, test_task(callback_success_task), task_id).await;
 
         let (task_status, _, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(task_status, "COMPLETED");
@@ -3643,8 +3765,7 @@ mod tests {
         let workflow_id = link_task_to_workflow(&pool, &task_id, None).await;
         add_dependent_node(&pool, workflow_id).await;
 
-        let phase2_work =
-            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
+        let phase2_work = run_phase_one(&broker, test_task(callback_success_task), task_id).await;
         assert_eq!(
             phase2_work.phase_two,
             crate::worker::execution::PhaseTwoForm::Step(
@@ -3654,12 +3775,7 @@ mod tests {
 
         run_phase2(
             &broker,
-            ChildBuild::Registry {
-                registry: &WorkflowSpecRegistry::new(
-                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                ),
-                retention: &crate::core::RetentionConfig::default(),
-            },
+            ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
             phase2_work,
         )
         .await;
@@ -3698,16 +3814,10 @@ mod tests {
         let child_id = link_task_to_workflow(&pool, &task_id, None).await;
         let parent_id = adopt_as_child_workflow(&pool, child_id).await;
 
-        let phase2_work =
-            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
+        let phase2_work = run_phase_one(&broker, test_task(callback_success_task), task_id).await;
         run_phase2(
             &broker,
-            ChildBuild::Registry {
-                registry: &WorkflowSpecRegistry::new(
-                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                ),
-                retention: &crate::core::RetentionConfig::default(),
-            },
+            ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
             phase2_work,
         )
         .await;
@@ -3737,8 +3847,7 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
-        let phase2_work =
-            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
+        let phase2_work = run_phase_one(&broker, test_task(callback_success_task), task_id).await;
 
         let (task_status, _, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(task_status, "COMPLETED");
@@ -3753,17 +3862,8 @@ mod tests {
         assert_eq!(workflow_status, "RUNNING");
         assert_eq!(workflow_result, None);
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        run_phase2(
-            &broker,
-            ChildBuild::Registry {
-                registry: &registry,
-                retention: &crate::core::RetentionConfig::default(),
-            },
-            phase2_work,
-        )
-        .await;
+        let child_specs = crate::test_support::child_specs::TestChildSpecs::empty();
+        run_phase2(&broker, ChildBuild::Client(&child_specs), phase2_work).await;
 
         let workflow_task_status = fetch_workflow_task_status(&pool, &workflow_id, &task_id).await;
         assert_eq!(workflow_task_status, "COMPLETED");
@@ -3789,8 +3889,7 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
-        let phase2_work =
-            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
+        let phase2_work = run_phase_one(&broker, test_task(callback_success_task), task_id).await;
 
         // A broker on a database that does not exist: every checkout fails
         // with a server refusal (3D000), which is not retryable.
@@ -3801,14 +3900,10 @@ mod tests {
             sqlx::postgres::PgPoolOptions::new().connect_lazy_with(missing_database),
         );
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = crate::test_support::child_specs::TestChildSpecs::empty();
         run_phase2(
             &failed_phase2_broker,
-            ChildBuild::Registry {
-                registry: &registry,
-                retention: &crate::core::RetentionConfig::default(),
-            },
+            ChildBuild::Client(&child_specs),
             phase2_work,
         )
         .await;
@@ -3848,7 +3943,7 @@ mod tests {
 
         let (function_name, trigger_name) = install_fail_workflow_task_running_trigger(&pool).await;
         let result = AssertUnwindSafe(async {
-            run_finalize(&broker, async_task_fn!(counted_success_task, ()), task_id).await;
+            run_finalize(&broker, test_task(counted_success_task), task_id).await;
 
             assert_eq!(
                 EXECUTION_COUNT.load(Ordering::SeqCst),
@@ -3900,7 +3995,7 @@ mod tests {
 
         let (end, settled) = run_finalize_with(
             &broker,
-            async_task_fn!(counted_success_task, ()),
+            test_task(counted_success_task),
             task_id,
             OrphanSelfHeal::Off,
         )
@@ -3938,7 +4033,7 @@ mod tests {
             .unwrap();
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
 
-        run_finalize(&broker, async_task_fn!(counted_success_task, ()), task_id).await;
+        run_finalize(&broker, test_task(counted_success_task), task_id).await;
 
         assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
 
@@ -3973,7 +4068,7 @@ mod tests {
             .unwrap();
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
 
-        run_finalize(&broker, async_task_fn!(counted_success_task, ()), task_id).await;
+        run_finalize(&broker, test_task(counted_success_task), task_id).await;
 
         assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
 
@@ -4002,7 +4097,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 3, Some("{")).await;
 
-        run_finalize(&broker, async_task_fn!(succeed, ()), task_id).await;
+        run_finalize(&broker, test_task(succeed), task_id).await;
 
         let (status, _result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "FAILED", "a run of `succeed` would have completed");
@@ -4042,7 +4137,7 @@ mod tests {
         .to_string();
         insert_claimed_task(&pool, &task_id, "default", 0, 2, Some(&task_options)).await;
 
-        run_finalize(&broker, async_task_fn!(succeed, ()), task_id).await;
+        run_finalize(&broker, test_task(succeed), task_id).await;
 
         let (status, _result, _error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "PENDING", "the refusal is retried, not run");
@@ -4078,7 +4173,7 @@ mod tests {
         .to_string();
         insert_claimed_task(&pool, &task_id, "default", 0, 3, Some(&task_options)).await;
 
-        run_finalize(&broker, async_task_fn!(retryable_failure, ()), task_id).await;
+        run_finalize(&broker, test_task(retryable_failure), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "PENDING");
@@ -4121,7 +4216,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        run_finalize(&broker, async_task_fn!(fatal_failure, ()), task_id).await;
+        run_finalize(&broker, test_task(fatal_failure), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "FAILED");
@@ -4152,7 +4247,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        run_finalize(&broker, async_task_fn!(panic_task, ()), task_id).await;
+        run_finalize(&broker, test_task(panic_task), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "FAILED");

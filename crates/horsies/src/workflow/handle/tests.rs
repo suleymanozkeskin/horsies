@@ -251,6 +251,12 @@ fn each_read_failure_has_python_s_code() {
             RetrievalCode::WaitInsideTask.into(),
         ),
         (
+            WorkflowReadError::AsyncContext {
+                message: "m".to_owned(),
+            },
+            RetrievalCode::AsyncContext.into(),
+        ),
+        (
             WorkflowReadError::Database {
                 code: HandleErrorCode::DbOperationFailed,
                 message: "m".to_owned(),
@@ -284,5 +290,9 @@ fn a_handle_error_maps_to_its_read_failure() {
     assert!(matches!(
         WorkflowReadError::of_handle_error(error(HandleErrorCode::DbOperationFailed)),
         WorkflowReadError::Database { .. }
+    ));
+    assert!(matches!(
+        WorkflowReadError::of_handle_error(error(HandleErrorCode::AsyncContext)),
+        WorkflowReadError::AsyncContext { .. }
     ));
 }

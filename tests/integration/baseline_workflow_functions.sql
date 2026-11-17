@@ -799,6 +799,157 @@ BEGIN
                       'stored deadline: the refused step wrote nothing');
 END $$;
 
+-- Stored input and args_from of a promoted task node, read as Python's _build_enqueued_task_params reads them
+-- (horsies_workflow_task_node_refusal). The start writes readable data; these cases change the stored data of PENDING
+-- nodes after the start.
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002b1';
+    v_case record;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', (
+        SELECT jsonb_agg(n) FROM (
+            SELECT jsonb_build_object('idx', 0) AS n
+            UNION ALL
+            SELECT jsonb_build_object('idx', i, 'deps', jsonb_build_array(0)) FROM generate_series(1, 9) AS i
+        ) AS nodes
+    ));
+    UPDATE horsies_workflow_tasks n
+    SET input = c.input, args_from = c.args_from
+    FROM (VALUES
+        (1, 'broken{json', NULL::jsonb),
+        (2, 'null', NULL),
+        (3, '{"k":1', NULL),
+        (4, '{"a":1,"a":2}', NULL),
+        (5, '{}', '{"x":"not_an_int"}'),
+        (6, '{}', '{"x":1.5}'),
+        (7, '{}', '{"x":null,"y":0}'),
+        (8, '{}', '"{broken"'),
+        (9, '{}', '{"x":true}')
+    ) AS c(task_index, input, args_from)
+    WHERE n.workflow_id = v_wf AND n.task_index = c.task_index;
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    FOR v_case IN
+        SELECT * FROM (VALUES
+            (1, 'Corrupt kwargs JSON for task 1'),
+            (2, 'Corrupt kwargs JSON for task 2'),
+            (3, 'Corrupt kwargs JSON for task 3'),
+            (4, 'Corrupt kwargs JSON for task 4'),
+            (5, 'args_from has non-int values for task 5'),
+            (6, 'args_from has non-int values for task 6'),
+            (7, 'args_from has non-int values for task 7'),
+            (8, 'Corrupt args_from JSON for task 8'),
+            (9, 'args_from has non-int values for task 9')
+        ) AS expected(task_index, message)
+    LOOP
+        PERFORM wft_check(
+            (wft_node(v_wf, v_case.task_index)).status = 'FAILED'
+            AND (wft_node(v_wf, v_case.task_index)).task_id IS NULL
+            AND ((wft_node(v_wf, v_case.task_index)).result::json -> 'err' -> 'error_code'
+                 ->> '__builtin_task_code__') = 'WORKER_SERIALIZATION_ERROR'
+            AND ((wft_node(v_wf, v_case.task_index)).result::json -> 'err' ->> 'message') = v_case.message
+            AND ((wft_node(v_wf, v_case.task_index)).result::json -> 'err' -> 'data')::jsonb
+                = jsonb_build_object('workflow_id', v_wf::text, 'task_index', v_case.task_index),
+            'stored node data: ' || v_case.message);
+    END LOOP;
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002b2';
+    v_input jsonb;
+BEGIN
+    -- Data that Python reads with no refusal: an input that is not an object or is empty gives no static members; an
+    -- args_from that is not an object gives no members; an index outside the integer range names no node; a jsonb
+    -- string holding an object text is read as that object.
+    PERFORM * FROM wft_start1(v_wf, 'fail', (
+        SELECT jsonb_agg(n) FROM (
+            SELECT jsonb_build_object('idx', 0) AS n
+            UNION ALL
+            SELECT jsonb_build_object('idx', i, 'deps', jsonb_build_array(0)) FROM generate_series(1, 8) AS i
+        ) AS nodes
+    ));
+    UPDATE horsies_workflow_tasks n
+    SET input = c.input, args_from = c.args_from
+    FROM (VALUES
+        (1, '[1,2]', '{"a":0}'::jsonb),
+        (2, '', NULL),
+        (3, ' "text" ', NULL),
+        (4, '{}', '{"a":99999999999,"b":-1}'),
+        (5, '{}', to_jsonb('{"a":0}'::text)),
+        (6, '{"k":1}', '[]'),
+        (7, '{"k":1}', 'false'),
+        (8, '{"k":1}', '""')
+    ) AS c(task_index, input, args_from)
+    WHERE n.workflow_id = v_wf AND n.task_index = c.task_index;
+    PERFORM wft_finish(v_wf, 0, wft_ok('7'));
+    PERFORM wft_check((SELECT bool_and(n.status = 'ENQUEUED' AND n.task_id IS NOT NULL)
+                       FROM horsies_workflow_tasks n WHERE n.workflow_id = v_wf AND n.task_index BETWEEN 1 AND 8),
+                      'readable node data: every node is enqueued with a task');
+    v_input := (SELECT input::jsonb FROM horsies_tasks WHERE id = wft_task_of(v_wf, 1));
+    PERFORM wft_check((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(v_input) AS k)
+                      = ARRAY['__h_workflow_meta__', 'a']
+                      AND v_input -> 'a' -> 'inner' = wft_ok('7')::jsonb,
+                      'readable node data: an array input gives no static members');
+    PERFORM wft_check((SELECT array_agg(k) FROM jsonb_object_keys(
+                          (SELECT input::jsonb FROM horsies_tasks WHERE id = wft_task_of(v_wf, 2))) AS k)
+                      = ARRAY['__h_workflow_meta__']
+                      AND (SELECT array_agg(k) FROM jsonb_object_keys(
+                          (SELECT input::jsonb FROM horsies_tasks WHERE id = wft_task_of(v_wf, 3))) AS k)
+                      = ARRAY['__h_workflow_meta__'],
+                      'readable node data: an empty input and a string input give no static members');
+    PERFORM wft_check((SELECT array_agg(k) FROM jsonb_object_keys(
+                          (SELECT input::jsonb FROM horsies_tasks WHERE id = wft_task_of(v_wf, 4))) AS k)
+                      = ARRAY['__h_workflow_meta__'],
+                      'readable node data: indexes that name no node give no member');
+    PERFORM wft_check((SELECT input::jsonb -> 'a' -> 'inner' FROM horsies_tasks WHERE id = wft_task_of(v_wf, 5))
+                      = wft_ok('7')::jsonb,
+                      'readable node data: a jsonb string holding an object text is read as that object');
+    PERFORM wft_check((SELECT bool_and((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(t.input::jsonb) AS k)
+                                       = ARRAY['__h_workflow_meta__', 'k'])
+                       FROM horsies_tasks t
+                       WHERE t.id IN (wft_task_of(v_wf, 6), wft_task_of(v_wf, 7), wft_task_of(v_wf, 8))),
+                      'readable node data: an empty array, false and "" give no args_from members');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002b3';
+BEGIN
+    -- The conflict names the first args_from key in Python's order (the stored key order of the jsonb value: "b"
+    -- before "aa"), quoted as Python's f-string quotes it.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"deps":[0]},{"idx":2,"deps":[0]}]');
+    UPDATE horsies_workflow_tasks n
+    SET input = c.input, args_from = c.args_from
+    FROM (VALUES
+        (1, '{"aa":1,"b":2}', '{"aa":0,"b":0}'::jsonb),
+        (2, '{"it''s":1}', '{"it''s":0}')
+    ) AS c(task_index, input, args_from)
+    WHERE n.workflow_id = v_wf AND n.task_index = c.task_index;
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    PERFORM wft_check(((wft_node(v_wf, 1)).result::json -> 'err' ->> 'message')
+                      = 'args_from key ''b'' conflicts with static kwarg (task 1)',
+                      'args_from key conflict: the first key in stored order');
+    PERFORM wft_check(((wft_node(v_wf, 2)).result::json -> 'err' ->> 'message')
+                      = 'args_from key ''it''s'' conflicts with static kwarg (task 2)',
+                      'args_from key conflict: the key is quoted as Python quotes it');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002b4';
+    v_owed horsies_workflow_step_row;
+BEGIN
+    -- The CHILD_START row gives a jsonb string args_from as its text, which the child build reads again as JSON.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"deps":[0],"sub":true}]');
+    UPDATE horsies_workflow_tasks SET args_from = '"{broken"' WHERE workflow_id = v_wf AND task_index = 1;
+    PERFORM wft_phase1(wft_task_of(v_wf, 0), wft_ok('1'));
+    SELECT * INTO v_owed FROM horsies_workflow_node_finish(wft_task_of(v_wf, 0), TRUE, 'READ') AS r
+    WHERE r.row_kind = 'CHILD_START';
+    PERFORM wft_check(v_owed.args_from = '{broken', 'child start row: a jsonb string args_from as its text');
+END $$;
+
 DO $$
 DECLARE
     v_wf uuid := '00000000-0000-7000-8000-000000000271';

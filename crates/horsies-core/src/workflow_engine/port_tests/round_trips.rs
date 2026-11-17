@@ -9,8 +9,8 @@
 //! proxy that counts round trips. The core sends one round trip per
 //! statement: a step in autocommit is one, and a step that owes a child start
 //! is `BEGIN`, the step, the child start and `COMMIT`. Each case runs once
-//! before the count on the same broker: that run checks the client family,
-//! runs the pool's first-use check and prepares the statements on the
+//! before the count on the same broker: that run checks the schema and the
+//! client family, runs the pool's first-use check and prepares the statements on the
 //! connection. The workflows of both runs are started, and their node tasks
 //! taken to RUNNING, through the test's own pool before the first run, so
 //! the counted run follows the first within the idle ping limit of the pool
@@ -23,16 +23,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    node, node_status, registry_of, run_node_task, spec, start, sub_workflow_node, task_node,
+    child_specs_of, node, node_status, run_node_task, spec, start, sub_workflow_node, task_node,
     worker_phase_one, worker_phase_two, workflow_status, CountedBroker, IsolatedDatabase,
     NodeReport, RunningNodeTask,
 };
+use crate::broker::workflow_start::ClientStartOutcome;
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::{AnyNode, WorkflowSpec, WorkflowSpecRegistry};
-use crate::workflow_engine::bound_handle::WorkflowHandle;
-use crate::workflow_engine::start::start_workflow;
+use crate::core::{AnyNode, WorkflowSpec};
+use crate::test_support::child_specs::TestChildSpecs;
 
 /// The round trips of a step in autocommit.
 const ONE_STATEMENT: u32 = 1;
@@ -114,7 +112,7 @@ struct FinalizeRoundTrips {
 /// counted.
 async fn finalize_counted(
     counted: &CountedBroker,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
     task: &RunningNodeTask,
     report: NodeReport,
 ) -> FinalizeRoundTrips {
@@ -122,7 +120,7 @@ async fn finalize_counted(
         .count(worker_phase_one(&counted.broker, task, report))
         .await;
     let (phase_two, ()) = counted
-        .count(worker_phase_two(&counted.broker, registry, task, done))
+        .count(worker_phase_two(&counted.broker, child_specs, task, done))
         .await;
     FinalizeRoundTrips {
         phase_one,
@@ -136,11 +134,11 @@ async fn finalize_counted(
 /// either runs, so the counted run follows the first with no wait.
 async fn two_running_node_a(
     pool: &PgPool,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
     shape: Shape,
 ) -> [(Uuid, RunningNodeTask); 2] {
-    let first = start(pool, &shape_spec(shape), registry).await;
-    let second = start(pool, &shape_spec(shape), registry).await;
+    let first = start(pool, &shape_spec(shape), child_specs).await;
+    let second = start(pool, &shape_spec(shape), child_specs).await;
     [
         (first, run_node_task(pool, first, 0).await),
         (second, run_node_task(pool, second, 0).await),
@@ -155,36 +153,39 @@ async fn measure_node_a(
     shape: Shape,
     report: NodeReport,
 ) -> (Uuid, FinalizeRoundTrips) {
-    let registry = registry_of(&[round_trip_child()]);
+    let child_specs = child_specs_of(&[round_trip_child()]);
     let [(_, warm_up), (workflow_id, counted_task)] =
-        two_running_node_a(pool, &registry, shape).await;
+        two_running_node_a(pool, &child_specs, shape).await;
     let counted = CountedBroker::open(pool).await;
-    let _warm_up = finalize_counted(&counted, &registry, &warm_up, report).await;
-    let measured = finalize_counted(&counted, &registry, &counted_task, report).await;
+    let _warm_up = finalize_counted(&counted, &child_specs, &warm_up, report).await;
+    let measured = finalize_counted(&counted, &child_specs, &counted_task, report).await;
     counted.close().await;
     (workflow_id, measured)
 }
 
-/// Starts `workflow_spec` on `broker` with a new id. Panics when the start
-/// fails.
+/// Starts `workflow_spec` on `broker` with a new id, through the core's
+/// start of a client spec. Panics when the start fails or writes nothing.
 async fn start_on(
     broker: &Arc<PostgresBroker>,
     workflow_spec: &WorkflowSpec,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    let started: crate::core::WorkflowStartResult<WorkflowHandle<serde_json::Value>> =
-        start_workflow(
-            broker,
-            workflow_spec,
-            Some(workflow_id),
-            registry,
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+    let started = broker
+        .start_client_workflow(
+            &child_specs.client_spec(workflow_spec),
+            workflow_id,
+            chrono::Utc::now(),
+            false,
+            child_specs,
         )
         .await;
     match started {
-        Ok(handle) => assert_eq!(handle.workflow_id(), workflow_id),
+        Ok(ClientStartOutcome::Started) => {}
+        Ok(outcome) => panic!(
+            "start of workflow '{}' wrote nothing: {outcome:?}",
+            workflow_spec.name
+        ),
         Err(error) => panic!(
             "start of workflow '{}' failed: {error:?}",
             workflow_spec.name
@@ -303,14 +304,14 @@ async fn phase_two_round_trips_follow_the_shape() {
 #[serial]
 async fn a_success_completion_is_one_round_trip_with_and_without_dependents() {
     let db = IsolatedDatabase::create().await;
-    let registry = registry_of(&[]);
-    let runs = two_running_node_a(&db.pool, &registry, Shape::Chain).await;
+    let child_specs = child_specs_of(&[]);
+    let runs = two_running_node_a(&db.pool, &child_specs, Shape::Chain).await;
     let counted = CountedBroker::open(&db.pool).await;
     let mut measured = Vec::with_capacity(runs.len());
     for (workflow_id, node_a) in &runs {
-        let promote = finalize_counted(&counted, &registry, node_a, NodeReport::Success).await;
+        let promote = finalize_counted(&counted, &child_specs, node_a, NodeReport::Success).await;
         let node_b = run_node_task(&db.pool, *workflow_id, 1).await;
-        let complete = finalize_counted(&counted, &registry, &node_b, NodeReport::Success).await;
+        let complete = finalize_counted(&counted, &child_specs, &node_b, NodeReport::Success).await;
         assert_eq!(workflow_status(&db.pool, *workflow_id).await, "COMPLETED");
         measured.push((promote.phase_two, complete.phase_two));
     }
@@ -398,11 +399,11 @@ fn child_of_shape(name: &str, chained: bool) -> WorkflowSpec {
 async fn a_start_is_one_round_trip_for_one_root_and_for_fifty() {
     let db = IsolatedDatabase::create().await;
     let counted = CountedBroker::open(&db.pool).await;
-    let registry = registry_of(&[]);
+    let child_specs = child_specs_of(&[]);
     let _warm_up = start_on(
         &counted.broker,
         &roots("round_trip_start_warm_up", 1),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -410,14 +411,14 @@ async fn a_start_is_one_round_trip_for_one_root_and_for_fifty() {
         .count(start_on(
             &counted.broker,
             &roots("round_trip_start_one", 1),
-            &registry,
+            &child_specs,
         ))
         .await;
     let (many, many_roots) = counted
         .count(start_on(
             &counted.broker,
             &roots("round_trip_start_many", MANY_ROOTS),
-            &registry,
+            &child_specs,
         ))
         .await;
     counted.close().await;
@@ -445,7 +446,7 @@ async fn a_child_start_is_one_round_trip_for_any_child_shape() {
     let db = IsolatedDatabase::create().await;
     let flat = child_of_shape("round_trip_flat_child", false);
     let chain = child_of_shape("round_trip_chain_child", true);
-    let registry = registry_of(&[flat.clone(), chain.clone()]);
+    let child_specs = child_specs_of(&[flat.clone(), chain.clone()]);
     let counted = CountedBroker::open(&db.pool).await;
     let _warm_up = start_on(
         &counted.broker,
@@ -453,7 +454,7 @@ async fn a_child_start_is_one_round_trip_for_any_child_shape() {
             "round_trip_parent_warm_up",
             vec![sub_workflow_node(0, &flat)],
         ),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -461,7 +462,7 @@ async fn a_child_start_is_one_round_trip_for_any_child_shape() {
         .count(start_on(
             &counted.broker,
             &spec("round_trip_flat_parent", vec![sub_workflow_node(0, &flat)]),
-            &registry,
+            &child_specs,
         ))
         .await;
     let (chain_round_trips, chain_parent) = counted
@@ -471,7 +472,7 @@ async fn a_child_start_is_one_round_trip_for_any_child_shape() {
                 "round_trip_chain_parent",
                 vec![sub_workflow_node(0, &chain)],
             ),
-            &registry,
+            &child_specs,
         ))
         .await;
     counted.close().await;

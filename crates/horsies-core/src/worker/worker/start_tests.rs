@@ -23,7 +23,6 @@ use super::{wait_for_claim_wake, ClaimWake, ClaimWakes, StartOutcome, Worker};
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::{AppConfig, WorkerResilienceConfig};
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
@@ -31,6 +30,7 @@ use crate::worker::executor::protocol::{
     ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
 };
 use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
+use crate::worker::executor::slots::{ChildLayout, PoolBoard};
 
 /// The longest wait for an event a test expects.
 const WAIT: Duration = Duration::from_secs(30);
@@ -52,11 +52,9 @@ fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) ->
     let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
     let connection = ChildConnection::of_config(&app_config.broker)
         .expect("the config of the test database validates");
-    Worker::new(
+    Worker::of_child_specs(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         app_config,
         WorkerConfig::default(),
         SelectedProfile {
@@ -84,6 +82,16 @@ fn no_claim_wakes() -> ClaimWakes {
     ClaimWakes {
         subscriptions: Vec::new(),
     }
+}
+
+/// A board of one isolated slot whose child never reports ready: its
+/// child-ready wake never fires.
+fn quiet_board() -> PoolBoard {
+    PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    })
 }
 
 /// A broker on a port where no server listens: each statement fails after
@@ -215,6 +223,7 @@ async fn a_stop_ends_the_claim_wait() {
         wait_for_claim_wake(
             &cancel,
             &Notify::new(),
+            &quiet_board(),
             &claim_wakes,
             Duration::from_secs(3_600),
         ),
@@ -232,6 +241,7 @@ async fn the_claim_wait_ends_at_the_poll_interval() {
     let wake = wait_for_claim_wake(
         &CancellationToken::new(),
         &Notify::new(),
+        &quiet_board(),
         &claim_wakes,
         Duration::from_millis(50),
     )
