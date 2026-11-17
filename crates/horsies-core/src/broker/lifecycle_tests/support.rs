@@ -10,7 +10,7 @@
 //! comparison.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -942,10 +942,6 @@ pub(super) async fn node_state(pool: &PgPool, workflow_id: Uuid) -> (String, Opt
 const BACKEND_EXIT_POLLS: u32 = 50;
 const BACKEND_EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Bound of the wait for a released connection to be idle in its pool.
-const IDLE_POLLS: u32 = 100;
-const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-
 /// The failed-attempt write of a task whose child reported a result
 /// (claimed-row rule `REFUSE`), on a core pool on the test database.
 pub(super) async fn write_failed_attempt(
@@ -990,29 +986,6 @@ pub(crate) fn database_options(pool: &PgPool) -> PgConnectOptions {
     (*pool.connect_options()).clone()
 }
 
-/// Wait until the one connection of `pool` is back in the pool; the release
-/// check of the pool runs in the background after a query.
-pub(crate) async fn wait_until_idle(pool: &PgPool) {
-    for _ in 0..IDLE_POLLS {
-        if pool.num_idle() == 1 {
-            return;
-        }
-        tokio::time::sleep(IDLE_POLL_INTERVAL).await;
-    }
-    panic!("the pooled connection did not return to its pool");
-}
-
-/// Open the one connection of `pool`, wait until it is idle again, and
-/// return its backend pid.
-pub(super) async fn pooled_backend_pid(pool: &PgPool) -> i32 {
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(pool)
-        .await
-        .expect("read the pooled backend pid");
-    wait_until_idle(pool).await;
-    pid
-}
-
 /// Terminate the server side of a connection and wait until it is gone. The
 /// client side stays in its pool.
 pub(super) async fn terminate_backend(observer: &PgPool, pid: i32) {
@@ -1044,14 +1017,32 @@ const PROXY_BUFFER_BYTES: usize = 16 * 1024;
 /// Time that the server gets to finish the statement whose reply is
 /// dropped, before the client's connection ends.
 const REPLY_DROP_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+/// The longest marker that the request filter matches
+/// ([`WireProxy::drop_reply_to_request_carrying`]).
+const PROXY_MARKER_MAX_BYTES: usize = 64;
+/// Bytes of the open request that a relay keeps from its earlier reads, so a
+/// marker that one read ends and the next read continues still matches.
+const PROXY_REQUEST_TAIL_BYTES: usize = PROXY_MARKER_MAX_BYTES - 1;
+
+/// The client request whose reply the proxy drops next.
+#[derive(Debug)]
+enum DropTarget {
+    /// No reply is dropped.
+    Disarmed,
+    /// The reply to the next request of any connection.
+    NextRequest,
+    /// The reply to the next request, of any connection, whose bytes carry
+    /// this marker.
+    RequestCarrying(Vec<u8>),
+}
 
 /// A TCP proxy to the test database (Python's `RoundTripProxy`). It counts
-/// round trips, and it can drop the reply of the next request: the server
-/// receives and runs the request; the client gets no reply and then a closed
-/// connection.
+/// round trips, and it can drop the reply to one request: the next request,
+/// or the next request that carries a marker. The server receives and runs
+/// the request; the client gets no reply and then a closed connection.
 pub(crate) struct WireProxy {
     port: u16,
-    armed: Arc<AtomicBool>,
+    target: Arc<Mutex<DropTarget>>,
     dropped: Arc<AtomicBool>,
     round_trips: Arc<AtomicU32>,
     accept_loop: tokio::task::JoinHandle<()>,
@@ -1064,7 +1055,7 @@ impl WireProxy {
             .await
             .expect("bind the proxy");
         let port = listener.local_addr().expect("proxy address").port();
-        let armed = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(DropTarget::Disarmed));
         let dropped = Arc::new(AtomicBool::new(false));
         let round_trips = Arc::new(AtomicU32::new(0));
         let accept_loop = tokio::spawn(accept_connections(
@@ -1072,14 +1063,14 @@ impl WireProxy {
             upstream.get_host().to_owned(),
             upstream.get_port(),
             RelayState {
-                armed: Arc::clone(&armed),
+                target: Arc::clone(&target),
                 dropped: Arc::clone(&dropped),
                 round_trips: Arc::clone(&round_trips),
             },
         ));
         Self {
             port,
-            armed,
+            target,
             dropped,
             round_trips,
             accept_loop,
@@ -1093,7 +1084,26 @@ impl WireProxy {
 
     /// Drop the reply to the next request that a client sends.
     pub(crate) fn drop_next_reply(&self) {
-        self.armed.store(true, Ordering::SeqCst);
+        self.arm(DropTarget::NextRequest);
+    }
+
+    /// Drop the reply to the next request, of any connection, whose bytes
+    /// carry `marker`, for example a bound parameter in its binary form. The
+    /// requests before it are relayed.
+    ///
+    /// Panics when `marker` is empty or longer than
+    /// [`PROXY_MARKER_MAX_BYTES`].
+    pub(crate) fn drop_reply_to_request_carrying(&self, marker: &[u8]) {
+        assert!(
+            (1..=PROXY_MARKER_MAX_BYTES).contains(&marker.len()),
+            "a request marker has 1 to {PROXY_MARKER_MAX_BYTES} bytes, not {}",
+            marker.len()
+        );
+        self.arm(DropTarget::RequestCarrying(marker.to_vec()));
+    }
+
+    fn arm(&self, target: DropTarget) {
+        *self.target.lock().expect("the proxy's drop target") = target;
     }
 
     /// Whether a reply was dropped.
@@ -1116,7 +1126,7 @@ impl WireProxy {
 /// The state that every relay of one proxy shares.
 #[derive(Debug, Clone)]
 struct RelayState {
-    armed: Arc<AtomicBool>,
+    target: Arc<Mutex<DropTarget>>,
     dropped: Arc<AtomicBool>,
     round_trips: Arc<AtomicU32>,
 }
@@ -1145,9 +1155,9 @@ async fn accept_connections(
 }
 
 /// Relay one client connection. A client request that follows a server
-/// reply starts a round trip. When the proxy is armed, the next request of
-/// the client marks the connection; the reply to it is not relayed, and the
-/// client's connection ends after `REPLY_DROP_SETTLE`.
+/// reply starts a round trip. A read of a request that hits the proxy's
+/// [`DropTarget`] marks the connection; the reply to it is not relayed, and
+/// the client's connection ends after `REPLY_DROP_SETTLE`.
 async fn relay(client: TcpStream, upstream: TcpStream, state: RelayState) {
     let (mut client_read, mut client_write) = client.into_split();
     let (mut upstream_read, mut upstream_write) = upstream.into_split();
@@ -1156,24 +1166,28 @@ async fn relay(client: TcpStream, upstream: TcpStream, state: RelayState) {
     let cut_by_request = Arc::clone(&cut);
     let opened_by_request = Arc::clone(&request_open);
     let RelayState {
-        armed,
+        target,
         dropped,
         round_trips,
     } = state;
     let requests = tokio::spawn(async move {
         let mut buffer = vec![0_u8; PROXY_BUFFER_BYTES];
+        let mut request_tail: Vec<u8> = Vec::with_capacity(2 * PROXY_REQUEST_TAIL_BYTES);
         for _ in 0..PROXY_READ_LIMIT {
             let read = match client_read.read(&mut buffer).await {
                 Ok(0) | Err(_) => return,
                 Ok(read) => read,
             };
+            let bytes = &buffer[..read];
             if !opened_by_request.swap(true, Ordering::SeqCst) {
                 round_trips.fetch_add(1, Ordering::SeqCst);
+                request_tail.clear();
             }
-            if armed.swap(false, Ordering::SeqCst) {
+            if hits_drop_target(&target, &request_tail, bytes) {
                 cut_by_request.store(true, Ordering::SeqCst);
             }
-            if upstream_write.write_all(&buffer[..read]).await.is_err() {
+            keep_request_tail(&mut request_tail, bytes);
+            if upstream_write.write_all(bytes).await.is_err() {
                 return;
             }
         }
@@ -1195,6 +1209,34 @@ async fn relay(client: TcpStream, upstream: TcpStream, state: RelayState) {
         }
     }
     requests.abort();
+}
+
+/// Whether one read of a client request hits `target`. `request_tail` holds
+/// the last bytes of the earlier reads of the same request. A hit disarms
+/// the target, so it hits once.
+fn hits_drop_target(target: &Mutex<DropTarget>, request_tail: &[u8], read: &[u8]) -> bool {
+    let mut current = target.lock().expect("the proxy's drop target");
+    let hit = match &*current {
+        DropTarget::Disarmed => false,
+        DropTarget::NextRequest => true,
+        DropTarget::RequestCarrying(marker) => [request_tail, read]
+            .concat()
+            .windows(marker.len())
+            .any(|window| window == marker.as_slice()),
+    };
+    if hit {
+        *current = DropTarget::Disarmed;
+    }
+    hit
+}
+
+/// Keeps the last [`PROXY_REQUEST_TAIL_BYTES`] bytes of the open request in
+/// `request_tail`, after `read`.
+fn keep_request_tail(request_tail: &mut Vec<u8>, read: &[u8]) {
+    let read_tail = &read[read.len().saturating_sub(PROXY_REQUEST_TAIL_BYTES)..];
+    request_tail.extend_from_slice(read_tail);
+    let start = request_tail.len().saturating_sub(PROXY_REQUEST_TAIL_BYTES);
+    *request_tail = request_tail.split_off(start);
 }
 
 /// The status of a task: of its live row, else of its history row.

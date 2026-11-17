@@ -31,7 +31,9 @@ use crate::core::lifecycle::{
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::StatementFailure;
-use crate::worker::execution::{finalize_workflow_phase, FinalizeStage, PhaseTwoForm};
+use crate::worker::execution::{
+    finalize_workflow_phase, FinalizeError, FinalizeStage, PhaseTwoForm,
+};
 
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
@@ -249,22 +251,11 @@ async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
-/// Python `test_a_dead_connection_fails_phase_two_as_retryable`: the wake of
-/// phase 2 runs on the dead pooled connection, and its error is a retryable
-/// phase-2 error.
-#[tokio::test]
-#[serial]
-async fn a_dead_connection_fails_phase_two_as_retryable() {
-    let pool = pool().await;
-    let unpinged = unpinged_single_connection_pool(database_options(&pool)).await;
-    let pid = pooled_backend_pid(&unpinged).await;
-    terminate_backend(&pool, pid).await;
-
-    // The wake of a plain task runs on the broker's sqlx pool, the unpinged
-    // pool with the dead connection.
-    let broker = PostgresBroker::from_pool(unpinged.clone());
-    let result = finalize_workflow_phase(
-        &broker,
+/// Phase 2 of a plain task on `broker`: the capacity wake of [`QUEUE`], which
+/// phase 1 did not send.
+async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
+    finalize_workflow_phase(
+        broker,
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         Uuid::new_v4(),
         QUEUE,
@@ -273,16 +264,49 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
         PhaseTwoForm::NotKnown,
         &RetentionConfig::default(),
     )
-    .await;
+    .await
+    .map(|_parent_advances| ())
+}
 
+/// Python `test_a_dead_connection_fails_phase_two_as_retryable`
+/// (`tests/integration/test_autocommit_outcomes.py:400`): a connection lost
+/// while the phase-2 wake is in flight fails phase 2 as retryable.
+///
+/// The wake of a plain task runs on the broker's main core pool, and the
+/// broker's core pools connect through the proxy (`WireProxy`). The first
+/// wake opens the pool's one connection, runs the pool's first-use check,
+/// prepares the wake statement on it and returns it to the pool. The wake
+/// under test takes that connection within the idle ping limit, so the wake
+/// is its one request: the server runs it, and the proxy drops the reply and
+/// closes the connection.
+#[tokio::test]
+#[serial]
+async fn a_dead_connection_fails_phase_two_as_retryable() {
+    let pool = pool().await;
+    let upstream = database_options(&pool);
+    let proxy = WireProxy::start(&upstream).await;
+    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+    let broker = PostgresBroker::from_pool(proxied);
+    plain_phase_two(&broker).await.expect("warm up");
+    proxy.reset_round_trips();
+
+    proxy.drop_next_reply();
+    let result = plain_phase_two(&broker).await;
+
+    assert!(proxy.reply_was_dropped(), "the proxy relayed the reply");
+    assert_eq!(
+        proxy.round_trips(),
+        1,
+        "the wake is the one request of the pooled connection"
+    );
     match result {
         Err(error) => {
             assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
             assert!(error.retryable, "{error}");
         }
-        Ok(_) => panic!("the wake succeeded on a dead connection"),
+        Ok(()) => panic!("the wake succeeded on a dead connection"),
     }
-    unpinged.close().await;
+    broker.close().await;
 }
 
 /// Python `test_a_dead_connection_fails_the_claim_pass_as_retryable`, on a
