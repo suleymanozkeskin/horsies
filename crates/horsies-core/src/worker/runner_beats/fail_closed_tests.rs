@@ -19,6 +19,7 @@ use chrono::TimeZone;
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::config::recovery::RecoveryConfigError;
+use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, ChildConnection, ChildFrame, ChildKind, ChildLogLevel,
@@ -40,6 +41,10 @@ use crate::worker::retry::read_stored_options;
 
 /// The longest wait for an event a test expects.
 const WAIT: Duration = Duration::from_secs(10);
+/// The start of the watchdog's line for late beats with recovery off.
+const LATE_BEATS_LINE: &str = "runner heartbeats are late; the worker runs on";
+/// The start of the writer's line for a failed write.
+const FAILED_WRITE_LINE: &str = "runner heartbeat write failed";
 /// The beat interval of the tests.
 const INTERVAL: Duration = Duration::from_millis(50);
 /// A fail-closed window that passes within a test.
@@ -512,9 +517,16 @@ fn task_code_in_the_worker_process_ends_the_process_at_once() {
 // ---------------------------------------------------------------------------
 
 /// Python `test_with_recovery_off_failing_writes_never_stop_the_worker`: no
-/// reaper fails the row, so a stop would protect nothing.
+/// reaper fails the row, so a stop would protect nothing. And
+/// `test_failed_writes_are_logged_at_most_once_per_log_interval`, the lines:
+/// writes that fail for 1.5 s, inside one log interval
+/// (`BEAT_FAILURE_LOG_INTERVAL`, 60 s), give one line, for the first
+/// failure, which names the consequence of recovery off; the watchdog's
+/// late line names the last error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn with_recovery_off_failing_writes_never_stop_the_worker() {
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
     let spawner = Spawner::start().expect("the spawner starts");
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
@@ -525,6 +537,19 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     let launched = launch(refusing_pool(), &live, StaleRunningRecovery::Off);
     tokio::time::sleep(Duration::from_millis(1_500)).await;
 
+    let failed = capture.lines_starting(tracing::Level::ERROR, FAILED_WRITE_LINE);
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].field("attempt"), Some("1"));
+    assert!(
+        failed[0]
+            .message
+            .ends_with("no reaper fails a RUNNING row, so the worker runs on"),
+        "{}",
+        failed[0].message
+    );
+    let late = one_late_line(&capture);
+    let cause = late.field("cause").expect("the late line names its cause");
+    assert!(cause.contains("last error: "), "{cause}");
     launched.still_watching();
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
     assert!(live
@@ -534,10 +559,13 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     end_child(spawner, spawned).await;
 }
 
-/// Python `test_with_recovery_off_a_dead_beat_thread_is_logged_and_the_worker_runs`,
-/// the worker part: a dead writer does not stop the worker.
+/// Python `test_with_recovery_off_a_dead_beat_thread_is_logged_and_the_worker_runs`:
+/// a dead writer does not stop the worker, and the watchdog logs, once per
+/// log interval, that no beat lands and the worker runs on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn with_recovery_off_a_dead_writer_leaves_the_worker_running() {
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
     let spawner = Spawner::start().expect("the spawner starts");
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
@@ -549,6 +577,12 @@ async fn with_recovery_off_a_dead_writer_leaves_the_worker_running() {
     launched.writer.abort();
     tokio::time::sleep(Duration::from_millis(1_500)).await;
 
+    let late = one_late_line(&capture);
+    let cause = late.field("cause").expect("the late line names its cause");
+    assert!(
+        cause.ends_with("the last write has not returned"),
+        "{cause}"
+    );
     launched.still_watching();
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
     launched.stop().await;
@@ -581,9 +615,20 @@ async fn with_recovery_off_a_late_beat_names_the_unreturned_write() {
     let _held = live
         .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
         .expect("the registry is open");
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
     let launched = launch(silent_pool(&silent), &live, StaleRunningRecovery::Off);
     tokio::time::sleep(Duration::from_millis(1_500)).await;
 
+    let late = one_late_line(&capture);
+    let cause = late.field("cause").expect("the late line names its cause");
+    assert!(
+        cause.ends_with("the last write has not returned"),
+        "{cause}"
+    );
+    assert!(capture
+        .lines_starting(tracing::Level::ERROR, FAILED_WRITE_LINE)
+        .is_empty());
     launched.still_watching();
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
     launched.stop().await;
@@ -610,6 +655,98 @@ fn failed_writes_are_logged_at_most_once_per_log_interval() {
     assert!(every_minute.due(start));
     assert!(!every_minute.due(start + BEAT_FAILURE_LOG_INTERVAL - Duration::from_millis(1)));
     assert!(every_minute.due(start + BEAT_FAILURE_LOG_INTERVAL));
+}
+
+/// The one late-beat line of the watchdog: a warning, logged once per log
+/// interval (`BEAT_FAILURE_LOG_INTERVAL`, 60 s, longer than any test).
+fn one_late_line(capture: &LogCapture) -> CapturedEvent {
+    let late = capture.lines_starting(tracing::Level::WARN, LATE_BEATS_LINE);
+    match <[CapturedEvent; 1]>::try_from(late) {
+        Ok([line]) => line,
+        Err(lines) => panic!("one late-beat line, got {lines:?}"),
+    }
+}
+
+/// Python `test_kill_child_session_reports_a_refused_kill`: a kill of a
+/// child that held tasks, which the OS refuses (`KillOutcome::NotPermitted`,
+/// errno `EPERM`), is logged with the child and its tasks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_kill_is_logged_with_the_child_and_its_tasks() {
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    let spawner = Spawner::start().expect("the spawner starts");
+    let (spawned, child) = sleeping_child(&spawner).await;
+    let pid = child.pid.get().to_string();
+    let task_id = Uuid::new_v4();
+
+    log_kill(
+        &ChildToKill {
+            child,
+            task_ids: vec![task_id],
+        },
+        KillOutcome::NotPermitted,
+    );
+
+    let refused =
+        capture.lines_starting(tracing::Level::ERROR, "cannot kill a child that held tasks");
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].field("pid"), Some(pid.as_str()));
+    assert_eq!(refused[0].field("outcome"), Some("NotPermitted"));
+    let tasks = refused[0].field("tasks").expect("the line names the tasks");
+    assert!(tasks.contains(&task_id.to_string()), "{tasks}");
+    end_child(spawner, spawned).await;
+}
+
+/// Set only in the process that [`a_worker_that_does_not_stop_within_the_grace_is_exited`]
+/// starts.
+const GRACE_PROBE_ENV: &str = "HORSIES_TEST_RUNNER_BEATS_GRACE_PROBE";
+const GRACE_PROBE_TEST: &str =
+    "worker::runner_beats::fail_closed_tests::grace_probe_a_worker_that_does_not_stop";
+
+/// The body of the probe process: a child holds a task, writes fail, and
+/// nothing stops the watchdog after it asks the worker to stop. The watchdog
+/// ends the process after the grace; without the probe variable this test
+/// returns at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grace_probe_a_worker_that_does_not_stop() {
+    let Some(_probe) = std::env::var_os(GRACE_PROBE_ENV) else {
+        return;
+    };
+    let spawner = Spawner::start().expect("the spawner starts");
+    let (_spawned, child) = sleeping_child(&spawner).await;
+    let live = LiveDispatches::default();
+    let _held = live
+        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .expect("the registry is open");
+    let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
+    tokio::time::sleep(FAIL_CLOSED_EXIT_GRACE + WAIT).await;
+    // Reached only when the watchdog did not end the process.
+    launched.stop().await;
+}
+
+/// Python `test_a_worker_that_does_not_stop_is_exited`: after it fails
+/// closed, the watchdog asks the worker to stop; a worker that has not
+/// stopped within `FAIL_CLOSED_EXIT_GRACE` (120 s) is ended with code 77.
+/// The test waits the whole grace.
+#[test]
+fn a_worker_that_does_not_stop_within_the_grace_is_exited() {
+    let started = Instant::now();
+    let status = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            GRACE_PROBE_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(GRACE_PROBE_ENV, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the probe process runs");
+    let elapsed = started.elapsed();
+    assert_eq!(status.code(), Some(RUNNER_HEARTBEAT_LOST_EXIT_CODE));
+    assert!(elapsed >= FAIL_CLOSED_EXIT_GRACE, "{elapsed:?}");
+    assert!(elapsed < FAIL_CLOSED_EXIT_GRACE + WAIT, "{elapsed:?}");
 }
 
 // ---------------------------------------------------------------------------
