@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    code, end_workflows, err, error_of, finish_node, handle, ok, seed_node, seed_workflow,
+    broker, code, end_workflows, err, error_of, finish_node, handle, ok, seed_node, seed_workflow,
     shared_pool, spec, start, task_node, unreachable_handle, IsolatedDatabase, NodeSeed,
     ParentLink, WorkflowSeed,
 };
@@ -158,7 +158,7 @@ async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "get_expired_pause").await;
 
-    let expired = expire_paused_workflows(&db.pool, chrono::Duration::milliseconds(1), 1)
+    let expired = expire_paused_workflows(&broker(&db.pool), chrono::Duration::milliseconds(1), 1)
         .await
         .expect("paused expiry");
 
@@ -179,7 +179,7 @@ async fn a_zero_age_expires_a_paused_workflow() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "get_expired_pause_zero_age").await;
 
-    let expired = expire_paused_workflows(&db.pool, chrono::Duration::zero(), 1)
+    let expired = expire_paused_workflows(&broker(&db.pool), chrono::Duration::zero(), 1)
         .await
         .expect("paused expiry with a zero age");
 
