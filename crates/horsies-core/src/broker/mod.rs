@@ -18,6 +18,7 @@ pub mod error;
 pub mod health;
 pub(crate) mod history_reads;
 pub(crate) mod key_reservation;
+mod lifecycle_operations;
 #[cfg(test)]
 pub(crate) mod lifecycle_tests;
 pub mod listener;
