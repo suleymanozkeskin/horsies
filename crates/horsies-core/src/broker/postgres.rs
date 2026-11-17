@@ -40,7 +40,7 @@ use crate::broker::health::{
     ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
-use crate::broker::history_reads::{read_history_detail, read_task_result};
+use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
@@ -798,6 +798,9 @@ pub struct PostgresBroker {
     client_family: ClientFamily,
     /// Set once the family check before the first write passed.
     client_family_admitted: tokio::sync::OnceCell<()>,
+    /// Whether this broker saw the staged result function published. The
+    /// result read keeps it ([`read_task_result`]).
+    result_reader: ResultReaderSeen,
 }
 
 impl PostgresBroker {
@@ -873,6 +876,7 @@ impl PostgresBroker {
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
+            result_reader: ResultReaderSeen::default(),
         }
     }
 
@@ -1022,6 +1026,7 @@ impl PostgresBroker {
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
+            result_reader: ResultReaderSeen::default(),
         })
     }
 
@@ -2592,14 +2597,23 @@ impl PostgresBroker {
 
     /// One statement through the staged result function. While that function
     /// is not published (an upgraded schema before its next coverage pass),
-    /// falls back to the live read plus the staged detail read.
+    /// falls back to the live read plus the staged detail read. A function
+    /// dropped out of band after this broker saw it fails one call with the
+    /// `42883` refusal that names it; the next call falls back (Python's
+    /// rule, [`read_task_result`]).
     ///
     /// An absence from the result reader is confirmed by the detail reader: a
     /// result reader rendered before a leaf existed does not probe that leaf,
     /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
         let open = self.core.pools()?;
-        let read = read_task_result(open.main(), self.statement_log, task_id).await?;
+        let read = read_task_result(
+            open.main(),
+            self.statement_log,
+            &self.result_reader,
+            task_id,
+        )
+        .await?;
         match read {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
