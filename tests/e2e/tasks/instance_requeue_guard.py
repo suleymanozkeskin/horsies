@@ -3,13 +3,11 @@
 Short claim_lease_ms + small max_claim_renew_age_ms so an orphaned CLAIMED
 task stops getting its lease renewed quickly and becomes reclaimable.
 
-When the env var INJECT_REQUEUE_DB_ERROR=1 is set (worker A subprocess only),
-the Worker class is monkeypatched at import time so that:
-  - _dispatch_one always fails (simulates a task that reaches no child)
-  - _requeue_claimed_task always returns DB_ERROR
-
-This keeps worker A alive (heartbeat loop running) but orphans every claimed
-task in CLAIMED state with a DB_ERROR requeue outcome.
+The fault of the test is on the connections of worker A, not in this module:
+worker A connects through a proxy that refuses the start of a task and the
+release of a claim (``test_layer2_cluster.REFUSED_FOR_WORKER_A``). Worker A
+stays alive (its claimer heartbeat runs) and every task it claims stays
+CLAIMED.
 """
 
 from __future__ import annotations
@@ -77,62 +75,3 @@ def requeue_guard_task(*, token: str) -> TaskResult[str, TaskError]:
         with marker_path.open('a', encoding='utf-8') as f:
             f.write('executed\n')
     return TaskResult(ok=f'done:{token}')
-
-
-# ---------------------------------------------------------------------------
-# Fault injection: activated only in worker A's subprocess via env var.
-# ---------------------------------------------------------------------------
-
-if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
-    from horsies.core.models.tasks import Execution
-    from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
-    from horsies.core.worker.dispatch_claim import DispatchClaim
-    from horsies.core.worker.worker import Worker, _RequeueOutcome
-    from typing import Optional
-
-    _original_dispatch = Worker._dispatch_one
-
-    async def _failing_dispatch(
-        self: Worker,
-        task_id: str,
-        task_name: str,
-        args_json: Optional[str],
-        kwargs_json: Optional[str],
-        queue_name: str = 'default',  # noqa: ARG001
-        is_workflow_task: bool = True,  # noqa: ARG001
-        timeout: StoredTimeout = NoTimeout(),  # noqa: ARG001
-        *,
-        claim: DispatchClaim,
-        execution: Execution,  # noqa: ARG001
-    ) -> None:
-        # Simulate: no child takes the task → requeue → DB_ERROR
-        outcome = await self._requeue_claimed_task(
-            task_id,
-            'INJECTED dispatch failure',
-            claim,
-        )
-        if outcome is _RequeueOutcome.DB_ERROR:
-            import logging
-            logging.getLogger('horsies.worker').critical(
-                'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
-                '(worker=%s, reason=INJECTED dispatch failure)',
-                task_id, self.worker_instance_id,
-            )
-
-    _original_requeue = Worker._requeue_claimed_task
-
-    async def _failing_requeue(
-        self: Worker,
-        task_id: str,
-        reason: str,
-        claim: DispatchClaim,  # noqa: ARG001
-    ) -> _RequeueOutcome:
-        import logging
-        logging.getLogger('horsies.worker').error(
-            'INJECTED DB_ERROR for requeue of task %s: %s',
-            task_id, reason,
-        )
-        return _RequeueOutcome.DB_ERROR
-
-    Worker._dispatch_one = _failing_dispatch  # type: ignore[assignment]
-    Worker._requeue_claimed_task = _failing_requeue  # type: ignore[assignment]

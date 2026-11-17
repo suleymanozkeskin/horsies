@@ -8,6 +8,13 @@ letter of each other message (``B`` bind, ``D`` describe, ``E`` execute,
 ``S`` sync). A prepared statement in its steady state sends no SQL text, only
 ``B``, ``D``, ``E`` and ``S``.
 
+The proxy can also refuse statements by their SQL text
+(``refuse_statements``): a client turn that parses or queries such a
+statement is never sent to the server, and the proxy closes both sides of
+its connection. This is a fault on the connection of any client, a worker
+subprocess and its children included, with no fault point in the code under
+test.
+
 The proxy runs on its own thread and event loop, so sync and async clients
 on any thread or loop of the test can use it.
 """
@@ -66,9 +73,19 @@ class _Connection:
     drop_reply: bool = False
 
 
-def _parse_client_messages(connection: _Connection) -> list[str]:
+@dataclass(frozen=True, slots=True)
+class _ClientMessage:
+    """One complete client message: its description for a turn, and the
+    whole SQL text of a parse or a simple query (``None`` for any other
+    message)."""
+
+    description: str
+    statement: str | None
+
+
+def _parse_client_messages(connection: _Connection) -> list[_ClientMessage]:
     """Split the buffered client bytes into complete protocol messages."""
-    messages: list[str] = []
+    messages: list[_ClientMessage] = []
     buffer = connection.pending
     while True:
         if not connection.startup_done:
@@ -79,9 +96,9 @@ def _parse_client_messages(connection: _Connection) -> list[str]:
             if len(buffer) < length:
                 break
             if code in _SSL_OR_GSS_REQUEST_CODES:
-                messages.append('ssl-request')
+                messages.append(_ClientMessage('ssl-request', None))
             else:
-                messages.append('startup')
+                messages.append(_ClientMessage('startup', None))
                 connection.startup_done = True
             buffer = buffer[length:]
             continue
@@ -93,23 +110,34 @@ def _parse_client_messages(connection: _Connection) -> list[str]:
             break
         payload = buffer[5 : 1 + length]
         buffer = buffer[1 + length :]
-        messages.append(_describe_message(kind, payload))
+        messages.append(_client_message(kind, payload))
     connection.pending = buffer
     return messages
 
 
-def _describe_message(kind: str, payload: bytes) -> str:
+def _client_message(kind: str, payload: bytes) -> _ClientMessage:
     match kind:
         case 'Q':
             sql = payload.rstrip(b'\x00').decode('utf-8', 'replace')
-            return 'Q:' + ' '.join(sql.split())[:_SQL_PREVIEW_CHARS]
+            return _ClientMessage('Q:' + ' '.join(sql.split())[:_SQL_PREVIEW_CHARS], sql)
         case 'P':
             name_end = payload.index(b'\x00')
             rest = payload[name_end + 1 :]
             sql = rest[: rest.index(b'\x00')].decode('utf-8', 'replace')
-            return 'P:' + ' '.join(sql.split())[:_SQL_PREVIEW_CHARS]
+            return _ClientMessage('P:' + ' '.join(sql.split())[:_SQL_PREVIEW_CHARS], sql)
         case _:
-            return kind
+            return _ClientMessage(kind, None)
+
+
+def _refused_text(messages: list[_ClientMessage], refused: tuple[str, ...]) -> str | None:
+    """The first text of ``refused`` that the SQL of a message holds."""
+    for message in messages:
+        if message.statement is None:
+            continue
+        for text in refused:
+            if text in message.statement:
+                return text
+    return None
 
 
 class RoundTripProxy:
@@ -120,6 +148,11 @@ class RoundTripProxy:
     next client turn that executes a statement, and close both sides of that
     connection: the server ran the statement, and the client never reads the
     reply.
+    ``refuse_statements`` makes the proxy refuse every later client turn
+    whose parse or simple query holds one of the given texts: the turn is not
+    sent and both sides of its connection close, so the server never ran the
+    statement. ``refused_statements`` gives the text that each refused turn
+    held.
     """
 
     def __init__(self, upstream_host: str, upstream_port: int) -> None:
@@ -130,6 +163,8 @@ class RoundTripProxy:
         self._recording = False
         self._drop_armed = False
         self._dropped = threading.Event()
+        self._refused_texts: tuple[str, ...] = ()
+        self._refusals: list[str] = []
         self._connections = 0
         self._writers: set[asyncio.StreamWriter] = set()
         self._handlers: set[asyncio.Task[None]] = set()
@@ -177,6 +212,17 @@ class RoundTripProxy:
     def reply_was_dropped(self, timeout_s: float) -> bool:
         return self._dropped.wait(timeout_s)
 
+    def refuse_statements(self, texts: tuple[str, ...]) -> None:
+        """Refuse every later turn whose SQL holds one of ``texts``."""
+        with self._lock:
+            self._refused_texts = texts
+
+    def refused_statements(self) -> tuple[str, ...]:
+        """The text of ``refuse_statements`` that each refused turn held, in
+        the order of the refusals."""
+        with self._lock:
+            return tuple(self._refusals)
+
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._server = self._loop.run_until_complete(
@@ -214,7 +260,7 @@ class RoundTripProxy:
         )
         self._writers.update((client_writer, upstream_writer))
         _ = await asyncio.gather(
-            self._client_to_server(connection, client_reader, upstream_writer),
+            self._client_to_server(connection, client_reader, client_writer, upstream_writer),
             self._server_to_client(
                 connection,
                 upstream_reader,
@@ -229,10 +275,11 @@ class RoundTripProxy:
         self,
         connection: _Connection,
         client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
         upstream_writer: asyncio.StreamWriter,
     ) -> None:
         try:
-            await self._pump_client(connection, client_reader, upstream_writer)
+            await self._pump_client(connection, client_reader, client_writer, upstream_writer)
         except ConnectionError:
             pass
         upstream_writer.close()
@@ -241,21 +288,33 @@ class RoundTripProxy:
         self,
         connection: _Connection,
         client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
         upstream_writer: asyncio.StreamWriter,
     ) -> None:
         while data := await client_reader.read(_READ_CHUNK_BYTES):
             with self._lock:
                 connection.pending += data
                 messages = _parse_client_messages(connection)
+                refused = _refused_text(messages, self._refused_texts)
+                if refused is not None:
+                    self._refusals.append(refused)
+                descriptions = [message.description for message in messages]
                 if connection.server_spoke_last or connection.turn is None:
                     connection.turn = _OpenTurn(connection=connection.number)
                     if self._recording:
                         self._turns.append(connection.turn)
-                connection.turn.messages.extend(messages)
+                connection.turn.messages.extend(descriptions)
                 connection.server_spoke_last = False
-                if self._drop_armed and 'E' in messages:
+                if self._drop_armed and 'E' in descriptions:
                     self._drop_armed = False
                     connection.drop_reply = True
+            if refused is not None:
+                # The bytes of a message that was not whole before this read
+                # went upstream alone; the server waits for the rest, so it
+                # never runs the statement.
+                upstream_writer.close()
+                client_writer.close()
+                return
             upstream_writer.write(data)
             await upstream_writer.drain()
 
