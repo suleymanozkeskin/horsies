@@ -166,14 +166,36 @@ class TestSpecData:
         )
         assert isinstance(request, core.WorkflowStartRequest)
 
-    def test_spec_data_that_the_core_refuses_raises_value_error_with_the_path(self) -> None:
-        with pytest.raises(ValueError, match='nodes'):
+    def test_spec_data_with_missing_fields_is_refused_at_the_root(self) -> None:
+        """serde reports a missing field at its container, so the path is
+        the root. The refusal holds the error class and its position, never
+        a text of the data."""
+        with pytest.raises(ValueError) as refused:
             core.WorkflowStartRequest(
                 spec_json='{"data_version": 1}',
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 sent_at=SENT_AT,
                 resend_on_transient_err=False,
             )
+
+        assert str(refused.value) == (
+            'workflow spec data refused at .: '
+            'value does not fit the field at line 1 column 19'
+        )
+
+    def test_a_field_of_the_wrong_type_is_refused_at_its_path(self) -> None:
+        with pytest.raises(ValueError) as refused:
+            core.WorkflowStartRequest(
+                spec_json='{"data_version": 1, "nodes": "one"}',
+                workflow_id=uuid.UUID(WORKFLOW_ID),
+                sent_at=SENT_AT,
+                resend_on_transient_err=False,
+            )
+
+        assert str(refused.value) == (
+            'workflow spec data refused at nodes: '
+            'value does not fit the field at line 1 column 34'
+        )
 
 
 class TestStartAnswers:
