@@ -1008,6 +1008,26 @@ mod tests {
         drop(write);
     }
 
+    /// Python `test_broker_postgres.py::TestCloseAsyncErrorPaths::test_close_async_attempts_both_on_first_failure`:
+    /// the first step of a close that does not end well does not stop the
+    /// second. A write that outlives the bound leaves its outcome unknown,
+    /// and the pools close all the same.
+    #[tokio::test(start_paused = true)]
+    async fn a_close_whose_write_outlives_the_bound_still_closes_the_pools() {
+        let handle = open_handle();
+        let (open, write) = handle.pools_for_write().expect("open pools");
+
+        assert_eq!(
+            handle.close().await,
+            CloseOutcome::ClosedWithWritesUnfinished { unfinished: 1 }
+        );
+        assert!(matches!(
+            open.main().checkout(CheckoutClass::Batch).await,
+            Err(CheckoutFailure::PoolClosed { .. })
+        ));
+        drop(write);
+    }
+
     #[tokio::test]
     async fn a_close_after_the_writes_ended_does_not_wait() {
         let handle = open_handle();
