@@ -22,9 +22,9 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, first_row, one_row, query_in, roll_back, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::config::retention::RetentionConfig;
-use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
+use crate::core::{OperationalErrorCode, TaskError};
 use crate::db::{CheckoutClass, IsolationLevel, ParameterType, Row, TypedStatement};
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::recovery_limit::{
@@ -619,23 +619,23 @@ fn record_discovery_error(metrics: &mut RecoveryCaseMetrics, started: Instant) {
 /// The reaper's global pass with [`GLOBAL_SCAN_ROW_CAP`]: one pass id, so a workflow counts at most once per
 /// pass toward `failure_limit` (`RecoveryConfig::workflow_recovery_failure_limit`, 3 to 1000).
 ///
+/// The children of the sub-workflow nodes that a case starts come from the client's `source`.
+///
 /// Errors: a discovery statement, the audit page, or the count of workflows over the limit failed; the cases
 /// before it ran. A candidate's own failure is not an error of the pass: it is logged, counted in the report,
 /// and counted toward the limit when it is persistent.
 pub async fn recover_stuck_workflows(
     broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
+    source: &dyn ChildSpecSource,
     failure_limit: u32,
-    retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
-    Box::pin(recover_stuck_workflows_with_cap(
+    Box::pin(recover_stuck_workflows_observed_with(
         broker,
-        registry,
-        GLOBAL_SCAN_ROW_CAP,
-        RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
-        retention,
+        ChildBuild::Client(source),
+        failure_limit,
     ))
     .await
+    .map_err(|failure| failure.error)
 }
 
 /// The reaper's global pass, with the children of its cases built by `build`. Outcomes as
@@ -656,52 +656,11 @@ pub(crate) async fn recover_stuck_workflows_observed_with(
     .await
 }
 
-/// A global pass with `max_rows` per case query and per audit page (the audit function refuses a page size
-/// outside 1 to 1000 with 22023, an error of the pass).
-pub(crate) async fn recover_stuck_workflows_with_cap(
-    broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
-    max_rows: i64,
-    failure_policy: RecoveryFailurePolicy,
-    retention: &RetentionConfig,
-) -> Result<RecoveryReport, WorkflowError> {
-    Box::pin(recover_stuck_workflows_in_scope(
-        broker,
-        ChildBuild::Registry {
-            registry,
-            retention,
-        },
-        RecoveryScope::Global { max_rows },
-        failure_policy,
-    ))
-    .await
-    .map_err(|failure| failure.error)
-}
-
-/// The recovery pass of one workflow tree (the root and its descendants), with no row cap. A resume runs it
-/// after its commit (Python `recover_stuck_workflow_tree`). It logs candidate failures and counts none: the
-/// reaper's global pass counts the same candidates.
+/// The recovery pass of one workflow tree (the root and its descendants), with no row cap, and the children of
+/// its cases built by `build`. A resume runs it after its commit (Python `recover_stuck_workflow_tree`). It logs
+/// candidate failures and counts none: the reaper's global pass counts the same candidates.
 ///
 /// Errors: the tree read or a discovery statement failed.
-pub(crate) async fn recover_stuck_workflow_tree(
-    broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
-    root_workflow_id: Uuid,
-    retention: &RetentionConfig,
-) -> Result<RecoveryReport, WorkflowError> {
-    Box::pin(recover_workflow_tree(
-        broker,
-        ChildBuild::Registry {
-            registry,
-            retention,
-        },
-        root_workflow_id,
-    ))
-    .await
-}
-
-/// [`recover_stuck_workflow_tree`] with the children of its cases built by
-/// `build`. Errors as [`recover_stuck_workflow_tree`].
 pub(crate) async fn recover_workflow_tree(
     broker: &PostgresBroker,
     build: ChildBuild<'_>,
@@ -2115,14 +2074,9 @@ mod cap_tests {
 
     #[tokio::test]
     async fn discovery_query_failure_is_typed() {
-        let error = recover_stuck_workflows_observed_with(
-            &unreachable_broker(),
-            ChildBuild::Client(&TestChildSpecs::empty()),
-            25,
-        )
-        .await
-        .map_err(|failure| failure.error)
-        .expect_err("candidate discovery failure must cross the containment seam");
+        let error = recover_stuck_workflows(&unreachable_broker(), &TestChildSpecs::empty(), 25)
+            .await
+            .expect_err("candidate discovery failure must cross the containment seam");
         assert!(matches!(error, WorkflowError::Broker(_)), "{error:?}");
     }
 

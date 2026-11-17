@@ -39,6 +39,8 @@ mod claim_plan_tests;
 #[cfg(test)]
 mod exit_not_seen_tests;
 #[cfg(test)]
+mod held_dispatch_tests;
+#[cfg(test)]
 mod held_exits;
 #[cfg(test)]
 mod isolated_run_tests;

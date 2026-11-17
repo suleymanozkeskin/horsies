@@ -1269,7 +1269,7 @@ async fn run_reaper_pass(
     let workflow_recovery =
         crate::workflow_engine::recovery::recover_stuck_workflows_observed_with(
             broker,
-            child_specs.build(retention),
+            child_specs.build(),
             config.workflow_recovery_failure_limit,
         )
         .await;
@@ -1290,7 +1290,7 @@ async fn run_reaper_pass(
     // Discovery and each record run on the main core pool with the reserve.
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with(
         broker,
-        child_specs.build(retention),
+        child_specs.build(),
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
         config.phase2_quarantine_after_attempts,

@@ -1,7 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod args_merge;
-pub mod bound_handle;
 pub mod child_spec;
 pub(crate) mod child_start;
 pub mod engine;

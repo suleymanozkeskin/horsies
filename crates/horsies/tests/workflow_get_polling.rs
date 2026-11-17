@@ -22,9 +22,9 @@ use horsies::{
 };
 use horsies_core::core::lifecycle::{OwnedClaim, WorkflowSuccessOutcome};
 use horsies_core::{
-    on_workflow_task_complete, BuilderHookName, CoverageOutcome, CoverageRequest,
-    CoverageSerialization, FinishWorkflowSuccess, PostgresBroker, RetentionConfig, TaskResult,
-    WorkflowSpecRegistry, WorkflowTaskCompletion,
+    on_workflow_task_complete, ChildSpecFuture, ChildSpecRequest, ChildSpecSource,
+    ChildSpecUnavailable, CoverageOutcome, CoverageRequest, CoverageSerialization,
+    FinishWorkflowSuccess, PostgresBroker, TaskResult, WorkflowTaskCompletion,
 };
 use uuid::Uuid;
 
@@ -147,6 +147,24 @@ async fn listener_refused_handle(url: &str, workflow_id: Uuid) -> WorkflowHandle
     handle
 }
 
+/// The child spec source of the phase 2 of these tests: their workflows have
+/// no sub-workflow node, so no step asks it for a child.
+struct NoChildren;
+
+impl ChildSpecSource for NoChildren {
+    fn child_spec(&self, request: ChildSpecRequest) -> ChildSpecFuture<'_> {
+        Box::pin(async move {
+            Err(ChildSpecUnavailable::Raised {
+                subject: format!(
+                    "build of the child of {}:{}",
+                    request.parent_workflow_name, request.task_index
+                ),
+                cause: "the workflows of these tests have no sub-workflow node".to_owned(),
+            })
+        })
+    }
+}
+
 /// Ends the task of node 0 of `workflow_id` with `ANSWER` as a worker does:
 /// the task goes RUNNING under `WORKER` with the process facts of its start,
 /// phase 1 moves it to history (`PostgresBroker::finish_workflow_success`),
@@ -201,14 +219,9 @@ async fn end_the_node(database: &TestDatabase, worker: &PostgresBroker, workflow
         matches!(phase_one, WorkflowSuccessOutcome::SuccessApplied { .. }),
         "phase 1 of task {task_id}: {phase_one:?}"
     );
-    let phase_two = on_workflow_task_complete(
-        worker,
-        task_id,
-        &WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER),
-        &RetentionConfig::default(),
-    )
-    .await
-    .expect("phase 2 of the task");
+    let phase_two = on_workflow_task_complete(worker, task_id, &NoChildren)
+        .await
+        .expect("phase 2 of the task");
     assert_eq!(phase_two, WorkflowTaskCompletion::Applied);
 }
 
