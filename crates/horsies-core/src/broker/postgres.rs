@@ -3115,17 +3115,21 @@ fn history_task_info(
             })
             .map_err(|error| {
                 invalid_raw_result(format!(
-                    "stored result of task {} does not decode: {error}",
+                    "History result envelope failed validation for task {}: {error}",
                     detail.task_id
                 ))
             })?,
     };
     let terminal_at = detail.terminal_at;
+    // The snapshot holds the attempts oldest first; a task info lists them
+    // newest first, as the live read (`ORDER BY attempt DESC`) and Python's
+    // history read (`reversed(detail.attempts)`).
     let attempts = include_attempts
         .then(|| {
             detail
                 .attempts
                 .iter()
+                .rev()
                 .map(|record| task_attempt_info_from_record(detail.task_id, record))
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -6707,6 +6711,53 @@ mod task_info_code_tests {
             "{shown:.40}"
         );
         assert!(!refused.retryable, "{shown:.40}");
+    }
+
+    fn history_attempt(
+        attempt: i32,
+        outcome: &str,
+        will_retry: bool,
+    ) -> crate::core::history::archive::attempts::AttemptRecord {
+        let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 7, 0, 0, 0).unwrap();
+        crate::core::history::archive::attempts::AttemptRecord::new(
+            attempt,
+            outcome,
+            will_retry,
+            at,
+            at,
+            None,
+            None,
+            None,
+            Some("w-1".to_owned()),
+            Some("host-1".to_owned()),
+            Some(100),
+            None,
+        )
+        .expect("a valid attempt record")
+    }
+
+    /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_attempts_are_listed_newest_first`:
+    /// the snapshot holds the attempts oldest first, and the task info lists
+    /// them newest first, as the live read does.
+    #[test]
+    fn history_attempts_are_listed_newest_first() {
+        let mut detail = history_detail_with_result(b"{}");
+        detail.attempts = vec![
+            history_attempt(1, "FAILED", true),
+            history_attempt(2, "FAILED", false),
+        ];
+
+        let info = history_task_info(detail, false, false, true)
+            .expect("a history row with two attempts reads");
+
+        let attempts = info.attempts.expect("the read asked for the attempts");
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.attempt)
+                .collect::<Vec<i32>>(),
+            vec![2, 1],
+        );
     }
 
     /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
