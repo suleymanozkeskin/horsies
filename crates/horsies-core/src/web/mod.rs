@@ -1,9 +1,12 @@
-//! Optional axum transport for the monitoring API.
+//! Optional axum transport for the monitoring API, and the
+//! framework-neutral handler that a host framework mounts over the same
+//! routes ([`MonitoringHandler`]).
 
 mod app;
 mod auth;
 mod common;
 mod events;
+mod handler;
 mod routes;
 mod schema;
 mod spa;
@@ -17,6 +20,10 @@ pub use auth::{
 pub use events::{
     EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS, DEBOUNCE, HEARTBEAT,
     MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
+};
+pub use handler::{
+    AccessGrant, AccessNeed, MonitoringHandler, MonitoringHandlerConfig, RequestParts,
+    ResponseForm, ResponseParts, RouteAccess, Verdict, WorkflowResumeContext, MAX_RESPONSE_BYTES,
 };
 pub use schema::{
     SchemaIncompatible, SchemaProbe, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
