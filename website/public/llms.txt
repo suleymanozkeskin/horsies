@@ -475,7 +475,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### RetentionConfig
 - Reached as AppConfig.retention
-- paused_workflow_auto_cancel_after: timedelta | None (default None)
+- paused_workflow_auto_cancel_after: timedelta | None (default None; a positive duration of at most 365,000 days, else HRS-216)
 - worker_state_retention_hours: int | None (default 168 / 7 days, range 1-8760, None disables pruning)
 - terminal_record_retention_hours: int | None (default 720 / 30 days, range 1-43800, None disables pruning; applies to terminal workflow rows)
 - history_leaf_horizon_days: int (default 3, range 2-14)
