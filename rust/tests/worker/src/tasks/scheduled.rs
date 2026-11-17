@@ -10,10 +10,10 @@ pub async fn scheduled_simple() -> Result<String, TaskError<Infallible>> {
     Ok("scheduled".to_owned())
 }
 
-/// Python `e2e_scheduled_with_args`: returns its scheduled input.
+/// Python `e2e_scheduled_with_args`: twice its scheduled input.
 #[task("e2e_scheduled_with_args")]
 pub async fn scheduled_with_args(value: i64) -> Result<i64, TaskError<Infallible>> {
-    Ok(value)
+    Ok(value * 2)
 }
 
 /// Python `e2e_catch_up_task`.
