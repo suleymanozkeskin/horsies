@@ -1,12 +1,12 @@
 //! The Rust scenario binary of the parity runs.
 //!
 //! - `horsies-parity send <scenario>`: send the scenario on the database of
-//!   `HORSIES_PARITY_DATABASE_URL`, start its workflows and run its actions,
-//!   and print one JSON line per send and per workflow start
-//!   (`tests/parity/send.py` prints the same lines). Exit 0, 1 on a refused
-//!   step, 2 on bad arguments.
+//!   `HORSIES_PARITY_DATABASE_URL`, rerun its reruns, start its workflows,
+//!   run its actions and ping, and print one JSON line per send, rerun,
+//!   workflow start and ping (`tests/parity/send.py` prints the same lines).
+//!   Exit 0, 1 on a refused step, 2 on bad arguments.
 //! - any other command goes to `horsies::cli::run`: `worker --profile <name>`
-//!   and the worker's children.
+//!   and the worker's children, and `scheduler`.
 
 use std::process::ExitCode;
 

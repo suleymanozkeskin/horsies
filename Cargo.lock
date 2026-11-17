@@ -1078,6 +1078,7 @@ dependencies = [
  "horsies",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

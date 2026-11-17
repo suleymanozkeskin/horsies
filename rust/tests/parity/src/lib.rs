@@ -1,23 +1,28 @@
 //! The Rust side of the parity runs (`tests/parity/runner.py`).
 //!
 //! The app has the task names, input field names, codes, messages, options,
-//! profiles and workflows of the Python parity app (`tests/parity/app.py`),
-//! and [`SCENARIOS`] holds the scenarios of `tests/parity/scenarios.py`.
-//! The runner sets [`DATABASE_URL_ENV`] for the worker, its children and the
-//! send process.
+//! profiles, schedule and workflows of the Python parity app
+//! (`tests/parity/app.py`), and [`SCENARIOS`] holds the scenarios of
+//! `tests/parity/scenarios.py`. The runner sets [`DATABASE_URL_ENV`] for the
+//! worker, its children, the scheduler and the send process.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use horsies::rerun::{RerunEnqueuePolicy, RerunOutcome, RerunTask};
 use horsies::{
     blocking_task, task, AppConfig, ChildPreload, DrainTimeout, Horsies, HorsiesError,
-    IsolatedChildCount, IsolatedChildren, IsolatedSetting, RetryPolicy, SharedAsyncChildCount,
-    SharedAsyncChildren, SharedAsyncSeats, SharedAsyncSetting, SharedThreadChildCount,
-    SharedThreadChildren, SharedThreadSeats, SharedThreadSetting, SubWorkflowParams, TaskError,
-    TaskOutcome, TaskRuntime, TaskSendError, TaskSendOptions, UserErrorCode, WorkerProfile,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowFunction, WorkflowHandle, WorkflowSpecBuilder,
+    IntervalSchedule, IsolatedChildCount, IsolatedChildren, IsolatedSetting, PingTarget,
+    RetryPolicy, ScheduleConfig, SchedulePattern, SharedAsyncChildCount, SharedAsyncChildren,
+    SharedAsyncSeats, SharedAsyncSetting, SharedThreadChildCount, SharedThreadChildren,
+    SharedThreadSeats, SharedThreadSetting, SubWorkflowParams, TaskError, TaskErrorCode,
+    TaskOutcome, TaskRuntime, TaskSchedule, TaskSendError, TaskSendOptions, UserErrorCode,
+    WaitLimit, WorkerPong, WorkerProfile, WorkflowDefConfig, WorkflowDefinition, WorkflowFunction,
+    WorkflowHandle, WorkflowSpecBuilder,
 };
+use uuid::Uuid;
 
 /// The database of this side of the run.
 pub const DATABASE_URL_ENV: &str = "HORSIES_PARITY_DATABASE_URL";
@@ -41,6 +46,25 @@ pub const PARENT_DEFINITION_KEY: &str = "tests.parity.parent.v1";
 
 /// The retries of a send of the form [`SendForm::RetryOfAsyncContext`].
 const SEND_RETRIES: usize = 2;
+
+pub const SCHEDULE_NAME: &str = "parity_slots";
+/// The task of each slot of the schedule.
+pub const SLOT_TASK_NAME: &str = "parity.add";
+/// The interval of the schedule, in hours: longer than any run, so a slot
+/// is due only after the runner moves the schedule back.
+const SCHEDULE_INTERVAL_HOURS: u32 = 1;
+const SCHEDULE_MAX_CATCH_UP_RUNS: u32 = 2;
+const SCHEDULE_CHECK_INTERVAL_S: u32 = 1;
+
+/// The longest wait for the end of a rerun source.
+const RESULT_WAIT: Duration = Duration::from_secs(30);
+
+/// The window of one worker ping.
+const PING_WINDOW: Duration = Duration::from_secs(2);
+
+/// The pings of every worker before the send process gives up: a worker
+/// that has just started may not listen yet.
+const PING_ATTEMPTS: usize = 10;
 
 /// The codes of the parity tasks' own errors.
 #[derive(Debug, Clone, PartialEq, UserErrorCode)]
@@ -275,15 +299,18 @@ pub struct ParityApp {
     pub parent: WorkflowFunction<i64>,
 }
 
-/// The app of this side on `database_url`, with every parity task and
-/// workflow. No I/O.
+/// The app of this side on `database_url`, with every parity task,
+/// workflow and the schedule. Every send retains its input, so a failed
+/// task can be rerun. No I/O.
 ///
 /// Errors: the config refusal, or the first registration refusal.
 pub fn build_app(database_url: &str) -> Result<ParityApp, HorsiesError> {
     let mut config = AppConfig::for_database_url(database_url);
     config.broker.pool_size = 5;
     config.broker.max_overflow = 5;
+    config.broker.retain_rerun_input_default = true;
     config.worker_profiles = profiles();
+    config.schedule = Some(schedules());
     let mut app = Horsies::new(config)?;
     let _add = add::register(&mut app)?;
     let _refuse = refuse::register(&mut app)?;
@@ -302,6 +329,26 @@ pub fn build_app(database_url: &str) -> Result<ParityApp, HorsiesError> {
     let _child = app.register_workflow_definition::<ParityChild>()?;
     let parent = app.register_workflow_definition::<ParityParent>()?;
     Ok(ParityApp { app, chain, parent })
+}
+
+/// The schedule `parity_slots` (Python `app.py`): `parity.add` (2 + 3)
+/// every hour, missed runs caught up, at most two slots per fire. Only the
+/// scheduler process of the `schedule_slots` scenario runs it.
+fn schedules() -> ScheduleConfig {
+    let every_hour = SchedulePattern::Interval(IntervalSchedule {
+        hours: Some(SCHEDULE_INTERVAL_HOURS),
+        ..IntervalSchedule::default()
+    });
+    ScheduleConfig::new(vec![TaskSchedule::new(
+        SCHEDULE_NAME,
+        SLOT_TASK_NAME,
+        every_hour,
+    )
+    .input(serde_json::json!({"a": 2, "b": 3}))
+    .timezone("UTC")
+    .catch_up_missed(true)
+    .max_catch_up_runs(SCHEDULE_MAX_CATCH_UP_RUNS)])
+    .check_interval_seconds(SCHEDULE_CHECK_INTERVAL_S)
 }
 
 fn profiles() -> BTreeMap<String, WorkerProfile> {
@@ -388,6 +435,28 @@ pub struct WorkflowAction {
     pub index: usize,
 }
 
+/// The rerun of the task of task line `source`: a send, or an earlier
+/// rerun. The send process waits for the end of that task, then reruns it
+/// with [`RerunEnqueuePolicy::standard`] and the input retained. The new
+/// task is a task line after the lines of the sends, in the order of the
+/// reruns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rerun {
+    pub source: usize,
+}
+
+/// Whether the send process pings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    NotPinged,
+    /// After the actions: `ping_database`; `ping_workers` until each
+    /// worker of the scenario answered, at most [`PING_ATTEMPTS`] pings of
+    /// [`PING_WINDOW`]; then a ping of the first worker that answered, by
+    /// its id. The send process prints one ping line with the counts of the
+    /// answers.
+    Pinged,
+}
+
 /// When the workers of a scenario start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerStart {
@@ -397,9 +466,10 @@ pub enum WorkerStart {
     AfterActions,
 }
 
-/// One worker per profile, the sends in order, the workflow starts in
-/// order, then the actions in order. The runner of `tests/parity` reads the
-/// profiles and the worker start of the Python copy.
+/// One worker per profile, the sends in order, the reruns in order, the
+/// workflow starts in order, the actions in order, then the pings. The
+/// runner of `tests/parity` reads the profiles, the worker start and the
+/// scheduler of the Python copy; the send process reads the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scenario {
     pub name: &'static str,
@@ -408,6 +478,8 @@ pub struct Scenario {
     pub workflows: &'static [&'static str],
     pub actions: &'static [WorkflowAction],
     pub worker_start: WorkerStart,
+    pub reruns: &'static [Rerun],
+    pub health: Health,
 }
 
 const fn send(task_name: &'static str, kwargs: &'static [(&'static str, i64)]) -> Send {
@@ -432,6 +504,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "shared_async_outcomes",
@@ -444,6 +518,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "shared_thread_outcomes",
@@ -456,6 +532,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "isolated_timeout",
@@ -464,6 +542,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "shared_async_timeout_cancel_grace",
@@ -472,6 +552,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "shared_thread_timeout",
@@ -480,6 +562,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "idempotency_key",
@@ -501,6 +585,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "workflow_chain",
@@ -509,6 +595,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[CHAIN_NAME],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     // Layer 2: two workers. A worker claims only the classes that its
     // profile has children for, so each task has one possible worker.
@@ -524,6 +612,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     Scenario {
         name: "send_retry",
@@ -537,6 +627,8 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     // Layer 6: the first chain is paused and resumed, the second cancelled,
     // before any worker runs.
@@ -560,6 +652,8 @@ pub const SCENARIOS: &[Scenario] = &[
             },
         ],
         worker_start: WorkerStart::AfterActions,
+        reruns: &[],
+        health: Health::NotPinged,
     },
     // Layer 7: a child workflow whose output a later node of the parent
     // takes.
@@ -570,6 +664,43 @@ pub const SCENARIOS: &[Scenario] = &[
         workflows: &[PARENT_NAME],
         actions: &[],
         worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
+    },
+    // Layer 3: the scheduler process and the move of the schedule are steps
+    // of the runner; the send process sends nothing.
+    Scenario {
+        name: "schedule_slots",
+        profiles: &[ISOLATED],
+        sends: &[],
+        workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::NotPinged,
+    },
+    // Layer 8: the database and the two workers answer.
+    Scenario {
+        name: "worker_health",
+        profiles: &[ISOLATED, SHARED_ASYNC],
+        sends: &[],
+        workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
+        reruns: &[],
+        health: Health::Pinged,
+    },
+    // A failed task, then its rerun: a new task with the source as its
+    // rerun parent and root.
+    Scenario {
+        name: "rerun",
+        profiles: &[ISOLATED],
+        sends: &[send("parity.refuse", &[("value", 7)])],
+        workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
+        reruns: &[Rerun { source: 0 }],
+        health: Health::NotPinged,
     },
 ];
 
@@ -590,10 +721,9 @@ fn member(send: &Send, name: &str) -> Result<i64, SendRefused> {
         .ok_or_else(|| SendRefused(format!("{} has no input {name}", send.task_name)))
 }
 
-/// The id of the task of `send`, sent through the typed function of `app`.
 /// The id of the task that two retries of a refused blocking send wrote.
 /// Only `parity.add` has this form.
-async fn send_retry(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
+async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     let runtime = app.task_runtime();
     let function = match send.task_name {
         "parity.add" => {
@@ -634,7 +764,7 @@ async fn send_retry(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
         ids.push(handle.task_id());
     }
     match ids.as_slice() {
-        [first, second] if first == second => Ok(first.to_string()),
+        [first, second] if first == second => Ok(*first),
         _ => Err(SendRefused(format!(
             "the retries of {} wrote other tasks: {ids:?}",
             send.task_name
@@ -643,7 +773,7 @@ async fn send_retry(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
 }
 
 /// The id of the task of `send`, sent through the typed function of `app`.
-async fn send_one(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
+async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     match send.form {
         SendForm::Direct => {}
         SendForm::RetryOfAsyncContext => return send_retry(app, send).await,
@@ -771,9 +901,93 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
             .map(|h| h.task_id()),
         other => return Err(SendRefused(format!("the parity app has no task {other}"))),
     };
-    task_id
-        .map(|id| id.to_string())
-        .map_err(|error| refused(&error))
+    task_id.map_err(|error| refused(&error))
+}
+
+/// The id of the new task of `rerun`, after the end of its source.
+async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, SendRefused> {
+    let source = *sent
+        .get(rerun.source)
+        .ok_or_else(|| SendRefused(format!("{rerun:?} names no earlier task line")))?;
+    let limit = WaitLimit::parse(Some(RESULT_WAIT)).expect("30 s is below the wait bound");
+    match app.get_result::<i64, ParityCode>(source, limit).await {
+        Ok(TaskOutcome::Failed(error))
+            if *error.code() == TaskErrorCode::User(ParityCode::Refused) => {}
+        other => {
+            return Err(SendRefused(format!(
+                "the rerun source {source} did not end with REFUSED: {other:?}"
+            )))
+        }
+    }
+    let command = RerunTask::new(source, None, None);
+    match app
+        .rerun_task(command, RerunEnqueuePolicy::standard(true))
+        .await
+    {
+        Ok(RerunOutcome::Enqueued { new_task_id, .. }) => Ok(new_task_id),
+        Ok(other) => Err(SendRefused(format!(
+            "the rerun of {source} answered {other:?}"
+        ))),
+        Err(error) => Err(SendRefused(format!(
+            "the rerun of {source} was refused: {error}"
+        ))),
+    }
+}
+
+/// The answers to a ping of every worker, once `expected` workers answered
+/// one ping.
+async fn every_worker(app: &Horsies, expected: usize) -> Result<Vec<WorkerPong>, SendRefused> {
+    let mut answered: Vec<WorkerPong> = Vec::new();
+    for _attempt in 0..PING_ATTEMPTS {
+        answered = app
+            .ping_workers(
+                PingTarget::EveryWorker,
+                PING_WINDOW,
+                NonZeroUsize::new(expected),
+            )
+            .await
+            .map_err(|refused| SendRefused(format!("ping_workers was refused: {refused}")))?;
+        if answered.len() >= expected {
+            return Ok(answered);
+        }
+    }
+    Err(SendRefused(format!(
+        "{} of {expected} workers answered the last of {PING_ATTEMPTS} pings",
+        answered.len()
+    )))
+}
+
+/// The ping line: the database answers, then each of the `expected`
+/// workers, then the first of them by its id.
+async fn ping(app: &Horsies, expected: usize) -> Result<String, SendRefused> {
+    let _latency = app
+        .ping_database()
+        .await
+        .map_err(|refused| SendRefused(format!("ping_database was refused: {refused}")))?;
+    let answered = every_worker(app, expected).await?;
+    let first = answered
+        .first()
+        .ok_or_else(|| SendRefused("no worker answered".to_owned()))?;
+    let targeted = app
+        .ping_workers(
+            PingTarget::Worker(first.worker_id.clone()),
+            PING_WINDOW,
+            None,
+        )
+        .await
+        .map_err(|refused| {
+            SendRefused(format!(
+                "the ping of worker {} was refused: {refused}",
+                first.worker_id
+            ))
+        })?;
+    Ok(serde_json::json!({
+        "kind": "ping",
+        "index": 0,
+        "workers": answered.len(),
+        "targeted": targeted.len(),
+    })
+    .to_string())
 }
 
 /// Run the action `action` on its started workflow. A pause and a resume
@@ -799,19 +1013,30 @@ async fn act(action: &WorkflowAction, handles: &[WorkflowHandle<i64>]) -> Result
     }
 }
 
-/// Send the tasks of `scenario`, start its workflows, then run its actions
-/// on the started workflows, in order. The result is one JSON line per send
-/// and start, as `tests/parity/send.py` prints them.
+/// Send the tasks of `scenario`, rerun the tasks of its reruns, start its
+/// workflows, run its actions on the started workflows, then ping, in
+/// order. The result is one JSON line per send, rerun, start and ping, as
+/// `tests/parity/send.py` prints them.
 ///
-/// Errors: the first refused send, start or action.
+/// Errors: the first refused send, rerun, start, action or ping.
 pub async fn run_sends(
     parity: &ParityApp,
     scenario: &Scenario,
 ) -> Result<Vec<String>, SendRefused> {
-    let mut lines = Vec::with_capacity(scenario.sends.len() + scenario.workflows.len());
-    for (index, send) in scenario.sends.iter().enumerate() {
-        let task_id = send_one(&parity.app, send).await?;
-        lines.push(serde_json::json!({"kind": "task", "index": index, "id": task_id}).to_string());
+    let mut sent: Vec<Uuid> = Vec::with_capacity(scenario.sends.len() + scenario.reruns.len());
+    for send in scenario.sends {
+        sent.push(send_one(&parity.app, send).await?);
+    }
+    for rerun in scenario.reruns {
+        let new_task_id = rerun_one(&parity.app, rerun, &sent).await?;
+        sent.push(new_task_id);
+    }
+    let mut lines = Vec::with_capacity(sent.len() + scenario.workflows.len() + 1);
+    for (index, task_id) in sent.iter().enumerate() {
+        lines.push(
+            serde_json::json!({"kind": "task", "index": index, "id": task_id.to_string()})
+                .to_string(),
+        );
     }
     let mut handles: Vec<WorkflowHandle<i64>> = Vec::with_capacity(scenario.workflows.len());
     for (index, workflow) in scenario.workflows.iter().enumerate() {
@@ -835,6 +1060,10 @@ pub async fn run_sends(
     }
     for action in scenario.actions {
         act(action, &handles).await?;
+    }
+    match scenario.health {
+        Health::Pinged => lines.push(ping(&parity.app, scenario.profiles.len()).await?),
+        Health::NotPinged => {}
     }
     Ok(lines)
 }

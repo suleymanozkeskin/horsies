@@ -4,15 +4,17 @@
 the same names, sends, workflows and actions: each side runs its own copy,
 and the snapshot compare shows any difference between the two copies too.
 
-A scenario runs in this order: the sends, the workflow starts, then the
-actions on the started workflows. The workers start before the sends, or
-after the actions (`WorkerStart`). Each scenario ends the same way on every
-run: no step depends on the timing of a worker.
+A scenario runs in this order: the sends, the reruns, the workflow starts,
+the actions on the started workflows, then the pings. The workers start
+before the sends, or after the actions (`WorkerStart`). A scenario with
+`ScheduleSlots` also runs a scheduler process. Each scenario ends the same
+way on every run: no step depends on the timing of a worker.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import Enum
 from typing import Final
 
@@ -57,6 +59,58 @@ class WorkflowAction:
     index: int
 
 
+@dataclass(frozen=True, slots=True)
+class Rerun:
+    """The rerun of the task of task line `source`: a send, or an earlier
+    rerun. The send process waits for the end of that task, then reruns it
+    with the default retention class, the input retained and a 24 h key
+    reservation. The new task is a task line after the lines of the sends,
+    in the order of the reruns."""
+
+    source: int
+
+
+class Health(Enum):
+    """Whether the send process pings."""
+
+    NOT_PINGED = 'not_pinged'
+    PINGED = 'pinged'
+    """After the actions: `ping_database`; `ping_workers` until each worker
+    of the scenario answered, at most `PING_ATTEMPTS` pings of
+    `PING_WINDOW_S` (`send.py`); then a ping of the first worker that
+    answered, by its id. The send process prints one ping line with the
+    counts of the answers."""
+
+
+@dataclass(frozen=True, slots=True)
+class NoScheduler:
+    """The scenario runs no scheduler process."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleSlots:
+    """A scheduler process of the side runs the schedule of the app
+    (`app.SCHEDULE_NAME`: every `app.SCHEDULE_INTERVAL`, missed runs caught
+    up, at most `app.SCHEDULE_MAX_CATCH_UP_RUNS` slots per fire).
+
+    Its start writes the state row with the first run one interval after
+    the database time. The runner then moves `next_run_at` to `backdate`
+    before the database time. The slots from there to the database time
+    are due: `backdate // SCHEDULE_INTERVAL + 1` of them. The scheduler
+    fires them over several fires, and the next run is then in the future.
+    The interval is longer than any run, so no other slot is due: the slot
+    count does not follow the run time. `backdate` is not a multiple of the
+    interval, so no slot is at the database time of the move.
+
+    The scenario has no sends and no workflow starts: every task of the
+    slot task name in its database is a slot task."""
+
+    backdate: timedelta
+
+
+type SchedulerRun = NoScheduler | ScheduleSlots
+
+
 class WorkerStart(Enum):
     BEFORE_SENDS = 'before_sends'
     AFTER_ACTIONS = 'after_actions'
@@ -66,8 +120,8 @@ class WorkerStart(Enum):
 
 @dataclass(frozen=True, slots=True)
 class Scenario:
-    """One worker per profile, the sends in order, the workflow starts in
-    order, then the actions in order."""
+    """One worker per profile, the sends in order, the reruns in order, the
+    workflow starts in order, the actions in order, then the pings."""
 
     name: str
     profiles: tuple[str, ...]
@@ -75,6 +129,9 @@ class Scenario:
     workflows: tuple[str, ...]
     actions: tuple[WorkflowAction, ...] = ()
     worker_start: WorkerStart = WorkerStart.BEFORE_SENDS
+    reruns: tuple[Rerun, ...] = ()
+    health: Health = Health.NOT_PINGED
+    scheduler: SchedulerRun = NoScheduler()
 
 
 def _send(task_name: str, *kwargs: tuple[str, int], key: str | None = None) -> Send:
@@ -191,6 +248,32 @@ SCENARIOS: Final[tuple[Scenario, ...]] = (
         profiles=(parity.ISOLATED,),
         sends=(),
         workflows=(parity.PARENT_NAME,),
+    ),
+    # Layer 3: the slots of 150 minutes before the database time are due
+    # (minus 150, minus 90 and minus 30 minutes): two fires, three tasks.
+    Scenario(
+        name='schedule_slots',
+        profiles=(parity.ISOLATED,),
+        sends=(),
+        workflows=(),
+        scheduler=ScheduleSlots(backdate=timedelta(minutes=150)),
+    ),
+    # Layer 8: the database and the two workers answer.
+    Scenario(
+        name='worker_health',
+        profiles=(parity.ISOLATED, parity.SHARED_ASYNC),
+        sends=(),
+        workflows=(),
+        health=Health.PINGED,
+    ),
+    # A failed task, then its rerun: a new task with the source as its
+    # rerun parent and root.
+    Scenario(
+        name='rerun',
+        profiles=(parity.ISOLATED,),
+        sends=(_send('parity.refuse', ('value', 7)),),
+        workflows=(),
+        reruns=(Rerun(source=0),),
     ),
 )
 

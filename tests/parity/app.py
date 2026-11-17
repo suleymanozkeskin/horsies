@@ -11,6 +11,13 @@ Profiles, one child each, so the tasks of a scenario start in send order:
 - `shared-async-1x4`: one shared async child with 4 seats.
 - `shared-thread-1x4`: one shared thread child with 4 seats.
 
+The schedule `parity_slots` sends `parity.add` (2 + 3) every hour and
+catches up missed runs, at most two slots per fire. Only the scheduler
+process of the `schedule_slots` scenario runs it.
+
+Every send retains its input (`retain_rerun_input_default`), so a failed
+task can be rerun.
+
 Each task ends the same way on every run: no task reads the clock, a
 random source, or the state of another task.
 """
@@ -29,6 +36,7 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
+from horsies.core.models.schedule import IntervalSchedule, ScheduleConfig, TaskSchedule
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
 from horsies.core.models.workflow import (
     OnError,
@@ -74,6 +82,15 @@ CHILD_DEFINITION_KEY: Final = 'tests.parity.child.v1'
 PARENT_NAME: Final = 'parity_parent'
 PARENT_DEFINITION_KEY: Final = 'tests.parity.parent.v1'
 
+SCHEDULE_NAME: Final = 'parity_slots'
+SLOT_TASK_NAME: Final = 'parity.add'
+"""The task of each slot of the schedule."""
+SCHEDULE_INTERVAL: Final = timedelta(hours=1)
+"""Longer than any run: a slot is due only after the runner moves the
+schedule back."""
+SCHEDULE_MAX_CATCH_UP_RUNS: Final = 2
+SCHEDULE_CHECK_INTERVAL_S: Final = 1
+
 
 def _database_url() -> str:
     """The URL that the runner set. The module may be imported without it
@@ -84,7 +101,24 @@ def _database_url() -> str:
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     broker=PostgresConfig(
-        database_url=SecretStr(_database_url()), pool_size=5, max_overflow=5
+        database_url=SecretStr(_database_url()),
+        pool_size=5,
+        max_overflow=5,
+        retain_rerun_input_default=True,
+    ),
+    schedule=ScheduleConfig(
+        schedules=[
+            TaskSchedule(
+                name=SCHEDULE_NAME,
+                task_name=SLOT_TASK_NAME,
+                pattern=IntervalSchedule(hours=SCHEDULE_INTERVAL // timedelta(hours=1)),
+                kwargs={'a': 2, 'b': 3},
+                timezone='UTC',
+                catch_up_missed=True,
+                max_catch_up_runs=SCHEDULE_MAX_CATCH_UP_RUNS,
+            ),
+        ],
+        check_interval_seconds=SCHEDULE_CHECK_INTERVAL_S,
     ),
     worker_profiles={
         ISOLATED: WorkerProfile(
