@@ -678,6 +678,23 @@ unless it starts with "Added".
   `SchemaProbe`, `SchemaState`, `MetaResponse`, ...) are no longer public.
   The crate no longer embeds a UI build of its own (`webui-dist/`), and the
   frozen UI source `rust/webui/` is removed.
+- **`rerun_task(broker, ...)` becomes `app.rerun_task(command, policy)`**,
+  which runs in a transaction of the app's handle and returns
+  `Result<RerunOutcome, AppRerunError>` (`Connect`, `Rerun(RerunError)`).
+  `RerunOutcome` is Python's catalog: `Enqueued`, `SourceLive`,
+  `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
+  `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
+  `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+- **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
+  sent_at)`**, the rerun in a transaction that the caller owns (Python
+  `rerun_task(connection, ...)`): the core builds each statement and
+  decides the outcome, the caller's driver runs the statements, and the
+  rerun commits or rolls back with the caller's own writes. Nothing commits
+  inside. `transaction` is any `CallerTransaction`; the adapters are
+  `rerun::TokioPostgresCaller` (feature `tokio-postgres`) and
+  `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
+  `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
+  { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
 
 ## [0.7.0] - 2026-11-15
 

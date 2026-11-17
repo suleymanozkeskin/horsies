@@ -59,10 +59,15 @@ owo-colors = { version = "4", optional = true }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "postgres",
+    "uuid",
+    "chrono",
 ], optional = true }
 tempfile = { version = "3", optional = true }
 # The same pin as the core's statement layer.
-tokio-postgres = { version = "=0.7.18", optional = true }
+tokio-postgres = { version = "=0.7.18", features = [
+    "with-uuid-1",
+    "with-chrono-0_4",
+], optional = true }
 toml = { version = "0.8", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
@@ -73,6 +78,8 @@ tracing-subscriber = { version = "0.3", features = [
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # `oneshot` of the web mount's tests.
 tower = { version = "0.5", features = ["util"] }
+# The encode buffer of the tokio-postgres rerun adapter's tests.
+bytes = "1"
 
 [lints]
 workspace = true
