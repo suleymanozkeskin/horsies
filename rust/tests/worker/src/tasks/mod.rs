@@ -55,6 +55,7 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _exponential = retry::exponential::register(app)?;
     let _retry_error_code = retry::retry_error_code::register(app)?;
     let _retry_other_code = retry::retry_other_code::register(app)?;
+    let _retry_long_interval = retry::retry_long_interval::register(app)?;
 
     let _shared_healthcheck = classes::shared_healthcheck::register(app)?;
     let _thread_healthcheck = classes::thread_healthcheck::register(app)?;

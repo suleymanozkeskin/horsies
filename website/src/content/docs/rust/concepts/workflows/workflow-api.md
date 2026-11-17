@@ -167,7 +167,7 @@ Steps 1 to 3 refuse with `ValidationFailed` before any I/O.
 
 - A start with an id that a workflow of the same name already has starts nothing and returns the handle of that workflow. An id of another workflow name is `WORKFLOW_ID_CONFLICT`.
 - `start_workflow` and `start_workflow_with` before the registration in the process are `VALIDATION_FAILED`.
-- With `AppConfig.resend_on_transient_err`, the core runs a retryable start failure again with the same workflow id, up to 3 times.
+- With `AppConfig.resend_on_transient_err`, the core runs a retryable start failure again with the same workflow id and start time, up to 3 times.
 - In a worker child a start goes through the child's producer handle, as a send does.
 
 ### Start from a Task
@@ -234,9 +234,9 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 
 | `WorkflowStartErrorCode` | When |
 |--------------------------|------|
-| `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, a start before the registration in the process |
+| `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, a start before the registration in the process. At the start: a spec or a sub-workflow child spec that the core refuses |
 | `WorkflowIdConflict` | The id belongs to another workflow name. Nothing was written |
-| `EnqueueFailed` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. When the commit reply was lost, a start again with the same id finds the workflow |
+| `EnqueueFailed` | The connect, the schema install, the client family check, the database, or the build of a sub-workflow child failed. `retryable` is the classification of the cause. When the commit reply was lost, a start again with the same id finds the workflow |
 
 `WorkflowFunction::retry_start(&error)` starts again with the error's `workflow_id`. It refuses with `ValidationFailed` an error that is not `EnqueueFailed`, an error of another workflow name, and an error with no workflow id. For a template, call `start_with_id(params, workflow_id)` with the error's id. The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#workflow-start-error-codes).
 

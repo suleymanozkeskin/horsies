@@ -1,2268 +1,1131 @@
-#![allow(clippy::unwrap_used)]
+//! Layer 1: task fundamentals on the child model (Python
+//! `tests/e2e/test_layer1_tasks.py`).
+//!
+//! Each test has its own database, builds the app of its instance in this
+//! process, and starts the test binary as its worker; every task body runs
+//! in a child of that worker.
+//!
+//! ```text
+//! HORSIES_TEST_DATABASE_URL=postgresql://... cargo test -p horsies-test-worker --test layer1_tasks
+//! ```
 
-//! Layer 1 e2e tests: task fundamentals.
-//!
-//! Mirrors Python's `tests/e2e/test_layer1_tasks.py`.
-//!
-//! Run with:
-//!   cargo test -p horsies-test-worker --test layer1_tasks -- --test-threads=1
-//!
-//! Requires: DATABASE_URL env var or local test DB, built `horsies-test-worker` binary.
-
+use std::convert::Infallible;
 use std::time::Duration;
 
+use chrono::Utc;
+use horsies::{
+    task, Horsies, ReadError, TaskError, TaskInfoParts, TaskOutcome, TaskSendError,
+    TaskSendOptions, TaskStatus,
+};
+use horsies_test_support::{poll, rows};
+use horsies_test_worker::harness::{failed_code, outcome, succeeded, within, Suite};
+use horsies_test_worker::instance::{Instance, Profile};
+use horsies_test_worker::tasks::{basic, custom, retry};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-use horsies::{OperationalErrorCode, PostgresBroker, TaskResult};
-use horsies_test_support::{
-    db,
-    e2e::{
-        db_poll::{wait_for_all_terminal, wait_for_task_status},
-        worker::start_worker,
-    },
+const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
+
+/// The longest wait for the outcome of a task that a running worker runs.
+const RESULT_WAIT: Duration = Duration::from_secs(15);
+
+/// Every part of the task info.
+const ALL_PARTS: TaskInfoParts = TaskInfoParts {
+    result: true,
+    failed_reason: true,
+    attempts: true,
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async fn pool() -> PgPool {
-    let p = db::create_pool().await;
-    db::run_migrations(&p).await;
-    p
+/// A task that only this test process registers: no worker knows its name.
+#[task("nonexistent_task_xyz")]
+async fn nonexistent_task() -> Result<String, TaskError<Infallible>> {
+    Ok("never".to_owned())
 }
 
-async fn broker() -> PostgresBroker {
-    let url = db::db_url();
-    let broker = PostgresBroker::connect(&url).await.unwrap();
-    broker.migrate().await.unwrap();
-    broker
+/// `e2e_simple` with an input type that the worker's `e2e_simple` does not
+/// decode.
+#[task("e2e_simple")]
+async fn simple_as_text(x: String) -> Result<i64, TaskError<Infallible>> {
+    Ok(i64::try_from(x.len()).unwrap_or(0))
 }
 
-/// Enqueue a task by name with kwargs JSON, return the task ID.
-async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs_json: &str) -> Uuid {
-    broker
-        .enqueue(
-            task_name,
-            None,
-            Some(kwargs_json),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap()
-}
-
-/// Enqueue a task with no args.
-async fn enqueue_no_args(broker: &PostgresBroker, task_name: &str) -> Uuid {
-    enqueue_task(broker, task_name, "{}").await
-}
-
-/// Wait for a task to complete and return the result JSON.
-async fn get_result_json(pool: &PgPool, task_id: &Uuid) -> Option<String> {
-    let info = PostgresBroker::from_pool(pool.clone())
-        .get_task_info(*task_id, true, false)
-        .await
-        .unwrap()?;
-    info.result
-        .map(|result| serde_json::to_string(&result).unwrap())
-}
-
-/// Get task status from DB.
-async fn get_task_status(pool: &PgPool, task_id: &Uuid) -> String {
-    PostgresBroker::from_pool(pool.clone())
-        .get_task_info(*task_id, false, false)
-        .await
-        .unwrap()
-        .unwrap()
-        .status
-        .to_string()
-}
-
-/// Get task retry_count from DB.
-async fn get_retry_count(pool: &PgPool, task_id: &Uuid) -> i32 {
-    PostgresBroker::from_pool(pool.clone())
-        .get_task_info(*task_id, false, false)
-        .await
-        .unwrap()
-        .unwrap()
-        .retry_count as i32
-}
-
-/// Enqueue with an explicit task_options JSON string. The low-level broker
-/// enqueue does not apply registry-declared options, so options the worker must
-/// read (timeout_ms, retry_policy) are supplied here — same as `enqueue_with_retry`.
-async fn enqueue_with_options(
-    broker: &PostgresBroker,
-    task_name: &str,
-    kwargs: &str,
-    task_options_json: &str,
-) -> Uuid {
-    broker
-        .enqueue(
-            task_name,
-            None,
-            Some(kwargs),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            Some(task_options_json),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap()
-}
-
-/// Get the latest recorded attempt's error_code for a task.
-async fn get_latest_attempt_error_code(pool: &PgPool, task_id: &Uuid) -> Option<String> {
-    PostgresBroker::from_pool(pool.clone())
-        .get_task_attempts(*task_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .next()
-        .and_then(|attempt| attempt.error_code)
-}
-
-fn db_url() -> String {
-    db::db_url()
-}
-
-fn write_prefetch_config() -> tempfile::NamedTempFile {
-    use std::io::Write;
-
-    let url = db_url();
-    let config = serde_json::json!({
-        "queue_mode": "default",
-        "broker": {
-            "database_url": url,
-            "pool_pre_ping": true,
-            "pool_size": 5,
-            "max_overflow": 5,
-            "pool_timeout": 10,
-            "pool_recycle": 600,
-            "echo": false
-        },
-        "prefetch_buffer": 2,
-        "claim_lease_ms": 5000,
-        "max_claim_renew_age_ms": 180000,
-        "recovery": {
-            "auto_requeue_stale_claimed": true,
-            "claimed_stale_threshold_ms": 120000,
-            "auto_fail_stale_running": true,
-            "running_stale_threshold_ms": 300000,
-            "check_interval_ms": 30000,
-            "runner_heartbeat_interval_ms": 30000,
-            "claimer_heartbeat_interval_ms": 1000
-        },
-        "resend_on_transient_err": false
-    });
-
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(serde_json::to_string_pretty(&config).unwrap().as_bytes())
-        .unwrap();
-    f.flush().unwrap();
-    f
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer1_tasks.py::test_simple_task_lifecycle`.
 #[tokio::test]
 #[serial]
 async fn test_simple_task_lifecycle() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), serde_json::json!(10));
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let simple = suite.function(basic::simple::handle);
+    let handle = simple
+        .send(basic::simple::Input { x: 5 })
+        .await
+        .expect("send e2e_simple");
+    assert_eq!(succeeded(&handle, RESULT_WAIT).await, 10);
 }
 
+/// Python: `test_layer1_tasks.py::test_status_transitions`.
 #[tokio::test]
 #[serial]
 async fn test_status_transitions() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 7}"#).await;
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let status = get_task_status(&pool, &task_id).await;
-    assert_eq!(status, "COMPLETED");
-
-    // Verify archived provenance is exposed through the public info surface.
-    let info = broker
-        .get_task_info(task_id, false, false)
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 5 })
         .await
-        .unwrap()
-        .unwrap();
-    assert!(info.started_at.is_some(), "started_at should be set");
-    assert!(info.completed_at.is_some(), "completed_at should be set");
-    assert!(info.claimed_at.is_some(), "claimed_at should be set");
+        .expect("send e2e_simple");
+    let _value = succeeded(&handle, RESULT_WAIT).await;
+    let info = handle
+        .info(TaskInfoParts::default())
+        .await
+        .expect("read the info");
+    assert_eq!(info.status, TaskStatus::Completed);
+    assert!(info.claimed_at.is_some(), "claimed_at is set");
+    assert!(info.started_at.is_some(), "started_at is set");
+    assert!(info.completed_at.is_some(), "completed_at is set");
 }
 
+/// Python: `test_layer1_tasks.py::test_kwargs_with_defaults`. A Rust input
+/// has every field; a field that may be left out is an `Option`.
 #[tokio::test]
 #[serial]
 async fn test_kwargs_with_defaults() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // required=5, defaults for optional and multiplier
-    let t1 = enqueue_task(&broker, "e2e_kwargs", r#"{"required": 5}"#).await;
-    wait_for_task_status(&pool, &t1, "COMPLETED", Duration::from_secs(10)).await;
-    let r1: TaskResult<serde_json::Value> =
-        serde_json::from_str(&get_result_json(&pool, &t1).await.unwrap()).unwrap();
-    assert_eq!(r1.unwrap(), serde_json::json!("5_default"));
-
-    // required=5, optional="custom"
-    let t2 = enqueue_task(
-        &broker,
-        "e2e_kwargs",
-        r#"{"required": 5, "optional": "custom"}"#,
-    )
-    .await;
-    wait_for_task_status(&pool, &t2, "COMPLETED", Duration::from_secs(10)).await;
-    let r2: TaskResult<serde_json::Value> =
-        serde_json::from_str(&get_result_json(&pool, &t2).await.unwrap()).unwrap();
-    assert_eq!(r2.unwrap(), serde_json::json!("5_custom"));
-
-    // required=5, optional="x", multiplier=10
-    let t3 = enqueue_task(
-        &broker,
-        "e2e_kwargs",
-        r#"{"required": 5, "optional": "x", "multiplier": 10}"#,
-    )
-    .await;
-    wait_for_task_status(&pool, &t3, "COMPLETED", Duration::from_secs(10)).await;
-    let r3: TaskResult<serde_json::Value> =
-        serde_json::from_str(&get_result_json(&pool, &t3).await.unwrap()).unwrap();
-    assert_eq!(r3.unwrap(), serde_json::json!("50_x"));
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let kwargs = suite.function(basic::kwargs::handle);
+    let defaults = kwargs
+        .send(basic::kwargs::Input {
+            required: 5,
+            optional: None,
+            multiplier: None,
+        })
+        .await
+        .expect("send with defaults");
+    let given = kwargs
+        .send(basic::kwargs::Input {
+            required: 5,
+            optional: Some("custom".to_owned()),
+            multiplier: Some(2),
+        })
+        .await
+        .expect("send with values");
+    assert_eq!(succeeded(&defaults, RESULT_WAIT).await, "5_default");
+    assert_eq!(succeeded(&given, RESULT_WAIT).await, "10_custom");
 }
 
+/// Python: `test_layer1_tasks.py::test_explicit_error_result`.
 #[tokio::test]
 #[serial]
 async fn test_explicit_error_result() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_no_args(&broker, "e2e_error").await;
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert!(result.is_err());
-
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.error_code.as_ref().map(|c| c.to_string()).as_deref(),
-        Some("DELIBERATE_ERROR")
-    );
-    assert_eq!(err.message.as_deref(), Some("This is intentional"));
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::error::handle)
+        .send(())
+        .await
+        .expect("send e2e_error");
+    match outcome(&handle, RESULT_WAIT).await {
+        TaskOutcome::Failed(error) => {
+            assert_eq!(error.code().text(), "DELIBERATE_ERROR");
+            assert_eq!(error.message(), Some("This is intentional"));
+            assert_eq!(error.data(), Some(&serde_json::json!({ "key": "value" })));
+        }
+        TaskOutcome::Succeeded(value) => panic!("e2e_error succeeded with {value}"),
+    }
 }
 
+/// Python: `test_layer1_tasks.py::test_no_retry_for_non_matching`. The
+/// policy names `TRANSIENT`; the task fails with another code.
 #[tokio::test]
 #[serial]
 async fn test_no_retry_for_non_matching() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_no_args(&broker, "e2e_no_retry").await;
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
-
-    let retry_count = get_retry_count(&pool, &task_id).await;
-    assert_eq!(
-        retry_count, 0,
-        "no retry should happen for non-matching error code"
-    );
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::retry_other_code::handle)
+        .send(())
+        .await
+        .expect("send");
+    assert_eq!(failed_code(&handle, RESULT_WAIT).await, "RETRYABLE_ERROR");
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!((info.status, info.retry_count), (TaskStatus::Failed, 0));
 }
 
-// Parity with horsies PR #102: per-task execution timeout (timeout_ms).
-
+/// Python: `test_task_timeout.py::test_timeout_fails_task_and_worker_survives`.
+/// A blocking and an async isolated body past their deadline: the parent
+/// kills each child at the deadline, records `TASK_TIMEOUT`, and runs the
+/// next task in a new child.
 #[tokio::test]
 #[serial]
 async fn test_task_timeout_fails_with_task_timeout() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // timeout_ms 1000 supplied via task_options; body sleeps 5000 ms.
-    let task_id = enqueue_with_options(
-        &broker,
-        "e2e_timeout_sleeper",
-        r#"{"duration_ms": 5000}"#,
-        r#"{"timeout_ms": 1000}"#,
-    )
-    .await;
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.error_code.as_ref().map(|c| c.to_string()).as_deref(),
-        Some("TASK_TIMEOUT"),
-    );
-
-    // Attempt row recorded with TASK_TIMEOUT; no retry (not opted in).
-    assert_eq!(
-        get_latest_attempt_error_code(&pool, &task_id)
-            .await
-            .as_deref(),
-        Some("TASK_TIMEOUT"),
-    );
-    assert_eq!(get_retry_count(&pool, &task_id).await, 0);
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let blocking = suite
+        .function(basic::timeout_sleeper::handle)
+        .send(basic::timeout_sleeper::Input {
+            duration_ms: 30_000,
+        })
+        .await
+        .expect("send e2e_timeout_sleeper");
+    assert_eq!(failed_code(&blocking, RESULT_WAIT).await, "TASK_TIMEOUT");
+    let async_body = suite
+        .function(basic::async_timeout_sleeper::handle)
+        .send(basic::async_timeout_sleeper::Input {
+            duration_ms: 30_000,
+        })
+        .await
+        .expect("send e2e_async_timeout_sleeper");
+    assert_eq!(failed_code(&async_body, RESULT_WAIT).await, "TASK_TIMEOUT");
+    match outcome(&async_body, RESULT_WAIT).await {
+        TaskOutcome::Failed(error) => {
+            let data = error.data().expect("TASK_TIMEOUT stores data");
+            assert_eq!(data["timeout_ms"], serde_json::json!(2_000));
+            assert!(
+                data.get("cancel_end").is_none(),
+                "only a shared async timeout stores cancel_end: {data}"
+            );
+        }
+        TaskOutcome::Succeeded(value) => panic!("the sleeper succeeded with {value}"),
+    }
+    let after = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 1 })
+        .await
+        .expect("send after the timeouts");
+    assert_eq!(succeeded(&after, RESULT_WAIT).await, 2);
 }
 
+/// Old Rust `test_task_timeout_retry_opt_in`; Python:
+/// `test_task_timeout.py::test_timeout_fails_task_and_worker_survives` with
+/// `TASK_TIMEOUT` in `auto_retry_for`.
 #[tokio::test]
 #[serial]
 async fn test_task_timeout_retry_opt_in() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Opted into retry on TASK_TIMEOUT (one retry, 1s delay); times out every
-    // attempt, so it retries once then exhausts to FAILED.
-    let task_id = enqueue_with_options(
-        &broker,
-        "e2e_timeout_retry",
-        r#"{"duration_ms": 5000}"#,
-        r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 1, "intervals": [1], "backoff_strategy": "fixed", "jitter": false, "auto_retry_for": ["TASK_TIMEOUT"]}}"#,
-    )
-    .await;
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(30)).await;
-
-    assert!(
-        get_retry_count(&pool, &task_id).await >= 1,
-        "timeout should have been retried before exhausting",
-    );
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::timeout_retry_sleeper::handle)
+        .send(basic::timeout_retry_sleeper::Input {
+            duration_ms: 30_000,
+        })
+        .await
+        .expect("send");
+    assert_eq!(failed_code(&handle, RESULT_WAIT).await, "TASK_TIMEOUT");
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!((info.status, info.retry_count), (TaskStatus::Failed, 1));
+    let attempts = info.attempts.expect("attempts were asked for");
+    let codes: Vec<Option<String>> = attempts.iter().map(|a| a.error_code.clone()).collect();
     assert_eq!(
-        result
-            .unwrap_err()
-            .error_code
-            .as_ref()
-            .map(|c| c.to_string())
-            .as_deref(),
-        Some("TASK_TIMEOUT"),
+        codes,
+        vec![
+            Some("TASK_TIMEOUT".to_owned()),
+            Some("TASK_TIMEOUT".to_owned())
+        ]
     );
 }
 
+/// Old Rust `test_slow_task_completes`; Python: `test_simple_task_lifecycle`
+/// with a body that sleeps 1.5 s.
 #[tokio::test]
 #[serial]
 async fn test_slow_task_completes() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_task(&broker, "e2e_slow", r#"{"duration_ms": 200}"#).await;
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert_eq!(result.unwrap(), serde_json::json!("slept_200"));
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::slow::handle)
+        .send(basic::slow::Input { duration_ms: 1_500 })
+        .await
+        .expect("send e2e_slow");
+    assert_eq!(succeeded(&handle, RESULT_WAIT).await, "slept_1500");
 }
 
+/// Python: `test_layer1_tasks.py::test_multiple_tasks_concurrent`.
 #[tokio::test]
 #[serial]
 async fn test_multiple_tasks_concurrent() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Enqueue 5 tasks.
-    let mut task_ids = Vec::new();
-    for i in 0..5 {
-        let id = enqueue_task(&broker, "e2e_simple", &format!(r#"{{"x": {}}}"#, i)).await;
-        task_ids.push(id);
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let slow = suite.function(basic::slow::handle);
+    let mut handles = Vec::new();
+    for _task in 0..4 {
+        handles.push(
+            slow.send(basic::slow::Input { duration_ms: 800 })
+                .await
+                .expect("send e2e_slow"),
+        );
     }
-
-    // Wait for all to complete.
-    wait_for_all_terminal(&pool, &task_ids, Duration::from_secs(15)).await;
-
-    // Verify all completed.
-    for task_id in &task_ids {
-        let status = get_task_status(&pool, task_id).await;
-        assert_eq!(status, "COMPLETED", "task {} should be COMPLETED", task_id);
-    }
-}
-
-#[tokio::test]
-#[serial]
-async fn test_healthcheck() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_no_args(&broker, "e2e_healthcheck").await;
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert_eq!(result.unwrap(), serde_json::json!("ready"));
-}
-
-// ---------------------------------------------------------------------------
-// L1.5: Retry tests
-// ---------------------------------------------------------------------------
-
-/// Enqueue with retry policy in task_options.
-async fn enqueue_with_retry(
-    broker: &PostgresBroker,
-    task_name: &str,
-    kwargs: &str,
-    max_retries: i32,
-    intervals: &[i32],
-    auto_retry_for: &[&str],
-) -> Uuid {
-    let task_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": max_retries,
-            "intervals": intervals,
-            "backoff_strategy": "fixed",
-            "jitter": false,
-            "auto_retry_for": auto_retry_for,
-        }
-    });
-    let task_options_str = serde_json::to_string(&task_options).unwrap();
-
-    broker
-        .enqueue(
-            task_name,
-            None,
-            Some(kwargs),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            Some(&task_options_str),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap()
-}
-
-#[tokio::test]
-#[serial]
-async fn test_retry_exhausted() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_with_retry(
-        &broker,
-        "e2e_retry_exhausted",
-        "{}",
-        3,
-        &[1, 1, 1],
-        &["TRANSIENT"],
-    )
-    .await;
-
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(30)).await;
-
-    let retry_count = get_retry_count(&pool, &task_id).await;
-    assert_eq!(retry_count, 3, "expected 3 retries before final failure");
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.error_code.as_ref().map(|c| c.to_string()).as_deref(),
-        Some("TRANSIENT")
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_retry_eventual_success() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    // Create state file for retry_success task.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), "0").unwrap();
-    std::env::set_var("E2E_RETRY_SUCCESS_PATH", tmp.path().to_str().unwrap());
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "1"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_with_retry(
-        &broker,
-        "e2e_retry_success",
-        "{}",
-        3,
-        &[1, 1, 1],
-        &["TRANSIENT"],
-    )
-    .await;
-
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(30)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), serde_json::json!("succeeded_on_attempt_3"));
-
-    std::env::remove_var("E2E_RETRY_SUCCESS_PATH");
-}
-
-// ---------------------------------------------------------------------------
-// L1.6: good_until expiry
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_good_until_already_past() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let past = chrono::Utc::now() - chrono::Duration::seconds(10);
-    let task_id = broker
-        .enqueue(
-            "e2e_simple",
-            None,
-            Some(r#"{"x": 5}"#),
-            "default",
-            100,
-            None,
-            None,
-            Some(past),
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Give worker time to potentially claim — it should NOT.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let status = get_task_status(&pool, &task_id).await;
-    assert_eq!(status, "PENDING", "expired task should remain PENDING");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_good_until_future_completes() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let future = chrono::Utc::now() + chrono::Duration::seconds(60);
-    let task_id = broker
-        .enqueue(
-            "e2e_simple",
-            None,
-            Some(r#"{"x": 5}"#),
-            "default",
-            100,
-            None,
-            None,
-            Some(future),
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert_eq!(result.unwrap(), serde_json::json!(10));
-}
-
-#[tokio::test]
-#[serial]
-async fn test_retry_blocked_by_good_until_expiry() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let good_until = chrono::Utc::now() + chrono::Duration::seconds(10);
-    let task_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": 3,
-            "intervals": [60],
-            "backoff_strategy": "fixed",
-            "jitter": false,
-            "auto_retry_for": ["TRANSIENT"],
+    let client = suite.client().await;
+    let most_running = poll::max_during(
+        Duration::from_secs(3),
+        Duration::from_millis(50),
+        async || {
+            rows::count(
+                &client,
+                "SELECT count(*) FROM horsies_tasks WHERE status = 'RUNNING'",
+                &[],
+            )
+            .await
         },
-        "good_until": good_until.to_rfc3339(),
-    });
-    let task_options_str = serde_json::to_string(&task_options).unwrap();
-
-    let task_id = broker
-        .enqueue(
-            "e2e_retry_exhausted",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            Some(good_until),
-            Some(&task_options_str),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "1"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(15)).await;
-
-    // Retry interval is 60s but good_until is 10s away — retry should be blocked.
-    let retry_count = get_retry_count(&pool, &task_id).await;
-    assert_eq!(
-        retry_count, 0,
-        "retry should be blocked by good_until expiry"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// L1.7: Error handling edge cases
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_worker_resolution_error() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let task_id = enqueue_task(&broker, "nonexistent_task_xyz", "{}").await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
-
-    // Task-level failures write to `result` (serialized TaskResult::Err), not
-    // `failed_reason` (which is reserved for worker crashes — see FAIL_TASK_SQL
-    // vs FAIL_WORKER_SQL in horsies/src/broker/postgres.rs).
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let parsed: TaskResult<serde_json::Value> =
-        serde_json::from_str(&result_json).expect("result must deserialize as TaskResult");
-    let TaskResult::Err(err) = parsed else {
-        panic!("expected TaskResult::Err for resolution error, got Ok");
-    };
-    assert_eq!(
-        err.error_code,
-        Some(OperationalErrorCode::WorkerResolutionError.into()),
-        "expected WORKER_RESOLUTION_ERROR, got: {:?}",
-        err.error_code,
-    );
-    assert!(
-        err.message
-            .as_deref()
-            .map(|m| m.contains("not registered"))
-            .unwrap_or(false),
-        "expected 'not registered' in message, got: {:?}",
-        err.message,
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_argument_deserialization_error() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-
-    // Insert task with corrupted args directly.
-    let task_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, \
-         status, sent_at, enqueued_at, enqueue_sha, created_at, updated_at,
-         command_fingerprint_version, command_fingerprint, retention_class_key,
-         retain_rerun_input, prepared_rerun_input_disposition) \
-         VALUES ($1, 'e2e_simple', 'default', 100, '\"not_valid\"', '{}', \
-         'PENDING', NOW(), NOW(), 'test-sha', NOW(), NOW(),
-         1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE')",
-    )
-    .bind(&task_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
-
-    let error_code = PostgresBroker::from_pool(pool.clone())
-        .get_task_info(task_id, false, false)
-        .await
-        .unwrap()
-        .unwrap()
-        .error_code;
-
-    assert_eq!(
-        error_code.as_deref(),
-        Some("ARGUMENT_TYPE_MISMATCH"),
-        "expected ARGUMENT_TYPE_MISMATCH, got: {:?}",
-        error_code,
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_task_cancelled() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
-
-    assert!(broker
-        .cancel(
-            task_id,
-            &[
-                horsies::TaskStatus::Pending,
-                horsies::TaskStatus::Claimed,
-                horsies::TaskStatus::Running,
-            ],
-        )
-        .await
-        .unwrap());
-
-    let status = get_task_status(&pool, &task_id).await;
-    assert_eq!(status, "CANCELLED");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_task_info_after_completion() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 21}"#).await;
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let info = broker.get_task_info(task_id, true, true).await.unwrap();
-    let info = info.expect("task info should exist");
-
-    assert_eq!(info.task_id, task_id);
-    assert_eq!(info.task_name, "e2e_simple");
-    assert_eq!(info.status, horsies::TaskStatus::Completed);
-    assert_eq!(info.queue_name, "default");
-    assert!(info.started_at.is_some(), "started_at should be set");
-    assert!(info.completed_at.is_some(), "completed_at should be set");
-
-    // Result should be included (include_result=true).
-    assert!(info.result.is_some(), "result should be included");
-}
-
-// ---------------------------------------------------------------------------
-// L1.4: Exponential backoff state — retry_count advances with next_retry_at
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_exponential_backoff_state() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Enqueue with exponential backoff: base=1s, max_retries=3.
-    let task_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": 3,
-            "intervals": [1],
-            "backoff_strategy": "exponential",
-            "jitter": false,
-            "auto_retry_for": ["TRANSIENT"],
-        }
-    });
-    let task_options_str = serde_json::to_string(&task_options).unwrap();
-    let task_id = broker
-        .enqueue(
-            "e2e_retry_exhausted",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            Some(&task_options_str),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    // Poll until retry_count >= 1 and next_retry_at is set.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut found = false;
-    while tokio::time::Instant::now() < deadline {
-        let row: Option<(i32, Option<chrono::DateTime<chrono::Utc>>)> =
-            sqlx::query_as("SELECT retry_count, next_retry_at FROM horsies_tasks WHERE id = $1")
-                .bind(&task_id)
-                .fetch_optional(&pool)
-                .await
-                .unwrap();
-        if let Some((rc, nra)) = row {
-            if rc >= 1 && nra.is_some() {
-                found = true;
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(
-        found,
-        "retry_count should advance to >= 1 with next_retry_at set"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// L1.4b: Exponential backoff intervals — interval_2 > interval_1
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_exponential_backoff_intervals() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": 3,
-            "intervals": [1],
-            "backoff_strategy": "exponential",
-            "jitter": false,
-            "auto_retry_for": ["TRANSIENT"],
-        }
-    });
-    let task_options_str = serde_json::to_string(&task_options).unwrap();
-    let task_id = broker
-        .enqueue(
-            "e2e_retry_exhausted",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            Some(&task_options_str),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    // Capture enqueued_at snapshots at each retry_count.
-    let mut snapshots: std::collections::HashMap<i32, chrono::DateTime<chrono::Utc>> =
-        std::collections::HashMap::new();
-
-    // Capture initial enqueued_at.
-    let initial: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT enqueued_at FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    snapshots.insert(0, initial);
-
-    // Poll until retry_count reaches 2.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while tokio::time::Instant::now() < deadline {
-        let row: Option<(i32, chrono::DateTime<chrono::Utc>)> =
-            sqlx::query_as("SELECT retry_count, enqueued_at FROM horsies_tasks WHERE id = $1")
-                .bind(&task_id)
-                .fetch_optional(&pool)
-                .await
-                .unwrap();
-        if let Some((rc, ea)) = row {
-            snapshots.entry(rc).or_insert(ea);
-            if rc >= 2 {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-
-    assert!(
-        snapshots.contains_key(&0) && snapshots.contains_key(&1) && snapshots.contains_key(&2),
-        "should have snapshots for retry_count 0, 1, 2; got: {:?}",
-        snapshots.keys().collect::<Vec<_>>(),
-    );
-
-    let interval_1 = (snapshots[&1] - snapshots[&0]).num_milliseconds() as f64 / 1000.0;
-    let interval_2 = (snapshots[&2] - snapshots[&1]).num_milliseconds() as f64 / 1000.0;
-    assert!(
-        interval_2 > interval_1,
-        "exponential backoff: interval_2 ({:.2}s) should exceed interval_1 ({:.2}s)",
-        interval_2,
-        interval_1,
-    );
-}
-
-// ---------------------------------------------------------------------------
-// L1.4c: Auto-retry by error code
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_auto_retry_by_error_code() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Task returns error code "TRANSIENT". Retry policy auto_retry_for includes "TRANSIENT".
-    let task_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": 1,
-            "intervals": [1],
-            "backoff_strategy": "fixed",
-            "jitter": false,
-            "auto_retry_for": ["TRANSIENT"],
-        }
-    });
-    let task_options_str = serde_json::to_string(&task_options).unwrap();
-    let task_id = broker
-        .enqueue(
-            "e2e_retry_exhausted",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            Some(&task_options_str),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(15)).await;
-
-    let retry_count = get_retry_count(&pool, &task_id).await;
-    assert_eq!(
-        retry_count, 1,
-        "should have retried once via error code match"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// L1.6.1: Task expires before claim (500ms expiry timing)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_task_expires_before_claim() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    // Submit task that expires in 500ms.
-    let expiry = chrono::Utc::now() + chrono::Duration::milliseconds(500);
-    let task_id = broker
-        .enqueue(
-            "e2e_simple",
-            None,
-            Some(r#"{"x": 5}"#),
-            "default",
-            100,
-            None,
-            None,
-            Some(expiry),
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    // Wait until task is definitely expired.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    // Start worker AFTER expiry.
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Observe for 2s — expired task should never be claimed.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let status = get_task_status(&pool, &task_id).await;
-    assert_eq!(status, "PENDING", "expired task should remain PENDING");
-}
-
-// ---------------------------------------------------------------------------
-// L1.6.5: Retry succeeds within good_until
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_retry_succeeds_within_good_until() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), "0").unwrap();
-    std::env::set_var("E2E_RETRY_SUCCESS_PATH", tmp.path().to_str().unwrap());
-
-    let good_until = chrono::Utc::now() + chrono::Duration::seconds(30);
-    let task_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": 3,
-            "intervals": [1, 1, 1],
-            "backoff_strategy": "fixed",
-            "jitter": false,
-            "auto_retry_for": ["TRANSIENT"],
-        },
-        "good_until": good_until.to_rfc3339(),
-    });
-    let task_options_str = serde_json::to_string(&task_options).unwrap();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "1"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = broker
-        .enqueue(
-            "e2e_retry_success",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            Some(good_until),
-            Some(&task_options_str),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(30)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), serde_json::json!("succeeded_on_attempt_3"));
-
-    let retry_count = get_retry_count(&pool, &task_id).await;
-    assert_eq!(retry_count, 2, "should have 2 retries (3 attempts total)");
-
-    std::env::remove_var("E2E_RETRY_SUCCESS_PATH");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_good_until_expires_while_claimed_before_start() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let config_file = write_prefetch_config();
-    let config_path = config_file.path().to_str().unwrap().to_owned();
-
-    let _worker = start_worker(
-        &config_path,
-        &["--concurrency", "1"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let blocker_id = enqueue_task(&broker, "e2e_slow", r#"{"duration_ms":1500}"#).await;
-
-    let good_until = chrono::Utc::now() + chrono::Duration::milliseconds(500);
-    let target_id = broker
-        .enqueue(
-            "e2e_simple",
-            None,
-            Some(r#"{"x": 5}"#),
-            "default",
-            100,
-            None,
-            None,
-            Some(good_until),
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < claim_deadline {
-        let status = get_task_status(&pool, &target_id).await;
-        if status == "CLAIMED" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(
-        get_task_status(&pool, &target_id).await,
-        "CLAIMED",
-        "target task should be buffered as CLAIMED before it expires",
-    );
-
-    wait_for_task_status(&pool, &target_id, "EXPIRED", Duration::from_secs(15)).await;
-    wait_for_task_status(&pool, &blocker_id, "COMPLETED", Duration::from_secs(15)).await;
-
-    let row: (
-        String,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT (detail.task_row).status,
-                (detail.task_row).started_at,
-                (detail.task_row).last_claimed_worker_id,
-                (detail.task_row).error_code
-         FROM horsies_task_detail_staged($1) AS detail
-         WHERE detail.location = 'HISTORY'",
-    )
-    .bind(&target_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert_eq!(row.0, "EXPIRED");
-    assert!(
-        row.1.is_none(),
-        "started_at must stay NULL when task expires before user code starts",
-    );
-    assert!(
-        row.2.is_some(),
-        "claimed_by_worker_id should be preserved for forensics",
-    );
-    assert_eq!(row.3.as_deref(), Some("TASK_EXPIRED"));
-
-    let live_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_tasks WHERE id = $1)")
-            .bind(target_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(!live_exists, "expired claim must leave the live table");
-
-    let attempts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
-            .bind(&target_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(attempts, 0, "no attempt row should be written");
-}
-
-// ---------------------------------------------------------------------------
-// L1.5.4: Priority ordering — high priority claimed before low
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_priority_ordering() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let enqueue_base = chrono::Utc::now() - chrono::Duration::seconds(1);
-
-    // Low priority (100) submitted first.
-    let task_id_low = broker
-        .enqueue(
-            "e2e_slow",
-            None,
-            Some(r#"{"duration_ms": 100}"#),
-            "default",
-            100,
-            None,
-            Some(enqueue_base),
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    // High priority (1) submitted second.
-    let task_id_high = broker
-        .enqueue(
-            "e2e_slow",
-            None,
-            Some(r#"{"duration_ms": 100}"#),
-            "default",
-            1,
-            None,
-            Some(enqueue_base + chrono::Duration::milliseconds(50)),
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-    let eligible: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM horsies_tasks WHERE id = ANY($1) AND enqueued_at <= NOW()",
-    )
-    .bind(vec![task_id_low, task_id_high])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        eligible, 2,
-        "both tasks must be eligible before the worker starts"
-    );
-
-    // Start worker with concurrency=1 to force serial execution.
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "1"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    wait_for_all_terminal(
-        &pool,
-        &[task_id_low.clone(), task_id_high.clone()],
-        Duration::from_secs(15),
     )
     .await;
-
-    // High priority should have started before low.
-    let started_high = broker
-        .get_task_info(task_id_high, false, false)
-        .await
-        .unwrap()
-        .unwrap()
-        .started_at;
-    let started_low = broker
-        .get_task_info(task_id_low, false, false)
-        .await
-        .unwrap()
-        .unwrap()
-        .started_at;
-
+    for handle in &handles {
+        let _value = succeeded(handle, RESULT_WAIT).await;
+    }
     assert!(
-        started_high.unwrap() < started_low.unwrap(),
-        "high priority should start before low: high={:?}, low={:?}",
-        started_high,
-        started_low,
+        most_running >= 2,
+        "at most {most_running} tasks ran at once"
     );
 }
 
-// ---------------------------------------------------------------------------
-// L1.8.2: SKIP LOCKED prevents double claim
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_skip_locked_prevents_double_claim() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let log_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("E2E_IDEMPOTENT_LOG_DIR", log_dir.path().to_str().unwrap());
-
-    // Start two workers.
-    let _w1 = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-    let _w2 = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Submit 20 idempotent tasks.
-    let mut task_ids = Vec::new();
-    for i in 0..20 {
-        let token = format!("skip_locked_{}", i);
-        let kwargs = serde_json::json!({"token": token});
-        let id = enqueue_task(&broker, "e2e_idempotent", &kwargs.to_string()).await;
-        task_ids.push(id);
-    }
-
-    wait_for_all_terminal(&pool, &task_ids, Duration::from_secs(30)).await;
-
-    // All tasks should succeed — no DOUBLE_EXECUTION errors.
-    for task_id in &task_ids {
-        let status = get_task_status(&pool, task_id).await;
-        assert_eq!(status, "COMPLETED", "task {} should COMPLETE", task_id);
-    }
-
-    // Each token file should exist exactly once.
-    let file_count = std::fs::read_dir(log_dir.path()).unwrap().count();
-    assert_eq!(
-        file_count, 20,
-        "expected 20 token files, got {}",
-        file_count
-    );
-
-    std::env::remove_var("E2E_IDEMPOTENT_LOG_DIR");
-}
-
-// ---------------------------------------------------------------------------
-// L1.8.3: max_claim_batch respected
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_max_claim_batch() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "1", "--max-claim-batch", "1"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Enqueue 6 slow tasks.
-    let mut task_ids = Vec::new();
-    for _ in 0..6 {
-        let id = enqueue_task(&broker, "e2e_slow", r#"{"duration_ms": 300}"#).await;
-        task_ids.push(id);
-    }
-
-    // Poll DB while tasks are running — CLAIMED count should never exceed 1.
-    let mut max_claimed_seen = 0i64;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while tokio::time::Instant::now() < deadline {
-        let claimed: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_tasks WHERE status = 'CLAIMED'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        if claimed > max_claimed_seen {
-            max_claimed_seen = claimed;
-        }
-
-        // Check if all done.
-        let pending: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('PENDING', 'CLAIMED', 'RUNNING')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if pending == 0 {
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    assert!(
-        max_claimed_seen <= 1,
-        "CLAIMED count {} exceeded max_claim_batch 1",
-        max_claimed_seen,
-    );
-
-    // All tasks should complete.
-    wait_for_all_terminal(&pool, &task_ids, Duration::from_secs(30)).await;
-    for task_id in &task_ids {
-        let status = get_task_status(&pool, task_id).await;
-        assert_eq!(status, "COMPLETED", "task {} should COMPLETE", task_id);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// L1.8.1 upgrade: Multiple tasks concurrent — DB polling proof
-// ---------------------------------------------------------------------------
-
+/// Old Rust `test_multiple_tasks_concurrent_db_proof`; Python:
+/// `test_multiple_tasks_concurrent`. Four children run four bodies at once:
+/// every body started before any ended.
 #[tokio::test]
 #[serial]
 async fn test_multiple_tasks_concurrent_db_proof() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Enqueue 4 tasks that take 800ms each.
-    let mut task_ids = Vec::new();
-    for _ in 0..4 {
-        let id = enqueue_task(&broker, "e2e_slow", r#"{"duration_ms": 800}"#).await;
-        task_ids.push(id);
-    }
-
-    // Poll DB to observe max concurrent RUNNING tasks.
-    let mut max_running = 0i64;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        let running: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING'")
-                .fetch_one(&pool)
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated4).await;
+    let stamp = suite.function(basic::stamp::handle);
+    let mut handles = Vec::new();
+    for _task in 0..4 {
+        handles.push(
+            stamp
+                .send(basic::stamp::Input { duration_ms: 1_500 })
                 .await
-                .unwrap();
-        if running > max_running {
-            max_running = running;
-        }
-        if max_running >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+                .expect("send e2e_stamp"),
+        );
     }
-
-    wait_for_all_terminal(&pool, &task_ids, Duration::from_secs(15)).await;
-
-    assert!(max_running > 0, "should have observed RUNNING tasks");
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    let mut pids = Vec::new();
+    for handle in &handles {
+        let stamp = succeeded(handle, RESULT_WAIT).await;
+        let parts: Vec<&str> = stamp.split(':').collect();
+        let [pid, start, end] = parts.as_slice() else {
+            panic!("a stamp is pid:start:end, not {stamp}");
+        };
+        pids.push((*pid).to_owned());
+        starts.push(start.parse::<u128>().expect("a start in ms"));
+        ends.push(end.parse::<u128>().expect("an end in ms"));
+    }
+    pids.sort();
+    pids.dedup();
+    assert_eq!(pids.len(), 4, "each body ran in its own child");
     assert!(
-        max_running >= 2,
-        "should prove parallelism with >= 2 concurrent RUNNING, got {}",
-        max_running
+        starts.iter().max() < ends.iter().min(),
+        "every body started before the first ended"
     );
 }
 
-// ---------------------------------------------------------------------------
-// L1.7.3: Task not found — non-existent task_id returns TaskNotFound
-// ---------------------------------------------------------------------------
-
+/// Old Rust `test_healthcheck`; Python: the ready check of every test.
 #[tokio::test]
 #[serial]
-async fn test_task_not_found() {
-    let broker = broker().await;
-
-    let result = broker
-        .get_result::<serde_json::Value>(uuid::Uuid::nil(), Some(Duration::from_millis(500)))
+async fn test_healthcheck() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::healthcheck::handle)
+        .send(())
         .await
-        .unwrap();
-
-    assert!(
-        result.is_err() && result.is_transient(),
-        "expected TaskNotFound (transient error), got: {:?}",
-        result,
-    );
+        .expect("send e2e_healthcheck");
+    assert_eq!(succeeded(&handle, RESULT_WAIT).await, "ready");
 }
 
-// ---------------------------------------------------------------------------
-// L1.7.4: Wait timeout — task never completes within timeout
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer1_tasks.py::test_retry_exhausted`.
 #[tokio::test]
 #[serial]
-async fn test_wait_timeout() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    // Enqueue but DON'T start a worker.
-    let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
-
-    let result = broker
-        .get_result::<serde_json::Value>(task_id, Some(Duration::from_millis(500)))
+async fn test_retry_exhausted() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::retry_exhausted::handle)
+        .send(())
         .await
-        .unwrap();
-
-    assert!(
-        result.is_err() && result.is_transient(),
-        "expected WaitTimeout (transient error), got: {:?}",
-        result,
-    );
+        .expect("send");
+    assert_eq!(failed_code(&handle, RESULT_WAIT).await, "TRANSIENT");
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!((info.status, info.retry_count), (TaskStatus::Failed, 3));
 }
 
-// ---------------------------------------------------------------------------
-// L1.7.6: Library error code in user task — OperationalErrorCode preserved
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer1_tasks.py::test_retry_eventual_success`.
 #[tokio::test]
 #[serial]
-async fn test_library_error_code_in_user_task() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_no_args(&broker, "e2e_error_code").await;
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert!(result.is_err());
-
-    let err = result.unwrap_err();
+async fn test_retry_eventual_success() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::retry_success::handle)
+        .send(retry::retry_success::Input {
+            token: Uuid::new_v4().simple().to_string(),
+        })
+        .await
+        .expect("send");
     assert_eq!(
-        err.error_code.as_ref().map(|c| c.to_string()).as_deref(),
-        Some("TASK_ERROR"),
+        succeeded(&handle, RESULT_WAIT).await,
+        "succeeded_on_attempt_3"
     );
-    assert_eq!(err.message.as_deref(), Some("boom"));
 }
 
-// ---------------------------------------------------------------------------
-// L1.7.9 upgrade: Cancelled task — get_result returns TaskCancelled
-// ---------------------------------------------------------------------------
+/// Python: `test_layer1_tasks.py::test_good_until_already_past`.
+#[tokio::test]
+#[serial]
+async fn test_good_until_already_past() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let past = Utc::now() - chrono::Duration::seconds(10);
+    let handle = suite
+        .function(basic::simple::handle)
+        .send_with_options(
+            TaskSendOptions::new().good_until(past),
+            basic::simple::Input { x: 5 },
+        )
+        .await
+        .expect("send");
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    poll::never_during(
+        Duration::from_secs(2),
+        "the expired task runs",
+        async || {
+            let status = rows::task_status(&client, handle.task_id()).await;
+            !matches!(status.as_deref(), Some("PENDING" | "EXPIRED"))
+        },
+    )
+    .await;
+}
 
+/// Old Rust `test_good_until_future_completes`; Python:
+/// `test_layer1_tasks.py::test_task_completes_before_expiry`.
+#[tokio::test]
+#[serial]
+async fn test_good_until_future_completes() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::simple::handle)
+        .send_with_options(
+            TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(60)),
+            basic::simple::Input { x: 5 },
+        )
+        .await
+        .expect("send");
+    assert_eq!(succeeded(&handle, RESULT_WAIT).await, 10);
+}
+
+/// Python: `test_layer1_tasks.py::test_retry_blocked_by_good_until_expiry`.
+/// The first retry would start 60 s after the failure, past the deadline:
+/// no retry, the task fails.
+#[tokio::test]
+#[serial]
+async fn test_retry_blocked_by_good_until_expiry() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::retry_long_interval::handle)
+        .send_with_options(
+            TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(10)),
+            (),
+        )
+        .await
+        .expect("send");
+    assert_eq!(failed_code(&handle, RESULT_WAIT).await, "TRANSIENT");
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!((info.status, info.retry_count), (TaskStatus::Failed, 0));
+}
+
+/// Python: `test_layer1_tasks.py::test_retry_succeeds_within_good_until`.
+#[tokio::test]
+#[serial]
+async fn test_retry_succeeds_within_good_until() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::retry_success::handle)
+        .send_with_options(
+            TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(60)),
+            retry::retry_success::Input {
+                token: Uuid::new_v4().simple().to_string(),
+            },
+        )
+        .await
+        .expect("send");
+    assert_eq!(
+        succeeded(&handle, RESULT_WAIT).await,
+        "succeeded_on_attempt_3"
+    );
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!((info.status, info.retry_count), (TaskStatus::Completed, 2));
+}
+
+/// Python: `test_layer1_tasks.py::test_worker_resolution_error`.
+#[tokio::test]
+#[serial]
+async fn test_worker_resolution_error() {
+    let mut suite = Suite::start(BIN, Instance::Default).await;
+    let unknown = nonexistent_task::register(&mut suite.app).expect("register in this process");
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = unknown.send(()).await.expect("send");
+    assert_eq!(
+        failed_code(&handle, RESULT_WAIT).await,
+        "WORKER_RESOLUTION_ERROR"
+    );
+}
+
+/// Python: `test_layer1_tasks.py::test_argument_deserialization_error`. A
+/// second app stores `{"x": "not_a_number"}` for `e2e_simple`, whose input
+/// field is an integer in the worker.
+#[tokio::test]
+#[serial]
+async fn test_argument_deserialization_error() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let mut other = Horsies::new(suite.config()).expect("a second app on the database");
+    let as_text = simple_as_text::register(&mut other).expect("register the text input");
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = as_text
+        .send(simple_as_text::Input {
+            x: "not_a_number".to_owned(),
+        })
+        .await
+        .expect("send");
+    assert_eq!(
+        failed_code(&handle, RESULT_WAIT).await,
+        "WORKER_SERIALIZATION_ERROR"
+    );
+}
+
+/// Python: `test_layer1_tasks.py::test_task_cancelled`.
+#[tokio::test]
+#[serial]
+async fn test_task_cancelled() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let handle = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 5 })
+        .await
+        .expect("send");
+    let _cancelled = horsies::monitoring::cancel_task(&suite.app, handle.task_id(), false)
+        .await
+        .expect("cancel the pending task");
+    match outcome(&handle, Duration::from_secs(1)).await {
+        TaskOutcome::Failed(error) => {
+            assert_eq!(error.code().text(), "TASK_CANCELLED");
+            let data = error.data().expect("TASK_CANCELLED stores data");
+            assert_eq!(
+                data["task_id"],
+                serde_json::json!(handle.task_id().to_string())
+            );
+        }
+        TaskOutcome::Succeeded(value) => panic!("the cancelled task succeeded with {value}"),
+    }
+}
+
+/// Old Rust `test_task_cancelled_get_result`; Python:
+/// `test_layer1_tasks.py::test_task_cancelled`, read by id.
 #[tokio::test]
 #[serial]
 async fn test_task_cancelled_get_result() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
-
-    assert!(broker
-        .cancel(
-            task_id,
-            &[
-                horsies::TaskStatus::Pending,
-                horsies::TaskStatus::Claimed,
-                horsies::TaskStatus::Running,
-            ],
-        )
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let handle = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 5 })
         .await
-        .unwrap());
-
-    let result = broker
-        .get_result::<serde_json::Value>(task_id, Some(Duration::from_millis(1000)))
+        .expect("send");
+    let _cancelled = horsies::monitoring::cancel_task(&suite.app, handle.task_id(), false)
         .await
-        .unwrap();
+        .expect("cancel the pending task");
+    let read = suite
+        .app
+        .get_result::<i64, Infallible>(handle.task_id(), within(Duration::from_secs(1)))
+        .await
+        .expect("read the result by id");
+    match read {
+        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "TASK_CANCELLED"),
+        TaskOutcome::Succeeded(value) => panic!("the cancelled task succeeded with {value}"),
+    }
+}
 
-    assert!(
-        result.is_err(),
-        "expected TaskCancelled error, got: {:?}",
-        result,
-    );
+/// Old Rust `test_task_info_after_completion`; Python:
+/// `test_layer1_tasks.py::test_task_handle_info`.
+#[tokio::test]
+#[serial]
+async fn test_task_info_after_completion() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 21 })
+        .await
+        .expect("send");
+    let _value = succeeded(&handle, RESULT_WAIT).await;
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!(info.task_id, handle.task_id());
+    assert_eq!(info.task_name, "e2e_simple");
+    assert_eq!(info.queue_name, "default");
+    assert_eq!(info.status, TaskStatus::Completed);
+    let result = info.result.expect("the result was asked for");
+    assert_eq!(result.ok(), Some(serde_json::json!(42)));
+    assert_eq!(info.attempts.map(|attempts| attempts.len()), Some(1));
+}
 
-    // Verify the error message contains the task_id.
-    let err = result.unwrap_err();
+/// Python: `test_layer1_tasks.py::test_exponential_backoff_state`.
+#[tokio::test]
+#[serial]
+async fn test_exponential_backoff_state() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::exponential::handle)
+        .send(())
+        .await
+        .expect("send");
+    let info = poll::poll_until(Duration::from_secs(5), "a retry is scheduled", async || {
+        let info = handle.info(TaskInfoParts::default()).await.ok()?;
+        (info.retry_count >= 1 && info.next_retry_at.is_some()).then_some(info)
+    })
+    .await;
+    assert_eq!(info.max_retries, 3);
+}
+
+/// Python: `test_layer1_tasks.py::test_exponential_backoff_intervals`. The
+/// second retry waits longer than the first; `sent_at` never changes.
+#[tokio::test]
+#[serial]
+async fn test_exponential_backoff_intervals() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let handle = suite
+        .function(retry::exponential::handle)
+        .send(())
+        .await
+        .expect("send");
+    let first = handle
+        .info(TaskInfoParts::default())
+        .await
+        .expect("read the info");
+    let mut enqueued = vec![first.enqueued_at];
+    let _worker = suite.worker(Profile::Isolated1).await;
+    poll::poll_until(Duration::from_secs(15), "the second retry", async || {
+        let info = handle.info(TaskInfoParts::default()).await.ok()?;
+        let count = usize::try_from(info.retry_count).ok()?;
+        if count == enqueued.len() {
+            enqueued.push(info.enqueued_at);
+        }
+        assert_eq!(info.sent_at, first.sent_at, "sent_at changed on a retry");
+        (enqueued.len() > 2).then_some(())
+    })
+    .await;
+    let first_interval = enqueued[1] - enqueued[0];
+    let second_interval = enqueued[2] - enqueued[1];
     assert!(
-        err.message
-            .as_deref()
-            .unwrap_or("")
-            .contains(&task_id.to_string()),
-        "expected task_id in error message",
+        second_interval > first_interval,
+        "exponential intervals: {first_interval} then {second_interval}"
     );
 }
 
-// ---------------------------------------------------------------------------
-// L1.5.1: Complex result serialization — nested struct roundtrip
-// ---------------------------------------------------------------------------
+/// Python: `test_layer1_tasks.py::test_auto_retry_by_error_code`.
+#[tokio::test]
+#[serial]
+async fn test_auto_retry_by_error_code() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::retry_error_code::handle)
+        .send(())
+        .await
+        .expect("send");
+    assert_eq!(failed_code(&handle, RESULT_WAIT).await, "RETRYABLE_ERROR");
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!((info.status, info.retry_count), (TaskStatus::Failed, 1));
+}
 
+/// Python: `test_layer1_tasks.py::test_task_expires_before_claim`.
+#[tokio::test]
+#[serial]
+async fn test_task_expires_before_claim() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let expiry = Utc::now() + chrono::Duration::milliseconds(500);
+    let handle = suite
+        .function(basic::simple::handle)
+        .send_with_options(
+            TaskSendOptions::new().good_until(expiry),
+            basic::simple::Input { x: 5 },
+        )
+        .await
+        .expect("send");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    poll::never_during(
+        Duration::from_secs(2),
+        "the expired task runs",
+        async || {
+            let status = rows::task_status(&client, handle.task_id()).await;
+            !matches!(status.as_deref(), Some("PENDING" | "EXPIRED"))
+        },
+    )
+    .await;
+}
+
+/// Old Rust `test_good_until_expires_while_claimed_before_start`; Python:
+/// `test_task_expires_before_claim`, with the deadline passing while the
+/// task is CLAIMED by a prefetch and its child is busy.
+#[tokio::test]
+#[serial]
+async fn test_good_until_expires_while_claimed_before_start() {
+    let suite = Suite::start(BIN, Instance::SoftCap).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let blocker = suite
+        .function(basic::slow::handle)
+        .send(basic::slow::Input { duration_ms: 4_000 })
+        .await
+        .expect("send the blocker");
+    let client = suite.client().await;
+    rows::wait_for_task_status(&client, blocker.task_id(), "RUNNING", RESULT_WAIT).await;
+    let expiring = suite
+        .function(basic::simple::handle)
+        .send_with_options(
+            TaskSendOptions::new().good_until(Utc::now() + chrono::Duration::seconds(1)),
+            basic::simple::Input { x: 5 },
+        )
+        .await
+        .expect("send the expiring task");
+    rows::wait_for_task_status(&client, expiring.task_id(), "EXPIRED", RESULT_WAIT).await;
+    assert_eq!(succeeded(&blocker, RESULT_WAIT).await, "slept_4000");
+}
+
+/// Python: `test_layer1_tasks.py::test_priority_ordering`.
+#[tokio::test]
+#[serial]
+async fn test_priority_ordering() {
+    let suite = Suite::start(BIN, Instance::CustomQueues).await;
+    let low = suite
+        .function(custom::low::handle)
+        .send(())
+        .await
+        .expect("send e2e_low");
+    let high = suite
+        .function(custom::high::handle)
+        .send(())
+        .await
+        .expect("send e2e_high");
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let _low = succeeded(&low, RESULT_WAIT).await;
+    let _high = succeeded(&high, RESULT_WAIT).await;
+    let client = suite.client().await;
+    let low_row = rows::read_task(&client, low.task_id())
+        .await
+        .expect("low row");
+    let high_row = rows::read_task(&client, high.task_id())
+        .await
+        .expect("high row");
+    assert!(
+        high_row.started_at < low_row.started_at,
+        "high started at {:?}, low at {:?}",
+        high_row.started_at,
+        low_row.started_at
+    );
+}
+
+/// Python: `test_layer1_tasks.py::test_skip_locked_prevents_double_claim`.
+/// Two workers, 20 tokens: each body runs once.
+#[tokio::test]
+#[serial]
+async fn test_skip_locked_prevents_double_claim() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _first = suite.worker(Profile::Isolated2).await;
+    let _second = suite.worker(Profile::Isolated2).await;
+    let idempotent = suite.function(basic::idempotent::handle);
+    let mut handles = Vec::new();
+    for index in 0..20 {
+        handles.push(
+            idempotent
+                .send(basic::idempotent::Input {
+                    token: format!("task_{index}"),
+                })
+                .await
+                .expect("send"),
+        );
+    }
+    for handle in &handles {
+        let _value = succeeded(handle, RESULT_WAIT).await;
+    }
+    assert_eq!(suite.markers.count("idempotent-task_"), 20);
+}
+
+/// Python: `test_layer1_tasks.py::test_max_claim_batch`.
+#[tokio::test]
+#[serial]
+async fn test_max_claim_batch() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::ClaimBatch1).await;
+    let slow = suite.function(basic::slow::handle);
+    let mut handles = Vec::new();
+    for _task in 0..6 {
+        handles.push(
+            slow.send(basic::slow::Input { duration_ms: 300 })
+                .await
+                .expect("send"),
+        );
+    }
+    let client = suite.client().await;
+    let most_claimed = poll::max_during(
+        Duration::from_secs(4),
+        Duration::from_millis(50),
+        async || {
+            rows::count(
+                &client,
+                "SELECT count(*) FROM horsies_tasks WHERE status = 'CLAIMED'",
+                &[],
+            )
+            .await
+        },
+    )
+    .await;
+    for handle in &handles {
+        let _value = succeeded(handle, RESULT_WAIT).await;
+    }
+    assert!(
+        most_claimed <= 1,
+        "{most_claimed} tasks were CLAIMED at once"
+    );
+}
+
+/// Python: `test_layer1_tasks.py::test_task_not_found`.
+#[tokio::test]
+#[serial]
+async fn test_task_not_found() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let read = suite
+        .app
+        .get_result::<i64, Infallible>(Uuid::nil(), within(Duration::from_secs(1)))
+        .await;
+    assert!(
+        matches!(read, Err(ReadError::TaskNotFound { .. })),
+        "{read:?}"
+    );
+}
+
+/// Python: `test_layer1_tasks.py::test_wait_timeout`. No worker runs.
+#[tokio::test]
+#[serial]
+async fn test_wait_timeout() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let handle = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 5 })
+        .await
+        .expect("send");
+    let read = handle.get(within(Duration::from_millis(500))).await;
+    assert!(
+        matches!(read, Err(ReadError::WaitTimedOut { .. })),
+        "{read:?}"
+    );
+}
+
+/// Python: `test_layer1_tasks.py::test_library_error_code_in_user_task`.
+#[tokio::test]
+#[serial]
+async fn test_library_error_code_in_user_task() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::error_code::handle)
+        .send(())
+        .await
+        .expect("send");
+    match outcome(&handle, RESULT_WAIT).await {
+        TaskOutcome::Failed(error) => {
+            assert_eq!(error.code().text(), "TASK_EXCEPTION");
+            assert_eq!(error.message(), Some("boom"));
+        }
+        TaskOutcome::Succeeded(value) => panic!("e2e_error_code succeeded with {value}"),
+    }
+}
+
+/// Python: `test_layer1_tasks.py::test_exception_becomes_error`. A panic of
+/// the body is recorded with its exception record; the child survives it.
+#[tokio::test]
+#[serial]
+async fn test_exception_becomes_error() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::panics::handle)
+        .send(())
+        .await
+        .expect("send");
+    match outcome(&handle, RESULT_WAIT).await {
+        TaskOutcome::Failed(error) => {
+            assert_eq!(error.code().text(), "UNHANDLED_EXCEPTION");
+            assert!(error.exception().is_some(), "a panic stores its record");
+            let data = error.data().expect("a panic stores data");
+            assert_eq!(data["exception_type"], serde_json::json!("panic"));
+        }
+        TaskOutcome::Succeeded(value) => panic!("e2e_panic succeeded with {value}"),
+    }
+}
+
+/// Python: `test_layer1_tasks.py::test_complex_result_serialization`.
 #[tokio::test]
 #[serial]
 async fn test_complex_result_serialization() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_no_args(&broker, "e2e_complex_result").await;
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let result_json = get_result_json(&pool, &task_id).await.unwrap();
-    let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
-    assert!(result.is_ok());
-
-    let output = result.unwrap();
-    assert_eq!(output.get("value").and_then(|v| v.as_i64()), Some(42));
-    let nested = output.get("nested").unwrap().as_object().unwrap();
-    assert_eq!(nested.get("a").unwrap().as_array().unwrap().len(), 3);
-    assert_eq!(nested.get("b").unwrap().as_array().unwrap().len(), 2);
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::complex_result::handle)
+        .send(())
+        .await
+        .expect("send");
+    let value = succeeded(&handle, RESULT_WAIT).await;
+    assert_eq!(value.value, 42);
+    assert_eq!(value.nested["a"], vec![1, 2, 3]);
+    assert_eq!(value.nested["b"], vec![4, 5]);
 }
 
-// ---------------------------------------------------------------------------
-// L1.5.2: Custom mode queue routing — tasks route to correct queues
-// ---------------------------------------------------------------------------
-
-fn write_custom_queues_config_l1() -> tempfile::NamedTempFile {
-    use std::io::Write;
-    let url = db_url();
-    let config = serde_json::json!({
-        "queue_mode": "custom",
-        "custom_queues": [
-            {"name": "high", "priority": 1, "max_concurrency": 5},
-            {"name": "normal", "priority": 50, "max_concurrency": 10},
-            {"name": "low", "priority": 100, "max_concurrency": 20}
-        ],
-        "broker": {
-            "database_url": url,
-            "pool_pre_ping": true,
-            "pool_size": 5,
-            "max_overflow": 5,
-            "pool_timeout": 10,
-            "pool_recycle": 600,
-            "echo": false
-        },
-        "prefetch_buffer": 0,
-        "max_claim_renew_age_ms": 180000,
-        "recovery": {
-            "auto_requeue_stale_claimed": false,
-            "auto_fail_stale_running": false,
-            "check_interval_ms": 60000
-        },
-        "resilience": {
-            "db_retry_initial_ms": 500,
-            "db_retry_max_ms": 5000,
-            "db_retry_max_attempts": 3,
-            "notify_poll_interval_ms": 1000
-        },
-        "resend_on_transient_err": false
-    });
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(serde_json::to_string_pretty(&config).unwrap().as_bytes())
-        .unwrap();
-    f.flush().unwrap();
-    f
-}
-
+/// Python: `test_layer1_tasks.py::test_custom_mode_queue_routing`.
 #[tokio::test]
 #[serial]
 async fn test_custom_mode_queue_routing() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let config_file = write_custom_queues_config_l1();
-    let config_path = config_file.path().to_str().unwrap().to_owned();
-
-    let _worker = start_worker(
-        &config_path,
-        &["--concurrency", "4", "--queues", "high,normal,low"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Enqueue to each queue.
-    let high_id = broker
-        .enqueue(
-            "e2e_high",
-            None,
-            Some("{}"),
-            "high",
-            1,
-            None,
-            None,
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+    let suite = Suite::start(BIN, Instance::CustomQueues).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let high = suite
+        .function(custom::high::handle)
+        .send(())
         .await
-        .unwrap();
-    let normal_id = broker
-        .enqueue(
-            "e2e_normal",
-            None,
-            Some("{}"),
-            "normal",
-            50,
-            None,
-            None,
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .expect("send high");
+    let normal = suite
+        .function(custom::normal::handle)
+        .send(())
         .await
-        .unwrap();
-    let low_id = broker
-        .enqueue(
-            "e2e_low",
-            None,
-            Some("{}"),
-            "low",
-            100,
-            None,
-            None,
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .expect("send normal");
+    let low = suite
+        .function(custom::low::handle)
+        .send(())
         .await
-        .unwrap();
-
-    wait_for_all_terminal(
-        &pool,
-        &[high_id.clone(), normal_id.clone(), low_id.clone()],
-        Duration::from_secs(10),
-    )
-    .await;
-
-    // All should complete.
-    assert_eq!(get_task_status(&pool, &high_id).await, "COMPLETED");
-    assert_eq!(get_task_status(&pool, &normal_id).await, "COMPLETED");
-    assert_eq!(get_task_status(&pool, &low_id).await, "COMPLETED");
+        .expect("send low");
+    assert_eq!(succeeded(&high, RESULT_WAIT).await, "high");
+    assert_eq!(succeeded(&normal, RESULT_WAIT).await, "normal");
+    assert_eq!(succeeded(&low, RESULT_WAIT).await, "low");
 }
 
-// ---------------------------------------------------------------------------
-// L1.5.3: Custom mode queue names stored in DB
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer1_tasks.py::test_custom_mode_queue_names_stored`.
 #[tokio::test]
 #[serial]
 async fn test_custom_mode_queue_names_stored() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let config_file = write_custom_queues_config_l1();
-    let config_path = config_file.path().to_str().unwrap().to_owned();
-
-    let _worker = start_worker(
-        &config_path,
-        &["--concurrency", "4", "--queues", "high,normal,low"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let high_id = broker
-        .enqueue(
-            "e2e_high",
-            None,
-            Some("{}"),
-            "high",
-            1,
-            None,
-            None,
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+    let suite = Suite::start(BIN, Instance::CustomQueues).await;
+    let high = suite
+        .function(custom::high::handle)
+        .send(())
         .await
-        .unwrap();
-
-    wait_for_task_status(&pool, &high_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let queue_name = broker
-        .get_task_info(high_id, false, false)
+        .expect("send high");
+    let normal = suite
+        .function(custom::normal::handle)
+        .send(())
         .await
-        .unwrap()
-        .unwrap()
-        .queue_name;
-
-    assert_eq!(queue_name, "high", "queue_name should be stored as 'high'");
+        .expect("send normal");
+    let low = suite
+        .function(custom::low::handle)
+        .send(())
+        .await
+        .expect("send low");
+    let client = suite.client().await;
+    for (handle, queue, priority) in [
+        (&high, "high", 1),
+        (&normal, "normal", 50),
+        (&low, "low", 100),
+    ] {
+        let row = rows::read_task(&client, handle.task_id())
+            .await
+            .expect("a live row");
+        assert_eq!((row.queue_name.as_str(), row.priority), (queue, priority));
+    }
 }
 
-// ---------------------------------------------------------------------------
-// L1.9 Task attempt history
-// ---------------------------------------------------------------------------
-
-async fn get_attempts(pool: &PgPool, task_id: &Uuid) -> Vec<horsies::TaskAttemptRow> {
-    let mut attempts = PostgresBroker::from_pool(pool.clone())
-        .get_task_attempts(*task_id)
-        .await
-        .unwrap();
-    attempts.reverse();
-    attempts
-}
-
-/// Successful task writes a COMPLETED attempt record.
+/// Old Rust `test_attempt_recorded_on_success`; Python:
+/// `test_layer1_tasks.py::test_task_handle_info` with its attempts.
 #[tokio::test]
 #[serial]
 async fn test_attempt_recorded_on_success() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_no_args(&broker, "e2e_healthcheck").await;
-    wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
-
-    let attempts = get_attempts(&pool, &task_id).await;
-    assert_eq!(attempts.len(), 1, "should have exactly 1 attempt");
-    assert_eq!(attempts[0].attempt, 1);
-    assert_eq!(attempts[0].outcome, "COMPLETED");
-    assert!(!attempts[0].will_retry);
-    assert!(attempts[0].error_code.is_none());
-    assert!(attempts[0].worker_id.is_some());
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 1 })
+        .await
+        .expect("send");
+    let _value = succeeded(&handle, RESULT_WAIT).await;
+    let attempts = handle
+        .info(ALL_PARTS)
+        .await
+        .expect("read the info")
+        .attempts
+        .expect("attempts were asked for");
+    let [attempt] = attempts.as_slice() else {
+        panic!("one attempt, not {attempts:?}");
+    };
+    assert_eq!(attempt.attempt, 1);
+    assert_eq!(attempt.outcome.to_string(), "COMPLETED");
+    assert!(!attempt.will_retry);
+    assert_eq!(attempt.error_code, None);
 }
 
-/// Failed task (no retry) writes a FAILED attempt record.
+/// Old Rust `test_attempt_recorded_on_failure`; Python:
+/// `test_layer1_tasks.py::test_explicit_error_result` with its attempts.
 #[tokio::test]
 #[serial]
 async fn test_attempt_recorded_on_failure() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let task_id = enqueue_no_args(&broker, "e2e_error").await;
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
-
-    let attempts = get_attempts(&pool, &task_id).await;
-    assert_eq!(attempts.len(), 1, "should have exactly 1 attempt");
-    assert_eq!(attempts[0].attempt, 1);
-    assert_eq!(attempts[0].outcome, "FAILED");
-    assert!(!attempts[0].will_retry);
-    assert!(attempts[0].error_code.is_some());
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(basic::error::handle)
+        .send(())
+        .await
+        .expect("send");
+    let _code = failed_code(&handle, RESULT_WAIT).await;
+    let attempts = handle
+        .info(ALL_PARTS)
+        .await
+        .expect("read the info")
+        .attempts
+        .expect("attempts were asked for");
+    let [attempt] = attempts.as_slice() else {
+        panic!("one attempt, not {attempts:?}");
+    };
+    assert_eq!(attempt.outcome.to_string(), "FAILED");
+    assert!(!attempt.will_retry);
+    assert_eq!(attempt.error_code.as_deref(), Some("DELIBERATE_ERROR"));
 }
 
-/// Retry-exhausted task writes multiple FAILED attempt records.
+/// Old Rust `test_attempt_recorded_on_retry_exhausted`; Python:
+/// `test_layer1_tasks.py::test_retry_exhausted` with its attempts.
 #[tokio::test]
 #[serial]
 async fn test_attempt_recorded_on_retry_exhausted() {
-    let pool = pool().await;
-    let broker = broker().await;
-    db::clean_tables(&pool).await;
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // e2e_retry_exhausted always returns TRANSIENT error, configured with 3 max retries.
-    // Enqueue with task_options that configure auto_retry_for + retry_policy.
-    let task_options = serde_json::json!({
-        "task_name": "e2e_retry_exhausted",
-        "auto_retry_for": ["TRANSIENT"],
-        "retry_policy": {
-            "max_retries": 2,
-            "intervals": [1, 1],
-            "backoff_strategy": "Fixed",
-            "jitter": false,
-        }
-    });
-    let task_id = broker
-        .enqueue(
-            "e2e_retry_exhausted",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            Some(&serde_json::to_string(&task_options).unwrap()),
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(retry::retry_exhausted::handle)
+        .send(())
         .await
-        .unwrap();
-
-    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(30)).await;
-
-    let attempts = get_attempts(&pool, &task_id).await;
-    assert!(
-        attempts.len() >= 2,
-        "should have at least 2 attempts (initial + retries), got {}",
-        attempts.len(),
-    );
-
-    // All non-final attempts should have will_retry=true
-    for a in &attempts[..attempts.len() - 1] {
-        assert_eq!(a.outcome, "FAILED", "non-final attempt should be FAILED");
-        assert!(
-            a.will_retry,
-            "non-final attempt should have will_retry=true"
-        );
-    }
-
-    // Final attempt should be FAILED with will_retry=false (exhausted)
-    let last = attempts.last().unwrap();
-    assert_eq!(last.outcome, "FAILED");
-    assert!(
-        !last.will_retry,
-        "final attempt should have will_retry=false (exhausted)"
-    );
+        .expect("send");
+    let _code = failed_code(&handle, RESULT_WAIT).await;
+    let attempts = handle
+        .info(ALL_PARTS)
+        .await
+        .expect("read the info")
+        .attempts
+        .expect("attempts were asked for");
+    // Newest first: the last attempt does not retry, the three before do.
+    let retries: Vec<(i32, bool)> = attempts.iter().map(|a| (a.attempt, a.will_retry)).collect();
+    assert_eq!(retries, vec![(4, false), (3, true), (2, true), (1, true)]);
+    assert!(attempts
+        .iter()
+        .all(|a| a.error_code.as_deref() == Some("TRANSIENT")));
 }
 
-// ---------------------------------------------------------------------------
-// L1.10 enqueue_sha idempotency verification
-// ---------------------------------------------------------------------------
-
-/// Same task_id + same SHA = idempotent success.
+/// Old Rust `test_enqueue_sha_idempotent_same_sha`; Python:
+/// `tests/unit/test_task_decorator.py` idempotency key sends. A second send
+/// of the same command with the same key answers with the first task.
 #[tokio::test]
 #[serial]
-async fn test_enqueue_sha_idempotent_same_sha() {
-    let broker = broker().await;
-    let task_id = uuid::Uuid::new_v4();
-    let sha = "deadbeef1234";
-
-    let id1 = broker
-        .enqueue(
-            "e2e_healthcheck",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            None,
-            sha,
-            Some(task_id),
-            None,
-            None,
-            None,
-            None,
-        )
+async fn test_idempotency_key_same_input_returns_the_first_task() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let simple = suite.function(basic::simple::handle);
+    let options = TaskSendOptions::new().idempotency_key("order-7");
+    let first = simple
+        .send_with_options(options.clone(), basic::simple::Input { x: 7 })
         .await
-        .unwrap();
-    assert_eq!(id1, task_id);
-
-    // Second enqueue with same SHA — should succeed idempotently.
-    let id2 = broker
-        .enqueue(
-            "e2e_healthcheck",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            None,
-            sha,
-            Some(task_id),
-            None,
-            None,
-            None,
-            None,
-        )
+        .expect("first send");
+    let second = simple
+        .send_with_options(options, basic::simple::Input { x: 7 })
         .await
-        .unwrap();
+        .expect("second send");
+    assert_eq!(first.task_id(), second.task_id());
+    let _worker = suite.worker(Profile::Isolated1).await;
+    assert_eq!(succeeded(&first, RESULT_WAIT).await, 14);
+    let client = suite.client().await;
     assert_eq!(
-        id2, task_id,
-        "idempotent re-enqueue should return same task_id"
+        rows::count_tasks(&client, "e2e_simple", "COMPLETED").await,
+        1
     );
 }
 
-/// Same task_id + different SHA = PayloadMismatch error.
+/// Old Rust `test_enqueue_sha_payload_mismatch`; Python: the
+/// `IDEMPOTENCY_KEY_CONFLICT` of a key that another command holds.
 #[tokio::test]
 #[serial]
-async fn test_enqueue_sha_payload_mismatch() {
-    let broker = broker().await;
-    let task_id = uuid::Uuid::new_v4();
-
-    let _ = broker
-        .enqueue(
-            "e2e_healthcheck",
-            None,
-            Some("{}"),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            None,
-            "sha_original",
-            Some(task_id),
-            None,
-            None,
-            None,
-            None,
-        )
+async fn test_idempotency_key_other_input_is_a_conflict() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let simple = suite.function(basic::simple::handle);
+    let options = TaskSendOptions::new().idempotency_key("order-8");
+    let _first = simple
+        .send_with_options(options.clone(), basic::simple::Input { x: 8 })
         .await
-        .unwrap();
-
-    // Second enqueue with DIFFERENT SHA — should fail.
-    let result = broker
-        .enqueue(
-            "e2e_healthcheck",
-            None,
-            Some(r#"{"different": true}"#),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            None,
-            "sha_different",
-            Some(task_id),
-            None,
-            None,
-            None,
-            None,
-        )
+        .expect("first send");
+    let second = simple
+        .send_with_options(options, basic::simple::Input { x: 9 })
         .await;
-
-    assert!(result.is_err(), "different SHA should return an error");
-    let err = result.unwrap_err();
     assert!(
-        matches!(err, horsies::BrokerError::PayloadMismatch { .. }),
-        "error should be PayloadMismatch, got: {:?}",
-        err,
+        matches!(second, Err(TaskSendError::IdempotencyKeyConflict { .. })),
+        "{second:?}"
+    );
+}
+
+/// Python: `test_layer1_tasks.py::test_a_task_cannot_wait_for_another_task`.
+#[tokio::test]
+#[serial]
+async fn test_a_task_cannot_wait_for_another_task() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let handle = suite
+        .function(basic::wait_inside_task::handle)
+        .send(())
+        .await
+        .expect("send");
+    assert!(
+        succeeded(&handle, RESULT_WAIT).await,
+        "the wait inside the task was not refused with WAIT_INSIDE_TASK"
+    );
+}
+
+/// Python: `test_async_tasks.py::test_an_async_task_sends_with_send_async`.
+#[tokio::test]
+#[serial]
+async fn test_an_async_task_sends() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let handle = suite
+        .function(basic::async_sends::handle)
+        .send(basic::async_sends::Input { x: 4 })
+        .await
+        .expect("send");
+    let sent: Uuid = succeeded(&handle, RESULT_WAIT)
+        .await
+        .parse()
+        .expect("the sent task id");
+    let read = suite
+        .app
+        .get_result::<i64, Infallible>(sent, within(RESULT_WAIT))
+        .await
+        .expect("read the task that the task sent");
+    assert_eq!(read, TaskOutcome::Succeeded(8));
+}
+
+/// Python: `test_layer1_tasks.py::test_send_suppressed`.
+#[tokio::test]
+#[serial]
+async fn test_send_suppressed() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    suite.app.suppress_sends(true);
+    let refused = suite
+        .function(basic::simple::handle)
+        .send(basic::simple::Input { x: 1 })
+        .await;
+    assert!(
+        matches!(refused, Err(TaskSendError::SendSuppressed { .. })),
+        "{refused:?}"
+    );
+    let client = suite.client().await;
+    assert_eq!(
+        rows::read_tasks_named(&client, "e2e_simple").await,
+        Vec::new()
     );
 }
