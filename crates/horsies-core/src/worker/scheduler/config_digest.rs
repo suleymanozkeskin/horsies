@@ -371,6 +371,34 @@ mod tests {
         }
     }
 
+    /// The pattern text inside a vector's digest text: the text of Python's
+    /// `pattern.model_dump(mode='json')`, the form of a scheduler manifest's
+    /// `pattern_json`.
+    fn pattern_text(vector: &PythonVector) -> &'static str {
+        let text: &'static str = vector.text;
+        let start = "{\"pattern\":".len();
+        let end = text
+            .rfind(",\"timezone\":")
+            .expect("a digest text ends with the timezone");
+        &text[start..end]
+    }
+
+    /// A manifest pattern text that Python wrote parses to the pattern whose
+    /// digest is the digest that Python stores, for every pattern kind.
+    #[test]
+    fn the_pattern_text_of_each_vector_parses_to_a_pattern_with_the_python_digest() {
+        for vector in python_vectors() {
+            let text = pattern_text(&vector);
+            let parsed = crate::scheduler_manifest::PatternJson::try_from(text.to_owned())
+                .unwrap_or_else(|refused| panic!("{text} parses: {refused}"));
+            assert_eq!(
+                hex(&config_digest(parsed.pattern(), vector.timezone)),
+                vector.digest_hex,
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn a_time_below_one_microsecond_is_not_in_the_text() {
         let nanoseconds =

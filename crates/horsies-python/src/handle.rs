@@ -419,8 +419,8 @@ impl CoreHandle {
 
     /// Write the plain successes of one request in one statement
     /// (`horsies_complete_tasks_fused`): `SuccessesWritten` with one row
-    /// record per success in the request order, `BatchRolledBack`, or
-    /// `BatchCommitUnknown`. Writes. Awaitable only: its caller, the
+    /// record per success in the request order, `BatchNotSent`,
+    /// `BatchRefused`, or `BatchCommitUnknown`. Writes. Awaitable only: its caller, the
     /// worker's finalize batcher, runs on the worker's event loop. Rows
     /// outside the function's contract raise `PanicException`.
     fn complete_successes_async<'py>(

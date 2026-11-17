@@ -7,7 +7,9 @@
 //!
 //! A batch answers `SuccessesWritten` with one row record per success in the
 //! request order (`SuccessApplied` or a refusal of `attempt_records`), or
-//! the batch failure: `BatchRolledBack` (no row changed) or
+//! the batch failure: `BatchNotSent` or `BatchRefused` (no row changed; the
+//! two causes that Python's batcher keeps apart, because only a refused
+//! statement of several rows is written again row by row) or
 //! `BatchCommitUnknown` (each row may have committed). Rows outside the
 //! function's contract panic, as Python raises.
 
@@ -125,12 +127,24 @@ impl SuccessesWritten {
     }
 }
 
-/// No row of the batch changed: the pools, the client family check or the
-/// checkout failed, or the server refused the statement (a row that raises
-/// refuses the whole statement).
+/// No row of the batch changed, and the statement was not sent: the pools,
+/// the client family check or the checkout failed (Python
+/// `BatchRolledBack(cause=NotSent)`). The cause is not about one row.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
-pub struct BatchRolledBack {
+pub struct BatchNotSent {
+    /// The cause, with its subject.
+    pub message: String,
+    pub retryable: bool,
+}
+
+/// No row of the batch changed: the server refused the statement (Python
+/// `BatchRolledBack(cause=StatementRefused)`). One row can be the cause, as
+/// a row that raises refuses the whole statement, so each row of a batch of
+/// several can be written alone.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct BatchRefused {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
@@ -149,7 +163,8 @@ pub struct BatchCommitUnknown {
 /// The outcome of one batch.
 pub enum BatchRecord {
     Written(SuccessesWritten),
-    RolledBack(BatchRolledBack),
+    NotSent(BatchNotSent),
+    Refused(BatchRefused),
     CommitUnknown(BatchCommitUnknown),
 }
 
@@ -161,7 +176,8 @@ impl<'py> IntoPyObject<'py> for BatchRecord {
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
             Self::Written(written) => written.into_bound_py_any(py),
-            Self::RolledBack(rolled_back) => rolled_back.into_bound_py_any(py),
+            Self::NotSent(not_sent) => not_sent.into_bound_py_any(py),
+            Self::Refused(refused) => refused.into_bound_py_any(py),
             Self::CommitUnknown(unknown) => unknown.into_bound_py_any(py),
         }
     }
@@ -235,12 +251,14 @@ fn batch_record(written: Result<BatchOutcomes, BatchWriteError>) -> BatchRecord 
         Ok(outcomes) => BatchRecord::Written(SuccessesWritten {
             rows: outcomes.into_outcomes().iter().map(success_row).collect(),
         }),
-        Err(error @ (BatchWriteError::NotSent { .. } | BatchWriteError::Refused { .. })) => {
-            BatchRecord::RolledBack(BatchRolledBack {
-                message: error.to_string(),
-                retryable: matches!(error.transience(), Transience::Transient),
-            })
-        }
+        Err(error @ BatchWriteError::NotSent { .. }) => BatchRecord::NotSent(BatchNotSent {
+            message: error.to_string(),
+            retryable: matches!(error.transience(), Transience::Transient),
+        }),
+        Err(error @ BatchWriteError::Refused { .. }) => BatchRecord::Refused(BatchRefused {
+            message: error.to_string(),
+            retryable: matches!(error.transience(), Transience::Transient),
+        }),
         Err(error @ BatchWriteError::CommitUnknown { .. }) => {
             BatchRecord::CommitUnknown(BatchCommitUnknown {
                 message: error.to_string(),
@@ -261,7 +279,7 @@ pub async fn complete_successes_operation(
     let broker = match connection.broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return BatchRecord::RolledBack(BatchRolledBack {
+            return BatchRecord::NotSent(BatchNotSent {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
             })
@@ -460,27 +478,31 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_batch_keeps_python_s_two_states() {
-        assert!(matches!(
-            batch_record(Err(BatchWriteError::NotSent {
-                transience: Transience::Transient,
-                detail: "pool timeout".to_owned(),
-            })),
-            BatchRecord::RolledBack(BatchRolledBack {
-                retryable: true,
-                ..
-            })
-        ));
-        assert!(matches!(
-            batch_record(Err(BatchWriteError::Refused {
-                transience: Transience::Permanent,
-                detail: "22023".to_owned(),
-            })),
-            BatchRecord::RolledBack(BatchRolledBack {
-                retryable: false,
-                ..
-            })
-        ));
+    fn a_failed_batch_keeps_python_s_three_states() {
+        let BatchRecord::NotSent(not_sent) = batch_record(Err(BatchWriteError::NotSent {
+            transience: Transience::Transient,
+            detail: "pool timeout".to_owned(),
+        })) else {
+            panic!("a batch that was not sent is BatchNotSent");
+        };
+        assert!(not_sent.retryable);
+        assert!(
+            not_sent.message.contains("was not sent: pool timeout"),
+            "{}",
+            not_sent.message
+        );
+        let BatchRecord::Refused(refused) = batch_record(Err(BatchWriteError::Refused {
+            transience: Transience::Permanent,
+            detail: "22023".to_owned(),
+        })) else {
+            panic!("a refused batch is BatchRefused");
+        };
+        assert!(!refused.retryable);
+        assert!(
+            refused.message.contains("was refused: 22023"),
+            "{}",
+            refused.message
+        );
         assert!(matches!(
             batch_record(Err(BatchWriteError::CommitUnknown {
                 detail: "connection lost".to_owned(),

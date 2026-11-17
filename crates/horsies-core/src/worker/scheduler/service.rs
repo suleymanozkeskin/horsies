@@ -1,8 +1,15 @@
 //! The scheduler service (Python `python/horsies/core/scheduler/service.py`,
 //! `Scheduler`): the start, the tick, and the fire of each due schedule
 //! through `horsies_fire_schedule` on the main core pool of the broker.
+//!
+//! A service is built from one of two sources: the schedule section of an
+//! app config with the send facts that `Horsies::prepare_schedules`
+//! resolved ([`SchedulerService::new`]), or a client's scheduler manifest,
+//! whose send facts the client resolved
+//! ([`SchedulerService::from_manifest`]). Both give the same started
+//! scheduler: each enabled schedule with its send command.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -11,6 +18,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -19,8 +27,9 @@ use crate::broker::postgres::SendCommand;
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::app::PreparedSchedules;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind};
-use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
+use crate::core::config::{AppConfig, ScheduleConfig, SchedulePattern, TaskSchedule};
 use crate::db::CorePool;
+use crate::scheduler_manifest::{ScheduleActivation, ScheduleSendManifest, SchedulerManifest};
 
 use super::calculator::next_run_at;
 use super::config_digest::config_digest;
@@ -91,6 +100,41 @@ fn resolve_queue_priority(app_config: &AppConfig, queue_name: &str) -> i32 {
     100
 }
 
+/// One enabled schedule as the start and the tick read it: its name, its
+/// pattern in its timezone, and its catch-up rule. Its send facts are in its
+/// send command.
+#[derive(Debug, Clone)]
+struct EnabledSchedule {
+    name: String,
+    pattern: SchedulePattern,
+    /// An IANA zone name that the core knows: the start checks it.
+    timezone: String,
+    catch_up_missed: bool,
+    max_catch_up_runs: u32,
+}
+
+impl EnabledSchedule {
+    /// The enabled schedule of a config entry, or `None` for a disabled
+    /// one. Pure.
+    fn of(schedule: &TaskSchedule) -> Option<Self> {
+        match schedule.enabled {
+            true => Some(Self {
+                name: schedule.name.clone(),
+                pattern: schedule.pattern.clone(),
+                timezone: schedule.timezone.clone(),
+                catch_up_missed: schedule.catch_up_missed,
+                max_catch_up_runs: schedule.max_catch_up_runs,
+            }),
+            false => None,
+        }
+    }
+}
+
+/// The enabled schedules of a config, in config order. Pure.
+fn enabled_schedules(schedules: &[TaskSchedule]) -> Vec<EnabledSchedule> {
+    schedules.iter().filter_map(EnabledSchedule::of).collect()
+}
+
 /// Why the scheduler refused to start. Nothing is written before a refusal.
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerStartError {
@@ -130,6 +174,14 @@ pub enum SchedulerStartError {
         #[source]
         cause: BrokerError,
     },
+    /// An enabled schedule of a manifest names a timezone that the core
+    /// does not know. The client checked the name with its own zone
+    /// database; give a name that the core's IANA database also has.
+    #[error(
+        "schedule '{schedule}' has the timezone '{timezone}', which is not an IANA zone name \
+         that the core knows"
+    )]
+    UnknownTimezone { schedule: String, timezone: String },
     /// The client family check before the first schedule-state write
     /// failed: `BrokerError::ClientFamilyMismatch` when the database records
     /// another family or none (not retryable), or the error of the family
@@ -166,12 +218,11 @@ fn check_schedules_at_start(
 /// `database_now`, the database time of the start read: its `next_run_at`
 /// (NOT NULL) cannot be stored. Pure.
 fn check_next_slots(
-    schedules: &[TaskSchedule],
+    schedules: &[EnabledSchedule],
     database_now: DateTime<Utc>,
 ) -> Result<(), SchedulerStartError> {
     match schedules
         .iter()
-        .filter(|s| s.enabled)
         .find(|s| next_run_at(&s.pattern, database_now, &s.timezone).is_none())
     {
         Some(schedule) => Err(SchedulerStartError::NoNextSlot {
@@ -184,15 +235,32 @@ fn check_next_slots(
 
 /// Asks a scheduler to stop at its next tick boundary. Idempotent, returns
 /// at once, and may be called from any thread. A fire in flight runs to its
-/// end.
-#[derive(Clone, Debug)]
+/// end. A request before the start stops the scheduler after its start.
+#[derive(Clone, Debug, Default)]
 pub struct SchedulerStop {
     token: CancellationToken,
 }
 
 impl SchedulerStop {
+    /// A stop request that nothing has asked for yet, to give to
+    /// [`SchedulerService::from_manifest`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn request_stop(&self) {
         self.token.cancel();
+    }
+
+    /// Whether a stop was asked for.
+    pub fn is_requested(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// Wait until a stop is asked for. Ends at once when it was asked for
+    /// before.
+    pub async fn requested(&self) {
+        self.token.cancelled().await;
     }
 }
 
@@ -205,17 +273,47 @@ impl SchedulerStop {
 /// - [`Self::run`]: the start, then one tick at once and one per
 ///   `check_interval_seconds` until a stop request ([`SchedulerStop`]).
 ///
-/// `prepared` comes from `Horsies::prepare_schedules`, which checks the
-/// schedules against the task registry (task registered, queue, input type,
-/// input size) and resolves each fired slot's queue and task options. The
-/// `app_config` gives each slot's queue priority, retention and payload
-/// policy. Every statement runs on the main core pool of the broker.
+/// Every statement runs on the main core pool of the broker.
 pub struct SchedulerService {
     broker: Arc<PostgresBroker>,
-    schedule_config: ScheduleConfig,
-    app_config: AppConfig,
-    prepared: PreparedSchedules,
+    source: ScheduleSource,
     stop: CancellationToken,
+}
+
+/// Where the schedules of a service and their send facts come from.
+enum ScheduleSource {
+    /// The schedule section of an app config. `prepared` comes from
+    /// `Horsies::prepare_schedules`, which checks the schedules against the
+    /// task registry (task registered, queue, input type, input size) and
+    /// resolves each fired slot's queue and task options. The `app_config`
+    /// gives each slot's queue priority, retention and payload policy.
+    AppConfig {
+        schedule_config: ScheduleConfig,
+        app_config: AppConfig,
+        prepared: PreparedSchedules,
+    },
+    /// A client's scheduler manifest: every send fact is resolved.
+    Manifest(SchedulerManifest),
+}
+
+/// What the start checks leave before any statement.
+enum StartPlan {
+    /// The master switch is off or no schedule is configured.
+    Idle,
+    Active(ActivePlan),
+}
+
+/// The schedules to start.
+struct ActivePlan {
+    /// The name of every configured schedule, disabled ones included: a
+    /// state row of another name is logged as not in this config.
+    configured_names: HashSet<String>,
+    /// The enabled schedules, in config order.
+    schedules: Vec<EnabledSchedule>,
+    /// The send command of each enabled schedule, by schedule name.
+    commands: HashMap<String, SendCommand>,
+    /// The wait between two ticks, 1 to 60 seconds.
+    check_interval_seconds: u32,
 }
 
 /// What a scheduler start leaves.
@@ -230,9 +328,12 @@ pub enum SchedulerStarted {
 /// A started scheduler.
 pub struct ActiveScheduler {
     broker: Arc<PostgresBroker>,
-    schedule_config: ScheduleConfig,
+    /// The enabled schedules, in config order.
+    schedules: Vec<EnabledSchedule>,
     /// The send command of each enabled schedule, built at the start.
     commands: HashMap<String, SendCommand>,
+    /// The wait between two ticks, 1 to 60 seconds.
+    check_interval_seconds: u32,
     existence_cadence: ExistenceCheckCadence,
     stop: CancellationToken,
 }
@@ -262,10 +363,27 @@ impl SchedulerService {
     ) -> Self {
         Self {
             broker,
-            schedule_config,
-            app_config,
-            prepared,
+            source: ScheduleSource::AppConfig {
+                schedule_config,
+                app_config,
+                prepared,
+            },
             stop: CancellationToken::new(),
+        }
+    }
+
+    /// A scheduler of a client's manifest
+    /// ([`crate::scheduler_manifest::parse_scheduler_manifest`]) that
+    /// `stop` stops. Starts nothing and connects to nothing.
+    pub fn from_manifest(
+        broker: Arc<PostgresBroker>,
+        manifest: SchedulerManifest,
+        stop: &SchedulerStop,
+    ) -> Self {
+        Self {
+            broker,
+            source: ScheduleSource::Manifest(manifest),
+            stop: stop.token.clone(),
         }
     }
 
@@ -278,9 +396,11 @@ impl SchedulerService {
 
     /// Start the scheduler:
     /// 1. With the master switch off or no schedule: [`SchedulerStarted::Idle`].
-    /// 2. The schedule section is valid and every enabled schedule has its
-    ///    send facts; the send command of each enabled schedule is built
-    ///    (`build_commands`); no database call before these checks.
+    /// 2. The start checks of the source, with no database call: an app
+    ///    config's schedule section is valid and every enabled schedule has
+    ///    its send facts; a manifest's enabled schedules name zones that the
+    ///    core knows. Then the send command of each enabled schedule is
+    ///    built.
     /// 3. The client family check of the broker.
     /// 4. The state start: one read with the database time; a refusal of an
     ///    enabled pattern with no slot after that time; one write of the new
@@ -291,17 +411,24 @@ impl SchedulerService {
     pub async fn start(self) -> Result<SchedulerStarted, SchedulerStartError> {
         let Self {
             broker,
-            schedule_config,
-            app_config,
-            prepared,
+            source,
             stop,
         } = self;
-        if !schedule_config.enabled || schedule_config.schedules.is_empty() {
-            tracing::info!("scheduler disabled or no schedules configured");
-            return Ok(SchedulerStarted::Idle);
-        }
-        check_schedules_at_start(&schedule_config, &prepared)?;
-        let commands = build_commands(&broker, &schedule_config, &app_config, &prepared)?;
+        let plan = match source {
+            ScheduleSource::AppConfig {
+                schedule_config,
+                app_config,
+                prepared,
+            } => app_config_plan(&broker, &schedule_config, &app_config, &prepared)?,
+            ScheduleSource::Manifest(manifest) => manifest_plan(manifest)?,
+        };
+        let plan = match plan {
+            StartPlan::Idle => {
+                tracing::info!("scheduler disabled or no schedules configured");
+                return Ok(SchedulerStarted::Idle);
+            }
+            StartPlan::Active(plan) => plan,
+        };
         // The state start is the first schedule-state write; the fire writes
         // the slot tasks without a second family check.
         broker
@@ -313,7 +440,8 @@ impl SchedulerService {
                 initialize_schedules(
                     open.main(),
                     broker.statement_log(),
-                    &schedule_config.schedules,
+                    &plan.configured_names,
+                    &plan.schedules,
                 )
                 .await?;
             }
@@ -323,12 +451,13 @@ impl SchedulerService {
                  missing rows",
             ),
         }
-        let existence_cadence = ExistenceCheckCadence::new(schedule_config.check_interval_seconds);
+        let existence_cadence = ExistenceCheckCadence::new(plan.check_interval_seconds);
         tracing::info!("scheduler started");
         Ok(SchedulerStarted::Active(ActiveScheduler {
             broker,
-            schedule_config,
-            commands,
+            schedules: plan.schedules,
+            commands: plan.commands,
+            check_interval_seconds: plan.check_interval_seconds,
             existence_cadence,
             stop,
         }))
@@ -374,7 +503,7 @@ impl ActiveScheduler {
         check_and_enqueue(
             open.main(),
             self.broker.statement_log(),
-            &self.schedule_config.schedules,
+            &self.schedules,
             &self.commands,
             &mut self.existence_cadence,
         )
@@ -387,8 +516,7 @@ impl ActiveScheduler {
     /// flight runs to its end. A failed tick is logged and the next one
     /// runs.
     pub async fn run(mut self) {
-        let check_interval =
-            Duration::from_secs(u64::from(self.schedule_config.check_interval_seconds));
+        let check_interval = Duration::from_secs(u64::from(self.check_interval_seconds));
         while !self.stop.is_cancelled() {
             if let Err(error) = self.tick().await {
                 tracing::error!(error = %error, "scheduler check failed");
@@ -418,12 +546,127 @@ pub fn spawn_scheduler(
 ) -> JoinHandle<Result<(), SchedulerStartError>> {
     let service = SchedulerService {
         broker,
-        schedule_config,
-        app_config,
-        prepared,
+        source: ScheduleSource::AppConfig {
+            schedule_config,
+            app_config,
+            prepared,
+        },
         stop: cancel,
     };
     tokio::spawn(service.run())
+}
+
+/// The start plan of an app config's schedule section: the start checks
+/// ([`check_schedules_at_start`]) and the send commands
+/// ([`build_commands`]). Does no I/O.
+///
+/// Errors: those of the two steps.
+fn app_config_plan(
+    broker: &PostgresBroker,
+    schedule_config: &ScheduleConfig,
+    app_config: &AppConfig,
+    prepared: &PreparedSchedules,
+) -> Result<StartPlan, SchedulerStartError> {
+    if !schedule_config.enabled || schedule_config.schedules.is_empty() {
+        return Ok(StartPlan::Idle);
+    }
+    check_schedules_at_start(schedule_config, prepared)?;
+    let commands = build_commands(broker, schedule_config, app_config, prepared)?;
+    Ok(StartPlan::Active(ActivePlan {
+        configured_names: schedule_config
+            .schedules
+            .iter()
+            .map(|schedule| schedule.name.clone())
+            .collect(),
+        schedules: enabled_schedules(&schedule_config.schedules),
+        commands,
+        check_interval_seconds: schedule_config.check_interval_seconds,
+    }))
+}
+
+/// The start plan of a manifest, in Python's order (`Scheduler.start`): the
+/// zone of every enabled schedule first, then the send command of each
+/// (Python `_build_commands`). The manifest parser checked the rest.
+/// Does no I/O.
+///
+/// Errors: [`SchedulerStartError::UnknownTimezone`] for the first enabled
+/// schedule whose zone the core does not know;
+/// [`SchedulerStartError::CommandRefused`] for the first send that the
+/// command rules refuse.
+fn manifest_plan(manifest: SchedulerManifest) -> Result<StartPlan, SchedulerStartError> {
+    if !manifest.enabled || manifest.schedules.is_empty() {
+        return Ok(StartPlan::Idle);
+    }
+    let configured_names: HashSet<String> = manifest
+        .schedules
+        .iter()
+        .map(|schedule| schedule.name.clone())
+        .collect();
+    let mut enabled: Vec<(EnabledSchedule, ScheduleSendManifest)> = Vec::new();
+    for schedule in manifest.schedules {
+        match schedule.activation {
+            ScheduleActivation::Disabled => {}
+            ScheduleActivation::Enabled {
+                pattern_json,
+                timezone,
+                catch_up_missed,
+                max_catch_up_runs,
+                send,
+            } => {
+                if timezone.parse::<Tz>().is_err() {
+                    return Err(SchedulerStartError::UnknownTimezone {
+                        schedule: schedule.name,
+                        timezone,
+                    });
+                }
+                let enabled_schedule = EnabledSchedule {
+                    name: schedule.name,
+                    pattern: pattern_json.into_pattern(),
+                    timezone,
+                    catch_up_missed,
+                    max_catch_up_runs: max_catch_up_runs.0.get(),
+                };
+                enabled.push((enabled_schedule, send));
+            }
+        }
+    }
+    let mut commands = HashMap::with_capacity(enabled.len());
+    for (schedule, send) in &enabled {
+        let command =
+            manifest_command(send).map_err(|cause| SchedulerStartError::CommandRefused {
+                schedule: schedule.name.clone(),
+                cause,
+            })?;
+        let _first_command = commands.insert(schedule.name.clone(), command);
+    }
+    Ok(StartPlan::Active(ActivePlan {
+        configured_names,
+        schedules: enabled
+            .into_iter()
+            .map(|(schedule, _send)| schedule)
+            .collect(),
+        commands,
+        check_interval_seconds: manifest.check_interval_seconds.0.get(),
+    }))
+}
+
+/// The send command of a manifest schedule's send facts: the values that a
+/// send of the same arguments writes, with the manifest's retention class
+/// and rerun-input posture. Does no I/O.
+///
+/// Errors: the refusals of [`SendCommand::prepare`].
+fn manifest_command(send: &ScheduleSendManifest) -> Result<SendCommand, BrokerError> {
+    let priority =
+        i32::try_from(send.priority.0.get()).expect("a queue priority of at most 100 fits an i32");
+    SendCommand::prepare(
+        &send.task_name,
+        &send.queue_name,
+        priority,
+        &send.input_json,
+        send.task_options.text(),
+        send.retention_class_key.retention(),
+        send.retain_rerun_input,
+    )
 }
 
 /// The send command of each enabled schedule, built once from its prepared
@@ -489,7 +732,8 @@ fn build_commands(
 
 /// Store the state row of each enabled schedule that is new or whose pattern
 /// or timezone changed, in two statements on `pool` (Python `_initialize_schedules`,
-/// `python/horsies/core/scheduler/service.py`):
+/// `python/horsies/core/scheduler/service.py`). `configured_names` holds the
+/// name of every configured schedule, disabled ones included:
 ///
 /// 1. One read of every row's name and digest, with the database time.
 /// 2. One write of the new and changed rows, each with its first run computed
@@ -503,7 +747,8 @@ fn build_commands(
 async fn initialize_schedules(
     pool: &CorePool,
     log: StatementLog,
-    schedules: &[TaskSchedule],
+    configured_names: &HashSet<String>,
+    schedules: &[EnabledSchedule],
 ) -> Result<(), SchedulerStartError> {
     let read = match state::read_start_states(pool, log).await {
         Ok(read) => read,
@@ -522,8 +767,6 @@ async fn initialize_schedules(
     // may own them, and deleting would silently stop its schedule. Such rows are
     // inert here — the due read only considers configured, enabled names.
     // Warn for visibility. Parity with horsies PR #101 e26a0f55.
-    let configured_names: std::collections::HashSet<&str> =
-        schedules.iter().map(|s| s.name.as_str()).collect();
     for row in &read.rows {
         if !configured_names.contains(row.schedule_name.as_str()) {
             tracing::warn!(
@@ -558,13 +801,13 @@ async fn initialize_schedules(
 /// whose pattern has no run after that time is left out and logged. Does no
 /// I/O.
 fn start_writes(
-    schedules: &[TaskSchedule],
+    schedules: &[EnabledSchedule],
     stored: &std::collections::HashMap<&str, &[u8]>,
     database_now: DateTime<Utc>,
 ) -> Vec<state::ScheduleStateWrite> {
     let mut writes: Vec<state::ScheduleStateWrite> = Vec::new();
     let mut failed: Vec<&str> = Vec::new();
-    for schedule in schedules.iter().filter(|s| s.enabled) {
+    for schedule in schedules {
         let config_hash = compute_config_hash(schedule);
         if stored
             .get(schedule.name.as_str())
@@ -643,12 +886,12 @@ fn log_start_writes(
 async fn ensure_states_exist(
     pool: &CorePool,
     log: StatementLog,
-    schedules: &[TaskSchedule],
+    schedules: &[EnabledSchedule],
     database_now: DateTime<Utc>,
 ) -> bool {
     let mut writes: Vec<state::ScheduleStateWrite> = Vec::new();
     let mut healthy = true;
-    for schedule in schedules.iter().filter(|s| s.enabled) {
+    for schedule in schedules {
         match next_run_at(&schedule.pattern, database_now, &schedule.timezone) {
             Some(next) => writes.push(state::ScheduleStateWrite {
                 schedule_name: schedule.name.clone(),
@@ -697,15 +940,11 @@ async fn ensure_states_exist(
 async fn check_and_enqueue(
     pool: &CorePool,
     log: StatementLog,
-    schedules: &[TaskSchedule],
+    schedules: &[EnabledSchedule],
     commands: &HashMap<String, SendCommand>,
     existence_cadence: &mut ExistenceCheckCadence,
 ) -> Result<(), BrokerError> {
-    let enabled_names: Vec<String> = schedules
-        .iter()
-        .filter(|s| s.enabled)
-        .map(|s| s.name.clone())
-        .collect();
+    let enabled_names: Vec<String> = schedules.iter().map(|s| s.name.clone()).collect();
     if enabled_names.is_empty() {
         return Ok(());
     }
@@ -724,10 +963,7 @@ async fn check_and_enqueue(
     existence_cadence.tick();
 
     for due in &due_read.due {
-        let Some(schedule) = schedules
-            .iter()
-            .find(|s| s.enabled && s.name == due.schedule_name)
-        else {
+        let Some(schedule) = schedules.iter().find(|s| s.name == due.schedule_name) else {
             tracing::warn!(schedule = %due.schedule_name, "due schedule not in config");
             continue;
         };
@@ -873,7 +1109,7 @@ enum ScheduleCheckError {
 async fn fire_due_schedule(
     pool: &CorePool,
     log: StatementLog,
-    schedule: &TaskSchedule,
+    schedule: &EnabledSchedule,
     command: &SendCommand,
     due: &DueSchedule,
     database_now: DateTime<Utc>,
@@ -888,7 +1124,7 @@ async fn fire_due_schedule(
     };
     match state::fire_schedule(pool, log, &fire).await {
         Ok(ScheduleFireAnswer::Advanced { slots }) => {
-            log_fired(schedule, &slots);
+            log_fired(schedule, command, &slots);
             Ok(())
         }
         Ok(ScheduleFireAnswer::StateMissing) => heal_one(pool, log, schedule, database_now).await,
@@ -935,7 +1171,7 @@ async fn fire_due_schedule(
 /// Panics: when `first_due` is after `database_now` (the due read returns
 /// only rows due at its database time).
 fn fire_plan(
-    schedule: &TaskSchedule,
+    schedule: &EnabledSchedule,
     first_due: DateTime<Utc>,
     database_now: DateTime<Utc>,
 ) -> Result<FirePlan, ScheduleCheckError> {
@@ -1001,12 +1237,12 @@ fn fire_plan(
 }
 
 /// Log each slot of an advanced fire by its outcome (Python `_log_fired`).
-fn log_fired(schedule: &TaskSchedule, slots: &[FiredSlot]) {
+fn log_fired(schedule: &EnabledSchedule, command: &SendCommand, slots: &[FiredSlot]) {
     for slot in slots {
         match slot.outcome {
             SlotOutcome::Inserted => tracing::info!(
                 schedule = %schedule.name,
-                task_name = %schedule.task_name,
+                task_name = %command.task_name,
                 task_id = %slot.task_id,
                 slot = %slot.slot_at,
                 "scheduled task enqueued",
@@ -1043,7 +1279,7 @@ fn log_fired(schedule: &TaskSchedule, slots: &[FiredSlot]) {
 async fn heal_one(
     pool: &CorePool,
     log: StatementLog,
-    schedule: &TaskSchedule,
+    schedule: &EnabledSchedule,
     database_now: DateTime<Utc>,
 ) -> Result<(), ScheduleCheckError> {
     let next = next_run_at(&schedule.pattern, database_now, &schedule.timezone).ok_or(
@@ -1076,7 +1312,7 @@ async fn heal_one(
 async fn move_past_refused(
     pool: &CorePool,
     log: StatementLog,
-    schedule: &TaskSchedule,
+    schedule: &EnabledSchedule,
     command: &SendCommand,
     due: &DueSchedule,
     plan: &FirePlan,
@@ -1119,7 +1355,7 @@ const MAX_SKIP_SCAN_PER_TICK: u32 = 100_000;
 /// be `Some(t)` with `t <= now` when the scan cap was reached — callers must not
 /// fire a slot in that case. Mirrors Python `_advance_to_latest_due_slot`.
 fn advance_to_latest_due_slot(
-    schedule: &TaskSchedule,
+    schedule: &EnabledSchedule,
     first_due: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> (DateTime<Utc>, Option<DateTime<Utc>>, u32) {
@@ -1148,7 +1384,7 @@ fn advance_to_latest_due_slot(
 }
 
 fn calculate_missed_runs(
-    schedule: &TaskSchedule,
+    schedule: &EnabledSchedule,
     first_due_run: DateTime<Utc>,
     now: DateTime<Utc>,
     max_runs: u32,
@@ -1196,7 +1432,7 @@ fn calculate_missed_runs(
 /// SHA-256 of the schedule's pattern and timezone in Python's digest text
 /// (`config_digest`), for change detection. A change of input, queue or
 /// catch-up settings does not move `next_run_at`.
-fn compute_config_hash(schedule: &TaskSchedule) -> [u8; 32] {
+fn compute_config_hash(schedule: &EnabledSchedule) -> [u8; 32] {
     config_digest(&schedule.pattern, &schedule.timezone)
 }
 
@@ -1257,15 +1493,19 @@ mod start_and_boundary_tests {
             schedule_without_next_slot("never", true),
         ];
         assert!(matches!(
-            check_next_slots(&schedules, database_now),
+            check_next_slots(&enabled_schedules(&schedules), database_now),
             Err(SchedulerStartError::NoNextSlot { ref schedule, after })
                 if schedule == "never" && after == database_now
         ));
     }
 
+    /// A disabled schedule is not an enabled schedule of its config, so the
+    /// start does not check its pattern.
     #[test]
     fn a_disabled_pattern_without_a_next_slot_is_not_checked() {
         let schedules = vec![schedule_without_next_slot("off", false)];
-        assert!(check_next_slots(&schedules, Utc::now()).is_ok());
+        let enabled = enabled_schedules(&schedules);
+        assert!(enabled.is_empty());
+        assert!(check_next_slots(&enabled, Utc::now()).is_ok());
     }
 }

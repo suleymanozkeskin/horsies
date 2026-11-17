@@ -65,7 +65,14 @@ async fn tick_on(
 ) -> Result<(), BrokerError> {
     let mut cadence = ExistenceCheckCadence::new(1);
     cadence.record(true);
-    check_and_enqueue(core, StatementLog::Off, schedules, commands, &mut cadence).await
+    check_and_enqueue(
+        core,
+        StatementLog::Off,
+        &enabled_schedules(schedules),
+        commands,
+        &mut cadence,
+    )
+    .await
 }
 
 /// The database time cut to a whole second.
@@ -160,7 +167,10 @@ async fn a_fire_that_finds_no_state_row_creates_it_and_writes_no_task() {
             <= database_now + chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS))
     );
     assert_eq!(row.run_count, 0);
-    assert_eq!(row.config_hash, compute_config_hash(&schedule).to_vec());
+    assert_eq!(
+        row.config_hash,
+        compute_config_hash(&enabled(&schedule)).to_vec()
+    );
     assert_eq!(task_count(&pool, &schedule.task_name).await, 0);
     cleanup(&pool, &schedule.task_name, &schedule.name).await;
 }
