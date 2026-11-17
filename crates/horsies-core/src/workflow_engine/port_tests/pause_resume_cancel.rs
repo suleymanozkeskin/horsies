@@ -636,7 +636,6 @@ async fn the_claim_filter_dispatches_a_claim_whose_workflow_was_resumed() {
 /// `test_pause_abandon_after_resume.py::test_batch_abandon_refuses_after_a_committed_resume`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #549"]
 async fn the_batch_abandon_refuses_after_a_committed_resume() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;
@@ -674,10 +673,10 @@ async fn the_batch_abandon_refuses_after_a_committed_resume() {
 
 /// `test_pause_abandon_after_resume.py::test_child_starts_a_task_resumed_before_its_abandon`
 /// (the abandon half): the start-time abandon of one node refuses after a
-/// committed resume, so the start can run the task.
+/// committed resume, so the start can run the task. The start half is
+/// `worker::executor::child_host::start_tests::a_resume_before_the_abandon_starts_the_task_on_the_next_attempt`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #549"]
 async fn the_start_abandon_refuses_after_a_committed_resume() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;

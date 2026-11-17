@@ -237,6 +237,21 @@ async fn node_status(pool: &PgPool, workflow_id: Uuid) -> String {
         .expect("read the node status")
 }
 
+/// The status of the one node of `workflow_id`, the task that the node
+/// links, and the status of the workflow.
+async fn node_and_workflow(pool: &PgPool, workflow_id: Uuid) -> (String, Option<Uuid>, String) {
+    sqlx::query_as(
+        "SELECT n.status::text, n.task_id, w.status::text
+         FROM horsies_workflow_tasks n
+         JOIN horsies_workflows w ON w.id = n.workflow_id
+         WHERE n.workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the node and its workflow")
+}
+
 async fn remove_workflow(pool: &PgPool, workflow_id: Uuid) {
     sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
@@ -473,14 +488,17 @@ async fn a_refused_expiry_before_the_start_is_a_lost_claim() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `TestMissedStart::test_a_resume_before_the_abandon_starts_the_task_on_the_next_attempt`:
+/// Python `test_pause_abandon_after_resume.py::test_child_starts_a_task_resumed_before_its_abandon`
+/// (the start half; the abandon half is
+/// `workflow_engine::port_tests::pause_resume_cancel::the_start_abandon_refuses_after_a_committed_resume`)
+/// and `test_shared_lifecycle.py::TestMissedStart::test_a_resume_before_the_stop_starts_the_task_on_the_next_attempt`:
 /// the start finds the workflow paused, and the workflow is resumed before
 /// the abandon: the miss path answers that the workflow was resumed, and the
-/// next start attempt sets the row and its node RUNNING. The test holds the
-/// workflow row with an uncommitted resume, which the miss path statement
-/// waits for and the start does not, and commits the resume while that
-/// statement waits, within its statement bound: the miss path ends by the
-/// resume, not by its bound.
+/// next start attempt sets the row and its node RUNNING; the node keeps its
+/// task and the workflow stays RUNNING. The test holds the workflow row with
+/// an uncommitted resume, which the miss path statement waits for and the
+/// start does not, and commits the resume while that statement waits, within
+/// its statement bound: the miss path ends by the resume, not by its bound.
 #[tokio::test]
 #[serial]
 async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
@@ -508,7 +526,10 @@ async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
     assert!(matches!(started, Started::Running));
     let row = live_row(&pool, task_id).await.expect("the row stays live");
     assert_eq!(row["status"], "RUNNING");
-    assert_eq!(node_status(&pool, workflow_id).await, "RUNNING");
+    assert_eq!(
+        node_and_workflow(&pool, workflow_id).await,
+        ("RUNNING".to_owned(), Some(task_id), "RUNNING".to_owned()),
+    );
     remove_task(&pool, task_id).await;
     remove_workflow(&pool, workflow_id).await;
 }
