@@ -209,11 +209,12 @@ def _limit_write(value: object) -> RecoveryLimitWrite:
             )
 
 
-def _quarantine_parts(value: object) -> tuple[str, str | None]:
-    """The verdict and the detail of ``quarantine_verdict``.
+def quarantine_parts(value: object) -> tuple[str, str | None]:
+    """The verdict and the detail of a quarantine verdict text.
 
-    The function writes the verdict, then ``': '`` and the detail when the
-    verdict has one. A verdict is a token of capitals and underscores, so the
+    ``horsies_workflow_phase2_record_raise`` (``quarantine_verdict``) and
+    ``horsies_workflow_phase2_recover`` (``detail``) write the verdict, then
+    ``': '`` and the detail when the verdict has one. A verdict is a token of capitals and underscores, so the
     first ``': '`` ends it.
     """
     match value:
@@ -226,8 +227,8 @@ def _quarantine_parts(value: object) -> tuple[str, str | None]:
                     return verdict, detail
         case _:
             raise OutcomeDecodeError(
-                f'horsies_workflow_phase2_record_raise returned '
-                f'quarantine_verdict {value!r}; expected a text',
+                f'a phase-2 function returned the quarantine verdict {value!r}; '
+                'expected a text',
             )
 
 
@@ -254,7 +255,7 @@ def decode_phase2_raise(rows: Sequence[Any]) -> Phase2RaiseOutcome:
         case 'COUNTED':
             return RaiseCounted(attempt_count=_attempt_count(row.attempt_count))
         case 'LIMIT_REACHED':
-            verdict, detail = _quarantine_parts(row.quarantine_verdict)
+            verdict, detail = quarantine_parts(row.quarantine_verdict)
             return RaiseLimitReached(
                 attempt_count=_attempt_count(row.attempt_count),
                 limit=_limit_write(row.limit_outcome),

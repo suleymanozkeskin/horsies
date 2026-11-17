@@ -30,9 +30,10 @@
 //! 3. Otherwise take the install lock on a session-work connection, read the
 //!    state again on it (another installer may have finished during the
 //!    wait), and act until the state is current or refused:
-//!    - each pending migration runs in its own transaction with its
-//!      bookkeeping row; the transaction of migration 1000 also writes this
-//!      client's family row;
+//!    - each pending migration runs in its own READ COMMITTED transaction
+//!      with its bookkeeping row; the transaction of migration 1000 also
+//!      publishes the history readers (`horsies_publish_history_readers`)
+//!      and writes this client's family row;
 //!    - a database with no family row gets this client's row.
 //! 4. Release the lock and check the release.
 //!
@@ -51,7 +52,7 @@ use crate::broker::client_family::{
     recorded_family_from, ClientFamily, RecordedFamily, RECORD_CLIENT_FAMILY,
 };
 use crate::broker::core_rows::{
-    column, execute_in, one_row, query_on, RowDecodeError, StatementLog,
+    column, execute_in, one_row, query_in, query_on, RowDecodeError, StatementLog,
 };
 use crate::broker::error::{BrokerError, InstallLockFailure};
 use crate::db::{
@@ -123,12 +124,25 @@ enum FamilyRow {
     NotWritten,
 }
 
+/// Whether the transaction of a migration publishes the history readers
+/// (`horsies_publish_history_readers`, baseline `0008`) after its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReaderPublication {
+    /// Migration 1000 creates the leaf catalog, the static forever leaf and
+    /// the publication function; its transaction publishes the readers, so a
+    /// recorded version 1000 always has them.
+    PublishedWithMigration,
+    /// The migration does not change what the readers read.
+    NotPublished,
+}
+
 /// One migration of the embedded chain, as written in the source.
 struct MigrationSource {
     version: i64,
     description: &'static str,
     script: SqlScript,
     family_row: FamilyRow,
+    readers: ReaderPublication,
 }
 
 /// The embedded chain, in apply order.
@@ -138,6 +152,7 @@ const MIGRATION_SOURCES: [MigrationSource; 2] = [
         description: "baseline",
         script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
         family_row: FamilyRow::WrittenWithMigration,
+        readers: ReaderPublication::PublishedWithMigration,
     },
     MigrationSource {
         version: 1001,
@@ -147,6 +162,7 @@ const MIGRATION_SOURCES: [MigrationSource; 2] = [
             include_str!("../../migrations/1001_interim_rust_claim_functions.sql"),
         ),
         family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
     },
 ];
 
@@ -166,6 +182,7 @@ pub(crate) struct EmbeddedMigration {
     description: &'static str,
     script: SqlScript,
     family_row: FamilyRow,
+    readers: ReaderPublication,
     checksum: [u8; CHECKSUM_BYTES],
 }
 
@@ -178,6 +195,7 @@ impl EmbeddedMigration {
             description: source.description,
             script: source.script,
             family_row: source.family_row,
+            readers: source.readers,
             checksum,
         }
     }
@@ -329,6 +347,15 @@ static RECORD_MIGRATION: TypedStatement = TypedStatement::new(
         ParameterType::Bytea,
         ParameterType::Int8,
     ],
+);
+
+/// The publication of the history readers for the current leaf catalog
+/// (`horsies_publish_history_readers`, baseline `0008`), in the caller's
+/// READ COMMITTED transaction. One row: `PUBLISHED` or `ALREADY_CURRENT`.
+static PUBLISH_HISTORY_READERS: TypedStatement = TypedStatement::new(
+    "publish_history_readers",
+    "SELECT outcome FROM horsies_publish_history_readers()",
+    &[],
 );
 
 /// One try of the install lock; it never waits.
@@ -932,7 +959,7 @@ async fn apply_pending(
     first: usize,
     own: ClientFamily,
     log: StatementLog,
-) -> Result<(), StatementFailure> {
+) -> Result<(), SchemaInstallError> {
     for migration in embedded_migrations().iter().skip(first) {
         tracing::info!(
             version = migration.version,
@@ -944,22 +971,25 @@ async fn apply_pending(
     Ok(())
 }
 
-/// Runs one migration and its bookkeeping row, and for migration 1000 this
-/// client's family row, in one transaction (Python `install_baseline`). On
-/// a failure nothing of it stays; the failure is returned.
+/// Runs one migration in one READ COMMITTED transaction (Python
+/// `install_baseline`): its text, then for migration 1000 the publication of
+/// the history readers, then its bookkeeping row, then for migration 1000
+/// this client's family row. READ COMMITTED is named, not taken from the
+/// server default, because the publication refuses any other isolation. On a
+/// failure nothing of the migration stays; the failure is returned.
 async fn apply_migration(
     connection: &mut PooledConnection,
     migration: &EmbeddedMigration,
     own: ClientFamily,
     log: StatementLog,
-) -> Result<(), StatementFailure> {
-    let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
+) -> Result<(), SchemaInstallError> {
+    let mut transaction = connection.begin(IsolationLevel::ReadCommitted).await?;
     match migration_statements(&mut transaction, migration, own, log).await {
-        Ok(()) => transaction.commit().await,
+        Ok(()) => Ok(transaction.commit().await?),
         Err(failure) => {
-            // The statement failure is the answer. A failed ROLLBACK discards
-            // the connection, and the server rolls the transaction back when
-            // the socket closes.
+            // The failure is the answer. A failed ROLLBACK discards the
+            // connection, and the server rolls the transaction back when the
+            // socket closes.
             let _rolled_back: RollbackOutcome = transaction.rollback().await;
             Err(failure)
         }
@@ -971,12 +1001,23 @@ async fn migration_statements(
     migration: &EmbeddedMigration,
     own: ClientFamily,
     log: StatementLog,
-) -> Result<(), StatementFailure> {
+) -> Result<(), SchemaInstallError> {
     let started = Instant::now();
     transaction
         .run_script(&migration.script, StatementBound::ConnectionTimeouts)
         .await?;
     let execution_time = i64::try_from(started.elapsed().as_nanos()).unwrap_or(i64::MAX);
+    match migration.readers {
+        ReaderPublication::PublishedWithMigration => {
+            let published = publish_history_readers(transaction, log).await?;
+            tracing::info!(
+                version = migration.version,
+                outcome = published.as_str(),
+                "history readers published with the schema migration",
+            );
+        }
+        ReaderPublication::NotPublished => {}
+    }
     let checksum = migration.checksum.to_vec();
     let _recorded = execute_in(
         transaction,
@@ -1003,6 +1044,47 @@ async fn migration_statements(
         FamilyRow::NotWritten => {}
     }
     Ok(())
+}
+
+/// What one reader publication did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublishedReaders {
+    /// The manifest was rewritten and the four readers were replaced and
+    /// stamped.
+    Published,
+    /// The manifest and every stamp were current; nothing changed.
+    AlreadyCurrent,
+}
+
+impl PublishedReaders {
+    fn as_str(self) -> &'static str {
+        match self {
+            PublishedReaders::Published => "PUBLISHED",
+            PublishedReaders::AlreadyCurrent => "ALREADY_CURRENT",
+        }
+    }
+}
+
+/// Publishes the history readers in `transaction`.
+///
+/// Errors: `Statement` when the function refuses (25000 outside READ
+/// COMMITTED, 42P01 when no attached leaf resolves its parent) or the call
+/// fails; `RowDecode` when it returns no row or an outcome outside its two.
+async fn publish_history_readers(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+) -> Result<PublishedReaders, SchemaInstallError> {
+    let statement = &PUBLISH_HISTORY_READERS;
+    let rows = query_in(transaction, log, &statement.bind().finish()).await?;
+    let outcome: String = column(&one_row(rows, statement)?, statement, "outcome")?;
+    match outcome.as_str() {
+        "PUBLISHED" => Ok(PublishedReaders::Published),
+        "ALREADY_CURRENT" => Ok(PublishedReaders::AlreadyCurrent),
+        other => Err(SchemaInstallError::RowDecode(RowDecodeError::Shape {
+            statement: statement.name(),
+            reason: format!("unknown publication outcome {other:?}"),
+        })),
+    }
 }
 
 /// Writes this client's family row when the database has none (Python
