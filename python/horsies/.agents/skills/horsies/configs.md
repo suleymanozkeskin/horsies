@@ -894,6 +894,8 @@ MonthlySchedule(day=15, time=time(15, 0))  # 15th at 15:00
 
 If `day` > days in month (e.g., day=31 in Feb), that month is skipped.
 
+The `time` of `DailySchedule`, `WeeklySchedule` and `MonthlySchedule` is in the schedule's `timezone`. A `time` with `tzinfo` or with microseconds is refused at construction (HRS-205): set the zone in `timezone`, and give whole seconds.
+
 **CronSchedule** — typed cron-style schedule:
 
 ```python
