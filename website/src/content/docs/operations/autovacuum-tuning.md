@@ -1,5 +1,6 @@
 ---
 title: Autovacuum Tuning
+section: shared
 summary: Per-table autovacuum settings for the high-churn horsies tables, and the queries that verify vacuum keeps up.
 related: [../internals/database-schema]
 tags: [operations, autovacuum, postgres, maintenance]

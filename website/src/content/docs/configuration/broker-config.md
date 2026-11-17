@@ -1,5 +1,6 @@
 ---
 title: Broker Config
+section: shared
 summary: PostgreSQL connection settings via PostgresConfig.
 related: [app-config]
 tags: [configuration, PostgresConfig, database]

@@ -1,5 +1,6 @@
 ---
 title: Web UI Deployment & Authentication
+section: shared
 summary: Mounting the monitoring app in a host application, running it standalone, and the identity, connection, and schema contracts each mode carries.
 related: [web-ui-overview, action-semantics, ../configuration/remote-postgres, ../troubleshooting/pgbouncer]
 tags: [monitoring, web, deployment, authentication, security, pgbouncer]

@@ -1,5 +1,6 @@
 ---
 title: Questions & Answers
+section: shared
 summary: Common questions about design trade-offs, scaling, and failure behavior.
 related: [concepts/architecture, workers/concurrency, workers/heartbeats-recovery, tasks/retry-policy, internals/serialization]
 tags: [faq, design]

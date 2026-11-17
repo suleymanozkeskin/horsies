@@ -1,5 +1,6 @@
 ---
 title: AppConfig
+section: python
 summary: Root configuration for a horsies application.
 related: [broker-config, recovery-config, ../../concepts/queue-modes]
 tags: [configuration, AppConfig]

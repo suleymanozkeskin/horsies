@@ -1,5 +1,6 @@
 ---
 title: Architecture
+section: shared
 summary: System design, components, and data flow.
 related: [task-lifecycle, ../../workers/worker-architecture]
 tags: [concepts, architecture, design]

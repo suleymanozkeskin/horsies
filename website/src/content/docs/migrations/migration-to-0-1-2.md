@@ -1,5 +1,6 @@
 ---
 title: Migrating to 0.1.2
+section: site
 summary: Breaking changes from 0.1.1 to 0.1.2 (strict-serde) and how to update existing code.
 related: [../internals/serialization, ../tasks/sending-tasks, ../tasks/defining-tasks]
 tags: [migration, strict-serde, 0.1.2, breaking-changes]

@@ -1,5 +1,6 @@
 ---
 title: Worker & Database Health
+section: shared
 summary: Active liveness probes for Postgres and workers, plus typed worker-state snapshots.
 related: [broker-methods, ../workers/heartbeats-recovery]
 tags: [monitoring, health, liveness, worker, api]

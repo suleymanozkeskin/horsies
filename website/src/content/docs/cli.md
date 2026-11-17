@@ -1,5 +1,6 @@
 ---
 title: CLI Reference
+section: python
 summary: Command-line interface for running workers, the scheduler, and the monitoring web UI.
 related: [../workers/worker-architecture, ../scheduling/scheduler-overview]
 tags: [cli, worker, scheduler, commands]

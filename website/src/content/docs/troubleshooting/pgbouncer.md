@@ -1,5 +1,6 @@
 ---
 title: PgBouncer Troubleshooting
+section: shared
 summary: Fix PgBouncer transaction pooling issues with Horsies and Syce, and size the PgBouncer pool for the workers.
 related: [../configuration/broker-config, ../configuration/remote-postgres, ../workers/worker-profiles, ../monitoring/syce-overview, ../tasks/errors]
 tags: [troubleshooting, pgbouncer, planetscale, postgres]

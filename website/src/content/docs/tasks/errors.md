@@ -1,5 +1,6 @@
 ---
 title: Errors Reference
+section: shared
 summary: Exhaustive reference of all error codes and types in horsies.
 related: [error-handling, ../../concepts/result-handling]
 tags: [errors, TaskError, BuiltInTaskCode, ErrorCode, reference]
