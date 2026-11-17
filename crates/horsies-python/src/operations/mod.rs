@@ -14,6 +14,7 @@ pub mod finalizing;
 pub mod monitoring_reads;
 pub mod monitoring_window;
 pub mod paused_expiry;
+pub mod pruning;
 pub mod queue_starts;
 pub mod release;
 pub mod result;
