@@ -352,6 +352,93 @@ def test_the_workflow_reads_answer_as_python_did(empty_database: MakeDatabase) -
     assert _differences(answers) == {}
 
 
+_ZERO_LED_RUN: Final = str(uuid.UUID('00' + uuid.uuid4().hex[2:]))
+"""A run id whose first two hex digits are 0: ``int(text, 16)`` reads the
+same value with ``0x``, a sign or a space in their place."""
+
+
+def _id_form_rows() -> tuple[SeedRow, ...]:
+    run = WorkflowRow(
+        id=_ZERO_LED_RUN,
+        name='web.forms',
+        status='RUNNING',
+        on_error='fail',
+        definition_key=None,
+        parent=None,
+        sent_at=_NOW - timedelta(seconds=60),
+        created_at=_NOW - timedelta(seconds=60),
+        completed_at=None,
+    )
+    node = NodeRow(
+        id=str(uuid.uuid4()),
+        workflow_id=_ZERO_LED_RUN,
+        task_index=0,
+        node_id='node-0',
+        task_name='web.step',
+        status='PENDING',
+        dependencies=(),
+        allow_failed_deps=False,
+        kind=TaskNode(task_id=None),
+        result=None,
+        created_at=_NOW - timedelta(seconds=60),
+        started_at=None,
+        completed_at=None,
+    )
+    return (run, node)
+
+
+def _id_forms_read(run_id: str) -> tuple[str, ...]:
+    """Texts of ``run_id`` that Python's ``uuid.UUID(text)`` reads as it. The
+    ``uuid`` crate refuses each one but the first two."""
+    digits = uuid.UUID(run_id).hex
+    return (
+        run_id,
+        f'urn:uuid:{run_id}',
+        f'uuid:{run_id}',
+        f'{{{digits}}}',
+        f'{digits[:2]}-{digits[2:4]}-{digits[4:]}',
+        f'0x{digits[2:]}',
+        f'+{digits[1:]}',
+        f' {digits[1:]}',
+        f'{digits[1:16]}_{digits[16:]}',
+        f'٠{digits[1:]}',
+    )
+
+
+def _id_forms_refused(run_id: str) -> tuple[str, ...]:
+    """Texts of ``run_id`` that ``uuid.UUID(text)`` refuses. The ``uuid``
+    crate reads the first one."""
+    digits = uuid.UUID(run_id).hex
+    return (f'URN:UUID:{run_id}', f'{digits[1:]}_')
+
+
+def test_the_workflow_reads_take_the_id_forms_that_python_took(
+    empty_database: MakeDatabase,
+) -> None:
+    """``get_workflow_run`` and ``get_workflow_node`` read the path text with
+    ``uuid.UUID(text)``: a text that it reads names the run, any other names
+    none (404)."""
+    read = _id_forms_read(_ZERO_LED_RUN)
+    refused = _id_forms_refused(_ZERO_LED_RUN)
+    paths = [
+        path
+        for form in (*read, *refused)
+        for path in (f'/api/workflows/{form}', f'/api/workflows/{form}/tasks/0')
+    ]
+
+    answers = read_dual_run(
+        empty_database, _id_form_rows(), [_read_pair('GET', path) for path in paths],
+    )
+
+    statuses = {each.name: each.reference['status'] for each in answers}
+    assert statuses == {
+        f'GET {path}': 200 if form in read else 404
+        for form in (*read, *refused)
+        for path in (f'/api/workflows/{form}', f'/api/workflows/{form}/tasks/0')
+    }, 'the reference reads each form that uuid.UUID reads'
+    assert _differences(answers) == {}
+
+
 _WORKER_STATES: Final[LiteralString] = """
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,

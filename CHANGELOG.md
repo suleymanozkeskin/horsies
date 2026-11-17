@@ -203,6 +203,16 @@ written in Rust, on a new baseline schema.
   cancel route does; they answered 503 with the driver's text. A
   `urn:uuid:` or braced id is read as its UUID.
 
+- **A workflow id text of a read names the run that `uuid.UUID(text)`
+  reads.** `horsies.monitoring.get_workflow_run` and `get_workflow_node`,
+  and the web routes `GET /api/workflows/{workflow_id}` and
+  `GET /api/workflows/{workflow_id}/tasks/{task_index}`, read the id text
+  as Python's `uuid.UUID` does. A text that it refuses names no run: `None`,
+  or 404 on the web. 0.7 passed the text to PostgreSQL, which refuses some
+  forms that `uuid.UUID` reads (for example `uuid:<id>`, or a `-` that does
+  not follow a group of four digits). Such a read failed with
+  `DB_OPERATION_FAILED`, or 503 on the web.
+
 - **`ping_workers` refuses a `timeout_seconds` of NaN.** It answers
   `INVALID_INPUT` (`timeout_seconds must be positive, got nan`) before any
   I/O; it sent the ping and returned at once with no reply. An infinite
