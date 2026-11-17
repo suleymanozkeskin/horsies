@@ -22,18 +22,15 @@ use crate::monitoring::TaskAbsenceReason;
 use crate::AppConfig;
 
 use super::app::{build_router, WebState};
-use super::auth::{
-    AllowAll, MonitoringAuthPolicy, MonitoringRequest, TrustedHeader, ViewOnly, INTENT_HEADER,
-    INTENT_VALUE,
-};
+use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE};
 use super::common::{parse_fastapi_bool, QueryValues};
 use super::events::{
     data_frame, degraded_frame, EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS,
-    MAX_IDS_PER_EVENT,
+    HEARTBEAT, MAX_IDS_PER_EVENT,
 };
 use super::handler::{
-    AccessGrant, AccessNeed, GrantedAccess, MonitoringHandler, RequestParts, ResponseForm,
-    ResponseParts, Verdict,
+    AccessGrant, AccessNeed, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
+    RequestParts, ResponseForm, ResponseParts, Verdict,
 };
 use super::routes::task_not_found_text;
 use super::schema::{
@@ -43,6 +40,72 @@ use super::spa::{
     inject, runtime_config_json, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig,
 };
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
+
+/// A policy of the router tests that allows reads and actions.
+struct AllowAll;
+
+#[async_trait]
+impl MonitoringAuthPolicy for AllowAll {
+    async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
+        true
+    }
+
+    async fn can_act(&self, _request: MonitoringRequest<'_>) -> bool {
+        true
+    }
+}
+
+/// A policy of the router tests that allows reads and refuses actions.
+struct ViewOnly;
+
+#[async_trait]
+impl MonitoringAuthPolicy for ViewOnly {
+    async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
+        true
+    }
+
+    async fn can_act(&self, _request: MonitoringRequest<'_>) -> bool {
+        false
+    }
+}
+
+/// A policy of the router tests that allows a request with a value of the
+/// header that is not blank; actions only when `allow_actions`.
+struct TrustedHeader {
+    header_name: axum::http::HeaderName,
+    allow_actions: bool,
+}
+
+impl TrustedHeader {
+    fn new(
+        header_name: &str,
+        allow_actions: bool,
+    ) -> Result<Self, axum::http::header::InvalidHeaderName> {
+        Ok(Self {
+            header_name: axum::http::HeaderName::try_from(header_name)?,
+            allow_actions,
+        })
+    }
+
+    fn identified(&self, request: MonitoringRequest<'_>) -> bool {
+        request
+            .headers
+            .get(&self.header_name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| !value.trim().is_empty())
+    }
+}
+
+#[async_trait]
+impl MonitoringAuthPolicy for TrustedHeader {
+    async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
+        self.identified(request)
+    }
+
+    async fn can_act(&self, request: MonitoringRequest<'_>) -> bool {
+        self.allow_actions && self.identified(request)
+    }
+}
 
 fn lazy_pool() -> PgPool {
     PgPoolOptions::new()
@@ -183,48 +246,6 @@ async fn json(response: axum::response::Response) -> serde_json::Value {
         .await
         .expect("response body");
     serde_json::from_slice(&bytes).expect("JSON response")
-}
-
-#[tokio::test]
-async fn auth_policies_match_the_three_pinned_postures() {
-    let base = request(Method::GET, "/api/meta");
-    let facts = MonitoringRequest::from_request(&base);
-    assert!(AllowAll.can_view(facts).await);
-    let facts = MonitoringRequest::from_request(&base);
-    assert!(AllowAll.can_act(facts).await);
-    let facts = MonitoringRequest::from_request(&base);
-    assert!(ViewOnly.can_view(facts).await);
-    let facts = MonitoringRequest::from_request(&base);
-    assert!(!ViewOnly.can_act(facts).await);
-
-    let policy = TrustedHeader::new("X-Forwarded-User", true).expect("header");
-    let absent = request(Method::GET, "/api/meta");
-    assert!(
-        !policy
-            .can_view(MonitoringRequest::from_request(&absent))
-            .await
-    );
-    let present = Request::builder()
-        .uri("/api/meta")
-        .header("x-forwarded-user", " alex ")
-        .body(Body::empty())
-        .unwrap();
-    assert!(
-        policy
-            .can_view(MonitoringRequest::from_request(&present))
-            .await
-    );
-    assert!(
-        policy
-            .can_act(MonitoringRequest::from_request(&present))
-            .await
-    );
-    let view_only_header = TrustedHeader::new("X-Forwarded-User", false).unwrap();
-    assert!(
-        !view_only_header
-            .can_act(MonitoringRequest::from_request(&present))
-            .await
-    );
 }
 
 #[tokio::test]
@@ -2148,10 +2169,10 @@ async fn horsies_objects(
 }
 
 /// Python `test_web_api.py::TestTheToolNeverRunsDdl::test_actions_are_refused_and_still_nothing_is_created`:
-/// the web router of an observe-only broker on a new, empty database answers
-/// a cancel that carries the intent header with 409 `SCHEMA_INCOMPATIBLE` and
-/// Python's detail, and the database still holds no horsies relation or
-/// function afterwards.
+/// the monitoring handler of an observe-only broker on a new, empty database
+/// answers an allowed cancel that carries the intent header with 409
+/// `SCHEMA_INCOMPATIBLE` and Python's detail, and the database still holds no
+/// horsies relation or function afterwards.
 #[tokio::test]
 #[serial]
 async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing() {
@@ -2164,23 +2185,28 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     );
     let app =
         Horsies::new(AppConfig::for_database_url(&url)).expect("the app of the empty database");
-    let router = super::app::create_monitoring_router(
-        &app,
+    let handler = MonitoringHandler::new(
         Arc::clone(&broker),
-        AllowAll,
-        MonitoringUiConfig::default(),
-        true,
+        crate::monitoring::ResumeChildren::Registry {
+            registry: Arc::new(app.workflow_registry().clone()),
+            retention: app.config().retention.clone(),
+        },
+        MonitoringHandlerConfig {
+            actions_enabled: true,
+            ui: MonitoringUiConfig::default(),
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            heartbeat: HEARTBEAT,
+        },
     );
 
-    let response = router
-        .oneshot(action_request(&format!(
-            "/api/tasks/{}/cancel",
-            Uuid::new_v4()
-        )))
-        .await
-        .unwrap();
-    let status = response.status();
-    let body = json(response).await;
+    let response = handler
+        .handle(
+            action_parts(&format!("/api/tasks/{}/cancel", Uuid::new_v4())),
+            grant(Verdict::Allowed, Verdict::Allowed),
+        )
+        .await;
+    let status = response.status;
+    let body = body_json(&response);
     let objects = horsies_objects(database.client()).await;
     broker.pool().close().await;
     broker.session_pool().close().await;
