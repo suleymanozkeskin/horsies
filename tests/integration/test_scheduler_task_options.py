@@ -2,9 +2,9 @@
 """A scheduled run stores the options of its task on the row.
 
 The worker reads the timeout, the retry limit and the execution class from
-the row. Each test runs the tick's due read, enters at
-``Scheduler._check_schedule`` (one ``horsies_fire_schedule`` call) and reads
-the row and the schedule state from the database.
+the row. Each test runs one tick of the started scheduler with its one
+schedule due (one ``horsies_fire_schedule`` call) and reads the row and the
+schedule state from the database.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import IntervalSchedule, ScheduleConfig, TaskSchedule
 from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
 from horsies.core.scheduler.service import Scheduler
-from horsies.core.scheduler.state import DueScheduleRead
+from horsies.core.scheduler.validation import prepare_schedules
 from horsies.core.task_decorator import effective_priority
 from horsies.core.types.result import Ok
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
@@ -75,15 +75,10 @@ def _app_with_scheduled_task(task_name: str, schedule_name: str) -> Horsies:
     return app
 
 
-async def _fire_due(scheduler: Scheduler, schedule_name: str) -> DueScheduleRead:
-    """Run the due read of one schedule and fire it at the read's database time."""
-    assert scheduler.state_manager is not None
-    read = await scheduler.state_manager.read_due_schedules([schedule_name])
-    [due] = read.due
-    await scheduler._check_schedule(
-        scheduler.schedule_config.schedules[0], due, read.database_now,
-    )
-    return read
+async def _fire_due(scheduler: Scheduler) -> None:
+    """One tick: the due read, then the fire of the one due schedule at the
+    read's database time."""
+    await scheduler._check_and_run_schedules()
 
 
 def _names() -> tuple[str, str]:
@@ -126,7 +121,7 @@ async def test_a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task(
             schedule_name,
             check_time - timedelta(seconds=1),
         )
-        _ = await _fire_due(scheduler, schedule_name)
+        await _fire_due(scheduler)
     finally:
         await scheduler.stop()
 
@@ -168,18 +163,19 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
     await scheduler.start()
     try:
         assert scheduler.broker is not None
-        schedule = scheduler.schedule_config.schedules[0]
+        schedule_config = scheduler.schedule_config
         check_time = datetime.now(timezone.utc).replace(microsecond=0)
         first_due = check_time - timedelta(seconds=1)
-        slot, next_run, _ = scheduler._advance_to_latest_due_slot(
-            schedule,
-            first_due,
-            check_time,
-        )
+        # The interval is longer than the time since the first due slot, so
+        # that slot is the latest due one, and the next run is one interval on.
+        slot = first_due
+        next_run = first_due + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
         slot_task_id = schedule_slot_task_id(schedule_name, slot)
         priority = effective_priority(app, 'default')
         # The same kwargs text as this version, so only the options differ.
-        prepared = scheduler._prepared_schedules[schedule_name]
+        prepared_schedules = prepare_schedules(app, schedule_config)
+        assert isinstance(prepared_schedules, Ok), prepared_schedules
+        prepared = prepared_schedules.ok_value[schedule_name]
         earlier_row = await scheduler.broker.enqueue_async(
             task_name=task_name,
             queue_name='default',
@@ -208,7 +204,7 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
         assert earlier_row == Ok(slot_task_id)
 
         await _set_next_run_at(session, schedule_name, first_due)
-        _ = await _fire_due(scheduler, schedule_name)
+        await _fire_due(scheduler)
     finally:
         await scheduler.stop()
 

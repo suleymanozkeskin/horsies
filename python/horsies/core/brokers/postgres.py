@@ -19,8 +19,10 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
+    BrokerFailure,
     CoreError,
     CoreHandle,
+    DatabasePingRecord,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -2564,30 +2566,51 @@ class PostgresBroker:
                 return first_rows
 
     async def ping_database_async(self) -> BrokerResult[DatabasePing]:
-        """Probe Postgres reachability with ``SELECT 1`` through the live pool.
+        """Probe Postgres reachability with one statement on the broker's main
+        core pool, through ``CoreHandle.ping_database_async``.
 
-        Goes through the broker's own pool (not an isolated engine), so a
-        success also confirms a connection could be checked out. Returns the
-        measured round-trip latency.
+        A success also confirms that a connection could be checked out of the
+        pool. Returns the measured round-trip latency. Reads only; a cancel
+        of the caller drops the ping.
+
+        Failures, each ``DB_PING_FAILED``; nothing changed:
+        - the connect or the statement failed; ``retryable`` is the core's
+          classification of the cause, and ``exception`` a
+          ``CoreOperationFailed``;
+        - the core of this process cannot run the call (``CoreError``: it
+          stopped, did not start, or has too many calls in flight); the
+          ``exception`` is that error, and ``retryable`` follows
+          ``core_error_retryable``.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('ping_database', loop_limit)
-            case Ok(resources):
-                pass
-        loop = asyncio.get_running_loop()
         try:
-            start = loop.time()
-            async with resources.session_factory() as session:
-                await session.execute(text('SELECT 1'))
-            latency_ms = (loop.time() - start) * 1000.0
-            return Ok(DatabasePing(latency_ms=latency_ms))
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.DB_PING_FAILED,
-                f'ping_database failed: {exc}',
-                exc,
+            outcome = await self._core_handle.ping_database_async()
+        except CoreError as exc:
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.DB_PING_FAILED,
+                    message=f'ping_database failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
             )
+        match outcome:
+            case DatabasePingRecord(latency_ms=latency_ms):
+                return Ok(DatabasePing(latency_ms=latency_ms))
+            case BrokerFailure(code='DB_PING_FAILED', message=message, retryable=retryable):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.DB_PING_FAILED,
+                        message=f'ping_database failed: {message}',
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            'PostgresBroker.ping_database_async', message, retryable,
+                        ),
+                    ),
+                )
+            case BrokerFailure(code=code):
+                raise AssertionError(f'the core database ping answered the code {code}')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def ping_workers_async(
         self,

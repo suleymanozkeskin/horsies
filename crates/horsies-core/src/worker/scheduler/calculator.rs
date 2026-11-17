@@ -746,4 +746,50 @@ mod tests {
             next_run_at(&other, equiv_base(), "UTC"),
         );
     }
+
+    /// One row of `calculator_vectors.json`.
+    #[derive(serde::Deserialize)]
+    struct PythonVector {
+        name: String,
+        pattern_json: String,
+        timezone: String,
+        after: DateTime<Utc>,
+        next_run_at: DateTime<Utc>,
+    }
+
+    /// The vector table.
+    #[derive(serde::Deserialize)]
+    struct PythonVectors {
+        vectors: Vec<PythonVector>,
+    }
+
+    /// Python is the specification of the calculator: for every pattern kind,
+    /// for zones with daylight saving changes (the gap and the fold of
+    /// Europe/Berlin and America/New_York) and for months without the day,
+    /// the core gives the next run that Python's `calculate_next_run` gave
+    /// (`calculator_vectors.json`; the Python test
+    /// `tests/unit/test_schedule_calculator_vectors.py` pins the same table).
+    /// The pattern is read from Python's text, as the scheduler manifest
+    /// gives it.
+    #[test]
+    fn each_python_vector_gives_python_s_next_run() {
+        let table: PythonVectors = serde_json::from_str(include_str!("calculator_vectors.json"))
+            .expect("the vector table parses");
+        assert!(!table.vectors.is_empty(), "the vector table has rows");
+        for vector in &table.vectors {
+            let pattern: SchedulePattern = serde_json::from_str(&vector.pattern_json)
+                .unwrap_or_else(|error| {
+                    panic!("{}: the pattern text parses: {error}", vector.name)
+                });
+            pattern
+                .validate()
+                .unwrap_or_else(|broken| panic!("{}: the pattern is valid: {broken}", vector.name));
+            assert_eq!(
+                next_run_at(&pattern, vector.after, &vector.timezone),
+                Some(vector.next_run_at),
+                "{}",
+                vector.name
+            );
+        }
+    }
 }

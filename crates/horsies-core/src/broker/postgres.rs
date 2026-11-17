@@ -850,6 +850,9 @@ impl SendCommand {
 ///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`]. The
 ///   schema install runs on the core pools.
 ///
+/// No pool connects when the broker is built: each opens its first
+/// connection at its first checkout.
+///
 /// Every LISTEN of the broker goes through the process listener of its
 /// session URL: one connection, shared with the other brokers of the process
 /// on the same URL.
@@ -1037,8 +1040,10 @@ impl PostgresBroker {
         Self::connect_with_profile(config, schema_initialization_mode, PoolProfile::Producer).await
     }
 
-    /// Checks the config, builds the core pools (no connection), then opens
-    /// the sqlx adapter pools (one connection each, as before).
+    /// Checks the config and builds the core pools and the sqlx adapter
+    /// pools. Opens no connection: each pool connects at its first checkout,
+    /// so a broker whose operations all run on the core pools holds no
+    /// adapter connection.
     async fn connect_with_profile(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
@@ -1053,20 +1058,14 @@ impl PostgresBroker {
         };
         let reserve_runtime =
             pg_reserve_pool_options(config).connect_lazy_with(connect_options.clone());
-        let pool = runtime_options
-            .connect_with(connect_options)
-            .await
-            .map_err(BrokerError::Database)?;
+        let pool = runtime_options.connect_lazy_with(connect_options);
 
         let session_pool = if config.effective_session_database_url() == config.database_url {
             pool.clone()
         } else {
             let session_options =
                 pg_connect_options(config.effective_session_database_url(), config.echo)?;
-            pg_session_pool_options(config)
-                .connect_with(session_options)
-                .await
-                .map_err(BrokerError::Database)?
+            pg_session_pool_options(config).connect_lazy_with(session_options)
         };
         let reserve = ReservePools {
             maintenance: match config.effective_session_database_url() == config.database_url {
@@ -5919,6 +5918,39 @@ mod broker_operation_error_tests {
         );
         assert!(worker_ping_statement_error("notify", checkout_timed_out()).retryable);
         assert!(!worker_ping_statement_error("notify", pool_closed()).retryable);
+    }
+}
+
+#[cfg(test)]
+mod connect_tests {
+    //! A connect checks the config and opens no connection.
+    use super::*;
+
+    /// No server listens on port 1.
+    const UNREACHABLE_URL: &str = "postgresql://horsies@127.0.0.1:1/horsies";
+
+    #[tokio::test]
+    async fn a_connect_opens_no_connection() {
+        let broker = PostgresBroker::connect(UNREACHABLE_URL)
+            .await
+            .expect("a connect opens no connection, so it needs no server");
+
+        assert_eq!(broker.pool().size(), 0);
+        assert_eq!(broker.session_pool().size(), 0);
+        assert_eq!(broker.reserve_pool().size(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_worker_connect_with_a_split_session_url_opens_no_connection() {
+        let mut config = PostgresConfig::from_url(UNREACHABLE_URL);
+        config.session_database_url = Some("postgresql://horsies@127.0.0.1:2/horsies".to_owned());
+
+        let broker = PostgresBroker::connect_worker_with(&config)
+            .await
+            .expect("a connect opens no connection, so it needs no server");
+
+        assert_eq!(broker.pool().size(), 0);
+        assert_eq!(broker.session_pool().size(), 0);
     }
 }
 

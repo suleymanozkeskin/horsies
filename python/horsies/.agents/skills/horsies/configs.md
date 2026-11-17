@@ -71,7 +71,7 @@ the profile and the field path, e.g. `worker_profiles['batch'].claim.claimed_per
 - Name: 1-64 characters of letters, digits, `_`, `.`, `-`; not starting with `.` or `-`.
 - At least one child.
 - Each `ClaimLimits` `TaskLimit` at or below the capacity: the sum of the claim budgets (the children, with isolated children only) + `prefetch_buffer`.
-- `pool=ParentPool(max_size=PoolSize(connections=N))` has N at least 5.
+- `pool=ParentPool(max_size=PoolSize(connections=N))` has N at least 3.
 
 ## Worker profiles
 
@@ -142,7 +142,7 @@ worker_profiles = {
 | `SharedPool` | `min_size` | `0` | 0-1000 connections kept open |
 | `SharedPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats |
 | `SharedPool` | `check` | `False` | As for `IsolatedPool` |
-| `ParentPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)`, N at least 5 (below fails with HRS-218), or derived from the seats of the whole profile |
+| `ParentPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)`, N at least 3 (below fails with HRS-218), or derived from the seats of the whole profile |
 | `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
 | `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
 | `ClaimLimits` | `per_queue_per_pass` | `NoTaskLimit()` | Most tasks one claim pass takes from one queue |
@@ -169,12 +169,14 @@ pool keeps about `2 x tasks per second x (RTT + server time)` connections busy
 leave more than a local database needs. The pool of the worker process
 (`WorkerProfile.pool`) derives from `seat_count()`: 10 seats per connection,
 floor 5, cap 20; it has no overflow and counts in HRS-219 as
-`parent pool max_size N`. A `PoolSize` below 5 fails with HRS-218: under load
-the claim loop holds 1 connection and the 2 steady flushers of the batched
-success write hold 1 each, and 2 stay free for the reaper (gate session and
-pass body) and the other writes; the batched success write runs at most
-`max_size - 3` flushers. Plain successes are written in batches and use few
-of its connections; failures, retries and workflow nodes are written per task.
+`parent pool max_size N`. A `PoolSize` below 3 fails with HRS-218: under load
+the claim loop holds 1 connection, and 2 stay free for the reaper (gate
+session and pass body) and the other users. The batched success write and the
+writes of failures and retries run in the core of the worker process, on a
+pool of the same `max_size`: the batched success write runs at most
+`max_size - 2` flushers, so 2 stay free there. Plain successes are written
+in batches and use few connections; failures, retries and workflow nodes are
+written per task.
 Set `pool=ParentPool(max_size=PoolSize(connections=N))` for a high RTT or many
 failures, retries or workflow nodes. Task code that sends opens the
 `task_send_pool` of its child kind (default 2) per event loop; HRS-219 states

@@ -20,6 +20,7 @@ from typing import Final, assert_never
 
 import pytest
 
+from tests.dualrun.operations.broker import BROKER_OPERATIONS
 from tests.dualrun.operations.lifecycle import LIFECYCLE_OPERATIONS
 from tests.dualrun.operations.rebinding import (
     CallCounts,
@@ -39,6 +40,7 @@ DUAL_RUN_TESTS: Final = Path('tests') / 'integration'
 
 OPERATION_TABLES: Final[Mapping[SwitchModule, tuple[DualRunOperation, ...]]] = {
     SwitchModule.LIFECYCLE: LIFECYCLE_OPERATIONS,
+    SwitchModule.BROKER: BROKER_OPERATIONS,
 }
 
 _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
