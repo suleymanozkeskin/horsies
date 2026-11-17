@@ -138,6 +138,18 @@ impl Placer {
         }
     }
 
+    /// The seats that take a task at once: the free seats of the open
+    /// children, less the tasks that wait for a seat.
+    fn free_seats(&self, seats: NonZeroUsize) -> usize {
+        let open_free: usize = self
+            .loads
+            .iter()
+            .filter(|load| load.accepting == Accepting::Open)
+            .map(|load| seats.get().saturating_sub(load.runs))
+            .sum();
+        open_free.saturating_sub(self.queue.len())
+    }
+
     fn next_dispatch(&mut self) -> DispatchNumber {
         self.last_dispatch = self.last_dispatch.saturating_add(1);
         DispatchNumber::new(self.last_dispatch).expect("run numbers start at 1")
@@ -340,6 +352,18 @@ impl SharedPool {
             self.shared.wakes[slot].notify_one();
         }
         Submitted::Queued(receiver)
+    }
+
+    /// The seats that take a task at once: the free seats of the open
+    /// children, less the tasks that wait for a seat. 0 once the pools stop
+    /// or failed (Python `SlotPool.free_shared_async_seats`,
+    /// `free_shared_thread_seats`).
+    pub fn free_seats(&self) -> u32 {
+        let placer = lock(&self.shared.placer);
+        match self.shared.board.not_serving() {
+            true => 0,
+            false => u32::try_from(placer.free_seats(self.shared.seats)).unwrap_or(u32::MAX),
+        }
     }
 
     /// The service of each slot with its seats, for the claim budget.

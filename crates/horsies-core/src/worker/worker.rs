@@ -51,9 +51,9 @@ use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
-    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask,
-    NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure, PoolStopReport, RetryFacts,
-    TaskKind,
+    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, ClaimRoute, Claimed,
+    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure,
+    PoolStopReport, RetryFacts, TaskKind,
 };
 use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -1057,9 +1057,12 @@ impl Worker {
     /// One claim pass (Python `_claim_and_dispatch_all`): the claim with the
     /// budgets and routes of the slots now, the workflow filter, the row
     /// class check, then each row to the pool of its kind. A row of a queue
-    /// that `hold` checks waits in `hold`; then the start check admits the
-    /// held rows that their queue's count leaves room for, also on a pass
-    /// that claimed nothing.
+    /// that `hold` checks waits in `hold` with the budget of its route; then
+    /// the start check admits the held rows that their queue's count leaves
+    /// room for and that a free child of their budget takes now, also on a
+    /// pass that claimed nothing. A row of a class that the plan does not
+    /// serve is submitted at once: it reaches no child, and its claim goes
+    /// back to the queue (`NoChildOfItsKind`), as for an uncapped queue.
     ///
     /// Errors: the error of the claim, the filter, the class return or the
     /// start check. The rows the claim committed before a later step failed
@@ -1073,12 +1076,14 @@ impl Worker {
         writes: &mut JoinSet<()>,
         hold: &mut QueueCapHold,
     ) -> Result<ClaimPassCounts, WorkerError> {
-        let request = self.claim_request(children.service().claim_classes());
+        let service = children.service();
+        let plan = service.plan();
+        let request = self.claim_request(service.claim_classes());
         let claimed = claim_for_dispatch(steps, &request, &self.registered).await?;
         for row in claimed.rows {
-            match hold.holds(&row.queue_name) {
-                true => hold.hold(row),
-                false => self.dispatch(
+            match (hold.holds(&row.queue_name), plan.route(row.execution)) {
+                (true, ClaimRoute::ServedBy(budget)) => hold.hold(row, budget),
+                (false, _) | (true, ClaimRoute::NotServed) => self.dispatch(
                     children,
                     writer,
                     writes,
@@ -1087,7 +1092,10 @@ impl Worker {
                 ),
             }
         }
-        let admitted = admit_held_rows(&self.broker, &self.worker_id, hold).await?;
+        let admitted = admit_held_rows(&self.broker, &self.worker_id, hold, || {
+            children.free_capacity()
+        })
+        .await?;
         for admitted in admitted {
             self.dispatch(
                 children,

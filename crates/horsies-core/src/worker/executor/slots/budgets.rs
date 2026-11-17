@@ -40,6 +40,29 @@ pub struct BudgetCapacity {
     pub in_service: u32,
 }
 
+/// The children or seats of each budget that take a task at once: an
+/// isolated child that waits for a task, a free seat of an open shared
+/// child, less the tasks that already wait for one (Python
+/// `SlotPool.free_slots`, `free_shared_async_seats`,
+/// `free_shared_thread_seats`). A kind with no pool has 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FreeCapacity {
+    pub isolated: u32,
+    pub shared_async: u32,
+    pub shared_thread: u32,
+}
+
+impl FreeCapacity {
+    /// The free capacity of `budget`.
+    pub fn of(&self, budget: ExecutionClass) -> u32 {
+        match budget {
+            ExecutionClass::Isolated => self.isolated,
+            ExecutionClass::SharedAsync => self.shared_async,
+            ExecutionClass::SharedThread => self.shared_thread,
+        }
+    }
+}
+
 /// The capacity of the `ISOLATED` budget.
 pub fn isolated_capacity(slots: &[SlotService]) -> u32 {
     let in_service = slots
