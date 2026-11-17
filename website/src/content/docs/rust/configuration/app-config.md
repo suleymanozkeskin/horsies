@@ -128,4 +128,4 @@ A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing.
 
 ## Refusals
 
-A refusal of the config, of a registration or of `provide` is a `HorsiesError`: an `ErrorCode` (`HRS-xxx`) and its `ErrorCategory` where the refusal has one, the message, notes and help text. A `ValidationReport` collects the refusals of one phase. Both clients print the same codes; the codes are in the [Errors Reference](/horsies/tasks/errors/#startup-errors-horsieserror).
+A refusal of the config, of a registration or of `provide` is a `HorsiesError`: an `ErrorCode` (`HRS-xxx`) and its `ErrorCategory` where the refusal has one, the message, notes and help text. A `ValidationReport` collects the refusals of one phase. Both clients print the same codes; the codes are in the [Errors Reference](/horsies/tasks/errors/#config-error-codes-horsieserror).

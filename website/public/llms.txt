@@ -759,7 +759,8 @@ Each entry: Title -- summary -> URL
 - Defining Tasks -- @app.task decorator -> /horsies/tasks/defining-tasks/
 - Sending Tasks -- enqueue for background execution -> /horsies/tasks/sending-tasks/
 - Error Handling -- TaskResult error patterns -> /horsies/tasks/error-handling/
-- Errors Reference -- all error codes and types -> /horsies/tasks/errors/
+- Errors Reference -- the error codes for both clients: task codes, send, workflow start and handle codes, HRS config codes -> /horsies/tasks/errors/
+- Error Types -- the Python error types: TaskError, BrokerResult and BrokerOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, TaskResult -> /horsies/tasks/error-types/
 - Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
 - Retry Policy -- fixed/exponential backoff -> /horsies/tasks/retry-policy/
 
@@ -884,8 +885,9 @@ serialization, JSON, codec, pydantic, datetime -> /horsies/internals/serializati
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
 FAQ, questions, trade-offs, why PostgreSQL, production-ready, compatibility -> /horsies/questions-and-answers/
 ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
+TaskError, BrokerOperationError, TaskSendError, NoCause, broker_error_cause, TaskResult -> /horsies/tasks/error-types/
 ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
-SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/errors/
+SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/error-types/
 HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
 horsies check, app.check, phased validation, startup validation -> /horsies/cli/
 get-docs, AI agent, local docs, offline docs -> /horsies/cli/
