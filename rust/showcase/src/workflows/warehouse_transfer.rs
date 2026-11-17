@@ -1,27 +1,46 @@
-use horsies::{HorsiesError, WorkflowSpec};
-use serde_json::json;
+//! The warehouse transfer: pick the source warehouse, then put the units
+//! back on the shelf at the destination.
 
-use super::{builder, finish, WorkflowTasks};
+use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
 
-pub fn build(
-    tasks: &WorkflowTasks,
-    sku: &str,
-    quantity: i32,
-) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = builder("warehouse_transfer", "acme.warehouse_transfer.v1");
-    let allocate = builder.task(tasks.node(
-        "allocate_warehouse",
-        "allocate_warehouse",
-        json!({"sku": sku, "quantity": quantity}),
-    )?);
-    builder.task(
-        tasks
-            .node(
-                "release_stock",
-                "release_stock",
-                json!({"sku": sku, "quantity": quantity}),
-            )?
-            .waits_for(allocate),
-    );
-    finish(builder, Some("release_stock"), &[], &[], None)
+use crate::domain::StockRelease;
+use crate::tasks::inventory::release_stock;
+use crate::tasks::orders::allocate_warehouse;
+
+/// The SKU that the definition transfers.
+pub const SKU: &str = "ACME-SKU-0001";
+/// The units that the definition transfers.
+pub const QUANTITY: i32 = 5;
+
+/// The warehouse transfer workflow. Its result is the release.
+pub struct WarehouseTransfer;
+
+impl WorkflowDefinition for WarehouseTransfer {
+    type Output = StockRelease;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "warehouse_transfer"
+    }
+
+    fn definition_key() -> &'static str {
+        "acme.warehouse_transfer.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let allocate = builder.task(
+            allocate_warehouse::node()?
+                .node_id("allocate_warehouse")
+                .set(allocate_warehouse::params::sku(), SKU.to_owned())?
+                .set(allocate_warehouse::params::quantity(), QUANTITY)?,
+        );
+        let release = builder.task(
+            release_stock::node()?
+                .node_id("release_stock")
+                .set(release_stock::params::sku(), SKU.to_owned())?
+                .set(release_stock::params::quantity(), QUANTITY)?
+                .waits_for(allocate),
+        );
+        Ok(WorkflowDefConfig::new().output(release))
+    }
 }

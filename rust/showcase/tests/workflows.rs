@@ -1,28 +1,27 @@
-use std::env;
-use std::sync::Arc;
+//! The order workflow through a worker of the `acme` binary, the check of
+//! every workflow, and a schedule that fires.
+
+mod support;
+
 use std::time::Duration;
 
-use acme_showcase::app::build_app_with_handles_for_url;
-use acme_showcase::domain::{Order, OrderLine, Product, StockLevel};
-use acme_showcase::settings::resolve_database_settings;
-use acme_showcase::store::{ensure_database, Store};
-use acme_showcase::{tuning, workflows};
+use acme_showcase::app::{build_app_for_url, build_app_with_config, config_for_url};
+use acme_showcase::domain::{Order, OrderLine, PaymentCapture, Product, StockLevel};
+use acme_showcase::store::Store;
+use acme_showcase::tasks::shipping::book_courier;
+use acme_showcase::workflows::{order_fulfillment, ALL_WORKFLOW_NAMES};
+use acme_showcase::{simulate, tuning};
 use chrono::Utc;
 use horsies::{
-    spawn_scheduler, IntervalSchedule, ScheduleConfig, SchedulePattern, TaskResult, TaskSchedule,
-    Worker, WorkerConfig,
+    IntervalSchedule, ScheduleConfig, SchedulePattern, SchemaMode, TaskOutcome, TaskSchedule,
+    UserCode, WaitLimit, WorkflowReadError,
 };
 use serde_json::json;
+use serial_test::serial;
 use uuid::Uuid;
 
-async fn database() -> Option<(String, Store)> {
-    env::var("ACME_DATABASE_URL").ok()?;
-    let settings = resolve_database_settings().expect("showcase settings");
-    ensure_database(&settings).await.expect("showcase database");
-    let store = Store::connect(&settings).await.expect("showcase store");
-    store.ensure_schema().await.expect("showcase schema");
-    Some((settings.sqlx_url().to_owned(), store))
-}
+/// How long the compressed scheduler runs before its stop request.
+const SCHEDULER_RUN: Duration = Duration::from_secs(5);
 
 async fn seed_order_with_id(
     store: &Store,
@@ -84,63 +83,45 @@ async fn seed_successful_order(store: &Store, prefix: &str, stock: i32, quantity
     let order_id = (0..100_000)
         .map(|index| format!("s3-{prefix}-{identity_prefix}-{index}"))
         .find(|id| {
-            !acme_showcase::simulate::draw(tuning::CARD_DECLINE_RATE, &[id, "card"])
-                && !acme_showcase::simulate::draw(tuning::INVOICE_HANG_RATE, &[id, "invoice"])
-                && !acme_showcase::simulate::draw(tuning::PSP_UNAVAILABLE_RATE, &[id, "psp"])
-                && !acme_showcase::simulate::draw(tuning::COURIER_FLAKE_RATE, &[id, "courier"])
+            !simulate::draw(tuning::CARD_DECLINE_RATE, &[id, "card"])
+                && !simulate::draw(tuning::INVOICE_HANG_RATE, &[id, "invoice"])
+                && !simulate::draw(tuning::PSP_UNAVAILABLE_RATE, &[id, "psp"])
+                && !simulate::draw(tuning::COURIER_FLAKE_RATE, &[id, "courier"])
         })
         .expect("seeded population contains a successful order");
     seed_order_with_id(store, order_id, prefix, stock, quantity).await
 }
 
-async fn run_order(order: Order, url: &str) -> TaskResult<serde_json::Value> {
-    let (app, _handles, workflows) = build_app_with_handles_for_url(url).expect("showcase app");
-    let handle = workflows
+/// Start the order workflow of `order` and read its outcome while a worker
+/// runs.
+async fn run_order(
+    order: Order,
+    url: &str,
+) -> Result<TaskOutcome<PaymentCapture, UserCode>, WorkflowReadError> {
+    let showcase =
+        build_app_for_url(url, SchemaMode::MigrateAndValidate).expect("the showcase app");
+    let _worker = support::WorkerProcess::start();
+    let handle = showcase
+        .workflows
         .order_fulfillment
         .start(order)
         .await
-        .expect("start workflow");
-    let (config, registry, workflow_registry, broker) = app.into_parts().await.expect("broker");
-    let mut worker_config = WorkerConfig {
-        queues: vec![
-            "payments".into(),
-            "fulfillment".into(),
-            "notifications".into(),
-            "analytics".into(),
-        ],
-        concurrency: 8,
-        ..WorkerConfig::default()
-    };
-    worker_config.apply_queue_config(&config);
-    let worker = Worker::new(
-        Arc::clone(&broker),
-        Arc::new(registry),
-        Arc::new(workflow_registry),
-        config,
-        worker_config,
-    )
-    .expect("worker");
-    let stop = worker.cancel_token();
-    let join = tokio::spawn(async move { worker.run().await });
-    let result = handle.get(Some(Duration::from_secs(30))).await;
-    stop.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), join)
-        .await
-        .expect("worker stop");
-    result
+        .expect("start the order workflow");
+    let limit = WaitLimit::parse(Some(support::RESULT_WAIT)).expect("the wait limit");
+    handle.get(limit).await
 }
 
 #[tokio::test]
-#[serial_test::serial]
+#[serial]
 async fn order_fulfillment_happy_path_completes_and_moves_stock() {
-    let Some((url, store)) = database().await else {
+    let Some((settings, store)) = support::database().await else {
         return;
     };
     let order = seed_successful_order(&store, "happy", 4, 1).await;
-    let result = run_order(order.clone(), &url).await;
+    let outcome = run_order(order.clone(), settings.sqlx_url()).await;
     assert!(
-        matches!(result, TaskResult::Ok(_)),
-        "happy workflow: {result:?}"
+        matches!(outcome, Ok(TaskOutcome::Succeeded(_))),
+        "happy workflow: {outcome:?}"
     );
     let status = store
         .get_order(&order.order_id)
@@ -159,74 +140,60 @@ async fn order_fulfillment_happy_path_completes_and_moves_stock() {
 }
 
 #[tokio::test]
-#[serial_test::serial]
+#[serial]
 async fn order_fulfillment_courier_retry_records_attempts_before_success() {
-    let Some((url, store)) = database().await else {
+    let Some((settings, store)) = support::database().await else {
         return;
     };
     let identity_prefix = Uuid::new_v4().simple().to_string();
     let order_id = (0..100_000)
         .map(|index| format!("s3-courier-{identity_prefix}-{index}"))
-        .find(|id| acme_showcase::simulate::draw(tuning::COURIER_FLAKE_RATE, &[id, "courier"]))
+        .find(|id| simulate::draw(tuning::COURIER_FLAKE_RATE, &[id, "courier"]))
         .expect("courier retry identity");
-    let order = seed_order_with_id(&store, order_id.clone(), "courier", 4, 1).await;
-    let args = json!({"order_id": order.order_id, "courier": "fleetline", "express": false});
-    let (app, handles, _workflows) = build_app_with_handles_for_url(&url).expect("showcase app");
-    let (config, registry, workflow_registry, broker) = app.into_parts().await.expect("broker");
-    let mut worker_config = WorkerConfig {
-        queues: vec!["fulfillment".into()],
-        concurrency: 2,
-        ..WorkerConfig::default()
-    };
-    worker_config.apply_queue_config(&config);
-    let worker = Worker::new(
-        Arc::clone(&broker),
-        Arc::new(registry),
-        Arc::new(workflow_registry),
-        config,
-        worker_config,
-    )
-    .expect("worker");
-    let stop = worker.cancel_token();
-    let join = tokio::spawn(async move { worker.run().await });
-    let handle = handles
-        .get("book_courier")
-        .expect("courier task")
-        .send(args)
+    let order = seed_order_with_id(&store, order_id, "courier", 4, 1).await;
+    let showcase = build_app_for_url(settings.sqlx_url(), SchemaMode::MigrateAndValidate)
+        .expect("the showcase app");
+    let _worker = support::WorkerProcess::start();
+    let handle = showcase
+        .tasks
+        .book_courier
+        .send(book_courier::Input {
+            order_id: order.order_id.clone(),
+            courier: "fleetline".to_owned(),
+            express: false,
+        })
         .await
-        .expect("courier enqueue");
-    let result = handle.get(Some(Duration::from_secs(20))).await;
-    stop.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), join)
-        .await
-        .expect("worker stop");
+        .expect("send the courier booking");
+    let limit = WaitLimit::parse(Some(support::RESULT_WAIT)).expect("the wait limit");
+    let outcome = handle.get(limit).await;
     assert!(
-        matches!(result, TaskResult::Ok(_)),
-        "courier retry: {result:?}"
+        matches!(outcome, Ok(TaskOutcome::Succeeded(_))),
+        "courier retry: {outcome:?}"
     );
     let shipment = store
         .get_shipment(&order.order_id)
         .await
         .expect("shipment read")
         .expect("shipment exists");
-    assert!(shipment.attempts >= 2, "retry must persist attempts");
+    assert!(
+        shipment.attempts >= 2,
+        "the retry must persist its attempts"
+    );
 }
 
 #[tokio::test]
-#[serial_test::serial]
+#[serial]
 async fn order_fulfillment_insufficient_stock_fails_before_payment() {
-    let Some((url, store)) = database().await else {
+    let Some((settings, store)) = support::database().await else {
         return;
     };
     let order = seed_order(&store, "short", 0, 1).await;
-    let result = run_order(order.clone(), &url).await;
-    let TaskResult::Err(error) = result else {
-        panic!("insufficient stock must fail");
+    let outcome = run_order(order.clone(), settings.sqlx_url()).await;
+    let error = match outcome {
+        Ok(TaskOutcome::Failed(error)) => error,
+        other => panic!("insufficient stock must fail the workflow: {other:?}"),
     };
-    assert_eq!(
-        error.error_code.expect("error code").to_string(),
-        "INSUFFICIENT_STOCK"
-    );
+    assert_eq!(error.code().text(), "INSUFFICIENT_STOCK");
     assert_eq!(
         sqlx::query_scalar::<_, i32>(
             "SELECT authorization_attempts FROM acme_orders WHERE order_id = $1",
@@ -236,53 +203,60 @@ async fn order_fulfillment_insufficient_stock_fails_before_payment() {
         .await
         .expect("authorization count"),
         0,
-        "payment must not start after reservation refusal"
+        "payment must not start after a refused reservation"
     );
 }
 
 #[test]
 fn all_showcase_workflows_validate() {
-    let app =
-        acme_showcase::app::build_app_for_url("postgresql://localhost/acme_demo").expect("app");
-    app.check().expect("workflow and scheduler validation");
-    assert_eq!(app.workflow_registry().spec_names().count(), 12);
-    assert!(workflows::order_fulfillment::check_order().lines.len() >= tuning::MIN_LINES_PER_ORDER);
+    let showcase = build_app_for_url(
+        "postgresql://localhost/acme_demo",
+        SchemaMode::MigrateAndValidate,
+    )
+    .expect("the showcase app");
+    showcase
+        .app
+        .check()
+        .expect("workflow and scheduler validation");
+    assert_eq!(showcase.workflows.names().len(), ALL_WORKFLOW_NAMES.len());
+    assert!(order_fulfillment::check_order().lines.len() >= tuning::MIN_LINES_PER_ORDER);
 }
 
 #[tokio::test]
-#[serial_test::serial]
-async fn compressed_schedule_enqueues_a_due_task() {
-    let Some((url, store)) = database().await else {
+#[serial]
+async fn compressed_schedule_sends_a_due_task() {
+    let Some((settings, store)) = support::database().await else {
         return;
     };
-    let app = acme_showcase::app::build_app_for_url(&url).expect("app");
-    let (config, _registry, _workflow_registry, broker) = app.into_parts().await.expect("broker");
-    let schedule_name = format!("s3-compressed-{}", Uuid::new_v4().simple());
-    let task_name = format!("s3-schedule-{}", Uuid::new_v4().simple());
+    let marker = format!("s3-schedule-{}", Uuid::new_v4().simple());
     let schedule = TaskSchedule::new(
-        &schedule_name,
+        format!("s3-compressed-{}", Uuid::new_v4().simple()),
         "prewarm_search",
         SchedulePattern::Interval(IntervalSchedule {
             seconds: Some(1),
             ..IntervalSchedule::default()
         }),
     )
-    .queue("analytics")
-    .kwargs(json!({"campaign_id": task_name}));
-    let schedule_config = ScheduleConfig::new(vec![schedule]).check_interval_seconds(1);
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let join = spawn_scheduler(Arc::clone(&broker), schedule_config, config, cancel.clone());
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    cancel.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(5), join)
-        .await
-        .expect("scheduler stop");
+    .input(json!({ "campaign_id": marker.as_str() }));
+    let mut config = config_for_url(settings.sqlx_url());
+    config.schedule = Some(ScheduleConfig::new(vec![schedule]).check_interval_seconds(1));
+    let showcase =
+        build_app_with_config(config, settings.sqlx_url(), SchemaMode::MigrateAndValidate)
+            .expect("the showcase app");
+    let scheduler = showcase.app.scheduler().expect("the prepared scheduler");
+    let stop = scheduler.stop_handle();
+    let stop_later = async move {
+        tokio::time::sleep(SCHEDULER_RUN).await;
+        stop.request_stop();
+    };
+    let (ran, ()) = tokio::join!(scheduler.run(), stop_later);
+    ran.expect("the scheduler runs until its stop request");
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM horsies_tasks WHERE task_name='prewarm_search' AND kwargs::text LIKE $1",
+        "SELECT count(*) FROM horsies_tasks WHERE task_name = 'prewarm_search' AND input LIKE $1",
     )
-    .bind(format!("%{task_name}%"))
+    .bind(format!("%{marker}%"))
     .fetch_one(store.pool())
     .await
     .expect("scheduled task count");
-    assert!(count >= 1, "compressed schedule must enqueue one task");
+    assert!(count >= 1, "the compressed schedule must send one task");
 }

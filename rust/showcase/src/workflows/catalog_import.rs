@@ -1,23 +1,45 @@
-use horsies::{HorsiesError, OnError, WorkflowSpec, WorkflowSpecBuilder};
-use serde_json::json;
+//! The catalog import: one node per chunk and no output node. Its result
+//! is the outcome of every chunk by node id (`OutputlessResults`).
 
-use super::{finish, WorkflowTasks};
+use horsies::{
+    HorsiesError, OutputlessResults, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+};
 
-pub fn build(
-    tasks: &WorkflowTasks,
-    import_id: &str,
-    chunks: usize,
-) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = WorkflowSpecBuilder::new("catalog_import");
-    builder
-        .definition_key("acme.catalog_import.v1")
-        .on_error(OnError::Fail);
-    for index in 0..chunks {
-        builder.task(tasks.node(
-            "catalog_import_chunk",
-            &format!("chunk_{index:02}"),
-            json!({"import_id": import_id, "chunk_index": index}),
-        )?);
+use crate::tasks::analytics::catalog_import_chunk;
+use crate::tuning;
+
+/// The import that the definition imports.
+pub const IMPORT_ID: &str = "CHECK-IMPORT";
+
+/// The catalog import workflow.
+pub struct CatalogImport;
+
+impl WorkflowDefinition for CatalogImport {
+    type Output = OutputlessResults;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "catalog_import"
     }
-    finish(builder, None, &[], &[], None)
+
+    fn definition_key() -> &'static str {
+        "acme.catalog_import.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let chunks = i32::try_from(tuning::CATALOG_IMPORT_CHUNKS)
+            .map_err(|_| HorsiesError::new("CATALOG_IMPORT_CHUNKS is above i32::MAX"))?;
+        for chunk_index in 0..chunks {
+            let _chunk = builder.task(
+                catalog_import_chunk::node()?
+                    .node_id(format!("chunk_{chunk_index:02}"))
+                    .set(
+                        catalog_import_chunk::params::import_id(),
+                        IMPORT_ID.to_owned(),
+                    )?
+                    .set(catalog_import_chunk::params::chunk_index(), chunk_index)?,
+            );
+        }
+        Ok(WorkflowDefConfig::new())
+    }
 }
