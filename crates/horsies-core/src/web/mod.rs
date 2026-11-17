@@ -11,6 +11,7 @@ mod routes;
 mod schema;
 mod spa;
 mod task_stats_cache;
+mod uuid_text;
 
 pub use crate::monitoring::ResumeChildren;
 pub use app::{create_monitoring_router, MetaResponse};
