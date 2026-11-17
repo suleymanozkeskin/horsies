@@ -883,7 +883,7 @@ class TestWorkLeftAfterAReturn:
         assert lines[0].levelno == logging.INFO
         assert 'ended within the cancel grace' in lines[0].message
         assert 'flush_later' in lines[0].message
-        assert 'leave (task-1, run 1)' in lines[0].message
+        assert f'leave ({_task_id(1)}, run 1)' in lines[0].message
 
     def test_work_alive_after_the_grace_is_cancelled_and_the_result_kept(
         self,
