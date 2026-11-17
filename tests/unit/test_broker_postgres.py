@@ -32,7 +32,7 @@ from horsies._core import (
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
 )
-from horsies.core.brokers.core_failure import CoreOperationFailed
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SyncSendRoute
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (

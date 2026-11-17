@@ -94,7 +94,7 @@ async def test_timeout_fails_task_and_worker_survives(
 
             # The move purges live attempt rows into the record's
             # snapshot; one reader answers for both homes.
-            attempts = await read_attempts(session, handle.task_id)
+            attempts = await read_attempts(session, str(handle.task_id))
             assert len(attempts) == 1
             attempt = attempts[0]
             assert attempt.outcome == 'FAILED'

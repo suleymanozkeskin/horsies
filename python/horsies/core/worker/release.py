@@ -10,20 +10,34 @@ the payload ``class``. ``SAME_CLASS`` sends no wake.
 
 The statement runs alone on an autocommit connection: it commits when it
 returns, and its row locks end with it. It never waits on an advisory lock.
+
+``release_claims_in_core`` runs the same function through the core
+(``CoreHandle.release_claims_async``). The worker calls it; ``release_claims``
+stays for the dual-run reference of the worker's callers.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Final
+from typing import Any, Final, Literal, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies._core import (
+    ClaimsReleased,
+    CoreHandle,
+    NotHeldRow,
+    ReleaseClaimsRequest,
+    ReleasedRow,
+    ReleaseFailed,
+)
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
+from horsies.core.types.core_failure import CoreOperationFailed
 
 MAX_RELEASE_ROWS: Final = 1000
 """Most rows of one ``horsies_release_claims`` call; the function refuses more
@@ -165,4 +179,100 @@ async def release_claims(
             _release_parameters(chunk, worker_id, placement),
         )
         released.extend(decode_release_rows(chunk, result.fetchall()))
+    return tuple(released)
+
+
+RELEASE_SUBJECT: Final = 'release_claims'
+"""The subject of a ``CoreOperationFailed`` of the release."""
+
+
+def _core_placement(placement: ReleasePlacement) -> Literal['SAME_CLASS', 'ISOLATED']:
+    match placement:
+        case ReleasePlacement.SAME_CLASS:
+            return 'SAME_CLASS'
+        case ReleasePlacement.ISOLATED:
+            return 'ISOLATED'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _released_row_outcome(
+    claim: HeldClaim,
+    row: ReleasedRow | NotHeldRow,
+) -> ClaimRelease:
+    """The outcome of ``claim`` from the core's record at its position. Pure.
+
+    A record of another task id contradicts the operation (one record per
+    claim, in the request order): ``OutcomeDecodeError``.
+    """
+    if row.task_id != uuid.UUID(claim.task_id):
+        raise OutcomeDecodeError(
+            f'release_claims_async answered for task {row.task_id} at the '
+            f'position of task {claim.task_id}'
+        )
+    match row:
+        case ReleasedRow():
+            return ClaimRelease(claim=claim, outcome=ReleaseOutcome.RELEASED)
+        case NotHeldRow():
+            return ClaimRelease(claim=claim, outcome=ReleaseOutcome.NOT_HELD)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _release_request(
+    claims: Sequence[HeldClaim],
+    worker_id: str,
+    placement: ReleasePlacement,
+) -> ReleaseClaimsRequest:
+    """The core request of one call. A claim id that is not a UUID is a
+    defect of the claim that gave it: ``ValueError``."""
+    return ReleaseClaimsRequest(
+        worker_id=worker_id,
+        claims=[(uuid.UUID(claim.task_id), claim.claimed_at) for claim in claims],
+        placement=_core_placement(placement),
+    )
+
+
+async def release_claims_in_core(
+    handle: CoreHandle,
+    *,
+    worker_id: str,
+    claims: Sequence[HeldClaim],
+    placement: ReleasePlacement,
+) -> tuple[ClaimRelease, ...]:
+    """Release ``claims`` of ``worker_id`` through the core; one outcome per
+    claim, in order.
+
+    Each call of at most ``MAX_RELEASE_ROWS`` claims is one
+    ``horsies_release_claims`` statement that commits alone. No claims sends
+    nothing. The task ids must be distinct (the request refuses a repeated
+    id with ``ValueError``).
+
+    Raises:
+        CoreOperationFailed: a ``ReleaseFailed`` record, with its message and
+            retryable flag. The calls sent before it committed; the failed
+            call wrote nothing, or committed and its reply was lost.
+        CoreError: the core of this process stopped or did not start.
+        OutcomeDecodeError: a record count or task id outside the
+            operation's contract.
+    """
+    released: list[ClaimRelease] = []
+    for start in range(0, len(claims), MAX_RELEASE_ROWS):
+        chunk = claims[start : start + MAX_RELEASE_ROWS]
+        request = _release_request(chunk, worker_id, placement)
+        match await handle.release_claims_async(request):
+            case ClaimsReleased(rows=rows):
+                if len(rows) != len(chunk):
+                    raise OutcomeDecodeError(
+                        f'release_claims_async answered {len(rows)} records for '
+                        f'{len(chunk)} claims'
+                    )
+                released.extend(
+                    _released_row_outcome(claim, row)
+                    for claim, row in zip(chunk, rows, strict=True)
+                )
+            case ReleaseFailed(message=message, retryable=retryable):
+                raise CoreOperationFailed(RELEASE_SUBJECT, message, retryable)
+            case _ as unreachable:
+                assert_never(unreachable)
     return tuple(released)

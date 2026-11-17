@@ -358,10 +358,8 @@ mod tests {
     }
 
     #[test]
-    fn the_handle_catalog_is_python_s_plus_internal_failed() {
-        // python/horsies/core/models/workflow/handle_types.py, then the one member
-        // that Python does not have: the workflow engine still folds some
-        // errors into INTERNAL_FAILED.
+    fn the_handle_catalog_is_python_s() {
+        // python/horsies/core/models/workflow/handle_types.py
         assert_python_members::<HandleErrorCode>(&[
             "WORKFLOW_NOT_FOUND",
             "DB_OPERATION_FAILED",
@@ -370,7 +368,6 @@ mod tests {
             "LOOP_RUNNER_FAILED",
             "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
-            "INTERNAL_FAILED",
         ]);
     }
 
