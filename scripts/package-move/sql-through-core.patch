@@ -200,9 +200,9 @@ index 96b0d97c..be8b5d11 100644
 +// The baseline SQL files, which horsies._core hands to the Python install.
 +pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
 +
- // Child mode of a Rust worker binary: the entry checks `child_mode` first
- // and, in child mode, exits with the code of `run_child_host`. Task bodies
- // start work that belongs to their run with `spawn_in_run`.
+ // lifecycle operations of a client handle (`PostgresBroker::release_claims`,
+ // `PostgresBroker::requeue_stale_claimed`)
+ pub use crate::broker::claims::{
 diff --git a/crates/horsies-python/src/lib.rs b/crates/horsies-python/src/lib.rs
 index f952636e..4b59d3e4 100644
 --- a/crates/horsies-python/src/lib.rs
@@ -681,7 +681,7 @@ index 3c89ce3e..4bd0b4ee 100644
 -from horsies.core.types.result import Err, Ok
  
  PINNED_CHECKSUM_HEX = (
-     '5831c885ae7ff234ebb04dd33a5f6f6ad7ee80db0630d919'
+     '07744e1c3dc4861d93bb750471224490e02051098ff15516'
 @@ -30,10 +23,6 @@ PINNED_CHECKSUM_HEX = (
  the edit then shows in this file's diff as well."""
  
