@@ -1,0 +1,5 @@
+error: UserErrorCode can only be derived for an enum of unit variants
+ --> tests/compile_fail/user_error_code_on_struct.rs:4:8
+  |
+4 | struct ChargeCode;
+  |        ^^^^^^^^^^

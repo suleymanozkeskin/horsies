@@ -1,0 +1,5 @@
+error: a UserErrorCode variant has no fields: its code is its name
+ --> tests/compile_fail/user_error_code_variant_with_fields.rs:5:5
+  |
+5 |     CardDeclined { reason: String },
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -353,7 +353,7 @@ fn registered_task(
     let validate_call = match &signature.input {
         InputShape::Unit => quote! { ::horsies::__private::decode_unit_input(input) },
         InputShape::Direct(_) | InputShape::Wrapped(_) => quote! {
-            ::horsies::__private::decode_input::<#input>(input).map(|_decoded| ())
+            ::horsies::__private::check_input::<#input>(input)
         },
     };
     let validate = quote! {

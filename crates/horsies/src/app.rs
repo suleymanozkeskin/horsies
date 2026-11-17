@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use horsies_core::handle::CoreHandle;
-use horsies_core::{ClientFamily, PoolProfile, RegisteredTask, TaskRegistry};
+use horsies_core::manifest::ProducerManifest;
+use horsies_core::{ChildStartFuture, ClientFamily, PoolProfile, RegisteredTask, TaskRegistry};
 
 pub use horsies_core::manifest::SchemaMode;
 
@@ -65,6 +66,18 @@ pub struct Horsies {
     role: AppRole,
     sends: SendSuppression,
     functions: Arc<TaskFunctions>,
+    child_start_hooks: Vec<ChildStartFn>,
+}
+
+/// One start hook of a worker child, called once in the child.
+pub(crate) type ChildStartFn = Box<dyn FnOnce() -> ChildStartFuture + Send + Sync>;
+
+/// What child mode takes from the app: the tasks, the start hooks in
+/// registration order, and the producer manifest of the app's handle.
+pub(crate) struct ChildParts {
+    pub(crate) tasks: TaskRegistry,
+    pub(crate) start_hooks: Vec<ChildStartFn>,
+    pub(crate) producer_manifest: ProducerManifest,
 }
 
 impl Horsies {
@@ -106,6 +119,7 @@ impl Horsies {
             role: AppRole::Producer,
             sends: SendSuppression::new(),
             functions: Arc::new(TaskFunctions::new()),
+            child_start_hooks: Vec::new(),
         }
     }
 
@@ -257,6 +271,27 @@ impl Horsies {
     pub(crate) fn send_suppression(&self) -> SendSuppression {
         self.sends.clone()
     }
+
+    /// Keep `hook` as the last start hook of each worker child.
+    pub(crate) fn add_child_start_hook(&mut self, hook: ChildStartFn) {
+        self.child_start_hooks.push(hook);
+    }
+
+    /// The number of child start hooks.
+    #[cfg(test)]
+    pub(crate) fn child_start_hook_count(&self) -> usize {
+        self.child_start_hooks.len()
+    }
+
+    /// The parts of the app that child mode serves from. Consumes the app:
+    /// a child process serves until its end.
+    pub(crate) fn into_child_parts(self) -> ChildParts {
+        ChildParts {
+            producer_manifest: self.handle.manifest().clone(),
+            tasks: self.tasks,
+            start_hooks: self.child_start_hooks,
+        }
+    }
 }
 
 impl std::fmt::Debug for Horsies {
@@ -265,6 +300,7 @@ impl std::fmt::Debug for Horsies {
             .field("role", &self.role)
             .field("queues", &self.get_valid_queue_names())
             .field("tasks", &self.tasks.len())
+            .field("child_start_hooks", &self.child_start_hooks.len())
             .finish()
     }
 }

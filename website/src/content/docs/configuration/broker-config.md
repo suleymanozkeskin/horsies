@@ -219,7 +219,7 @@ resource set of the calling event loop. The other calls of the app, the
 broker, and the task and workflow handles run on the core of the process: a
 broker has one set of core pools for every thread and event loop that calls
 it, so these calls have no event loop limit. See
-[Calls That Run on the Core](/horsies/tasks/errors/#calls-that-run-on-the-core)
+[Calls That Run on the Core](/horsies/tasks/error-types/#calls-that-run-on-the-core)
 for the failure exits of the broker calls and the sends.
 
 A broker keeps one resource set per open event loop that starts or resumes a
