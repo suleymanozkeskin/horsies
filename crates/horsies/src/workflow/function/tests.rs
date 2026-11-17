@@ -68,6 +68,26 @@ impl WorkflowDefinition for Regional {
     }
 }
 
+/// Its build refuses every region.
+struct RefusingRegional;
+
+impl WorkflowDefinition for RefusingRegional {
+    type Output = u32;
+    type Params = Region;
+
+    fn name() -> &'static str {
+        "refusing_regional"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.function.refusing_regional.v1"
+    }
+
+    fn build_with(params: Region) -> Result<WorkflowSpec, HorsiesError> {
+        Err(HorsiesError::new(format!("bad region: {}", params.region)))
+    }
+}
+
 /// Never registered: its process-wide start is refused.
 struct Unregistered;
 
@@ -226,4 +246,27 @@ fn the_first_registration_serves_the_process_wide_start() {
     let _later = second.register_workflow_definition::<Daily>().unwrap();
     let kept = global::<Daily, WorkflowFunction<u32>>().unwrap();
     assert_eq!(kept.name(), function.name());
+}
+
+/// A template start whose build refuses is `VALIDATION_FAILED`, not
+/// retryable, with the name of the workflow and the text of the build's
+/// error, before any I/O.
+#[tokio::test]
+async fn a_template_start_whose_build_refuses_is_validation_failed_before_any_io() {
+    let mut app = app();
+    let template = app.workflow_template::<RefusingRegional>().unwrap();
+    let refused = template
+        .start(Region {
+            region: "antarctica".to_owned(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
+    assert_eq!(refused.workflow_name, "refusing_regional");
+    assert!(!refused.retryable);
+    assert!(
+        refused.message.contains("bad region: antarctica"),
+        "{}",
+        refused.message
+    );
 }

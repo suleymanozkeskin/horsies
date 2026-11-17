@@ -435,20 +435,13 @@ where
             false => 0,
         };
         let handle = self.context.send_handle();
-        let mut kind = first;
-        for resend in 0..=resends {
-            if resend > 0 {
-                tokio::time::sleep(resend_wait(resend)).await;
-            }
-            match enqueue_once(&handle, task_id, &payload, kind).await {
-                Ok(stored_id) => return Ok(TaskHandle::new(stored_id, Arc::clone(&handle))),
-                Err(TaskSendError::EnqueueFailed {
-                    retryable: true, ..
-                }) if resend < resends => kind = SendKind::Repeat,
-                Err(refused) => return Err(refused),
-            }
-        }
-        unreachable!("the last send of the resend loop returns its outcome")
+        let handle_ref: &CoreHandle = &handle;
+        let payload_ref = &payload;
+        let stored_id = send_with_resends(resends, first, move |kind| {
+            enqueue_once(handle_ref, task_id, payload_ref, kind)
+        })
+        .await?;
+        Ok(TaskHandle::new(stored_id, Arc::clone(&handle)))
     }
 
     fn validation_failed(&self, message: String) -> TaskSendError {
@@ -463,6 +456,35 @@ where
 pub(crate) enum RetryOf {
     Send,
     Schedule,
+}
+
+/// Run `send` with `first`; after a retryable `ENQUEUE_FAILED`, run it
+/// again as `SendKind::Repeat`, at most `resends` more times, after
+/// [`resend_wait`]. Returns the stored id of the first send that succeeds,
+/// else the error of the last send. Any other error returns at once.
+async fn send_with_resends<F, Fut>(
+    resends: u32,
+    first: SendKind,
+    mut send: F,
+) -> Result<Uuid, TaskSendError>
+where
+    F: FnMut(SendKind) -> Fut,
+    Fut: std::future::Future<Output = Result<Uuid, TaskSendError>>,
+{
+    let mut kind = first;
+    for resend in 0..=resends {
+        if resend > 0 {
+            tokio::time::sleep(resend_wait(resend)).await;
+        }
+        match send(kind).await {
+            Ok(stored_id) => return Ok(stored_id),
+            Err(TaskSendError::EnqueueFailed {
+                retryable: true, ..
+            }) if resend < resends => kind = SendKind::Repeat,
+            Err(refused) => return Err(refused),
+        }
+    }
+    unreachable!("the last send of the resend loop returns its outcome")
 }
 
 /// The wait before resend `resend` (1 is the first): 200 ms doubled per
@@ -938,5 +960,134 @@ mod tests {
     fn a_function_is_send_and_sync_for_any_types() {
         fn assert_send_sync<V: Send + Sync>() {}
         assert_send_sync::<TaskFunction<std::rc::Rc<u8>, BTreeMap<String, u8>, Infallible>>();
+    }
+
+    /// An `ENQUEUE_FAILED` of the send of `invoice()`, retryable or not.
+    fn failed_enqueue(retryable: bool) -> TaskSendError {
+        match enqueue_failed("send_invoice", None) {
+            TaskSendError::EnqueueFailed {
+                task_id,
+                payload,
+                message,
+                ..
+            } => TaskSendError::EnqueueFailed {
+                task_id,
+                payload,
+                message,
+                retryable,
+            },
+            other => panic!("expected ENQUEUE_FAILED, got {other}"),
+        }
+    }
+
+    const STORED_ID: Uuid = Uuid::from_u128(7);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_first_send_that_succeeds_is_not_resent() {
+        let mut kinds = Vec::new();
+        let sent = send_with_resends(RESEND_COUNT, SendKind::First, |kind| {
+            kinds.push(kind);
+            std::future::ready(Ok(STORED_ID))
+        })
+        .await;
+        assert_eq!(sent.unwrap(), STORED_ID);
+        assert_eq!(kinds, vec![SendKind::First]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retryable_enqueue_failure_is_resent_until_a_send_succeeds() {
+        let transient = failed_enqueue(true);
+        let mut kinds = Vec::new();
+        let sent = send_with_resends(RESEND_COUNT, SendKind::First, |kind| {
+            kinds.push(kind);
+            std::future::ready(match kinds.len() {
+                1 | 2 => Err(transient.clone()),
+                _ => Ok(STORED_ID),
+            })
+        })
+        .await;
+        assert_eq!(sent.unwrap(), STORED_ID);
+        assert_eq!(
+            kinds,
+            vec![SendKind::First, SendKind::Repeat, SendKind::Repeat]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_that_is_not_retryable_is_not_resent() {
+        for refusal in [
+            failed_enqueue(false),
+            TaskSendError::ValidationFailed {
+                message: "bad input".to_owned(),
+            },
+        ] {
+            let mut kinds = Vec::new();
+            let sent = send_with_resends(RESEND_COUNT, SendKind::First, |kind| {
+                kinds.push(kind);
+                std::future::ready(Err::<Uuid, _>(refusal.clone()))
+            })
+            .await;
+            let refused = sent.unwrap_err();
+            assert_eq!(refused.code(), refusal.code(), "{refused}");
+            assert_eq!(kinds, vec![SendKind::First], "{refusal}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retryable_failure_is_resent_three_times_and_the_last_error_returns() {
+        let transient = failed_enqueue(true);
+        let mut kinds = Vec::new();
+        let sent = send_with_resends(RESEND_COUNT, SendKind::First, |kind| {
+            kinds.push(kind);
+            std::future::ready(Err::<Uuid, _>(transient.clone()))
+        })
+        .await;
+        assert!(
+            matches!(
+                sent,
+                Err(TaskSendError::EnqueueFailed {
+                    retryable: true,
+                    ..
+                })
+            ),
+            "{sent:?}"
+        );
+        assert_eq!(RESEND_COUNT, 3);
+        assert_eq!(
+            kinds,
+            vec![
+                SendKind::First,
+                SendKind::Repeat,
+                SendKind::Repeat,
+                SendKind::Repeat
+            ]
+        );
+    }
+
+    /// The task of the process-wide send test. No other test registers it:
+    /// the first registration in the process serves the module's helpers.
+    #[horsies::task("process_wide_send")]
+    async fn process_wide_send(id: u32) -> Result<u32, TaskError<Infallible>> {
+        Ok(id)
+    }
+
+    #[tokio::test]
+    async fn the_process_wide_send_helpers_use_the_registered_function() {
+        let mut app = Horsies::new(config()).unwrap();
+        let function = process_wide_send::register(&mut app).unwrap();
+        assert_eq!(function.task_name(), "process_wide_send");
+        app.suppress_sends(true);
+        let refused = process_wide_send::send(7).await.unwrap_err();
+        assert!(
+            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            "{refused}"
+        );
+        let refused = process_wide_send::schedule(WholeSeconds::from_secs(30), 7)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, TaskSendError::SendSuppressed { .. }),
+            "{refused}"
+        );
     }
 }
