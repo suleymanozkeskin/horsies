@@ -697,21 +697,42 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
     }
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_sends_no_wake`:
-/// a phase 2 that fails after the node write rolls the write back and sends
-/// no wake.
+/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_after_its_wake_sends_no_wake`
+/// (`tests/integration/test_worker_finalize_workflow_phase.py:198`): a
+/// phase 2 that fails after the node write rolls the write back, keeps the
+/// phase-2 record and sends no wake. The node finish wakes the queue of the
+/// node row (`horsies_workflow_node_apply`), so the listener is on the
+/// channel of the seeded node's queue. Control: after the stored success
+/// policy is repaired, the retry of phase 2 commits, and the same listener
+/// hears its wake.
 #[tokio::test]
 #[serial]
 async fn a_phase_two_that_fails_sends_no_wake() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, Some(poison_success_policy())).await;
-    let mut listener = Notifications::listen(&db.pool, &[WAKE_CHANNEL]).await;
+    let mut listener = Notifications::listen(&db.pool, &[SEEDED_NODE_CHANNEL]).await;
 
-    let result = phase_two(&db.pool, task_id, WAKE_QUEUE, true).await;
+    let result = phase_two(&db.pool, task_id, SEEDED_NODE_QUEUE, true).await;
 
     let _error = assert_a_phase_two_error(&result);
     assert_eq!(listener.received().await, Vec::new());
     assert_eq!(node(&db.pool, workflow_id, 0).await.status, "RUNNING");
+    assert_eq!(pending_rows(&db.pool, task_id).await, 1);
+
+    execute(
+        &db.pool,
+        &format!("UPDATE horsies_workflows SET success_policy = NULL WHERE id = '{workflow_id}'"),
+    )
+    .await;
+    phase_two(&db.pool, task_id, SEEDED_NODE_QUEUE, true)
+        .await
+        .expect("the retry of phase 2");
+    assert_eq!(node(&db.pool, workflow_id, 0).await.status, "COMPLETED");
+    assert_eq!(pending_rows(&db.pool, task_id).await, 0);
+    assert_eq!(
+        listener.received().await,
+        vec![(SEEDED_NODE_CHANNEL.to_owned(), "capacity".to_owned())]
+    );
     db.drop().await;
 }
 

@@ -247,6 +247,15 @@ const MARK_FINALIZING_PARAMETERS: &[StubParameter] = &[
     keyword("worker_id", "str"),
     keyword("claimed_at", "datetime.datetime"),
 ];
+const EXPIRE_OWNED_CLAIM_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+];
+const CANCEL_OWNED_ORPHAN_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+    keyword("claimed_at", "datetime.datetime"),
+];
 
 const RESOLVE_MONITORING_WINDOW_PARAMETERS: &[StubParameter] = &[
     keyword("since", "datetime.datetime | None"),
@@ -285,6 +294,12 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
     "StaleRunningRecovered | StaleRunningScanFull | StaleRunningScanFailed";
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
+const EXPIRE_PENDING_TASKS_OUTCOME: &str =
+    "PendingExpiryDrained | PendingExpiryBoundReached | PendingExpiryFailed";
+const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
+    "OrphanPageAudited | OrphanAuditLockBusy | OrphanAuditFailed";
+const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | \
+     AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
 
 const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
@@ -328,7 +343,7 @@ const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
+const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     StubFunction {
         name: "start_attempt",
         parameters: START_ATTEMPT_PARAMETERS,
@@ -339,6 +354,18 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
         name: "start_attempt_async",
         parameters: START_ATTEMPT_PARAMETERS,
         returns: TypeText::FutureOf(START_ATTEMPT_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "expire_owned_claim",
+        parameters: EXPIRE_OWNED_CLAIM_PARAMETERS,
+        returns: TypeText::Plain(TASK_ROW_END_OUTCOME),
+        doc: "Expire one claimed row of this worker whose deadline passed before its start. Writes,\nin one statement.",
+    },
+    StubFunction {
+        name: "expire_owned_claim_async",
+        parameters: EXPIRE_OWNED_CLAIM_PARAMETERS,
+        returns: TypeText::FutureOf(TASK_ROW_END_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
@@ -355,7 +382,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 26] = [
+const CORE_HANDLE_METHODS: [StubFunction; 29] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -475,6 +502,24 @@ const CORE_HANDLE_METHODS: [StubFunction; 26] = [
         parameters: CANCEL_TASK_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_TASK_OUTCOME),
         doc: "Cancel one plain task; a RUNNING task only with include_running. Writes, in one\nstatement. An outcome that contradicts the function raises PanicException.",
+    },
+    StubFunction {
+        name: "expire_pending_tasks_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(EXPIRE_PENDING_TASKS_OUTCOME),
+        doc: "One pending expiry pass. Writes; each batch commits alone.",
+    },
+    StubFunction {
+        name: "audit_orphaned_workflow_tasks_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME),
+        doc: "One page of the orphan sweep and its cursor counts, in one transaction. Writes.",
+    },
+    StubFunction {
+        name: "cancel_owned_orphan_async",
+        parameters: CANCEL_OWNED_ORPHAN_PARAMETERS,
+        returns: TypeText::FutureOf(TASK_ROW_END_OUTCOME),
+        doc: "Cancel one claimed workflow task that this claim holds and that no runnable node\nlinks. Writes, in one statement. A naive claimed_at raises TypeError.",
     },
     StubFunction {
         name: "pause_workflow_async",
@@ -652,7 +697,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 71] = [
+const RECORD_CLASSES: [StubClass; 78] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -914,6 +959,70 @@ const RECORD_CLASSES: [StubClass; 71] = [
         doc: "The stale RUNNING pass did not run: a threshold out of range, a failed connect or family\ncheck, or a failed scan. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PendingExpiryDrained",
+        doc: "The pending expiry pass ended at a short batch: no due row was left. Every batch\ncommitted.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("expired", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PendingExpiryBoundReached",
+        doc: "The pending expiry pass ran its bound of full batches and stopped; due rows can remain.\nEvery batch committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("expired", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PendingExpiryFailed",
+        doc: "The pending expiry pass stopped at a failure. The batches before it committed and\nexpired expired_before rows; the failed batch committed nothing, or its outcome is unknown.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("expired_before", "int"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "OrphanPageAudited",
+        doc: "The orphan page committed: rows_selected workflow tasks scanned, and\ncandidates_returned of them, with no runnable node link, moved to history as CANCELLED.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows_selected", "int"),
+            property("candidates_returned", "int"),
+            property("cancelled", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "OrphanAuditLockBusy",
+        doc: "Another sweep holds the orphan cursor: the page was refused at once (SQLSTATE 55P03)\nand wrote nothing.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "OrphanAuditFailed",
+        doc: "The orphan page did not commit: a failed connect, family check or statement, or a page\noutside the function's contract. After a lost COMMIT reply its outcome is unknown.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskRowEnded",
+        doc: "The row moved to history: kind is EXPIRE_CLAIMED or CANCEL_ORPHAN. The observed fields\nare the row as the statement locked it.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("terminal_at", "datetime.datetime"),
+            property("kind", "str"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
         methods: &[],
     },
     StubClass {

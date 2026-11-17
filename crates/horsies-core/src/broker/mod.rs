@@ -16,6 +16,7 @@ pub(crate) mod enqueue_history_tests;
 mod enqueue_identity_ports;
 pub(crate) mod enqueue_task;
 pub mod error;
+pub mod expiry_and_orphans;
 pub mod health;
 pub(crate) mod history_reads;
 mod lifecycle_operations;

@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::core_rows::StatementLog;
+use crate::broker::expiry_and_orphans::expire_pending_pass;
 use crate::broker::pools::{core_pool_for_test_pool, unpinged_single_connection_core_pool};
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claims, scan_stale_running, FinishStaleAttempt,
@@ -35,9 +36,7 @@ use crate::core::lifecycle::{
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::CorePool;
-use crate::worker::recovery::{
-    expire_pending_tasks, mark_stale_running_as_failed, requeue_stale_claimed,
-};
+use crate::worker::recovery::{mark_stale_running_as_failed, requeue_stale_claimed};
 
 const QUEUE: &str = "q_stale";
 const CHANNEL: &str = "task_queue_q_stale";
@@ -876,19 +875,19 @@ mod round_trips {
         let pool = pool().await;
         drain_pending_expiry(&pool).await;
         let counted = counted_pool(&pool).await;
-        let _warm_up = expire_pending_tasks(&counted.pool, StatementLog::Off)
+        let _warm_up = expire_pending_pass(&counted.pool, StatementLog::Off)
             .await
             .expect("warm up");
         let task_id = seed_task(&pool, &TaskSeed::pending()).await;
         set_deadline(&pool, task_id, Deadline::PassedSecondsAgo(1.0)).await;
 
         counted.proxy.reset_round_trips();
-        let expired = expire_pending_tasks(&counted.pool, StatementLog::Off)
+        let expired = expire_pending_pass(&counted.pool, StatementLog::Off)
             .await
             .expect("pending expiry");
 
         assert_eq!(counted.proxy.round_trips(), 3);
-        assert_eq!(expired, 1);
+        assert_eq!(expired.expired(), 1);
         assert_eq!(status_of(&pool, task_id).await, "EXPIRED");
         counted.pool.close();
         cleanup_tasks(&pool, &[task_id]).await;
