@@ -27,6 +27,7 @@ use tokio_postgres::error::{DbError, SqlState};
 
 use crate::broker::partition_maintenance::{CoveragePassError, PrunePassError};
 use crate::broker::process_listener::ListenError;
+use crate::broker::workflow_start::ClientStartError;
 use crate::broker::BrokerError;
 use crate::core::history::errors::HistoryError;
 use crate::db::{
@@ -34,6 +35,7 @@ use crate::db::{
     PoolingCheckFailure, StatementFailure, SubscribeError, UnknownOutcomeCause,
 };
 use crate::monitoring::{MonitoringQueryError, MonitoringQueryErrorSource};
+use crate::worker::finalize_batch::BatchWriteError;
 use crate::workflow_engine::child_spec::ChildSpecUnavailable;
 use crate::workflow_engine::error::WorkflowError;
 
@@ -338,6 +340,29 @@ impl WorkflowError {
                 FailureCause::ContractViolation
             }
             Self::WorkflowNotFound { .. } | Self::Validation(_) => FailureCause::PreconditionFailed,
+        }
+    }
+}
+
+impl ClientStartError {
+    /// The cause of a failed workflow start: the schema install's or the
+    /// start's. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::SchemaInstall(error) => error.failure_cause(),
+            Self::Start(error) => error.failure_cause(),
+        }
+    }
+}
+
+impl BatchWriteError {
+    /// The cause of a batch statement with no outcome per row. Rows that
+    /// break the statement's contract are a contract violation. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::NotSent { cause, .. } | Self::CommitUnknown { cause, .. } => cause.clone(),
+            Self::Refused { server_error, .. } => FailureCause::Server(server_error.clone()),
+            Self::ContractBroken { .. } => FailureCause::ContractViolation,
         }
     }
 }
