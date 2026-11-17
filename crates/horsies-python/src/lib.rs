@@ -21,6 +21,8 @@
 //! - Core log events reach Python `logging` through a bounded channel and one
 //!   forwarder thread (`logging`).
 //! - A `CoreHandle` is built once from a typed manifest (`handle`).
+//! - A `CoreScheduler` runs the scheduler of a scheduler manifest on the
+//!   broker of a `CoreHandle` (`scheduler`).
 
 mod bridge;
 mod child_handle;
@@ -30,6 +32,7 @@ mod logging;
 mod operations;
 mod process_core;
 mod records;
+mod scheduler;
 
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -140,6 +143,7 @@ fn refresh_log_levels(py: Python<'_>) -> PyResult<()> {
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<handle::CoreHandle>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
+    module.add_class::<scheduler::CoreScheduler>()?;
     module.add_class::<records::BrokerFailure>()?;
     module.add_class::<records::DatabasePingRecord>()?;
     module.add_class::<records::HandleClosed>()?;
@@ -206,12 +210,19 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::success::SuccessBatchRequest>()?;
     module.add_class::<operations::success::SuccessApplied>()?;
     module.add_class::<operations::success::SuccessesWritten>()?;
-    module.add_class::<operations::success::BatchRolledBack>()?;
+    module.add_class::<operations::success::BatchNotSent>()?;
+    module.add_class::<operations::success::BatchRefused>()?;
     module.add_class::<operations::success::BatchCommitUnknown>()?;
     module.add_class::<operations::success::WorkflowSuccessApplied>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
+    module.add_class::<scheduler::SchedulerStarted>()?;
+    module.add_class::<scheduler::SchedulerStartRefused>()?;
+    module.add_class::<scheduler::SchedulerStartFailed>()?;
+    module.add_class::<scheduler::SchedulerTicked>()?;
+    module.add_class::<scheduler::SchedulerTickFailed>()?;
+    module.add_class::<scheduler::SchedulerStopped>()?;
     module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;

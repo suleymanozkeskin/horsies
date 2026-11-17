@@ -64,7 +64,6 @@ fn slow_parent(name: &str, value: &str) -> WorkflowSpec {
 /// One recovery pass; returns the work it applied.
 async fn recovery_pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> u64 {
     let phase2 = drive_phase2_recovery(
-        pool,
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
         0,

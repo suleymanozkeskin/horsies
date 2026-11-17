@@ -681,7 +681,7 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
          LANGUAGE plpgsql AS $$
          BEGIN
              UPDATE horsies_recovery_scan_cursors
-             SET last_scan_rows = 1, last_candidate_rows = 1
+             SET last_scan_rows = 1, last_candidate_rows = 1, last_scan_at = now()
              WHERE scan_name = 'orphan_workflow_tasks';
              RETURN QUERY SELECT gen_random_uuid(), NULL::bigint, 'TASK_ABSENT'::text,
                  NULL::timestamptz, NULL::text, NULL::text, NULL::varchar,

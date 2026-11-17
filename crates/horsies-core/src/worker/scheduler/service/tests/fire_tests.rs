@@ -65,7 +65,14 @@ async fn tick_on(
 ) -> Result<(), BrokerError> {
     let mut cadence = ExistenceCheckCadence::new(1);
     cadence.record(true);
-    check_and_enqueue(core, StatementLog::Off, schedules, commands, &mut cadence).await
+    check_and_enqueue(
+        core,
+        StatementLog::Off,
+        &enabled_schedules(schedules),
+        commands,
+        &mut cadence,
+    )
+    .await
 }
 
 /// The database time cut to a whole second.
@@ -160,7 +167,10 @@ async fn a_fire_that_finds_no_state_row_creates_it_and_writes_no_task() {
             <= database_now + chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS))
     );
     assert_eq!(row.run_count, 0);
-    assert_eq!(row.config_hash, compute_config_hash(&schedule).to_vec());
+    assert_eq!(
+        row.config_hash,
+        compute_config_hash(&enabled(&schedule)).to_vec()
+    );
     assert_eq!(task_count(&pool, &schedule.task_name).await, 0);
     cleanup(&pool, &schedule.task_name, &schedule.name).await;
 }
@@ -267,9 +277,14 @@ async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_
 }
 
 /// Terminate the backend that waits for the state row lock that
-/// `transaction` holds.
+/// `transaction` holds. Each poll first drops the activity snapshot: inside
+/// one transaction, `pg_stat_activity` keeps the rows of its first read.
 async fn terminate_the_waiting_fire(transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
     for _ in 0..100 {
+        let _cleared = sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut **transaction)
+            .await
+            .expect("drop the activity snapshot");
         let terminated: Vec<bool> = sqlx::query_scalar(
             "SELECT pg_terminate_backend(a.pid)
              FROM pg_stat_activity AS a

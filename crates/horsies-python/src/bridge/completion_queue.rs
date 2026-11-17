@@ -410,8 +410,6 @@ where
 /// total bound.
 ///
 /// Failure exits: those of [`call_async`].
-// The first caller is the scheduler run.
-#[allow(dead_code)]
 pub fn call_service_async<'py, T, F>(
     py: Python<'py>,
     core: &'static Core,

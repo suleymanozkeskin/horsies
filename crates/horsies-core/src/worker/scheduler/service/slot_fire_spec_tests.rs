@@ -14,7 +14,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::state::test_rows::{delete_state, seed_state, state_row};
-use super::{build_commands, fire_due_schedule, DueSchedule};
+use super::{build_commands, fire_due_schedule, DueSchedule, EnabledSchedule};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::PostgresBroker;
 use crate::core::config::{
@@ -151,7 +151,7 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
     fire_due_schedule(
         &core,
         StatementLog::Off,
-        &schedule,
+        &EnabledSchedule::of(&schedule).expect("the schedule is enabled"),
         &command,
         &DueSchedule {
             schedule_name: schedule_name.clone(),

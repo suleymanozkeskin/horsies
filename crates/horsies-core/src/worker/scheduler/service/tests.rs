@@ -100,8 +100,8 @@ fn compute_config_hash_deterministic() {
         max_catch_up_runs: 100,
     };
 
-    let hash1 = compute_config_hash(&schedule);
-    let hash2 = compute_config_hash(&schedule);
+    let hash1 = compute_config_hash(&enabled(&schedule));
+    let hash2 = compute_config_hash(&enabled(&schedule));
     assert_eq!(hash1, hash2);
 }
 
@@ -142,8 +142,8 @@ fn compute_config_hash_changes_on_different_config() {
     };
 
     assert_ne!(
-        compute_config_hash(&schedule1),
-        compute_config_hash(&schedule2)
+        compute_config_hash(&enabled(&schedule1)),
+        compute_config_hash(&enabled(&schedule2))
     );
 }
 
@@ -168,7 +168,7 @@ fn compute_config_hash_is_stable_sha256() {
         catch_up_missed: false,
         max_catch_up_runs: 100,
     };
-    let hash = compute_config_hash(&schedule);
+    let hash = compute_config_hash(&enabled(&schedule));
     // SHA-256 of
     // {"pattern":{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null},"timezone":"UTC"}.
     let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -184,7 +184,7 @@ fn compute_config_hash_is_stable_sha256() {
 #[test]
 fn compute_config_hash_covers_pattern_and_timezone_only() {
     let base = interval_schedule_secs("hash_scope", 60);
-    let hash = compute_config_hash(&base);
+    let hash = compute_config_hash(&enabled(&base));
 
     let mut other_settings = base.clone();
     other_settings.task_name = "another_task".to_owned();
@@ -192,14 +192,14 @@ fn compute_config_hash_covers_pattern_and_timezone_only() {
     other_settings.queue_name = Some("bulk".to_owned());
     other_settings.catch_up_missed = true;
     other_settings.max_catch_up_runs = 7;
-    assert_eq!(compute_config_hash(&other_settings), hash);
+    assert_eq!(compute_config_hash(&enabled(&other_settings)), hash);
 
     let mut other_timezone = base.clone();
     other_timezone.timezone = "Europe/Istanbul".to_owned();
-    assert_ne!(compute_config_hash(&other_timezone), hash);
+    assert_ne!(compute_config_hash(&enabled(&other_timezone)), hash);
 
     let other_pattern = interval_schedule_secs("hash_scope", 61);
-    assert_ne!(compute_config_hash(&other_pattern), hash);
+    assert_ne!(compute_config_hash(&enabled(&other_pattern)), hash);
 }
 
 /// Python `_count_existing_slot_as_fired` and the retryable / permanent
@@ -369,8 +369,8 @@ async fn catch_up_permanent_failure_skips_doomed_slot() {
 /// command: the start refuses it before any statement (Python
 /// `prepare_schedules`, `CONFIG_INVALID_SCHEDULE`). Before, the refusal
 /// came at each fire and skipped the slot.
-#[test]
-fn an_input_over_the_reject_bound_refuses_the_start() {
+#[tokio::test]
+async fn an_input_over_the_reject_bound_refuses_the_start() {
     let lazy = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable")
         .expect("lazy pool");
@@ -397,8 +397,8 @@ fn an_input_over_the_reject_bound_refuses_the_start() {
 
 /// Options that the broker refuses give no send command: the start refuses
 /// the schedule (Python `_build_commands`, `CONFIG_INVALID_SCHEDULE`).
-#[test]
-fn options_that_the_broker_refuses_refuse_the_start() {
+#[tokio::test]
+async fn options_that_the_broker_refuses_refuse_the_start() {
     let lazy = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable")
         .expect("lazy pool");
@@ -442,7 +442,7 @@ fn calculate_missed_runs_returns_consecutive_slots_up_to_cap() {
     let first_due = Utc.with_ymd_and_hms(2025, 3, 29, 12, 0, 0).unwrap();
     let now = Utc.with_ymd_and_hms(2025, 3, 29, 12, 4, 30).unwrap();
 
-    let missed = calculate_missed_runs(&schedule, first_due, now, 3);
+    let missed = calculate_missed_runs(&enabled(&schedule), first_due, now, 3);
 
     assert_eq!(
         missed,
@@ -475,7 +475,7 @@ fn calculate_missed_runs_returns_empty_when_first_due_is_in_the_future() {
     let first_due = Utc.with_ymd_and_hms(2025, 3, 29, 12, 5, 0).unwrap();
     let now = Utc.with_ymd_and_hms(2025, 3, 29, 12, 4, 59).unwrap();
 
-    let missed = calculate_missed_runs(&schedule, first_due, now, 3);
+    let missed = calculate_missed_runs(&enabled(&schedule), first_due, now, 3);
 
     assert!(missed.is_empty());
 }
@@ -529,7 +529,7 @@ async fn fire_once(
     let outcome = fire_due_schedule(
         &core,
         StatementLog::Off,
-        schedule,
+        &enabled(schedule),
         &command,
         &due,
         database_now,
@@ -609,6 +609,11 @@ fn interval_schedule_secs(name: &str, seconds: u32) -> TaskSchedule {
         catch_up_missed: false,
         max_catch_up_runs: 100,
     }
+}
+
+/// The enabled schedule of `schedule`, as the start reads it.
+fn enabled(schedule: &TaskSchedule) -> EnabledSchedule {
+    EnabledSchedule::of(schedule).expect("the test schedule is enabled")
 }
 
 /// Send facts of a schedule whose task declares no queue and no options.
@@ -845,7 +850,7 @@ fn advance_to_latest_due_slot_skips_backlog() {
     let schedule = interval_schedule_secs("unit_skip", 5);
     let first_due = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
-    let (slot, next, skipped) = advance_to_latest_due_slot(&schedule, first_due, now);
+    let (slot, next, skipped) = advance_to_latest_due_slot(&enabled(&schedule), first_due, now);
     assert_eq!(slot, Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 15).unwrap());
     assert_eq!(
         next,
@@ -860,7 +865,7 @@ fn advance_to_latest_due_slot_no_skip_within_one_period() {
     let schedule = interval_schedule_secs("unit_noskip", 5);
     let first_due = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 3).unwrap();
-    let (slot, next, skipped) = advance_to_latest_due_slot(&schedule, first_due, now);
+    let (slot, next, skipped) = advance_to_latest_due_slot(&enabled(&schedule), first_due, now);
     assert_eq!(slot, first_due);
     assert_eq!(
         next,
@@ -888,7 +893,13 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
     let schedules = vec![interval_schedule_secs(&missing, 60), disabled_schedule];
 
     let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
-    let healthy = ensure_states_exist(&core, StatementLog::Off, &schedules, now).await;
+    let healthy = ensure_states_exist(
+        &core,
+        StatementLog::Off,
+        &enabled_schedules(&schedules),
+        now,
+    )
+    .await;
     assert!(healthy, "a pass that heals its missing row counts healthy");
 
     let healed = state::test_rows::state_row(&pool, &missing).await.unwrap();
@@ -902,7 +913,13 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
 
     // A later tick leaves the existing row's next_run untouched.
     let later = now + chrono::Duration::seconds(30);
-    let healthy = ensure_states_exist(&core, StatementLog::Off, &schedules, later).await;
+    let healthy = ensure_states_exist(
+        &core,
+        StatementLog::Off,
+        &enabled_schedules(&schedules),
+        later,
+    )
+    .await;
     assert!(healthy, "all rows present is a healthy pass");
     let after = state::test_rows::state_row(&pool, &missing).await.unwrap();
     assert_eq!(
@@ -929,15 +946,23 @@ async fn initialize_schedules_computes_first_runs_from_the_database_time() {
     let schedules = vec![interval_schedule_secs(&name, 60)];
 
     let before = database_time(&pool).await;
-    initialize_schedules(&core, StatementLog::Off, &schedules)
-        .await
-        .expect("every pattern has a next slot");
+    initialize_schedules(
+        &core,
+        StatementLog::Off,
+        &HashSet::from([name.clone()]),
+        &enabled_schedules(&schedules),
+    )
+    .await
+    .expect("every pattern has a next slot");
     let after = database_time(&pool).await;
 
     let row = state::test_rows::state_row(&pool, &name).await.unwrap();
     assert!(row.next_run_at > before);
     assert!(row.next_run_at <= after + chrono::Duration::seconds(60));
-    assert_eq!(row.config_hash, compute_config_hash(&schedules[0]).to_vec());
+    assert_eq!(
+        row.config_hash,
+        compute_config_hash(&enabled(&schedules[0])).to_vec()
+    );
     assert_eq!(row.run_count, 0);
 
     core.close();
@@ -994,3 +1019,6 @@ fn existence_cadence_unhealthy_rechecks_every_tick_until_healthy() {
 
 #[cfg(test)]
 mod fire_tests;
+
+#[cfg(test)]
+mod manifest_tests;

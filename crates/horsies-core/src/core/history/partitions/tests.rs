@@ -2805,16 +2805,25 @@ async fn finalization_retries_publication_after_detach_committed() {
         .await
         .unwrap());
     drop(connection);
+    // The leaf is DETACHED: horsies_begin_leaf_detach records its detach
+    // and, because the published manifest still names it, publishes the
+    // readers in its own statement. The finalize call does not run the
+    // publisher, and a repeat finds nothing left to publish.
     let publisher = CountingStagedPublisher::default();
     let finalize = FinalizeInterruptedLeafDetach::new(leaf.clone(), Some(5_000)).unwrap();
     finalize_interrupted_detach(&database.pool, &finalize, &publisher)
         .await
         .unwrap();
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    let mut connection = database.pool.acquire().await.unwrap();
+    assert!(!StagedLoaderPublisher
+        .references_leaf(&mut connection, leaf.leaf_name())
+        .await
+        .unwrap());
+    drop(connection);
     finalize_interrupted_detach(&database.pool, &finalize, &publisher)
         .await
         .unwrap();
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 0);
     database.drop().await;
 }
 

@@ -7,6 +7,8 @@
 //!   dataclasses, its integer bounds and its dump function.
 //! - `_catalog/worker_manifest.py`: the worker manifest
 //!   (`horsies_core::manifest_schema::WORKER_MANIFEST`) in the same form.
+//! - `_catalog/scheduler_manifest.py`: the scheduler manifest
+//!   (`horsies_core::manifest_schema::SCHEDULER_MANIFEST`) in the same form.
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:
