@@ -337,14 +337,14 @@ def test_get_folds_each_wait_failure(answer: Any, folded_code: object) -> None:
 # =============================================================================
 
 
-def _task_row(summary: str | None) -> MagicMock:
+def _task_row(summary: str | None, result_json: str | None = None) -> MagicMock:
     return _core_record(
         core.StoredNodeRecord,
         node_id='parent:0',
         task_index=0,
         task_name='child_wf',
         status='COMPLETED',
-        result_json=None,
+        result_json=result_json,
         started_at=None,
         completed_at=None,
         sub_workflow_id=uuid.UUID('00000000-0000-0000-0000-0000000000c1'),
@@ -354,10 +354,12 @@ def _task_row(summary: str | None) -> MagicMock:
     )
 
 
-def _tasks_handle(summary: str | None) -> WorkflowHandle[Any]:
+def _tasks_handle(
+    summary: str | None, result_json: str | None = None,
+) -> WorkflowHandle[Any]:
     return _handle_answering(
         'workflow_nodes_async',
-        _core_record(core.WorkflowNodesRead, nodes=[_task_row(summary)]),
+        _core_record(core.WorkflowNodesRead, nodes=[_task_row(summary, result_json)]),
     )
 
 
@@ -441,6 +443,35 @@ class TestStoredSubworkflowSummary:
         assert not isinstance(err.exception, SerializationError)
         assert 'sub_workflow_summary invalid for node parent:0' in err.message
         assert 'NOT_A_STATUS' in str(err.exception)
+
+
+class TestStoredNodeResult:
+    """tasks(): NULL is a node with no result; an empty text is corrupt data."""
+
+    @pytest.mark.asyncio
+    async def test_a_stored_null_is_no_result(self) -> None:
+        handle = _tasks_handle(None, result_json=None)
+
+        result = await handle.tasks_async()
+
+        assert is_ok(result)
+        assert result.ok_value[0].result is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_result_is_a_deserialization_error(self) -> None:
+        handle = _tasks_handle(None, result_json='')
+
+        result = await handle.tasks_async()
+
+        assert is_ok(result)
+        node_result = result.ok_value[0].result
+        assert node_result is not None
+        assert node_result.is_err()
+        error = node_result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message == (
+            'Result JSON corrupt for node parent:0: the stored text is empty'
+        )
 
 
 # =============================================================================
