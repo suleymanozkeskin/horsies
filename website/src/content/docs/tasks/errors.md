@@ -81,7 +81,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
 | `RESULT_NOT_READY` | Result not yet available; task is still running | No |
-| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
+| `EVENT_LOOP_LIMIT` | Not returned: `get()` and `get_async()` read on the core of the process, which has no event loop limit. The member stays in the enum | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
@@ -125,8 +125,8 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 
 | Method | Returns |
 | ------ | ------- |
-| `enqueue_async()` | `Result[str, BrokerEnqueueError]` |
-| `enqueue()` | `Result[str, BrokerEnqueueError \| BrokerSyncCallError]` |
+| `enqueue_async()` | `Result[uuid.UUID, BrokerEnqueueError]` |
+| `enqueue()` | `Result[uuid.UUID, BrokerEnqueueError \| BrokerSyncCallError]` |
 | `ensure_schema_initialized()` | `Result[None, BrokerOperationFailed \| BrokerEventLoopLimit]` |
 
 `enqueue()` and `enqueue_async()` require `sent_at`, the call time of the send, which the row stores. A send that repeats a task id is the same send when the stored command fingerprint and `sent_at` equal its own, and answers with that task id; otherwise it is `PAYLOAD_MISMATCH`. A resend therefore passes the `sent_at` of the first send.
@@ -135,11 +135,29 @@ They also require `send_kind` (`SendKind` from `horsies.core.brokers.enqueue_tas
 
 `BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`. `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`: the failures that the sync form adds, where nothing ran. Both are exported from `horsies`.
 
+#### Calls That Run on the Core
+
+These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ensure_schema_initialized()`, `get_task_info()`, `get_task_info_async()`, `get_raw_result_record()`, `get_raw_result_record_async()`, `ping_database_async()`, `ping_workers_async()`, and the task sends (`send()`, `send_async()`, `schedule()`, `schedule_async()` and the four retry methods). The core has one set of pools per broker, for every thread and event loop.
+
+- They do not return `EVENT_LOOP_LIMIT`.
+- The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They do not return `LOOP_RUNNER_FAILED`. They still return `ASYNC_CONTEXT` on a thread that runs an event loop.
+- `BrokerEnqueueError`, `BrokerSyncCallError`, `TaskSendError` and the return type of `ensure_schema_initialized()` keep the two variants, so an exhaustive `match` names them.
+
+When the core of the process cannot run the call, the call returns its failure code (`ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. The core errors are in `horsies._core`:
+
+| Core error | When | `retryable` | After the failure |
+| ---------- | ---- | ----------- | ----------------- |
+| `TooManyPendingCalls` | 65,536 core calls are in flight on the calling event loop | `True` | Nothing ran |
+| `CoreCallTimedOut` | A sync form did not end within 30 minutes. For `get_raw_result_record()` with a `timeout_ms`, the bound is `timeout_ms` plus 30 minutes; with no `timeout_ms`, the call has no bound | `True` | A read changed nothing. After `enqueue()` or a sync send, the row may or may not exist |
+| `CoreStopped` | A core background task panicked, so the core is stopped in this process. The message names the first panic | `False` | Nothing ran |
+| `CoreStartFailed` | The core runtime could not start | `False` | Nothing ran |
+| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent. Start children that call horsies with `spawn` or `forkserver` | `False` | Nothing ran |
+
 <!-- members: BrokerErrorCode -->
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
 | `SCHEMA_INIT_FAILED` | Schema initialization failed | Varies |
-| `ENQUEUE_FAILED` | The enqueue write failed or could not be confirmed; the row may or may not exist | Varies |
+| `ENQUEUE_FAILED` | The enqueue write failed or could not be confirmed, or the core of the process could not run it ([Calls That Run on the Core](#calls-that-run-on-the-core)); the row may or may not exist | Varies |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send | No |
 | `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; `owner_task_id` names the owner task | No |
 | `TASK_INFO_QUERY_FAILED` | Task-info or raw-result query failed | Varies |
@@ -151,9 +169,9 @@ They also require `send_kind` (`SendKind` from `horsies.core.brokers.enqueue_tas
 | `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | Varies |
 | `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | Varies |
 | `NO_BROKER` | Operation needs a broker, but none is configured | No |
-| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this call ran on a new one; nothing ran; clears when one of those loops closes | No |
+| `EVENT_LOOP_LIMIT` | Not returned by a broker method: the broker's calls run on the core ([Calls That Run on the Core](#calls-that-run-on-the-core)). The workflow start and the workflow resume return their own `EVENT_LOOP_LIMIT` | No |
 | `ASYNC_CONTEXT` | A sync method (`app.get_result()`, `app.ping_database()`, `broker.close()`, ...) was called on a thread that runs an event loop; nothing ran. Call the `*_async` form | No |
-| `LOOP_RUNNER_FAILED` | A sync method could not run the call on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran. `close()` and `close_async()` stop the runner, and a stopped runner does not start again: call the `*_async` form or use a new broker | No |
+| `LOOP_RUNNER_FAILED` | A sync method of the app (`app.get_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `app.get_class_coverage()`, `app.get_class_report()`) or `broker.close()` could not run the call on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran. `close()` and `close_async()` stop the runner, and a stopped runner does not start again: call the `*_async` form or use a new broker. `broker.enqueue()`, `broker.get_task_info()` and `broker.get_raw_result_record()` do not use the runner | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON or not a JSON object, a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields), an `execution` that is not an `Execution` value, or a `cancel_grace_ms` that does not fit the class (100 to 10,000 ms for `SHARED_ASYNC`, absent or null for the others). The message names each failing field. Nothing was written | No |
@@ -185,7 +203,7 @@ They also require `send_kind` (`SendKind` from `horsies.core.brokers.enqueue_tas
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
-| `retryable` | `bool` | Driver classification of the cause where the variant has a cause from the driver: `True` when the condition may clear, for example a lost connection. `False` on every other variant |
+| `retryable` | `bool` | The classification of the cause where the variant has a cause from the database or the core: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `False` on every other variant |
 | `exception` | `BaseException` on `BrokerOperationFailed` and `BrokerLoopRunnerFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `loop_limit` | `EventLoopLimit` | The limit and the threads of the held event loops |
@@ -247,7 +265,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `message` | `str` | Human-readable description |
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
-| `retryable` | `bool` | Driver classification of the cause: `True` when the condition may clear, for example a lost connection |
+| `retryable` | `bool` | The core's classification of the cause: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls` |
 | `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception. On `TaskSendLoopRunnerFailed` it is `BaseException`: always the `LoopRunnerError` |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Length of the serialized kwargs |
@@ -283,12 +301,12 @@ For a validation failure, the cause names the field, the message and the type, n
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
 | `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; `retry_*_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
 | `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
-| `ENQUEUE_FAILED` | Broker/database failure during enqueue; the row may or may not exist | Accepted |
+| `ENQUEUE_FAILED` | Broker/database failure during enqueue, or the core of the process could not run the send ([Calls That Run on the Core](#calls-that-run-on-the-core)); the row may or may not exist | Accepted |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
 | `PAYLOAD_TOO_LARGE` | The serialized kwargs exceed `payload.reject_bytes`; nothing was enqueued | Refused |
 | `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted | Accepted |
-| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this send ran on a new one; nothing was enqueued; clears when one of those loops closes | Refused |
-| `LOOP_RUNNER_FAILED` | Sync send/schedule (or sync retry variant) could not run the enqueue on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran and nothing was written. A stopped runner does not start again, so a sync retry returns the same error; `retry_*_async(err)` completes the same dispatch | Accepted |
+| `EVENT_LOOP_LIMIT` | Not returned: a send runs on the core of the process, which has no event loop limit. The variant stays in `TaskSendError` | Refused |
+| `LOOP_RUNNER_FAILED` | Not returned: a sync send calls the core on the calling thread, not on the broker's sync runner. The variant stays in `TaskSendError` and in `TaskSendRetryable` | Accepted |
 
 `TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict | TaskSendLoopRunnerFailed`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These four variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a retry reads the task history).
 
@@ -336,7 +354,7 @@ The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAIL
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
 | `LOOP_RUNNER_FAILED` | `HandleLoopRunnerFailed` | `exception: BaseException` (the `LoopRunnerError`) | No | A sync method could not run the call on the broker's sync runner; nothing ran |
-| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | `resume()`, `resume_async()`, `resume_workflow()` or `resume_workflow_sync()` ran on a new event loop while the broker serves its limit of open event loops; nothing ran. The other handle methods run on the core and do not return it |
 | `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
 
 `get()` folds a status read failure into its `TaskResult`: `WORKFLOW_NOT_FOUND` becomes `RetrievalCode.WORKFLOW_NOT_FOUND`, and `DB_OPERATION_FAILED` and `STORED_DATA_INVALID` become `BROKER_ERROR`.

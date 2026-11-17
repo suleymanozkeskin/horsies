@@ -85,7 +85,7 @@ pub async fn on_workflow_task_complete(
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry,
         retention,
     };

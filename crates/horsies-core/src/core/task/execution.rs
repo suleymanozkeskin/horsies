@@ -35,6 +35,7 @@ pub const MAX_CANCEL_GRACE_MS: i64 = 10_000;
     Deserialize,
     horsies_macros::ManifestSchema,
 )]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Execution {
     /// One task at a time in its own child process. The default class.

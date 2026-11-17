@@ -62,6 +62,8 @@ mod cancel_spec_tests;
 #[cfg(test)]
 mod list_detail_spec_tests;
 #[cfg(test)]
+mod model_contract_tests;
+#[cfg(test)]
 mod spec_support;
 #[cfg(test)]
 mod tests;

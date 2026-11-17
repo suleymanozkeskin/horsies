@@ -46,6 +46,7 @@ impl std::fmt::Display for ErrorCategory {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TaskAttemptInfo {
     pub attempt: i32,
     pub outcome: String,
@@ -62,6 +63,7 @@ pub struct TaskAttemptInfo {
 /// `LeafTaskInfo`). `execution` is the stored class of a live task, and
 /// `None` for a task read from history, which does not keep the class.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct LeafTaskInfo {
     pub task_id: Uuid,
     pub status: String,
@@ -81,18 +83,21 @@ pub struct LeafTaskInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct StatusCount {
     pub status: String,
     pub count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct FacetValue {
     pub value: String,
     pub count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ErrorFacet {
     pub value: String,
     pub count: i64,
@@ -100,6 +105,7 @@ pub struct ErrorFacet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Facets {
     pub workers: Vec<FacetValue>,
     pub task_names: Vec<FacetValue>,
@@ -115,6 +121,7 @@ pub struct Facets {
 /// `worker` grouping has. A worker whose id is the text `unknown` is a
 /// `value` group of its own, never the `unclaimed` group.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BreakdownGroup {
     Value { value: String },
@@ -124,6 +131,7 @@ pub enum BreakdownGroup {
 /// Task counts per status, the task total, and the tasks retried at least
 /// once (Python `BreakdownCounts`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct BreakdownCounts {
     pub total: i64,
     pub pending: i64,
@@ -139,6 +147,7 @@ pub struct BreakdownCounts {
 /// One group's per-status task counts (Python `GroupRow`): the counts, then
 /// the group, in one JSON object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct GroupRow {
     #[serde(flatten)]
     pub counts: BreakdownCounts,
@@ -153,6 +162,7 @@ pub struct GroupRow {
 /// groups, and `total` covers every matching task, not only the groups
 /// shown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Breakdown {
     pub group_by: String,
     pub groups: Vec<GroupRow>,
@@ -161,6 +171,7 @@ pub struct Breakdown {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TaskSummary {
     pub id: Uuid,
     pub task_name: String,
@@ -183,12 +194,14 @@ pub struct TaskSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TaskListPage {
     pub rows: Vec<TaskSummary>,
     pub total: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TaskDetail {
     pub leaf: LeafTaskInfo,
     pub task_name: String,
@@ -220,6 +233,7 @@ pub struct TaskDetailNotFound {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowRunSummary {
     pub id: Uuid,
     pub name: String,
@@ -231,6 +245,7 @@ pub struct WorkflowRunSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowNodeInfo {
     pub task_index: i32,
     pub node_id: Option<String>,
@@ -247,12 +262,14 @@ pub struct WorkflowNodeInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowEdge {
     pub from_index: i32,
     pub to_index: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowRunDetail {
     pub run: WorkflowRunSummary,
     pub nodes: Vec<WorkflowNodeInfo>,
@@ -262,6 +279,7 @@ pub struct WorkflowRunDetail {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowTaskDetail {
     pub task_index: i32,
     pub node_id: Option<String>,
@@ -279,6 +297,7 @@ pub struct WorkflowTaskDetail {
 /// `cause` describes the cause of the last failed child start, and `detail`
 /// is its error text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DownSlotInfo {
     pub slot: u32,
     pub cause: String,
@@ -290,6 +309,7 @@ pub struct DownSlotInfo {
 /// Whether any slot of a worker was down (Python `SlotHealthKind`,
 /// `python/horsies/monitoring/execution_classes.py:42`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SlotHealthKind {
     AllServing,
@@ -302,6 +322,7 @@ pub enum SlotHealthKind {
 /// `down_slots` lists the down slots in slot order; it is empty unless
 /// `slot_health` is `slots_down`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerStateInfo {
     pub worker_id: String,
     pub hostname: String,
@@ -332,6 +353,7 @@ pub struct WorkerStateInfo {
 /// rows and `CLAIMED` rows with a live lease of the classes in `serves`.
 /// `free` is `capacity` minus `in_flight`, at least 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct BudgetLoadInfo {
     pub budget: Execution,
     pub capacity: u64,
@@ -342,6 +364,7 @@ pub struct BudgetLoadInfo {
 
 /// The claim budgets of one live worker, in execution class order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerClassLoadInfo {
     pub worker_id: String,
     pub snapshot_at: DateTime<Utc>,
@@ -353,6 +376,7 @@ pub struct WorkerClassLoadInfo {
 /// `StreamNoCapacityInfo`, `StreamUnservedInfo`,
 /// `python/horsies/monitoring/models.py:378-400`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamCoverageInfo {
     /// `workers` counts the live workers that serve the stream; `capacity`
@@ -369,6 +393,7 @@ pub enum StreamCoverageInfo {
 /// `none_due` (Python `StreamWaitingInfo`, `StreamNoneDueInfo`,
 /// `python/horsies/monitoring/models.py:403-415`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamWaitInfo {
     /// At least one row is due. `wait_s` is the wait of the oldest due row,
@@ -383,6 +408,7 @@ pub enum StreamWaitInfo {
 
 /// The `PENDING` rows of one queue and one execution class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct PendingStreamInfo {
     pub queue_name: String,
     pub execution: Execution,
@@ -397,6 +423,7 @@ pub struct PendingStreamInfo {
 /// is at most `live_window_s` old. `streams` is ordered by queue name, then
 /// by execution class. `workers` holds the live workers, by worker id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ClassReportInfo {
     pub checked_at: DateTime<Utc>,
     pub live_window_s: u64,
@@ -405,6 +432,7 @@ pub struct ClassReportInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerPingInfo {
     pub worker_id: String,
     pub hostname: String,
@@ -413,6 +441,7 @@ pub struct WorkerPingInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct LivenessReport {
     pub db_latency_ms: Option<f64>,
     pub db_reachable: bool,
@@ -420,6 +449,7 @@ pub struct LivenessReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerHistoryPoint {
     pub snapshot_at: DateTime<Utc>,
     pub tasks_running: i32,
@@ -434,6 +464,7 @@ pub struct WorkerHistoryPoint {
 /// hyphenated lowercase text, as Python's `str` of the id. `next_run_at` is
 /// NOT NULL in the baseline, so every row has one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ScheduleStateInfo {
     pub schedule_name: String,
     pub last_run_at: Option<DateTime<Utc>>,

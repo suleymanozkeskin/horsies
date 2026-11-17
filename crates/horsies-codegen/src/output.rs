@@ -4,13 +4,15 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use horsies_core::catalog::CODE_CATALOGS;
-use horsies_core::manifest_schema::{PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST};
+use horsies_core::manifest_schema::{
+    PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST, WORKFLOW_SPEC_DATA,
+};
 
 use crate::catalogs::{group_by_module, render_module, render_package_init, CATALOG_FOLDER};
 use crate::core_stub::{render_core_stub, CORE_STUB_FILE};
 use crate::manifest::{
     render_manifest_module, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
-    WORKER_MANIFEST_MODULE_FILE,
+    WORKER_MANIFEST_MODULE_FILE, WORKFLOW_SPEC_MODULE_FILE,
 };
 use crate::python_text::GENERATED_HEADER;
 use crate::surface::CORE_MODULE;
@@ -118,6 +120,10 @@ pub fn render_all() -> Vec<GeneratedFile> {
     files.push(GeneratedFile {
         relative_path: catalog_folder.join(SCHEDULER_MANIFEST_MODULE_FILE),
         text: render_manifest_module(&SCHEDULER_MANIFEST),
+    });
+    files.push(GeneratedFile {
+        relative_path: catalog_folder.join(WORKFLOW_SPEC_MODULE_FILE),
+        text: render_manifest_module(&WORKFLOW_SPEC_DATA),
     });
     files.push(GeneratedFile {
         relative_path: PathBuf::from(CORE_STUB_FILE),
@@ -261,8 +267,9 @@ mod tests {
         let files = render_all();
         let modules = group_by_module(CODE_CATALOGS);
         // __init__.py, one file per catalog module, manifest.py,
-        // worker_manifest.py, scheduler_manifest.py, _core.pyi
-        assert_eq!(files.len(), modules.len() + 5);
+        // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
+        // _core.pyi
+        assert_eq!(files.len(), modules.len() + 6);
         for file in &files {
             assert!(file.text.starts_with(GENERATED_HEADER));
         }

@@ -166,7 +166,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - BrokerEnqueueError = BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit (every failure of enqueue_async); BrokerSyncCallError = BrokerAsyncContext | BrokerLoopRunnerFailed (the failures that the sync enqueue adds; nothing ran)
 - BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_BROKER, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, EVENT_LOOP_LIMIT, ASYNC_CONTEXT, LOOP_RUNNER_FAILED, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
 - ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran and the sync runner did not start; call the *_async form (not retryable; RetrievalCode.ASYNC_CONTEXT is not cached)
-- EVENT_LOOP_LIMIT (in every result catalog): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop and, in a worker child, the task loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes
+- EVENT_LOOP_LIMIT (WorkflowStartErrorCode, HandleErrorCode): a workflow start and a workflow resume use one broker resource set per open event loop, up to 5 loops plus its sync runner loop and, in a worker child, the task loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes. Every other call runs on the core of the process, which has no event loop limit: TaskSendErrorCode, BrokerErrorCode, RetrievalCode and the monitoring catalogs keep the member, and no call returns it
 - LOOP_RUNNER_FAILED (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode): a sync call could not run on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing ran; close()/close_async() stop the runner and it does not start again; call the *_async form (not retryable; the send error is accepted by retry_send_async / retry_schedule_async). Any other exception from a sync call propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> Result[str, BrokerEnqueueError], enqueue (sync) -> Result[str, BrokerEnqueueError | BrokerSyncCallError], get_task_info_async -> BrokerResult[TaskInfo | None],
@@ -256,13 +256,13 @@ making web request, local will cost you less tokens and greater knowledgebase at
 <!-- members: TaskSendErrorCode -->
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
-- ENQUEUE_FAILED: broker/database failure during enqueue; retryable is the driver classification
+- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (exception is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStopped, CoreStartFailed and ForkedAfterCoreStart are not); the row may or may not exist; retryable is the core's classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
 - IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the retry methods accept it
 - PAYLOAD_TOO_LARGE: serialized kwargs exceed payload.reject_bytes; nothing was enqueued
-- EVENT_LOOP_LIMIT: the broker serves its limit of open event loops and this send ran on a new one (not retryable on this loop)
+- EVENT_LOOP_LIMIT: not returned; a send runs on the core of the process, which has no event loop limit (the variant stays in TaskSendError)
 - ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
-- LOOP_RUNNER_FAILED: sync send/schedule (or sync retry) could not run the enqueue on the broker's sync runner; nothing was enqueued; a stopped runner does not start again, so a sync retry returns the same error; the error keeps the payload for retry_send_async / retry_schedule_async
+- LOOP_RUNNER_FAILED: not returned; a sync send calls the core on the calling thread, not on the broker's sync runner (the variant stays in TaskSendError and TaskSendRetryable)
 
 ### TaskSendPayload (frozen dataclass)
 - task_name: str, queue_name: str, priority: int
