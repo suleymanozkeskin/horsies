@@ -1,0 +1,19 @@
+error: `timeout_ms` must be from 1000 to 4294967295 (got 999)
+ --> tests/compile_fail/timeout_below_minimum.rs:5:28
+  |
+5 | #[task("bad", timeout_ms = 999)]
+  |                            ^^^
+
+warning: unused import: `std::convert::Infallible`
+ --> tests/compile_fail/timeout_below_minimum.rs:1:5
+  |
+1 | use std::convert::Infallible;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TaskError`
+ --> tests/compile_fail/timeout_below_minimum.rs:3:21
+  |
+3 | use horsies::{task, TaskError};
+  |                     ^^^^^^^^^

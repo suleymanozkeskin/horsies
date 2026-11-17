@@ -1,7 +1,7 @@
-error: #[horsies::blocking_task] requires a non-async function; use #[horsies::task] for async functions
+error: #[horsies::blocking_task] takes a fn; use #[horsies::task] for an async fn
  --> tests/compile_fail/async_with_blocking_attr.rs:5:1
   |
-5 | async fn bad(_: ()) -> Result<String, TaskError> {
+5 | async fn bad(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
   | ^^^^^
 
 warning: unused import: `horsies::TaskError`

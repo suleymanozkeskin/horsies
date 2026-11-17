@@ -1,0 +1,19 @@
+error: execution = shared_thread needs `timeout_ms`: a shared child runs other tasks next to this one, and the deadline is what ends a task that does not return
+ --> tests/compile_fail/shared_thread_without_timeout.rs:5:36
+  |
+5 | #[blocking_task("bad", execution = shared_thread)]
+  |                                    ^^^^^^^^^^^^^
+
+warning: unused import: `std::convert::Infallible`
+ --> tests/compile_fail/shared_thread_without_timeout.rs:1:5
+  |
+1 | use std::convert::Infallible;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TaskError`
+ --> tests/compile_fail/shared_thread_without_timeout.rs:3:30
+  |
+3 | use horsies::{blocking_task, TaskError};
+  |                              ^^^^^^^^^

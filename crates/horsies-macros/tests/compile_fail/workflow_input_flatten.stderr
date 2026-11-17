@@ -1,0 +1,6 @@
+error: WorkflowInput has no field token for a #[serde(flatten)] field: its keys are those of its own type; derive WorkflowInput on that type, or list its fields here
+  --> tests/compile_fail/workflow_input_flatten.rs:12:5
+   |
+12 | /     #[serde(flatten)]
+13 | |     inner: Inner,
+   | |________________^
