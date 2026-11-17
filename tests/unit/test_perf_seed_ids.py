@@ -89,3 +89,6 @@ class TestSeedRows:
         assert rows.nodes == seed_ids(
             'workflow-success-phase2', Role.BALLAST, RowKind.WORKFLOW_NODE
         )
+        assert rows.dependent_nodes == seed_ids(
+            'workflow-success-phase2', Role.BALLAST, RowKind.DEPENDENT_NODE
+        )

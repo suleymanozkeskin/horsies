@@ -24,8 +24,13 @@ pub(crate) struct CodeBody {
 }
 
 /// The `code` of a 400 body for request text refused before any read
-/// (Python `horsies.web.routes._common.INVALID_INPUT`).
+/// (Python `tests.dualrun.reference.web_routes._common.INVALID_INPUT`).
 pub(crate) const INVALID_INPUT: &str = "INVALID_INPUT";
+
+/// The mark of a response that refused request text as `INVALID_INPUT`, in
+/// the response's extensions, for the log line of the refusal.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InvalidInputRefused;
 
 #[derive(Debug)]
 pub(crate) enum ApiError {
@@ -135,14 +140,18 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
             Self::Detail(status, detail) => (status, Json(DetailBody { detail })).into_response(),
-            Self::InvalidInput(detail) => (
-                StatusCode::BAD_REQUEST,
-                Json(CodeBody {
-                    code: INVALID_INPUT,
-                    detail,
-                }),
-            )
-                .into_response(),
+            Self::InvalidInput(detail) => {
+                let mut response = (
+                    StatusCode::BAD_REQUEST,
+                    Json(CodeBody {
+                        code: INVALID_INPUT,
+                        detail,
+                    }),
+                )
+                    .into_response();
+                let _first_mark = response.extensions_mut().insert(InvalidInputRefused);
+                response
+            }
             Self::Validation(issues) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({ "detail": issues })),
@@ -376,7 +385,7 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
 }
 
 /// Map a monitoring read failure to its response, as Python
-/// (`python/horsies/web/routes/_common.py:103-127`): a database failure is 503, the
+/// (`tests/dualrun/reference/web_routes/_common.py:103-127`): a database failure is 503, the
 /// dependency failed and the state can clear; stored history data that does
 /// not decode is 500, the request was valid and a repeat gives the same
 /// answer until the stored row changes.

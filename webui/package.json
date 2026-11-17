@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:core": "tsc --noEmit && vite build --outDir ../crates/horsies-core/webui-dist",
     "check:core-dist": "scripts/check-core-dist.sh",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

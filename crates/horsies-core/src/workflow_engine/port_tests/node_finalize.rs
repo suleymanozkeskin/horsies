@@ -39,6 +39,7 @@ use crate::worker::execution::{
 use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
 use crate::worker::retry::read_stored_options;
 use crate::workflow_engine::lifecycle::cancel_workflow;
+use crate::workflow_engine::steps::ChildBuild;
 
 /// The process facts that the start write records for [`WORKER`].
 const WORKER_PID: i32 = 4242;
@@ -200,13 +201,17 @@ async fn finalize_on(
     if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
             broker,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Registry {
+                registry: &WorkflowSpecRegistry::new(
+                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                ),
+                retention: &RetentionConfig::default(),
+            },
             claimed.task_id,
             &claimed.queue_name,
             claimed.kind.is_workflow_task(),
             capacity_notified,
             form,
-            &RetentionConfig::default(),
         )
         .await?;
     }
@@ -579,13 +584,17 @@ async fn phase_two(
     let broker = PostgresBroker::from_pool(pool.clone());
     finalize_workflow_phase(
         &broker,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        ChildBuild::Registry {
+            registry: &WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
+            retention: &RetentionConfig::default(),
+        },
         task_id,
         queue_name,
         is_workflow_task,
         false,
         PhaseTwoForm::NotKnown,
-        &RetentionConfig::default(),
     )
     .await
     .map(|_parent_advances| ())
@@ -791,13 +800,17 @@ async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_no
     proxy.drop_reply_to_request_carrying(task_id.as_bytes());
     let result = finalize_workflow_phase(
         &proxied_broker,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        ChildBuild::Registry {
+            registry: &WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
+            retention: &RetentionConfig::default(),
+        },
         task_id,
         SEEDED_NODE_QUEUE,
         true,
         false,
         PhaseTwoForm::NotKnown,
-        &RetentionConfig::default(),
     )
     .await
     .map(|_parent_advances| ());

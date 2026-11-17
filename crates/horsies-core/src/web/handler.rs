@@ -12,6 +12,7 @@
 //! of calling a policy.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body, Bytes};
@@ -21,14 +22,12 @@ use axum::Router;
 use tower::ServiceExt;
 
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::monitoring::ResumeChildren;
 
 use super::app::{build_router, MountPath, WebState};
 use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER};
 use super::common::ApiError;
-use super::events::{EventBroadcaster, HEARTBEAT};
+use super::events::{EventBroadcaster, EventFrames};
 use super::schema::SchemaProbe;
 use super::spa::{EmbeddedAssets, MonitoringUiConfig};
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
@@ -37,6 +36,13 @@ use super::task_stats_cache::{ReadCache, TaskStatsCache};
 /// 64 MiB. The read routes are bounded by their row limits and the page by
 /// the embedded assets, so a response over it is refused with 500.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+/// The largest request body that [`MonitoringHandler::handle`] takes: 1 MiB.
+/// The one route that reads a body (the task cancel) takes a JSON object of
+/// one flag. A host reads at most one byte more than this bound and passes
+/// what it read; a body over the bound is refused with 413 before any
+/// route reads it.
+pub const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 /// Which verdicts of the user's policy a request needs, in the order that
 /// the host asks them.
@@ -169,14 +175,9 @@ pub struct MonitoringHandlerConfig {
     /// The version that `/api/meta` reports: the package version of the
     /// client that mounts the handler.
     pub client_version: String,
-}
-
-/// What the resume route needs to start the children that a resume owes.
-#[derive(Clone)]
-pub struct WorkflowResumeContext {
-    pub registry: Arc<WorkflowSpecRegistry>,
-    pub payload: PayloadPolicy,
-    pub retention: RetentionConfig,
+    /// How long an event stream waits without an event before it sends a
+    /// heartbeat frame ([`super::HEARTBEAT`] in production).
+    pub heartbeat: Duration,
 }
 
 /// The monitoring app of one broker as a framework-neutral handler.
@@ -184,14 +185,17 @@ pub struct MonitoringHandler {
     router: Router,
     events: Arc<EventBroadcaster>,
     actions_enabled: bool,
+    heartbeat: Duration,
 }
 
 impl MonitoringHandler {
-    /// The handler of `broker`. Starts nothing: the event broadcaster
-    /// subscribes on the broker's listener at the first subscriber.
+    /// The handler of `broker`. The resume route builds the sub-workflow
+    /// children that a resume owes through `children`. Starts nothing: the
+    /// event broadcaster subscribes on the broker's listener at the first
+    /// subscriber.
     pub fn new(
         broker: Arc<PostgresBroker>,
-        resume: WorkflowResumeContext,
+        children: ResumeChildren,
         config: MonitoringHandlerConfig,
     ) -> Self {
         let state = WebState {
@@ -205,10 +209,8 @@ impl MonitoringHandler {
             actions_enabled: config.actions_enabled,
             ui_config: config.ui,
             assets: Arc::new(EmbeddedAssets),
-            workflow_registry: resume.registry,
-            payload: resume.payload,
-            retention: resume.retention,
-            heartbeat: HEARTBEAT,
+            children,
+            heartbeat: config.heartbeat,
             client_version: config.client_version,
         };
         Self::from_state(state)
@@ -220,70 +222,46 @@ impl MonitoringHandler {
         Self {
             events: Arc::clone(&state.events),
             actions_enabled: state.actions_enabled,
+            heartbeat: state.heartbeat,
             router: build_router(state),
         }
     }
 
-    /// The event broadcaster of the handler, for the host's event stream.
+    /// The event broadcaster of the handler. Its `close` ends every event
+    /// stream of the handler after the degraded frame.
     pub fn events(&self) -> &Arc<EventBroadcaster> {
         &self.events
     }
 
-    /// The access that a request needs, from its method and its path inside
-    /// the mount, as the routes of the Python app guard them: every read
-    /// route and the event stream need `can_view`; `/api/meta` asks
-    /// `can_act` to report it; an action route needs `can_view` and
-    /// `can_act`, or only `can_view` while actions are disabled (the act
-    /// guard refuses without asking). Every other path is public. Pure.
+    /// Subscribe one event stream (`/api/events`). The host calls it after
+    /// the user's policy allowed the view, and writes the frames of the
+    /// answer. The first subscriber starts the broadcaster's subscriptions
+    /// on the broker's listener; a broker without a listener, or a listener
+    /// that stopped, answers the degraded frame and the end.
+    pub async fn subscribe_events(&self) -> EventFrames {
+        EventFrames::new(self.events.subscribe().await, self.heartbeat)
+    }
+
+    /// The access that a request needs: [`route_access`] with the actions
+    /// switch of this handler. Pure.
     pub fn route_access(&self, method: &Method, path: &str) -> RouteAccess {
-        let segments: Vec<&str> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
-        let action = match self.actions_enabled {
-            true => AccessNeed::ViewAndAct,
-            false => AccessNeed::View,
-        };
-        // A HEAD request is served by the GET route, with its guards.
-        let verb = match method.as_str() {
-            "HEAD" => "GET",
-            other => other,
-        };
-        let need = match (verb, segments.as_slice()) {
-            ("GET", ["api", "meta"]) => AccessNeed::ViewReportAct,
-            ("GET", ["api", "events"]) => {
-                return RouteAccess {
-                    need: AccessNeed::View,
-                    form: ResponseForm::EventStream,
-                }
-            }
-            ("GET", ["api", "tasks" | "workflows" | "workers"]) => AccessNeed::View,
-            ("GET", ["api", "tasks" | "workflows", id]) if named(id) => AccessNeed::View,
-            ("GET", ["api", "workflows", id, "tasks", index]) if named(id) && named(index) => {
-                AccessNeed::View
-            }
-            ("GET", ["api", "workers", "ping" | "schedules" | "classes"]) => AccessNeed::View,
-            ("GET", ["api", "workers", id, "history"]) if named(id) => AccessNeed::View,
-            ("POST", ["api", "tasks", id, "cancel"]) if named(id) => action,
-            ("POST", ["api", "workflows", id, "pause" | "resume" | "cancel"]) if named(id) => {
-                action
-            }
-            _ => AccessNeed::Public,
-        };
-        RouteAccess {
-            need,
-            form: ResponseForm::OneResponse,
-        }
+        route_access(self.actions_enabled, method, path)
     }
 
     /// Serve one request with the verdicts of `grant`.
     ///
     /// Every expected outcome is a status and a body: the refusals of the
     /// guards (403), a path that is not a valid request path (400), the
-    /// schema gate (409 `SCHEMA_INCOMPATIBLE`), validation (422), a body
+    /// schema gate (409 `SCHEMA_INCOMPATIBLE`), a request body over
+    /// [`MAX_REQUEST_BODY_BYTES`] when no verdict refused (413), validation
+    /// (422), a response body
     /// over [`MAX_RESPONSE_BYTES`] (500) and the missing page (503). An
-    /// action writes, and runs to its end when the host leaves.
+    /// action writes, and runs to its end when the host leaves. The event
+    /// stream path answers here only when the view is refused (403).
     ///
     /// Panics on a defect of the host: a grant that does not answer the
-    /// verdicts of [`route_access`](Self::route_access), or a request for the
-    /// event stream, which has no single response.
+    /// verdicts of [`route_access`](Self::route_access), or an allowed
+    /// request for the event stream, which has no single response.
     pub async fn handle(&self, request: RequestParts, grant: AccessGrant) -> ResponseParts {
         let access = self.route_access(&request.method, &request.path);
         assert!(
@@ -294,11 +272,20 @@ impl MonitoringHandler {
             request.path,
         );
         assert!(
-            access.form == ResponseForm::OneResponse,
+            access.form == ResponseForm::OneResponse || grant.view == Verdict::Refused,
             "monitoring handler: {} {} is the event stream; it has no single response",
             request.method,
             request.path,
         );
+        // A refused verdict is answered by the guards, which read no body.
+        let refused_by_policy = grant.view == Verdict::Refused || grant.act == Verdict::Refused;
+        if request.body.len() > MAX_REQUEST_BODY_BYTES && !refused_by_policy {
+            let refused = ApiError::detail(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("The request body is over {MAX_REQUEST_BODY_BYTES} bytes."),
+            );
+            return response_parts(refused.into_response()).await;
+        }
         let routed = match http_request(request, grant) {
             Ok(routed) => routed,
             Err(refused) => return response_parts(refused.into_response()).await,
@@ -308,6 +295,48 @@ impl MonitoringHandler {
             Err(never) => match never {},
         };
         response_parts(response).await
+    }
+}
+
+/// The access that a request needs, from its method and its path inside the
+/// mount, as the routes of the Python app guard them: every read route and
+/// the event stream need `can_view`; `/api/meta` asks `can_act` to report
+/// it; an action route needs `can_view` and `can_act`, or only `can_view`
+/// while actions are disabled (`actions_enabled` false: the act guard
+/// refuses without asking). Every other path is public. Pure.
+pub fn route_access(actions_enabled: bool, method: &Method, path: &str) -> RouteAccess {
+    let segments: Vec<&str> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
+    let action = match actions_enabled {
+        true => AccessNeed::ViewAndAct,
+        false => AccessNeed::View,
+    };
+    // A HEAD request is served by the GET route, with its guards.
+    let verb = match method.as_str() {
+        "HEAD" => "GET",
+        other => other,
+    };
+    let need = match (verb, segments.as_slice()) {
+        ("GET", ["api", "meta"]) => AccessNeed::ViewReportAct,
+        ("GET", ["api", "events"]) => {
+            return RouteAccess {
+                need: AccessNeed::View,
+                form: ResponseForm::EventStream,
+            }
+        }
+        ("GET", ["api", "tasks" | "workflows" | "workers"]) => AccessNeed::View,
+        ("GET", ["api", "tasks" | "workflows", id]) if named(id) => AccessNeed::View,
+        ("GET", ["api", "workflows", id, "tasks", index]) if named(id) && named(index) => {
+            AccessNeed::View
+        }
+        ("GET", ["api", "workers", "ping" | "schedules" | "classes"]) => AccessNeed::View,
+        ("GET", ["api", "workers", id, "history"]) if named(id) => AccessNeed::View,
+        ("POST", ["api", "tasks", id, "cancel"]) if named(id) => action,
+        ("POST", ["api", "workflows", id, "pause" | "resume" | "cancel"]) if named(id) => action,
+        _ => AccessNeed::Public,
+    };
+    RouteAccess {
+        need,
+        form: ResponseForm::OneResponse,
     }
 }
 

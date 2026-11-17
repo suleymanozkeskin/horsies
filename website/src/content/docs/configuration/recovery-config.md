@@ -16,23 +16,7 @@ Tasks can become stale when:
 
 Horsies automatically detects and recovers these tasks.
 
-## Basic Usage
-
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-from horsies.core.models.recovery import RecoveryConfig
-
-config = AppConfig(
-    broker=PostgresConfig(...),
-    recovery=RecoveryConfig(
-        auto_requeue_stale_claimed=True,
-        claimed_stale_threshold_ms=120_000,
-        auto_fail_stale_running=True,
-        running_stale_threshold_ms=300_000,
-        finalizing_stale_threshold_ms=300_000,
-    ),
-)
-```
+The settings are the `recovery` section of the app config. The API is on the client pages: [Recovery Configuration](/horsies/configuration/app-config/#recovery-configuration) (Python) and [AppConfig](/horsies/rust/configuration/app-config/#appconfig) (Rust).
 
 ## Fields
 
@@ -159,15 +143,7 @@ For the heartbeat timing rules, CPU-heavy tasks and quick tasks, see
 
 ## Validation
 
-The config validates that thresholds are safe:
-
-```python
-# This raises ConfigurationError (HRS-204):
-RecoveryConfig(
-    runner_heartbeat_interval_ms=30_000,
-    running_stale_threshold_ms=60_000,  # Must be >= 64_000: 2 x (30s + 2s)
-)
-```
+A config that breaks a rule of [Threshold Guidelines](#threshold-guidelines) is refused with `HRS-204`. The refusal names the fields and the smallest valid value. See the example in [Rule: Thresholds Hold the Heartbeats](/horsies/workers/heartbeats-recovery/#rule-thresholds-hold-the-heartbeats).
 
 ## Retention
 
@@ -183,14 +159,7 @@ names its new home; there is no alias.
 
 ## Disabling Recovery
 
-To disable automatic recovery (not recommended):
-
-```python
-RecoveryConfig(
-    auto_requeue_stale_claimed=False,
-    auto_fail_stale_running=False,
-)
-```
+To disable automatic recovery (not recommended), set `auto_requeue_stale_claimed` and `auto_fail_stale_running` to false. See [Disable Recovery](/horsies/configuration/app-config/#disable-recovery) (Python).
 
 Tasks will remain stuck until manually resolved.
 

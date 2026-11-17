@@ -13,7 +13,7 @@ use serde::Serialize;
 static EMBEDDED_UI: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/webui-dist");
 
 pub const ASSETS_MISSING_DETAIL: &str = "horsies web UI assets are not built. \
-     Run: cd webui && bun install && bun run build:core, then rebuild horsies-core";
+     Run: cd webui && bun install && bun run build, then rebuild horsies-core";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MonitoringUiConfig {

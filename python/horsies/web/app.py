@@ -2,56 +2,53 @@
 # Route handlers are registered by their decorator, not called by name.
 """FastAPI application factory for the monitoring UI.
 
-The app is a thin HTTP skin: every read goes through ``horsies.monitoring``
-and every action through its task or workflow primitive. What lives here is
-transport — authorization enforcement, status-code mapping, the event stream,
-and serving the single-page app.
+The app mounts the core's monitoring handler (``horsies._core.MonitoringHandler``):
+every route, guard, read cache, the schema gate, the event stream and the
+page run in the core. What lives here is the user's authorization policy,
+which only Python can call. For each request the app asks the handler which
+verdicts the request needs, calls the policy for those and no other, and
+passes the verdicts with the request.
 
-Mounting anywhere works because the SPA is told its own base path per request
-from the ASGI ``root_path`` rather than at build time.
+Mounting anywhere works because the page is told its own base path per
+request from the ASGI ``root_path`` rather than at build time.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import re
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Final, Literal, assert_never
+from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from horsies import __version__
+from horsies._core import (
+    AccessGrant,
+    EventFrame,
+    EventStream,
+    EventStreamEnded,
+    EventStreamRefused,
+    MonitoringHandler,
+    MonitoringRequest,
+    MonitoringResponse,
+)
 from horsies.core.app import Horsies
-from horsies.core.logging import get_logger
-from horsies.core.utils.url import to_psycopg_url
-from horsies.web.auth import MonitoringAuthPolicy, act_guard, view_guard
-from horsies.web.events import EventBroadcaster
-from horsies.web.routes import actions, events, tasks, workers, workflows
-from horsies.web.routes._common import INVALID_INPUT, InvalidInput
-from horsies.web.read_cache import TaskReadCaches
-from horsies.web.schema import (
-    SCHEMA_INCOMPATIBLE,
-    SCHEMA_UNKNOWN,
-    SchemaIncompatible,
-    SchemaProbe,
-    SchemaState,
-    schema_guard,
-)
+from horsies.web.auth import INTENT_HEADER, MonitoringAuthPolicy
+from horsies.web.schema import SchemaState
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), 'static')
-INDEX_FILE = 'index.html'
+EVENT_HEARTBEAT_MS: Final = 15_000
+"""How long an event stream waits without an event before it sends a
+heartbeat frame, which keeps an intermediary proxy from closing it."""
 
-ASSETS_MISSING_DETAIL = (
-    'horsies web UI assets are not built. '
-    'Run: cd webui && bun install && bun run build'
-)
+SERVED_METHODS: Final = ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS')
+"""The methods that reach the handler: every route of the app answers in the
+core, a method that no route takes included (405)."""
 
-_HEAD_CLOSE = re.compile(r'</head\s*>', re.IGNORECASE)
-
-logger = get_logger('web')
+type Verdict = Literal['ALLOWED', 'REFUSED']
+"""The answer of one call of the user's policy."""
 
 
 class MonitoringUIConfig(BaseModel):
@@ -67,7 +64,8 @@ class MonitoringUIConfig(BaseModel):
 
 
 class MetaResponse(BaseModel):
-    """What the SPA needs on boot to decide what to render.
+    """What the SPA needs on boot to decide what to render: the body of
+    ``GET /api/meta``.
 
     ``actions_enabled`` is the server's verdict — the deployment's own switch
     ANDed with schema compatibility — while ``can_act`` is this caller's
@@ -88,56 +86,190 @@ class MetaResponse(BaseModel):
     actions_disabled_reason: str | None
 
 
-def _disabled_reason(state: SchemaState) -> str | None:
-    """Why actions are off, distinguishing an unknown schema from a foreign one."""
-    match state:
-        case SchemaState.MATCH:
-            return None
-        case SchemaState.UNKNOWN:
-            return SCHEMA_UNKNOWN
-        case SchemaState.MISMATCH | SchemaState.ABSENT | SchemaState.ZERO_X:
-            return SCHEMA_INCOMPATIBLE
+class MonitoringEvents:
+    """The event layer of one monitoring app (``monitoring_app.state.events``).
 
-
-def _ui_config(root_path: str) -> dict[str, str]:
-    """The runtime config injected into the served page."""
-    return {
-        'basePath': root_path or '/',
-        'apiBase': f'{root_path}/api',
-    }
-
-
-def _read_index() -> str | None:
-    """Read the built page once, or None when the build is absent."""
-    path = os.path.join(STATIC_DIR, INDEX_FILE)
-    if not os.path.isfile(path):
-        return None
-    with open(path, encoding='utf-8') as handle:
-        return handle.read()
-
-
-def _base_href(root_path: str) -> str:
-    """The directory every relative asset URL resolves against.
-
-    The SPA builds with a relative base, so a deep link served at a path
-    without a trailing slash would otherwise resolve its assets against the
-    wrong directory. The trailing slash is what makes this a directory.
+    ``close`` ends every open event stream of the app after its degraded
+    frame. The app's lifespan calls it at shutdown; a host process or a test
+    can call it without waiting for the lifespan.
     """
-    return f'{root_path}/' if root_path else '/'
+
+    def __init__(self, handler: MonitoringHandler) -> None:
+        self._handler = handler
+
+    async def close(self) -> None:
+        """End every event stream of the app. Runs to its end when the caller leaves."""
+        await self._handler.close_events_async()
 
 
-def _inject(index_html: str, root_path: str, custom_css_url: str | None) -> str:
-    """Put the base path, runtime config, and any adopter stylesheet into the page."""
-    block = (
-        f'<base href="{_base_href(root_path)}">'
-        f'<script>window.__HORSIES_UI__ = '
-        f'{json.dumps(_ui_config(root_path), allow_nan=False)}</script>'
+def path_inside_mount(scope: Mapping[str, Any]) -> str:
+    """The request path inside the mount, percent-encoded as it came on the wire.
+
+    The ASGI ``raw_path`` holds the whole path, the mount path included; the
+    mount path (``root_path``) is cut as Starlette cuts it from ``path``. A
+    scope without ``raw_path`` gives ``path`` encoded again. Pure.
+    """
+    root_path: str = scope.get('root_path', '')
+    raw_path: object = scope.get('raw_path')
+    match raw_path:
+        case bytes():
+            path = raw_path.decode('latin-1')
+        case _:
+            path = quote(str(scope['path']))
+    if not root_path or not path.startswith(root_path):
+        return path or '/'
+    if path == root_path:
+        return '/'
+    if path[len(root_path)] == '/':
+        return path[len(root_path) :]
+    return path
+
+
+def _verdict(answer: object) -> Verdict:
+    """A policy answer as a verdict: a true value allows. Pure."""
+    match bool(answer):
+        case True:
+            return 'ALLOWED'
+        case False:
+            return 'REFUSED'
+
+
+async def ask_policy(
+    need: Literal['PUBLIC', 'VIEW', 'VIEW_REPORT_ACT', 'VIEW_AND_ACT'],
+    policy: MonitoringAuthPolicy,
+    request: Request,
+) -> AccessGrant:
+    """Call the user's policy for the verdicts that ``need`` names, in order.
+
+    ``can_act`` is asked only after ``can_view`` allowed. Effects: the calls
+    of the user's policy. A policy that raises raises here.
+    """
+    match need:
+        case 'PUBLIC':
+            return AccessGrant(view='NOT_ASKED', act='NOT_ASKED')
+        case 'VIEW':
+            return AccessGrant(
+                view=_verdict(await policy.can_view(request)), act='NOT_ASKED',
+            )
+        case 'VIEW_REPORT_ACT' | 'VIEW_AND_ACT':
+            match _verdict(await policy.can_view(request)):
+                case 'REFUSED':
+                    return AccessGrant(view='REFUSED', act='NOT_ASKED')
+                case 'ALLOWED':
+                    return AccessGrant(
+                        view='ALLOWED', act=_verdict(await policy.can_act(request)),
+                    )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def read_bounded_body(request: Request, bound: int) -> bytes:
+    """The request body, read up to ``bound + 1`` bytes.
+
+    A body over ``bound`` stops the read; the handler refuses it with 413.
+    """
+    chunks: list[bytes] = []
+    read = 0
+    async for chunk in request.stream():
+        chunks.append(chunk)
+        read += len(chunk)
+        if read > bound:
+            break
+    return b''.join(chunks)[: bound + 1]
+
+
+def to_starlette_response(response: MonitoringResponse) -> Response:
+    """The handler's response as a Starlette response. Starlette writes the
+    content length of the body. Pure."""
+    sent = Response(content=response.body, status_code=response.status)
+    for name, value in response.headers:
+        match name:
+            case 'content-length':
+                pass
+            case _:
+                sent.headers.append(name, value)
+    return sent
+
+
+async def stream_frames(stream: EventStream) -> AsyncIterator[str]:
+    """The frames of an event stream until it ends. The stream is closed when
+    the client leaves."""
+    try:
+        while True:
+            match await stream.next_async():
+                case EventFrame(text=text):
+                    yield text
+                case EventStreamEnded():
+                    return
+    finally:
+        stream.close()
+
+
+async def one_frame(frame: str) -> AsyncIterator[str]:
+    """One frame, then the end."""
+    yield frame
+
+
+async def event_stream_response(handler: MonitoringHandler) -> StreamingResponse:
+    """The event stream of one client, after an allowed view."""
+    match await handler.subscribe_events_async():
+        case EventStream() as stream:
+            frames = stream_frames(stream)
+        case EventStreamRefused(frame=frame):
+            frames = one_frame(frame)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return StreamingResponse(
+        frames,
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
     )
-    if custom_css_url is not None:
-        block += f'<link rel="stylesheet" href="{custom_css_url}">'
 
-    replaced, count = _HEAD_CLOSE.subn(f'{block}</head>', index_html, count=1)
-    return replaced if count else index_html + block
+
+async def one_response(
+    handler: MonitoringHandler,
+    request: Request,
+    path: str,
+    grant: AccessGrant,
+) -> Response:
+    """The handler's one response to a request with its verdicts."""
+    query = bytes(request.scope.get('query_string', b'')).decode('latin-1')
+    answer = await handler.handle_async(
+        MonitoringRequest(
+            method=request.method,
+            path=path,
+            raw_query=query or None,
+            intent_header=request.headers.get(INTENT_HEADER),
+            content_type=request.headers.get('content-type'),
+            body=await read_bounded_body(request, handler.max_request_body_bytes),
+            base_path=str(request.scope.get('root_path', '')),
+            grant=grant,
+        ),
+    )
+    return to_starlette_response(answer)
+
+
+async def serve_request(
+    handler: MonitoringHandler,
+    policy: MonitoringAuthPolicy,
+    request: Request,
+) -> Response:
+    """Answer one request: the policy's verdicts, then the handler's answer.
+
+    The event stream opens only after an allowed view; a refused view of it
+    is the handler's 403.
+    """
+    path = path_inside_mount(request.scope)
+    access = handler.route_access(request.method, path)
+    grant = await ask_policy(access.need, policy, request)
+    match access.form:
+        case 'EVENT_STREAM' if grant.view == 'ALLOWED':
+            return await event_stream_response(handler)
+        case 'EVENT_STREAM' | 'ONE_RESPONSE':
+            return await one_response(handler, request, path, grant)
 
 
 def create_monitoring_app(
@@ -159,17 +291,19 @@ def create_monitoring_app(
     """
     broker = app.get_broker()
     ui_config = config or MonitoringUIConfig()
-    schema_probe = SchemaProbe(broker)
-    broadcaster = EventBroadcaster(
-        to_psycopg_url(broker.config.effective_session_database_url),
-        tcp_user_timeout_ms=broker.config.tcp_user_timeout_ms,
+    handler = MonitoringHandler(
+        broker._core_handle,  # pyright: ignore[reportPrivateUsage]
+        actions_enabled=actions_enabled,
+        custom_css_url=ui_config.custom_css_url,
+        client_version=__version__,
+        heartbeat_ms=EVENT_HEARTBEAT_MS,
     )
-    index_html = _read_index()
+    events = MonitoringEvents(handler)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         yield
-        await broadcaster.close()
+        await events.close()
 
     monitoring_app = FastAPI(
         title='horsies monitoring',
@@ -181,124 +315,15 @@ def create_monitoring_app(
 
     # Exposed so a host process (or a test) can shut the event layer down
     # without waiting for the ASGI lifespan to run.
-    monitoring_app.state.events = broadcaster
+    monitoring_app.state.events = events
 
-    view_only = Depends(view_guard(auth_policy))
-    may_act = Depends(act_guard(auth_policy, actions_enabled=actions_enabled))
-
-    @monitoring_app.exception_handler(SchemaIncompatible)
-    async def _on_schema_incompatible(request: Request, exc: Exception) -> JSONResponse:
-        """Render the action refusal a foreign schema produces."""
-        detail = exc.detail if isinstance(exc, SchemaIncompatible) else str(exc)
-        code = exc.code if isinstance(exc, SchemaIncompatible) else SCHEMA_INCOMPATIBLE
-        logger.warning(
-            f'monitoring action refused path={request.url.path} '
-            f'http=409 result={code}'
-        )
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={'code': code, 'detail': detail},
-        )
-
-    @monitoring_app.exception_handler(InvalidInput)
-    async def _on_invalid_input(request: Request, exc: Exception) -> JSONResponse:
-        """Render request text refused before any read: 400 ``INVALID_INPUT``."""
-        match exc:
-            case InvalidInput(refused=refused):
-                logger.info(
-                    f'monitoring request refused path={request.url.path} '
-                    f'http=400 result={INVALID_INPUT}'
-                )
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={'code': INVALID_INPUT, 'detail': refused.detail},
-                )
-            case _:
-                raise AssertionError(
-                    f'invalid input handler got {type(exc).__name__}; it is '
-                    'registered for InvalidInput only',
-                )
-
-    @monitoring_app.get('/api/meta', dependencies=[view_only])
-    async def read_meta(request: Request) -> MetaResponse:
-        """Version, schema verdict, and this caller's action verdict."""
-        schema = await schema_probe.status()
-        return MetaResponse(
-            horsies_version=__version__,
-            base_path=request.scope.get('root_path', '') or '/',
-            actions_enabled=actions_enabled and schema.compatible,
-            can_act=await auth_policy.can_act(request),
-            schema_version=schema.version,
-            expected_schema_version=schema.expected_version,
-            schema_compatible=schema.compatible,
-            schema_state=schema.state,
-            actions_disabled_reason=_disabled_reason(schema.state),
-        )
-
-    monitoring_app.include_router(
-        tasks.build_router(broker, caches=TaskReadCaches()),
-        prefix='/api',
-        dependencies=[view_only],
+    # One route takes every path: the page, its assets, the API and its 404s
+    # are the handler's.
+    @monitoring_app.api_route(
+        '/{full_path:path}', methods=list(SERVED_METHODS), include_in_schema=False,
     )
-    monitoring_app.include_router(
-        workflows.build_router(broker), prefix='/api', dependencies=[view_only]
-    )
-    monitoring_app.include_router(
-        workers.build_router(app, broker), prefix='/api', dependencies=[view_only]
-    )
-    monitoring_app.include_router(
-        events.build_router(broadcaster), prefix='/api', dependencies=[view_only]
-    )
-    # The schema gate sits after the authorization gates: an unauthorized
-    # caller learns nothing about the database, and an authorized one is
-    # refused regardless of what its policy permits.
-    monitoring_app.include_router(
-        actions.build_router(broker),
-        prefix='/api',
-        dependencies=[view_only, may_act, Depends(schema_guard(schema_probe))],
-    )
-
-    # Registered last so it never shadows an API route. Static assets carry no
-    # data and are served without the authorization dependency; an
-    # unauthorized viewer receives the shell and then the not-authorized state
-    # its first /api/meta call produces.
-    @monitoring_app.get('/{full_path:path}', include_in_schema=False)
-    async def serve_spa(request: Request, full_path: str) -> Any:
-        """Serve a built asset, or the page itself for any client-side route."""
-        if full_path == 'api' or full_path.startswith('api/'):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail='Not found.'
-            )
-        if index_html is None:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={'detail': ASSETS_MISSING_DETAIL},
-            )
-
-        asset = _resolve_asset(full_path)
-        if asset is not None:
-            return FileResponse(asset)
-        return HTMLResponse(
-            _inject(
-                index_html,
-                request.scope.get('root_path', ''),
-                ui_config.custom_css_url,
-            )
-        )
+    async def serve(request: Request) -> Response:
+        """Answer one request through the handler."""
+        return await serve_request(handler, auth_policy, request)
 
     return monitoring_app
-
-
-def _resolve_asset(relative_path: str) -> str | None:
-    """Resolve a request path to a built file inside the static tree.
-
-    Returns None for the page itself and for anything that is not a real file
-    under the static directory, including paths that try to escape it.
-    """
-    if not relative_path or relative_path == INDEX_FILE:
-        return None
-    candidate = os.path.realpath(os.path.join(STATIC_DIR, relative_path))
-    root = os.path.realpath(STATIC_DIR)
-    if not candidate.startswith(root + os.sep):
-        return None
-    return candidate if os.path.isfile(candidate) else None

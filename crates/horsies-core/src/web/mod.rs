@@ -12,18 +12,23 @@ mod schema;
 mod spa;
 mod task_stats_cache;
 
+pub use crate::monitoring::ResumeChildren;
 pub use app::{create_monitoring_router, MetaResponse};
 pub use auth::{
     AllowAll, MonitoringAuthPolicy, MonitoringRequest, TrustedHeader, ViewOnly, INTENT_HEADER,
     INTENT_VALUE,
 };
+/// The HTTP types of the handler's request and response parts.
+pub use axum::body::Bytes;
+pub use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 pub use events::{
-    EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS, DEBOUNCE, HEARTBEAT,
-    MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
+    EventBroadcaster, EventCoalescer, EventFrames, EventStreamItem, TopicEvent, CHANNEL_TOPICS,
+    DEBOUNCE, DEGRADED_FRAME, HEARTBEAT, HEARTBEAT_FRAME, MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
 };
 pub use handler::{
-    AccessGrant, AccessNeed, MonitoringHandler, MonitoringHandlerConfig, RequestParts,
-    ResponseForm, ResponseParts, RouteAccess, Verdict, WorkflowResumeContext, MAX_RESPONSE_BYTES,
+    route_access, AccessGrant, AccessNeed, MonitoringHandler, MonitoringHandlerConfig,
+    RequestParts, ResponseForm, ResponseParts, RouteAccess, Verdict, MAX_REQUEST_BODY_BYTES,
+    MAX_RESPONSE_BYTES,
 };
 pub use schema::{
     SchemaIncompatible, SchemaProbe, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,

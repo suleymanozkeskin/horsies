@@ -14,7 +14,7 @@ An ASGI application runs endpoint code on an event loop. Horsies has a sync form
 
 Read this page when a web framework (FastAPI, Starlette, or another ASGI framework) sends tasks or starts workflows.
 
-The sync forms block their thread. On a thread that runs an event loop, the block would stop every coroutine on that loop. For this reason the sync forms refuse to run there. See [Async Code and Jupyter](/horsies/configuration/broker-config/#async-code-and-jupyter) for the full table of sync calls and their `ASYNC_CONTEXT` results.
+The sync forms block their thread. On a thread that runs an event loop, the block would stop every coroutine on that loop. For this reason the sync forms refuse to run there. See [Async Code and Jupyter](/horsies/configuration/broker-connections/#async-code-and-jupyter) for the full table of sync calls and their `ASYNC_CONTEXT` results.
 
 ## How To
 
@@ -84,7 +84,7 @@ def welcome_blocking(address: str) -> dict[str, str]:
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```
 
-Sends and result reads of both forms use the one core pool of the broker. A workflow start opens connections in the resource set of its loop: the server's event loop for the async form, the runner loop for the sync form. See [Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling).
+Sends and result reads of both forms use the one core pool of the broker. A workflow start opens connections in the resource set of its loop: the server's event loop for the async form, the runner loop for the sync form. See [Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling).
 
 ## The Event-Loop Limit
 
@@ -92,7 +92,7 @@ A workflow start and a workflow resume use one broker resource set (pools and a 
 
 A workflow start or resume from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that call. Nothing runs. The error clears when one of the open loops closes.
 
-An ASGI server such as uvicorn runs one loop for each process, so a server stays far below the limit. The limit matters for code that creates loops itself, and for test runs. See [Event Loops](/horsies/configuration/broker-config/#event-loops).
+An ASGI server such as uvicorn runs one loop for each process, so a server stays far below the limit. The limit matters for code that creates loops itself, and for test runs. See [Event Loops](/horsies/configuration/broker-connections/#event-loops).
 
 ## Things to Avoid
 

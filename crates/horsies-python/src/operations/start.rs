@@ -217,6 +217,16 @@ mod tests {
     fn a_run_with_no_deadline_has_an_open_window() {
         assert_eq!(start_window(None), StartWindow::Open);
         assert!(matches!(start_window(Some(1_000)), StartWindow::Until(_)));
-        assert_eq!(start_window(Some(u64::MAX)), StartWindow::Open);
+        // `u64::MAX` ms is about 1.8e16 s. Where `Instant` holds that much
+        // (an `i64` of seconds on macOS and Linux) the window ends that far
+        // ahead; where the sum overflows, the window is open. In both cases
+        // no run sees it close.
+        let longer_than_any_run = Duration::from_secs(1_000 * 365 * 24 * 3_600);
+        match start_window(Some(u64::MAX)) {
+            StartWindow::Open => {}
+            StartWindow::Until(deadline) => {
+                assert!(deadline > Instant::now() + longer_than_any_run);
+            }
+        }
     }
 }

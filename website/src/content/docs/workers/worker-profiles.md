@@ -100,6 +100,241 @@ io_profile = WorkerProfile(
 )
 ```
 
+### Run Shared Tasks
+
+A worker runs `SHARED_ASYNC` tasks on shared async children and `SHARED_THREAD` tasks on shared thread children. What runs where, the timeouts and the rules for task authors are on [Shared Async Tasks](/horsies/workers/shared-async-tasks/) and [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
+
+```python
+import asyncio
+
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    Execution,
+    Horsies,
+    IsolatedChildren,
+    PostgresConfig,
+    SharedAsyncChildren,
+    TaskError,
+    TaskResult,
+    WorkerProfile,
+)
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
+    ),
+    worker_profiles={
+        'io': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_async=SharedAsyncChildren(count=4, seats=25),
+        ),
+    },
+))
+
+
+@app.task(
+    'fetch_quote',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=10_000,
+    cancel_grace_ms=2_000,
+)
+async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+    await asyncio.sleep(0.1)
+    return TaskResult(ok=symbol)
+```
+
+```bash
+horsies worker myapp.instance:app --profile io
+```
+
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats.
+
+```python
+import hashlib
+
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    Execution,
+    Horsies,
+    IsolatedChildren,
+    PostgresConfig,
+    SharedThreadChildren,
+    TaskError,
+    TaskResult,
+    WorkerProfile,
+)
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
+    ),
+    worker_profiles={
+        'files': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_thread=SharedThreadChildren(count=2, seats=4),
+        ),
+    },
+))
+
+
+@app.task('digest_file', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
+def digest_file(*, path: str) -> TaskResult[str, TaskError]:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        for block in iter(lambda: source.read(1 << 20), b''):
+            digest.update(block)
+    return TaskResult(ok=digest.hexdigest())
+```
+
+```bash
+horsies worker myapp.instance:app --profile files
+```
+
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. The fields are in [`SharedAsyncChildren`](#sharedasyncchildren) and [`SharedThreadChildren`](#sharedthreadchildren).
+
+### Mix the Modes
+
+One app with three profiles, and one task of each mode. Which child runs each task, per profile, is on [Profile Examples](/horsies/workers/execution-modes/#profile-examples).
+
+```python
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    Horsies,
+    IsolatedChildren,
+    PostgresConfig,
+    SharedAsyncChildren,
+    SharedThreadChildren,
+    WorkerProfile,
+)
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
+    ),
+    worker_profiles={
+        # Every task in an isolated child
+        'default': WorkerProfile(isolated=IsolatedChildren(count=8)),
+        # Network waits on 4 x 25 = 100 seats; other tasks in 2 isolated children
+        'io': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_async=SharedAsyncChildren(count=4, seats=25),
+        ),
+        # C code that releases the GIL, on a machine with 8 CPUs: 2 x 4 = 8 seats
+        'compute': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_thread=SharedThreadChildren(count=2, seats=4),
+        ),
+    },
+))
+```
+
+One task of each mode:
+
+```python
+import asyncio
+import zlib
+
+from horsies import Execution, TaskError, TaskResult
+
+
+@app.task('fetch_rate', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def fetch_rate(*, currency: str) -> TaskResult[str, TaskError]:
+    await asyncio.sleep(0.1)  # stands in for an HTTP call with its own timeout
+    return TaskResult(ok=currency)
+
+
+@app.task('compress_report', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
+def compress_report(*, text: str) -> TaskResult[int, TaskError]:
+    return TaskResult(ok=len(zlib.compress(text.encode(), level=6)))
+
+
+@app.task('render_invoice')
+def render_invoice(*, invoice_id: int) -> TaskResult[str, TaskError]:
+    return TaskResult(ok=f'invoice-{invoice_id}.pdf')
+```
+
+```bash
+horsies worker myapp.instance:app --profile io
+```
+
+## Recycling
+
+`IsolatedRecycle` sets when an isolated child is replaced: `after` a number of tasks, `above` a resident memory size, or both. What each limit does, and how to choose them, is on [Process Recycling](/horsies/workers/concurrency/#process-recycling) and [Memory Recycling](/horsies/workers/concurrency/#memory-recycling).
+
+```python
+# The default is 100; raise it for high-throughput or connection-constrained apps
+recycle_after_500 = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=TaskLimit(tasks=500)),
+    ),
+)
+
+# Disable recycling entirely
+no_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=NoTaskLimit()),
+    ),
+)
+```
+
+```python
+# Recycle any child once its RSS reaches 200 MB
+memory_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(above=MemoryLimit(mb=200)),
+    ),
+)
+
+# Combine with count recycling: a child recycles when either limit is reached
+count_and_memory = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(
+            after=TaskLimit(tasks=500),
+            above=MemoryLimit(mb=200),
+        ),
+    ),
+)
+```
+
+Memory only: disable count recycling explicitly, or its default `TaskLimit(tasks=100)` still applies.
+
+```python
+memory_only = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=NoTaskLimit(), above=MemoryLimit(mb=180)),
+    ),
+)
+```
+
+## Claim Limits
+
+`ClaimLimits` caps the claims of a worker. What each limit does is on [Claiming Controls](/horsies/workers/concurrency/#claiming-controls).
+
+```python
+fair_batches = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4)),
+)
+```
+
+```python
+few_claimed = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=4)),
+)
+```
+
 ## Connection Pools and the Default Executor
 
 A profile sizes three kinds of connection pools:
@@ -575,6 +810,18 @@ claim_at_capacity = WorkerProfile(
 ```
 
 **Don't size the memory limits for one machine and ignore the boot warning on another.** The warning names the sum, the usable memory of the worker that started, and its source.
+
+**Don't set `PSYCOPG_IMPL` in a `.env` file that the app loads.** `ChildPreload.LIBRARY` and `ChildPreload.APP` import psycopg, SQLAlchemy and pydantic before the app runs, so `load_dotenv()` in the app is too late. See [Things to Avoid](/horsies/workers/worker-architecture/#things-to-avoid) of Worker Architecture.
+
+```bash
+# Wrong: in a .env file that the app loads
+PSYCOPG_IMPL=binary
+
+# Correct: in the environment of the worker process
+PSYCOPG_IMPL=binary horsies worker myapp.instance:app --profile default
+```
+
+Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NONE`.
 
 ## Migrating from Worker Flags
 

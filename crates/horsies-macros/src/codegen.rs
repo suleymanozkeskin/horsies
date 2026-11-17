@@ -32,13 +32,24 @@ struct Param {
 /// How the parameters after an optional `TaskRuntime` form the input.
 #[derive(Clone)]
 enum InputShape {
-    /// No parameter: the input is `()`, sent as `null`.
-    Unit,
-    /// One parameter: its type is the input.
-    Direct(Param),
-    /// Several parameters, or one that a workflow fills from a dependency
-    /// result: a generated `Input` struct with one field per parameter.
+    /// No parameter, or one parameter of type `()`: the input is `()`, sent
+    /// as `null`; a workflow node gives `{}`.
+    Unit(UnitParameter),
+    /// One or more parameters, any one that is not a single `()`: a
+    /// generated `Input` struct with one field per parameter, keyed by the
+    /// parameter's name, as Python stores each keyword argument. A single
+    /// struct parameter is wrapped too: `fn f(order: Order)` stores
+    /// `{"order": {...}}`.
     Wrapped(Vec<Param>),
+}
+
+/// The parameter of a task whose input is `()`.
+#[derive(Clone)]
+enum UnitParameter {
+    /// The function takes no input parameter.
+    Absent,
+    /// The function takes one parameter of type `()`; the body passes `()`.
+    Given(Param),
 }
 
 #[derive(Clone)]
@@ -351,8 +362,8 @@ fn registered_task(
             .in_module(::horsies::__private::parent_module(::std::module_path!()))
     };
     let validate_call = match &signature.input {
-        InputShape::Unit => quote! { ::horsies::__private::decode_unit_input(input) },
-        InputShape::Direct(_) | InputShape::Wrapped(_) => quote! {
+        InputShape::Unit(_) => quote! { ::horsies::__private::decode_unit_input(input) },
+        InputShape::Wrapped(_) => quote! {
             ::horsies::__private::check_input::<#input>(input)
         },
     };
@@ -423,19 +434,18 @@ fn registered_task(
 
 /// The decode of `input` (a byte slice or a vector in scope) into the
 /// bindings that the call takes. A refusal returns the stored error. A task
-/// with no parameters reads `null` (a send) and `{}` (a workflow node).
+/// whose input is `()` reads `null` (a send) and `{}` (a workflow node).
 fn decode_statement(signature: &Signature, input_type: &Type) -> TokenStream {
     let pattern = match &signature.input {
-        InputShape::Unit => quote! { () },
-        InputShape::Direct(_) => quote! { decoded },
+        InputShape::Unit(_) => quote! { () },
         InputShape::Wrapped(params) => {
             let names = params.iter().map(|param| &param.ident);
             quote! { Input { #(#names),* } }
         }
     };
     let decode = match &signature.input {
-        InputShape::Unit => quote! { ::horsies::__private::decode_unit_input(&input) },
-        InputShape::Direct(_) | InputShape::Wrapped(_) => {
+        InputShape::Unit(_) => quote! { ::horsies::__private::decode_unit_input(&input) },
+        InputShape::Wrapped(_) => {
             quote! { ::horsies::__private::decode_input::<#input_type>(&input) }
         }
     };
@@ -456,8 +466,8 @@ fn call_expression(signature: &Signature, fn_name: &syn::Ident) -> TokenStream {
         false => vec![],
     };
     let input: Vec<TokenStream> = match &signature.input {
-        InputShape::Unit => vec![],
-        InputShape::Direct(_) => vec![quote! { decoded }],
+        InputShape::Unit(UnitParameter::Absent) => vec![],
+        InputShape::Unit(UnitParameter::Given(_)) => vec![quote! { () }],
         InputShape::Wrapped(params) => params
             .iter()
             .map(|param| param.ident.to_token_stream())
@@ -520,8 +530,8 @@ fn params_module(signature: &Signature) -> TokenStream {
 /// The parameters of the send helpers: the task's input parameters.
 fn send_params(signature: &Signature) -> TokenStream {
     let params: Vec<&Param> = match &signature.input {
-        InputShape::Unit => vec![],
-        InputShape::Direct(param) => vec![param],
+        InputShape::Unit(UnitParameter::Absent) => vec![],
+        InputShape::Unit(UnitParameter::Given(param)) => vec![param],
         InputShape::Wrapped(params) => params.iter().collect(),
     };
     let params = params.iter().map(|param| {
@@ -535,8 +545,8 @@ fn send_params(signature: &Signature) -> TokenStream {
 /// The input value from the send helper's parameters.
 fn build_input(signature: &Signature) -> TokenStream {
     match &signature.input {
-        InputShape::Unit => quote! { () },
-        InputShape::Direct(param) => param.ident.to_token_stream(),
+        InputShape::Unit(UnitParameter::Absent) => quote! { () },
+        InputShape::Unit(UnitParameter::Given(param)) => param.ident.to_token_stream(),
         InputShape::Wrapped(params) => {
             let names = params.iter().map(|param| &param.ident);
             quote! { Input { #(#names),* } }
@@ -565,8 +575,9 @@ fn check_execution_fits(attrs: &TaskAttrs, kind: BodyKind) -> syn::Result<()> {
 
 /// The shape of the signature. Refuses a method, generics, lifetimes, an
 /// `async fn` under `#[blocking_task]` and a `fn` under `#[task]`, a missing
-/// return type, a `TaskRuntime` that is not the first parameter, and a
-/// parameter that is not a plain name.
+/// return type, a `TaskRuntime` that is not the first parameter, a
+/// parameter that is not a plain name, and a `_` parameter whose value is
+/// stored (any but a single `()`).
 fn validate_signature(func: &ItemFn, kind: BodyKind) -> syn::Result<Signature> {
     let sig = &func.sig;
     if let Some(receiver) = sig.inputs.iter().find_map(|argument| match argument {
@@ -624,22 +635,35 @@ fn validate_signature(func: &ItemFn, kind: BodyKind) -> syn::Result<Signature> {
             "TaskRuntime is the first parameter of a task function, or absent",
         ));
     }
-    let params = user_params
-        .iter()
-        .map(|param| param_of(param))
-        .collect::<syn::Result<Vec<_>>>()?;
-    let input = match params.as_slice() {
-        [] => InputShape::Unit,
-        [param] if !is_dependency_result(&param.ty) => InputShape::Direct(param.clone()),
-        _ => InputShape::Wrapped(params),
-    };
+    let input = input_shape(&user_params)?;
     Ok(Signature {
         takes_runtime,
         input,
     })
 }
 
-fn param_of(param: &syn::PatType) -> syn::Result<Param> {
+/// The input of the parameters after an optional `TaskRuntime`, as Python
+/// stores keyword arguments: no parameter, or one of type `()`, is `()`;
+/// any other parameters are a generated `Input` struct keyed by their
+/// names, a single struct included. The rule reads only the syntax of `()`,
+/// never a type's name.
+fn input_shape(params: &[&syn::PatType]) -> syn::Result<InputShape> {
+    match params {
+        [] => Ok(InputShape::Unit(UnitParameter::Absent)),
+        [single] if is_unit_type(&single.ty) => {
+            Ok(InputShape::Unit(UnitParameter::Given(unit_param(single)?)))
+        }
+        _ => params
+            .iter()
+            .map(|param| stored_param(param))
+            .collect::<syn::Result<Vec<_>>>()
+            .map(InputShape::Wrapped),
+    }
+}
+
+/// The one `()` parameter: a plain name, or `_`. Its value is not stored,
+/// so `_` needs no key; the send helpers name it `input`.
+fn unit_param(param: &syn::PatType) -> syn::Result<Param> {
     match param.pat.as_ref() {
         Pat::Ident(pattern) => Ok(Param {
             ident: pattern.ident.clone(),
@@ -656,16 +680,48 @@ fn param_of(param: &syn::PatType) -> syn::Result<Param> {
     }
 }
 
+/// A parameter whose value the input stores under its name.
+fn stored_param(param: &syn::PatType) -> syn::Result<Param> {
+    match param.pat.as_ref() {
+        Pat::Ident(pattern) => Ok(Param {
+            ident: pattern.ident.clone(),
+            ty: (*param.ty).clone(),
+        }),
+        Pat::Wild(_) => Err(syn::Error::new_spanned(
+            &param.pat,
+            "the input stores each task parameter under its name; name this parameter (`_` is \
+             allowed only for a single `()` parameter)",
+        )),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "task function parameters are plain names",
+        )),
+    }
+}
+
 fn is_task_runtime(ty: &Type) -> bool {
     last_segment_is(ty, "TaskRuntime")
 }
 
-/// A single parameter that a workflow fills is wrapped, so that the node
-/// binds it by name: a dependency's result (`TaskOutcome<S, E>`, the
-/// receiving type of `arg_from`) or the workflow context (`WorkflowContext`,
-/// the member `workflow_ctx`).
-fn is_dependency_result(ty: &Type) -> bool {
-    last_segment_is(ty, "TaskOutcome") || last_segment_is(ty, "WorkflowContext")
+/// The deepest nesting of parentheses around `()` that [`is_unit_type`]
+/// reads through; a deeper type is not taken as `()`.
+const MAX_PAREN_DEPTH: usize = 8;
+
+/// Whether `ty` is written as `()`, inside at most [`MAX_PAREN_DEPTH`]
+/// parentheses. A type alias of `()` is not seen as `()`: the attribute
+/// reads syntax, not definitions, so such a parameter is stored under its
+/// name (`{"name": null}`).
+fn is_unit_type(ty: &Type) -> bool {
+    let mut current = ty;
+    for _level in 0..=MAX_PAREN_DEPTH {
+        match current {
+            Type::Paren(inner) => current = inner.elem.as_ref(),
+            Type::Group(inner) => current = inner.elem.as_ref(),
+            Type::Tuple(tuple) => return tuple.elems.is_empty(),
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn last_segment_is(ty: &Type, name: &str) -> bool {
@@ -682,8 +738,7 @@ fn last_segment_is(ty: &Type, name: &str) -> bool {
 /// The input, output and code types of the task.
 fn task_types(func: &ItemFn, signature: &Signature) -> syn::Result<TaskTypes> {
     let input: Type = match &signature.input {
-        InputShape::Unit => syn::parse_quote!(()),
-        InputShape::Direct(param) => param.ty.clone(),
+        InputShape::Unit(_) => syn::parse_quote!(()),
         InputShape::Wrapped(_) => syn::parse_quote!(Input),
     };
     let ReturnType::Type(_, returned) = &func.sig.output else {
@@ -778,5 +833,137 @@ fn generic_types(arguments: &PathArguments) -> Vec<&Type> {
             })
             .collect(),
         PathArguments::None | PathArguments::Parenthesized(_) => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{input_shape, InputShape, UnitParameter};
+
+    /// The parameters of `func`, as the attribute reads them.
+    fn shape_of(func: syn::ItemFn) -> syn::Result<InputShape> {
+        let params: Vec<syn::PatType> = func
+            .sig
+            .inputs
+            .into_iter()
+            .filter_map(|argument| match argument {
+                syn::FnArg::Typed(typed) => Some(typed),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect();
+        let borrowed: Vec<&syn::PatType> = params.iter().collect();
+        input_shape(&borrowed)
+    }
+
+    /// The field names of a wrapped input; `None` for a `()` input.
+    fn wrapped_names(shape: &InputShape) -> Option<Vec<String>> {
+        match shape {
+            InputShape::Unit(_) => None,
+            InputShape::Wrapped(params) => {
+                Some(params.iter().map(|param| param.ident.to_string()).collect())
+            }
+        }
+    }
+
+    #[test]
+    fn no_parameter_and_a_single_unit_parameter_are_the_unit_input() {
+        let none = shape_of(syn::parse_quote!(
+            fn f() {}
+        ))
+        .expect("no parameter");
+        assert!(matches!(none, InputShape::Unit(UnitParameter::Absent)));
+        let unit_cases: [syn::ItemFn; 3] = [
+            syn::parse_quote!(
+                fn f(_: ()) {}
+            ),
+            syn::parse_quote!(
+                fn f(nothing: ()) {}
+            ),
+            syn::parse_quote!(
+                fn f(nothing: (())) {}
+            ),
+        ];
+        for func in unit_cases {
+            let shape = shape_of(func).expect("one () parameter");
+            assert!(matches!(shape, InputShape::Unit(UnitParameter::Given(_))));
+        }
+    }
+
+    #[test]
+    fn every_other_single_parameter_is_stored_under_its_name() {
+        let single_cases: [syn::ItemFn; 8] = [
+            syn::parse_quote!(
+                fn f(order: Order) {}
+            ),
+            syn::parse_quote!(
+                fn f(order: crate::orders::Order) {}
+            ),
+            syn::parse_quote!(
+                fn f(order: Box<Order>) {}
+            ),
+            syn::parse_quote!(
+                fn f(order: OrderKind) {}
+            ),
+            syn::parse_quote!(
+                fn f(order: i64) {}
+            ),
+            syn::parse_quote!(
+                fn f(order: Option<Order>) {}
+            ),
+            syn::parse_quote!(
+                fn f(order: TaskOutcome<i64, Infallible>) {}
+            ),
+            syn::parse_quote!(
+                fn f(order: Box<()>) {}
+            ),
+        ];
+        for func in single_cases {
+            let shape = shape_of(func).expect("one parameter");
+            assert_eq!(wrapped_names(&shape), Some(vec!["order".to_owned()]));
+        }
+    }
+
+    #[test]
+    fn several_parameters_are_each_stored_under_their_names() {
+        let shape = shape_of(syn::parse_quote!(
+            fn f(order: Order, nothing: (), count: u32) {}
+        ))
+        .expect("three parameters");
+        assert_eq!(
+            wrapped_names(&shape),
+            Some(vec![
+                "order".to_owned(),
+                "nothing".to_owned(),
+                "count".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_wildcard_parameter_whose_value_is_stored_is_refused() {
+        let refused: [syn::ItemFn; 2] = [
+            syn::parse_quote!(
+                fn f(_: Order) {}
+            ),
+            syn::parse_quote!(
+                fn f(count: u32, _: ()) {}
+            ),
+        ];
+        for func in refused {
+            let error = match shape_of(func) {
+                Ok(_) => panic!("a stored `_` parameter must be refused"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("under its name"), "{error}");
+        }
+    }
+
+    #[test]
+    fn unit_inside_parentheses_past_the_depth_bound_is_stored() {
+        let deep = shape_of(syn::parse_quote!(
+            fn f(nothing: ((((((((((()))))))))))) {}
+        ))
+        .expect("one parameter");
+        assert_eq!(wrapped_names(&deep), Some(vec!["nothing".to_owned()]));
     }
 }

@@ -72,10 +72,7 @@ Each isolated child holds one task, so a failure stays with that task. A shared 
 
 ### 1. Startup
 
-```bash
-# In CLI
-horsies worker myapp.instance:app --profile default
-```
+A worker starts from the CLI of its client, with the name of a worker profile. The commands are on the client pages: [`horsies worker`](/horsies/cli/#horsies-worker) (Python) and [`worker`](/horsies/rust/cli/#worker) (Rust). The start steps:
 
 1. Load app from module
 2. Import task modules (for registry population)
@@ -86,8 +83,7 @@ horsies worker myapp.instance:app --profile default
 
 ### 2. Main Loop
 
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
+```text
 while not stopped:
     await claim_and_dispatch_all()
     await wait_for_any_notify()
@@ -269,21 +265,10 @@ See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
 Each child process:
 
 1. Reads its settings from the worker over its socket. The database URL is not in `argv`, because `ps` shows `argv`.
-2. Loads app via `_child_initializer()`
+2. Loads the app
 3. Imports task modules
 4. Populates local task registry
 5. Suppresses sends during import (prevents side effects)
-
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
-def _child_initializer(app_locator, imports):
-    app = _locate_app(app_locator)
-    set_current_app(app)
-    app.suppress_sends(True)
-    for module in imports:
-        import_module(module)
-    app.suppress_sends(False)
-```
 
 A child differs from a `multiprocessing` process:
 
@@ -469,43 +454,20 @@ A child that dies with no report names no cause, so the worker counts it as a ca
 
 ### Configuration
 
-```python
-from horsies import WorkerResilienceConfig
+The `resilience` field of the app config holds these settings. The Python example is in [Resilience Configuration](/horsies/configuration/app-config/#resilience-configuration).
 
-config = AppConfig(
-    broker=broker,
-    resilience=WorkerResilienceConfig(
-        db_retry_initial_ms=500,      # initial backoff on DB errors
-        db_retry_max_ms=30_000,       # backoff cap
-        db_retry_max_attempts=0,      # 0 = retry forever
-        notify_poll_interval_ms=5_000, # poll fallback when NOTIFY is silent
-    ),
-)
-```
-
-| Field | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `db_retry_initial_ms` | `int` | `500` | Initial backoff delay (100–60,000ms) |
-| `db_retry_max_ms` | `int` | `30000` | Maximum backoff delay (500–300,000ms) |
-| `db_retry_max_attempts` | `int` | `0` | Max retry attempts; `0` = infinite (0–10,000) |
-| `notify_poll_interval_ms` | `int` | `5000` | Poll interval when NOTIFY is silent (1,000–300,000ms) |
+| Field | Default | Description |
+| ----- | ------- | ----------- |
+| `db_retry_initial_ms` | `500` | Initial backoff delay (100–60,000ms) |
+| `db_retry_max_ms` | `30000` | Maximum backoff delay (500–300,000ms) |
+| `db_retry_max_attempts` | `0` | Max retry attempts; `0` = infinite (0–10,000) |
+| `notify_poll_interval_ms` | `5000` | Poll interval when NOTIFY is silent (1,000–300,000ms) |
 
 Backoff uses exponential growth (`initial_ms * 2^attempt`) with ±25% jitter, capped at `db_retry_max_ms`. Backoff resets after each successful loop iteration.
 
 ## Module Discovery
 
-Workers need to know where tasks are defined:
-
-```python
-# In instance.py
-# Dotted module paths (recommended)
-app.discover_tasks(["myapp.tasks", "myapp.jobs.worker_tasks"])
-
-# Or file paths
-app.discover_tasks(["tasks.py", "more_tasks.py"])
-```
-
-This list is passed to child processes for import.
+Workers need to know where tasks are defined: the app lists its task modules, and the list is passed to child processes for import. See [Register Tasks for Workers](/horsies/tasks/defining-tasks/#register-tasks-for-workers) (Python) and [Registration and State](/horsies/rust/configuration/app-config/#registration-and-state) (Rust).
 
 ## Error Handling
 
@@ -518,15 +480,7 @@ This list is passed to child processes for import.
 
 ## Multiple Workers
 
-Run multiple worker processes for horizontal scaling:
-
-```bash
-# On machine 1
-horsies worker myapp.instance:app --profile default
-
-# On machine 2
-horsies worker myapp.instance:app --profile default
-```
+Run several worker processes of one app, on one machine or on several, for horizontal scaling. Each one starts with the same command as a single worker: see [Startup](#1-startup).
 
 - Each worker claims independently
 - `SKIP LOCKED` prevents duplicate claims
@@ -537,31 +491,9 @@ horsies worker myapp.instance:app --profile default
 
 **Don't build a client at import with `preload=ChildPreload.APP`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child.
 
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
-# Wrong: this runs once, in the preload parent
-client = firestore.Client()
+Build such a client in an `on_child_process_start` hook. The Python example is in [Things to Avoid](/horsies/workers/child-process-hooks/#things-to-avoid) of Child-Process Hooks.
 
-# Correct: this runs in every child, after the fork
-client = None
-
-@app.on_child_process_start
-def build_client() -> None:
-    global client
-    client = firestore.Client()
-```
-
-**Don't set a library's import-time setting in `.env` that your app loads.** `library` and `app` both import psycopg, SQLAlchemy, and pydantic before your app runs, so `load_dotenv()` in your app is too late for `PSYCOPG_IMPL`. Set such a value in the process environment.
-
-```bash
-# Wrong: in a .env file that the app loads
-PSYCOPG_IMPL=binary
-
-# Correct: in the environment of the worker process
-PSYCOPG_IMPL=binary horsies worker myapp.instance:app --profile default
-```
-
-Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NONE`.
+**Don't set a library's import-time setting in a `.env` file that your app loads.** The `library` and `app` preload modes import the libraries before your app runs, so the app reads the file too late. Set such a value in the environment of the worker process. The Python example is in [Things to Avoid](/horsies/workers/worker-profiles/#things-to-avoid) of Worker Profiles.
 
 **Don't expect a recycle to load new code with `preload=ChildPreload.APP`.** A recycled child is a new fork of the same preload parent. Restart the worker.
 

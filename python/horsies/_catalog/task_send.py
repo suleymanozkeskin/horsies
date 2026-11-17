@@ -12,9 +12,9 @@ class TaskSendErrorCode(str, Enum):
     """Categorized task send failure codes.
 
     The members are Python's, in Python's order
-    (`python/horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
-    `EVENT_LOOP_LIMIT` and `LOOP_RUNNER_FAILED` are produced by the Python
-    client only; [`TaskSendError`] has no variant for them.
+    (`python/horsies/core/models/task_send_types.py`). `EVENT_LOOP_LIMIT`
+    and `LOOP_RUNNER_FAILED` are produced by the Python client only;
+    [`TaskSendError`] has no variant for them.
     """
 
     SEND_SUPPRESSED = 'SEND_SUPPRESSED'
@@ -23,10 +23,11 @@ class TaskSendErrorCode(str, Enum):
     """
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    """A sync send or schedule (or a sync retry) was called from inside a
-    running event loop; the blocking enqueue would stall the loop, so
-    nothing was written. A sync retry from the same loop returns this code
-    again; the `*_async` forms complete the dispatch. Python client only.
+    """A sync (Python) or blocking (Rust) send, schedule or retry was called
+    on a thread that runs an event loop (Python) or a tokio runtime
+    (Rust); the blocking enqueue would stall it, so nothing was written.
+    A blocking retry on the same thread returns this code again; the
+    async forms complete the dispatch with the same task id.
     """
 
     VALIDATION_FAILED = 'VALIDATION_FAILED'

@@ -13,16 +13,14 @@ a browser cannot attach it to a cross-site form post.
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 
-from fastapi import HTTPException, Request, status
+from fastapi import Request
 
 # Mutating requests must opt in explicitly. A cross-site form post cannot set
 # a custom header, so its absence is treated as an untrusted request.
 INTENT_HEADER = 'X-Horsies-Intent'
 INTENT_VALUE = 'action'
-
-_NOT_AUTHORIZED = 'Not authorized.'
 
 
 class MonitoringAuthPolicy(Protocol):
@@ -83,44 +81,3 @@ class TrustedHeader:
 
     async def can_act(self, request: Request) -> bool:
         return self.allow_actions and await self.can_view(request)
-
-
-def view_guard(
-    policy: MonitoringAuthPolicy,
-) -> Callable[[Request], Awaitable[None]]:
-    """Build the dependency gating every ``/api`` route."""
-
-    async def guard(request: Request) -> None:
-        if not await policy.can_view(request):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=_NOT_AUTHORIZED,
-            )
-
-    return guard
-
-
-def act_guard(
-    policy: MonitoringAuthPolicy,
-    *,
-    actions_enabled: bool,
-) -> Callable[[Request], Awaitable[None]]:
-    """Build the dependency gating every action route.
-
-    Authorization is checked before intent: a caller who may not act learns
-    that, rather than being told to resend with a header that would not help.
-    """
-
-    async def guard(request: Request) -> None:
-        if not actions_enabled or not await policy.can_act(request):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=_NOT_AUTHORIZED,
-            )
-        if request.headers.get(INTENT_HEADER) != INTENT_VALUE:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f'Missing {INTENT_HEADER}: {INTENT_VALUE} header.',
-            )
-
-    return guard

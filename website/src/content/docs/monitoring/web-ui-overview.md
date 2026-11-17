@@ -1,15 +1,14 @@
 ---
 title: Web UI Overview
 section: shared
-summary: Browser dashboard for tasks, workflows, and workers, shipped in the horsies[web] extra.
-related: [web-ui-deployment, action-semantics, syce-overview, worker-health]
+summary: Browser dashboard for tasks, workflows, and workers, served by the monitoring app of each client.
+related: [web-ui-deployment, web-ui-mount, action-semantics, syce-overview, worker-health]
 tags: [monitoring, web, dashboard, ui, sse]
 ---
 
-The web UI is a browser dashboard for a single horsies deployment. It ships as
-`horsies.web`, a FastAPI sub-app behind the `[web]` extra, which serves both the
-JSON API under `/api` and the single-page app that consumes it. The dashboard
-reads through `horsies.monitoring`, a query package in core that needs no extra.
+The web UI is a browser dashboard for a single horsies deployment. The
+monitoring app serves both the JSON API under `/api` and the single-page app
+that consumes it.
 
 The UI is read-only unless a deployment enables actions. See
 [Deployment & Authentication](/horsies/monitoring/web-ui-deployment/) for how to turn them on and
@@ -17,16 +16,11 @@ The UI is read-only unless a deployment enables actions. See
 
 ## Installation
 
-```bash
-pip install "horsies[web]"
-```
-
-```bash
-uv add "horsies[web]"
-```
-
-The extra adds `fastapi` and `uvicorn`. `horsies.monitoring` imports neither and
-is available without the extra.
+Each client ships the monitoring app as an option of its package: the
+`horsies[web]` extra of the Python package, and the `web` feature of the Rust
+crate. The install is on the client pages:
+[Install the Extra](/horsies/monitoring/web-ui-mount/#install-the-extra)
+(Python). The Rust page is not written yet.
 
 ## Surfaces
 
@@ -88,10 +82,10 @@ The selected run and open node are URL search parameters (`?run=&node=`).
 
 ## Freshness
 
-Freshness is events-first. The web app runs its own `PostgresListener` on the
-monitoring NOTIFY channels (`horsies_task_status`, `horsies_workflow_status`,
-`horsies_worker_state`) and fans coalesced invalidation events out over SSE at
-`GET /api/events`. Payloads are ids, never data: an event says which surface
+Freshness is events-first. The web app subscribes on the process listener of
+its broker to the monitoring NOTIFY channels (`horsies_task_status`,
+`horsies_workflow_status`, `horsies_worker_state`) and fans coalesced
+invalidation events out over SSE at `GET /api/events`. Payloads are ids, never data: an event says which surface
 changed, and the browser refetches through the normal endpoints.
 
 Each stream queues at most 256 events (`SUBSCRIBER_QUEUE_CAPACITY`). When a
@@ -146,9 +140,12 @@ One load serves every open dashboard with the same filters, and an answer is
 kept for 10 seconds after its load ends. The task list's `total` is a planner estimate on the
 unfiltered view and exact under any active filter.
 
-If the server's listener fails and cannot reconnect, the stream emits a
-`degraded` event and closes; the client falls back to polling and keeps
-retrying. The server never fabricates events.
+When the listener loses its connection, it reconnects, and each stream then
+gets one event with no ids per topic: notifications sent during the gap may
+be lost, so the browser re-reads every surface. If the app's broker has no
+listener (a broker built with `assume_initialized=True`) or the listener
+stopped, the stream emits a `degraded` event and closes; the client falls
+back to polling and keeps retrying. The server never fabricates events.
 
 ## Actions
 

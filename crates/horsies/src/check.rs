@@ -18,11 +18,16 @@
 //!
 //! The live check adds, after a passing static check:
 //!
-//! 4. Connectivity: a connect of the app's handle and one `SELECT 1`.
+//! 4. Connectivity, the core's rule for both clients
+//!    (`PostgresBroker::check_connectivity`): `SELECT 1` on the main URL,
+//!    then on the session URL when it differs, then, in PgBouncer
+//!    transaction mode, a LISTEN probe on the session URL.
 //! 5. Worker connections: each worker profile against the server's
 //!    connection limit (none through a transaction pooler).
 
-use horsies_core::{check_worker_connections, Execution, RegisteredTask, TaskOptions};
+use horsies_core::{
+    check_worker_connections, ConnectivityRefusal, Execution, RegisteredTask, TaskOptions,
+};
 
 use crate::{AppRole, ErrorCode, Horsies, HorsiesError, ValidationReport};
 
@@ -128,7 +133,8 @@ impl Horsies {
 
     /// The static check, then the connectivity and the worker connections
     /// (Python `check(live=True)`). Connects the app's handle and reads;
-    /// writes nothing.
+    /// writes nothing but the LISTEN probe's one NOTIFY in PgBouncer
+    /// transaction mode. Installs no schema.
     ///
     /// Errors: [`CheckReport`] with the refusals of the first phase that
     /// refused.
@@ -138,8 +144,8 @@ impl Horsies {
             Ok(broker) => broker,
             Err(error) => return Err(connectivity_report(&error.to_string())),
         };
-        if let Err(error) = broker.ping_database().await {
-            return Err(connectivity_report(&error.to_string()));
+        if let Err(refused) = broker.check_connectivity().await {
+            return Err(refusal_report(&refused));
         }
         match check_worker_connections(self.config(), &broker).await {
             errors if errors.is_empty() => Ok(passed),
@@ -184,6 +190,35 @@ pub(crate) fn connectivity_report(cause: &str) -> CheckReport {
             .with_code(ErrorCode::BrokerInvalidUrl)
             .with_note(cause.to_owned())
             .with_help("check database_url in PostgresConfig")],
+    )
+}
+
+/// The report of a refused connectivity step, with Python's two answers:
+/// the listener probe's, and the connectivity failure's for every other
+/// step. Pure.
+fn refusal_report(refused: &ConnectivityRefusal) -> CheckReport {
+    match refused {
+        ConnectivityRefusal::ListenerNotCapable(failure) => listener_report(&failure.to_string()),
+        ConnectivityRefusal::PoolSettings(_)
+        | ConnectivityRefusal::MainUnreachable(_)
+        | ConnectivityRefusal::SessionUnreachable(_) => connectivity_report(&refused.to_string()),
+    }
+}
+
+/// The report of a session URL that does not deliver a NOTIFY to a LISTEN
+/// in PgBouncer transaction mode (Python `_run_listener_probe`), with the
+/// probe's cause as a second note. Pure.
+fn listener_report(cause: &str) -> CheckReport {
+    CheckReport::of(
+        CHECK,
+        vec![HorsiesError::new("broker listener capability check failed")
+            .with_code(ErrorCode::BrokerInvalidUrl)
+            .with_note(
+                "session_database_url appears to be transaction-pooled; LISTEN notification \
+                 was not delivered",
+            )
+            .with_note(cause.to_owned())
+            .with_help("use a direct/session-capable Postgres URL for session_database_url")],
     )
 }
 
@@ -457,6 +492,19 @@ mod tests {
             CheckScope::of_role(AppRole::Producer),
             CheckScope::WithSchedules
         );
+    }
+
+    #[test]
+    fn a_listener_that_does_not_deliver_is_python_s_listener_refusal() {
+        let refused = ConnectivityRefusal::ListenerNotCapable(
+            horsies_core::ListenProbeFailure::Interrupted(horsies_core::CheckInterruption::Stopped),
+        );
+        let report = refusal_report(&refused);
+        let error = &report.errors()[0];
+        assert_eq!(error.message, "broker listener capability check failed");
+        assert_eq!(error.code, Some(ErrorCode::BrokerInvalidUrl));
+        assert!(error.notes[0].contains("transaction-pooled"));
+        assert_eq!(error.notes[1], "the listener stopped during the probe");
     }
 
     #[test]

@@ -9,20 +9,11 @@ tags: [troubleshooting, pgbouncer, planetscale, postgres]
 # PgBouncer Troubleshooting
 
 Horsies supports PgBouncer transaction pooling only with a second
-session-capable PostgreSQL URL.
-
-```python
-from pydantic import SecretStr
-from horsies import AppConfig, PostgresConfig
-
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
-        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
-        pgbouncer_transaction_mode=True,
-    ),
-)
-```
+session-capable PostgreSQL URL: `database_url` is the pooled URL,
+`session_database_url` is the direct URL, and `pgbouncer_transaction_mode` is
+true. The API is on the client pages:
+[PgBouncer / Transaction Pooling](/horsies/configuration/broker-connections/#pgbouncer--transaction-pooling)
+(Python) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 
 Managed providers, such as PlanetScale Postgres, may show separate pooled and
 direct connection strings. Verify the current ports and URLs in your provider
@@ -175,17 +166,9 @@ of transaction pooling. Use the direct Postgres URL for `session_database_url`.
 
 ## Prepared Statement Errors
 
-If the pooled URL is used without `pgbouncer_transaction_mode=True`, operators
+If the pooled URL is used without `pgbouncer_transaction_mode` set to true, operators
 may see prepared-statement or statement-cache errors from the pooler. Enable the
-flag:
-
-```python
-PostgresConfig(
-    database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
-    session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
-    pgbouncer_transaction_mode=True,
-)
-```
+flag, with the split URLs above.
 
 This disables psycopg prepared statements for Horsies runtime SQL. In Syce, pass
 `--pgbouncer-transaction-mode` to disable SQLx's PostgreSQL statement cache.

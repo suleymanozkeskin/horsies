@@ -96,6 +96,22 @@ def report() -> TaskResult[int, TaskError]:
 
 **Don't register async functions.** Hooks run during child boot, before any event loop exists; registration rejects coroutine functions (`HRS-214`). Dispose async engines via `async_engine.sync_engine.dispose(close=False)`.
 
+**Don't build a client at import with `preload=ChildPreload.APP`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child. See [Preload Parent](/horsies/workers/worker-architecture/#preload-parent).
+
+<!-- check: skip partial -- uses names that the page does not define -->
+```python
+# Wrong: this runs once, in the preload parent
+client = firestore.Client()
+
+# Correct: this runs in every child, after the fork
+client = None
+
+@app.on_child_process_start
+def build_client() -> None:
+    global client
+    client = firestore.Client()
+```
+
 ## Limits
 
 - Engines created lazily after the hook runs, raw psycopg clients outside any pool, and pools hidden in C extensions are out of reach — only app-side close-per-use helps there.
@@ -128,6 +144,26 @@ async def loop_check() -> TaskResult[bool, TaskError]:
 - They run in every shared async child, also in a replacement child, so bodies must be idempotent.
 - Work that a hook starts and leaves running, such as a background task of a client, belongs to no task.
 - Isolated children do not run these hooks.
+
+A long-lived client opened in the hook belongs to no task, so its background work does not hold a task open:
+
+<!-- check: skip partial -- the client module is the reader's own -->
+```python
+import httpx
+
+clients: dict[str, httpx.AsyncClient] = {}
+
+
+@app.on_shared_async_child_start
+async def open_http_client() -> None:
+    clients['http'] = httpx.AsyncClient(timeout=5.0)
+
+
+@app.task('get_status', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def get_status(*, url: str) -> TaskResult[int, TaskError]:
+    response = await clients['http'].get(url)
+    return TaskResult(ok=response.status_code)
+```
 
 ## API Reference
 

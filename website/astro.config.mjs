@@ -36,7 +36,6 @@ export default defineConfig({
 		'/rust/monitoring/broker-methods': '/horsies/rust/monitoring/health-reads/',
 		'/rust/workers/concurrency': '/horsies/workers/concurrency/',
 		'/rust/internals/serialization': '/horsies/internals/serialization/',
-		'/rust/cli': '/horsies/rust/',
 		'/rust/concepts/workflows/subworkflows': '/horsies/rust/',
 		'/rust/concepts/workflows/typed-node-builder': '/horsies/rust/',
 		'/rust/concepts/workflows/workflow-api': '/horsies/rust/',
@@ -202,6 +201,7 @@ export default defineConfig({
 								{ label: 'Sending Tasks', slug: 'tasks/sending-tasks' },
 								{ label: 'Error Handling', slug: 'tasks/error-handling' },
 								{ label: 'Error Types', slug: 'tasks/error-types' },
+								{ label: 'Task Types', slug: 'tasks/task-types' },
 								{ label: 'Retrieving Results', slug: 'tasks/retrieving-results' },
 							],
 						},
@@ -209,6 +209,7 @@ export default defineConfig({
 							label: 'Workflows',
 							items: [
 								{ label: 'Workflow API', slug: 'concepts/workflows/workflow-api' },
+								{ label: 'Workflow Examples', slug: 'concepts/workflows/workflow-examples' },
 								{ label: 'Subworkflows', slug: 'concepts/workflows/subworkflows' },
 								{ label: 'Typed Node Builder', slug: 'concepts/workflows/typed-node-builder' },
 								{ label: 'Start a Workflow Once', slug: 'guides/start-workflow-once' },
@@ -218,6 +219,7 @@ export default defineConfig({
 							label: 'Configuration',
 							items: [
 								{ label: 'App Config', slug: 'configuration/app-config' },
+								{ label: 'Broker Connections', slug: 'configuration/broker-connections' },
 							],
 						},
 						{
@@ -237,12 +239,16 @@ export default defineConfig({
 						{
 							label: 'Monitoring',
 							items: [
+								{ label: 'Health Reads', slug: 'monitoring/health-reads' },
 								{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
+								{ label: 'Web UI Mount', slug: 'monitoring/web-ui-mount' },
 							],
 						},
 						{
 							label: 'Operations',
 							items: [
+								{ label: 'Rerun in Your Transaction', slug: 'operations/rerun-in-your-transaction' },
+								{ label: 'Code Change Examples', slug: 'operations/code-change-examples' },
 								{ label: 'Async Frameworks', slug: 'guides/async-frameworks' },
 								{ label: 'Testing', slug: 'operations/testing' },
 								{ label: 'CLI Reference', slug: 'cli' },
@@ -312,7 +318,7 @@ export default defineConfig({
 								{ label: 'Rerun in Your Transaction', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 								{ label: 'Async Frameworks', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 								{ label: 'Testing', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'CLI Reference', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'CLI Reference', slug: 'rust/cli' },
 							],
 						},
 						{
