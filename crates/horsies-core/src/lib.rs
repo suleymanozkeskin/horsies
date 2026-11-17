@@ -73,11 +73,12 @@ pub use crate::core::{AppConfig, HorsiesError};
 // broker re-exports
 pub use crate::broker::{
     expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
-    CheckInterruption, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError,
-    PostgresBroker, RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure,
-    StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRead, TaskInfoRow, TaskResultRow,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
-    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    CheckInterruption, ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow,
+    ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead,
+    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow,
+    TaskHandle, TaskInfoRead, TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
+    WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
@@ -136,8 +137,8 @@ pub use crate::worker::executor::child_host::{
     child_command, child_mode, child_producer, process_role, run_cancel_signal, run_child_host,
     spawn_in_run, thread_role, wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError,
     ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture,
-    ChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused, ThreadRole,
-    CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
+    ChildStartHook, NamedChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused,
+    RunSpawnRefused, ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the

@@ -133,7 +133,7 @@ async fn send_with_one_retry(
 
 ### Resend on Transient Errors
 
-With `AppConfig.resend_on_transient_err`, a send that fails with a retryable `EnqueueFailed` is sent again up to 3 times, after 200 ms, 400 ms and 800 ms, with the same task id and payload, as a repeat. A send whose commit reply was lost answers with its task id, and a task that already finished does not run again.
+With `AppConfig.resend_on_transient_err`, a send that fails with a retryable `EnqueueFailed` is sent again with the same task id and payload, as a repeat. The number of resends, the waits and the answer of a repeat are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
 
 ## Payload Size
 

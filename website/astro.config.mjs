@@ -202,6 +202,7 @@ export default defineConfig({
 								{ label: 'Sending Tasks', slug: 'tasks/sending-tasks' },
 								{ label: 'Error Handling', slug: 'tasks/error-handling' },
 								{ label: 'Error Types', slug: 'tasks/error-types' },
+								{ label: 'Task Types', slug: 'tasks/task-types' },
 								{ label: 'Retrieving Results', slug: 'tasks/retrieving-results' },
 							],
 						},
@@ -239,6 +240,7 @@ export default defineConfig({
 							items: [
 								{ label: 'Health Reads', slug: 'monitoring/health-reads' },
 								{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
+								{ label: 'Web UI Mount', slug: 'monitoring/web-ui-mount' },
 							],
 						},
 						{

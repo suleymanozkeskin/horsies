@@ -473,19 +473,126 @@ impl EventBroadcaster {
     }
 }
 
+/// The JSON object of one event, as Python's `json.dumps` writes it
+/// (`python/horsies/web/routes/events.py`): `{"topic": ..., "ids": [...]}`,
+/// with a space after each `:` and `,`, and every text escaped to ASCII.
+/// Pure.
 pub(crate) fn data_frame(event: &TopicEvent) -> String {
     let ids = event
         .ids
         .iter()
-        .map(|id| serde_json::to_string(id).expect("string JSON encoding cannot fail"))
+        .map(|id| python_json_text(id))
         .collect::<Vec<_>>()
         .join(", ");
-    let topic = serde_json::to_string(&event.topic).expect("string JSON encoding cannot fail");
-    format!("{{\"topic\": {topic}, \"ids\": [{ids}]}}")
+    format!(
+        "{{\"topic\": {}, \"ids\": [{ids}]}}",
+        python_json_text(&event.topic)
+    )
 }
 
+/// The JSON object of the degraded frame. Pure.
 pub(crate) fn degraded_frame() -> &'static str {
     "{\"topic\": \"degraded\"}"
+}
+
+/// A JSON text literal as Python's `json.dumps` writes it with its default
+/// `ensure_ascii=True`: `"` and `\\` escaped, the control characters
+/// `\b \f \n \r \t` by their short escapes, every other character below
+/// U+0020 and every character above U+007E as `\uXXXX` (lowercase hex, a
+/// surrogate pair above U+FFFF). Pure.
+pub(crate) fn python_json_text(text: &str) -> String {
+    let mut written = String::with_capacity(text.len() + 2);
+    written.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => written.push_str("\\\""),
+            '\\' => written.push_str("\\\\"),
+            '\n' => written.push_str("\\n"),
+            '\r' => written.push_str("\\r"),
+            '\t' => written.push_str("\\t"),
+            '\u{08}' => written.push_str("\\b"),
+            '\u{0c}' => written.push_str("\\f"),
+            ' '..='~' => written.push(character),
+            other => {
+                let mut units = [0_u16; 2];
+                for unit in other.encode_utf16(&mut units) {
+                    written.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+    }
+    written.push('"');
+    written
+}
+
+/// The heartbeat frame: an SSE comment that `EventSource` ignores and that
+/// keeps an intermediary proxy from closing an idle stream (Python
+/// `_HEARTBEAT_FRAME`).
+pub const HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
+
+/// The next item of an event stream ([`EventFrames::next`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventStreamItem {
+    /// One frame text, with the blank line that ends it: a data frame, the
+    /// heartbeat frame, or the degraded frame.
+    Frame(String),
+    /// The stream ended: after the degraded frame, or after the broadcaster
+    /// closed. Every later call answers it again.
+    Ended,
+}
+
+/// Whether an event stream can still send frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FramesState {
+    Open,
+    Ended,
+}
+
+/// One web client's event stream in the frame texts of the wire, as
+/// Python's `/api/events` route writes them
+/// (`python/horsies/web/routes/events.py`): `data: <event>\n\n` per event,
+/// [`HEARTBEAT_FRAME`] after `heartbeat` without an event, and
+/// `data: {"topic": "degraded"}\n\n`, after which the stream ends.
+pub struct EventFrames {
+    subscription: EventSubscription,
+    heartbeat: Duration,
+    state: FramesState,
+}
+
+impl EventFrames {
+    pub(crate) fn new(subscription: EventSubscription, heartbeat: Duration) -> Self {
+        Self {
+            subscription,
+            heartbeat,
+            state: FramesState::Open,
+        }
+    }
+
+    /// The next item: a frame, or the end. Waits at most `heartbeat` for an
+    /// event; the heartbeat frame answers a wait that ended without one.
+    /// Cancel-safe: a call dropped before it returns loses no event.
+    pub async fn next(&mut self) -> EventStreamItem {
+        match self.state {
+            FramesState::Ended => return EventStreamItem::Ended,
+            FramesState::Open => {}
+        }
+        match tokio::time::timeout(self.heartbeat, self.subscription.recv()).await {
+            Err(_no_event_within_the_heartbeat) => {
+                EventStreamItem::Frame(HEARTBEAT_FRAME.to_owned())
+            }
+            Ok(Some(Some(event))) => {
+                EventStreamItem::Frame(format!("data: {}\n\n", data_frame(&event)))
+            }
+            Ok(Some(None)) => {
+                self.state = FramesState::Ended;
+                EventStreamItem::Frame(format!("data: {}\n\n", degraded_frame()))
+            }
+            Ok(None) => {
+                self.state = FramesState::Ended;
+                EventStreamItem::Ended
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -599,6 +706,93 @@ mod queue_tests {
             .expect("the reader wakes")
             .expect("the reader does not panic");
         assert_eq!(item, Some(event("workflows", "wf")));
+    }
+
+    fn frames_of(queue: &Arc<SubscriberQueue>, heartbeat: Duration) -> EventFrames {
+        EventFrames::new(
+            EventSubscription {
+                queue: Arc::clone(queue),
+            },
+            heartbeat,
+        )
+    }
+
+    /// The frame texts are Python's: a data frame per event, the heartbeat
+    /// comment after a wait without an event, and the degraded frame, after
+    /// which the stream ends.
+    #[tokio::test]
+    async fn the_frames_are_the_python_frame_texts() {
+        let queue = Arc::new(SubscriberQueue::default());
+        let mut frames = frames_of(&queue, Duration::from_millis(20));
+
+        queue.push(Some(TopicEvent {
+            topic: "tasks".to_owned(),
+            ids: vec!["a".to_owned(), "b".to_owned()],
+        }));
+        assert_eq!(
+            frames.next().await,
+            EventStreamItem::Frame(
+                "data: {\"topic\": \"tasks\", \"ids\": [\"a\", \"b\"]}\n\n".to_owned()
+            )
+        );
+        queue.push(Some(refresh_event("workers")));
+        assert_eq!(
+            frames.next().await,
+            EventStreamItem::Frame("data: {\"topic\": \"workers\", \"ids\": []}\n\n".to_owned())
+        );
+        assert_eq!(
+            frames.next().await,
+            EventStreamItem::Frame(": heartbeat\n\n".to_owned())
+        );
+        queue.push(None);
+        assert_eq!(
+            frames.next().await,
+            EventStreamItem::Frame("data: {\"topic\": \"degraded\"}\n\n".to_owned())
+        );
+        assert_eq!(frames.next().await, EventStreamItem::Ended);
+        assert_eq!(frames.next().await, EventStreamItem::Ended);
+    }
+
+    /// A closed queue with nothing left ends the stream without a frame.
+    #[tokio::test]
+    async fn a_closed_subscription_ends_the_frames() {
+        let queue = Arc::new(SubscriberQueue::default());
+        let mut frames = frames_of(&queue, Duration::from_secs(5));
+
+        queue.close();
+
+        assert_eq!(frames.next().await, EventStreamItem::Ended);
+    }
+
+    /// A wait dropped before it returns loses no event.
+    #[tokio::test]
+    async fn a_dropped_wait_keeps_the_event() {
+        let queue = Arc::new(SubscriberQueue::default());
+        let mut frames = frames_of(&queue, Duration::from_secs(5));
+        let dropped = tokio::time::timeout(Duration::from_millis(10), frames.next()).await;
+        assert!(dropped.is_err(), "no event was queued");
+
+        queue.push(event("tasks", "kept"));
+
+        assert_eq!(
+            frames.next().await,
+            EventStreamItem::Frame(
+                "data: {\"topic\": \"tasks\", \"ids\": [\"kept\"]}\n\n".to_owned()
+            )
+        );
+    }
+
+    /// Texts are escaped as Python's `json.dumps` escapes them.
+    #[test]
+    fn a_text_is_escaped_as_python_json_dumps_does() {
+        assert_eq!(python_json_text("plain-id_1"), "\"plain-id_1\"");
+        assert_eq!(
+            python_json_text("q\"b\\n\nr\rt\tb\u{8}f\u{c}"),
+            "\"q\\\"b\\\\n\\nr\\rt\\tb\\bf\\f\""
+        );
+        assert_eq!(python_json_text("\u{1}\u{7f}"), "\"\\u0001\\u007f\"");
+        assert_eq!(python_json_text("é"), "\"\\u00e9\"");
+        assert_eq!(python_json_text("😀"), "\"\\ud83d\\ude00\"");
     }
 
     /// A dropped client stream is removed at the next publish.

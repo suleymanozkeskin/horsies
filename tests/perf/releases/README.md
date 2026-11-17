@@ -34,8 +34,12 @@ operation. The patch makes these changes:
   at most 64 rows for each transaction). The rows then are in history.
 - **One implementation for each scenario.** The older statements of
   `legacy_terminalization_sql.py` write a terminal status into the live
-  table, which schema 61 refuses. Each scenario runs the statement of the
-  0.7.0 product (the former candidate side) on both sides: a control run.
+  table, which schema 61 refuses. Each scenario runs one implementation on
+  both sides: a control run.
+- **Worker statements.** `terminal-application-failure` and
+  `workflow-success-phase2` send the statements that the v0.7.0 worker sends
+  for their case (see "Scenario map"). The other scenarios run their former
+  candidate side.
 - **Schema install.** A terminal write needs the history leaves and the
   published history readers. `--apply-schema` runs the coverage pass of a
   worker startup after the install, with the default `RetentionConfig`.
@@ -52,29 +56,54 @@ them.
 
 ## Scenario map
 
-The comparison pairs these scenarios. "Statement" is what the scenario
-sends in each operation.
+The comparison pairs these scenarios. Each cell names what the scenario
+sends in one operation: the statements that the product of that release
+sends for the same case.
 
-| Current scenario | v0.7.0 scenario | v0.7.0 statement |
-|---|---|---|
-| `fused-completion-small-result` | `fused-completion-small-result` | `horsies_complete_task_fused` |
-| `fused-completion-1mib-result` | `fused-completion-1mib-result` | `horsies_complete_task_fused` |
-| `owned-claim-expiry` | `owned-claim-expiry` | `horsies_expire_owned_claim`, on the synchronous cursor of the child |
-| `pending-expiry-batch` | `pending-expiry-batch` | `horsies_expire_pending_tasks` |
-| `failed-attempt-terminal` | `terminal-application-failure` | `horsies_fail_locked_task` |
-| `stale-attempt-terminal` | `stale-terminal-failure` | In one transaction: the task advisory lock, the locking read, the attempt upsert, `horsies_fail_stale_task` |
-| `workflow-success-phase2` | `workflow-success-phase2` | Phase 1 in one transaction: the task advisory lock, the locking read, the attempt upsert, `horsies_complete_locked_task`. Phase 2: `on_workflow_task_complete` and the capacity wake |
-| none | `locked-completion` | `horsies_complete_locked_task` |
+| Current scenario | Current statements | v0.7.0 scenario | v0.7.0 statements |
+|---|---|---|---|
+| `fused-completion-small-result` | `horsies_complete_task_fused` | `fused-completion-small-result` | `horsies_complete_task_fused` |
+| `fused-completion-1mib-result` | `horsies_complete_task_fused` | `fused-completion-1mib-result` | `horsies_complete_task_fused` |
+| `owned-claim-expiry` | `horsies_expire_owned_claim`, on the synchronous cursor of the child | `owned-claim-expiry` | `horsies_expire_owned_claim`, on the synchronous cursor of the child |
+| `pending-expiry-batch` | `horsies_expire_pending_tasks` | `pending-expiry-batch` | `horsies_expire_pending_tasks` |
+| `failed-attempt-terminal` | `horsies_finish_failed_attempt` (retry `NONE`, claimed-row rule `REFUSE`, wake `TRUE`) | `terminal-application-failure` | The retry-facts read (`READ_IN_FLIGHT_ATTEMPT_SQL`), then `horsies_finish_failed_attempt` with no retry |
+| `stale-attempt-terminal` | `horsies_finish_stale_attempt` | `stale-terminal-failure` | The task advisory lock, the locking read, the attempt upsert, `horsies_fail_stale_task` |
+| `workflow-success-phase2` | Phase 1: `horsies_finish_workflow_success`. Phase 2: `horsies_workflow_node_finish(task, TRUE, 'NONE')` | `workflow-success-phase2` | Phase 1: `horsies_finish_workflow_success`. Phase 2: `on_workflow_task_complete`, with the capacity wake in its node write |
+| `workflow-success-phase2-dependent` | Phase 1: `horsies_finish_workflow_success`. Phase 2: `horsies_workflow_node_finish(task, TRUE, 'READ')`, which promotes the dependent node and mints its task row | none | none |
+| none | none | `locked-completion` | `horsies_complete_locked_task` |
 
-Two v0.7.0 scenarios send a statement that the v0.7.0 worker does not send
-for the same case:
+Where each release sends these statements:
 
-- `terminal-application-failure`: for a task error, the v0.7.0 worker reads
-  the retry facts and then sends `horsies_finish_failed_attempt`
-  (`horsies/core/worker/finalize.py:1467-1523` at `v0.7.0`).
-- `workflow-success-phase2`: for phase 1, the v0.7.0 worker sends
-  `horsies_finish_workflow_success` (`horsies/core/worker/finalize.py:1322-1373`
-  at `v0.7.0`). Phase 2 is the same as in the worker.
+- Current, failed attempt: one statement, with the retry facts of the claim
+  (`python/horsies/core/worker/failed_attempt.py`), through the core
+  (`crates/horsies-core/src/broker/attempt_writes.rs`).
+- Current, phase 2: the form follows the step that phase 1 returns
+  (`finish_node`, `python/horsies/core/workflows/node_finish.py`):
+  `NO_DEPENDENTS` sends `'NONE'`, and `DEPENDENTS_WITHOUT_SUBWORKFLOW` sends
+  `'READ'`. Each form is one statement.
+- v0.7.0, failed attempt: `_persist_failed_attempt`
+  (`horsies/core/worker/finalize.py:1467-1523` at `v0.7.0`) reads the retry
+  facts (`_finalize_retry_request`, `:1525-1554`), then sends
+  `horsies_finish_failed_attempt`.
+- v0.7.0, workflow success: `_finish_workflow_success` (`:1322-1373`) sends
+  phase 1. `_finalize_workflow_phase` (`:1619-1674`) runs phase 2 in one
+  transaction, with the capacity wake in the node write.
+- v0.7.0, stale recovery: `mark_stale_tasks_as_failed`
+  (`horsies/core/brokers/postgres.py:3999-4196` at `v0.7.0`) sends the four
+  statements in one transaction.
+- `locked-completion`: no path of the v0.7.0 worker sends
+  `horsies_complete_locked_task`. A locked completion goes to
+  `horsies_finish_workflow_success` (`finalize.py:1285-1292`), and a plain
+  success to `horsies_complete_task_fused`. The scenario has no pair.
+- `workflow-success-phase2-dependent`: the v0.7.0 harness seeds one-node
+  workflows only. The scenario has no pair.
+
+Each harness sends the statements of one operation in one transaction, and
+a workflow success in one transaction for each phase. The workers of both
+releases send a one-statement write, and the v0.7.0 retry-facts read, in
+autocommit. Thus each measured operation of such a write has a `BEGIN` and a
+`COMMIT` that the worker does not send, on both releases. Phase 2 of v0.7.0
+is a transaction in the worker too.
 
 ## A session: both releases on one server
 

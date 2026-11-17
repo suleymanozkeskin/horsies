@@ -54,8 +54,7 @@ use crate::broker::client_family::{
     RecordedFamily,
 };
 use crate::broker::process_listener::{
-    default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ProcessListener,
-    SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
+    default_payload_capacity, fixed_channel, ListenError, ProcessListener, SessionCheckFailure,
     TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
 };
 use crate::broker::task_lists::{
@@ -2298,7 +2297,10 @@ impl PostgresBroker {
     /// 3. One autocommit `SELECT pg_notify($1, 'ok')` on the main core pool.
     ///    Its first checkout runs the statement-pooling check of the main
     ///    pool.
-    /// 4. Wait at most [`SESSION_CAPABILITY_TIMEOUT`] for the NOTIFY.
+    /// 4. Wait at most `SESSION_CAPABILITY_TIMEOUT` (2 s) for the NOTIFY.
+    ///
+    /// Steps 2 to 4 are the LISTEN probe that the live check also runs
+    /// ([`PostgresBroker::check_connectivity`]).
     ///
     /// The subscription is dropped at the end, and the listener UNLISTENs the
     /// channel. Nothing is written.
@@ -2314,43 +2316,9 @@ impl PostgresBroker {
             .pools()
             .map_err(SessionCheckFailure::PoolSettings)?;
         self.check_session_pool(open.pools().session()).await?;
-        let listener = self
-            .listener
-            .start()
+        self.probe_listen_delivery(&self.listener, &open)
             .await
-            .map_err(SessionCheckFailure::Subscribe)?;
-        let channel = fixed_channel(&format!(
-            "{SESSION_CHECK_CHANNEL_PREFIX}{}",
-            Uuid::new_v4().simple()
-        ));
-        let delivery = listener
-            .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
-            .await
-            .map_err(SessionCheckFailure::Subscribe)?;
-        let channel_name: &str = channel.as_str();
-        self.log_statement(&SESSION_CHECK_NOTIFY);
-        let _notified = open
-            .main()
-            .execute(
-                CheckoutClass::Batch,
-                &SESSION_CHECK_NOTIFY.bind().value(&channel_name).finish(),
-                StatementBound::ConnectionTimeouts,
-            )
-            .await
-            .map_err(SessionCheckFailure::Notify)?;
-        match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
-            Ok(WakeEvent::Notified) => Ok(()),
-            Ok(WakeEvent::Gap) => Err(SessionCheckFailure::Interrupted(
-                CheckInterruption::Reconnected,
-            )),
-            Ok(WakeEvent::Stopped) => {
-                Err(SessionCheckFailure::Interrupted(CheckInterruption::Stopped))
-            }
-            Err(_elapsed) => Err(SessionCheckFailure::NotCapable {
-                session_url: listener.masked_url().clone(),
-                waited: SESSION_CAPABILITY_TIMEOUT,
-            }),
-        }
+            .map_err(SessionCheckFailure::from)
     }
 
     /// Step 1 of [`PostgresBroker::check_worker_session`]: `SELECT 1` on the
@@ -6030,6 +5998,9 @@ mod task_info_code_tests {
         }
     }
 }
+
+mod connectivity;
+pub use connectivity::{ConnectivityRefusal, ListenProbeFailure};
 
 #[cfg(test)]
 mod result_read_spec_tests;
