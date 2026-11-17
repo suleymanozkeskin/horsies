@@ -1448,7 +1448,7 @@ impl Worker {
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
         let claimer_hb = spawn_claimer_heartbeat(
-            self.broker.pool().clone(),
+            Arc::clone(&self.broker),
             self.worker_id.clone(),
             self.hostname.clone(),
             std::process::id() as i32,
@@ -1460,7 +1460,7 @@ impl Worker {
         let reaper_health = new_reaper_health();
         let reaper = self.spawn_reaper_loop(Arc::clone(&reaper_health));
         let state_loop = crate::worker::worker_state::spawn_worker_state_loop(
-            self.broker.pool().clone(),
+            Arc::clone(&self.broker),
             self.worker_id.clone(),
             self.hostname.clone(),
             std::process::id() as i32,
