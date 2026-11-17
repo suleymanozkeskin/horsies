@@ -296,3 +296,13 @@ fn a_handle_error_maps_to_its_read_failure() {
         WorkflowReadError::AsyncContext { .. }
     ));
 }
+
+/// A handle prints and crosses threads for any output type: Debug, Send and
+/// Sync.
+#[test]
+fn a_workflow_handle_is_debug_send_and_sync() {
+    fn assert_debug_send_sync<V: std::fmt::Debug + Send + Sync>() {}
+    assert_debug_send_sync::<WorkflowHandle<u32>>();
+    assert_debug_send_sync::<WorkflowHandle<serde_json::Value>>();
+    assert_debug_send_sync::<WorkflowHandle<std::rc::Rc<u8>>>();
+}
