@@ -453,3 +453,37 @@ fn count_rows_that_break_the_contract_fail_closed() {
         );
     }
 }
+
+/// The start names its process as Python's `start_attempt_params`: the
+/// process name `worker-<pid>` and the beat sender `<worker_id>:<pid>`.
+#[test]
+fn a_start_names_its_process_by_its_pid() {
+    let start = StartAttempt::of_process(
+        task(1),
+        OwnedClaim {
+            worker_id: "worker-a".to_owned(),
+            claimed_at: instant(),
+        },
+        4242,
+        "host-1".to_owned(),
+    );
+    assert_eq!(start.worker_pid, 4242);
+    assert_eq!(start.worker_hostname, "host-1");
+    assert_eq!(start.worker_process_name, "worker-4242");
+    assert_eq!(start.beat_sender_id, "worker-a:4242");
+}
+
+/// Each miss reason reads back from its own text.
+#[test]
+fn each_miss_reason_reads_back_from_its_text() {
+    for miss in [
+        StartMiss::DeadlinePassed,
+        StartMiss::NotHeld,
+        StartMiss::LeaseExpired,
+        StartMiss::WorkflowPaused,
+        StartMiss::WorkflowCancelled,
+        StartMiss::NodeNotLinked,
+    ] {
+        assert_eq!(StartMiss::from_wire(miss.as_str()), Some(miss));
+    }
+}

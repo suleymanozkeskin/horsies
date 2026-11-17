@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::claims::{
-    claim_pass, release_claims, start_attempt, ClaimClasses, ClaimTake, ReleaseBatch,
-    ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
+    claim_pass, release_claims, start_attempt, start_attempt_within, ClaimClasses, ClaimTake,
+    ReleaseBatch, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt, StartMiss,
+    StartOutcome, StartWindow, WindowedStart,
 };
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
@@ -203,6 +204,54 @@ mod start {
             assert_eq!(runner_beats(&pool, task_id).await, 0, "{task_id}");
         }
         cleanup_tasks(&pool, &[other_generation, lease_expired, deadline_passed]).await;
+    }
+
+    /// A window that closed before the pool gave the connection sends no
+    /// statement: the row stays CLAIMED with no runner beat (Python
+    /// `DeadlineBeforeStart`). An open window, and a window that is still
+    /// open at the checkout, start the row.
+    #[tokio::test]
+    #[serial]
+    async fn a_closed_window_sends_no_statement_and_an_open_one_starts() {
+        let pool = pool().await;
+        ensure_recent_heartbeat_leaves(&pool).await;
+        let closed = seed_task(&pool, &claimed()).await;
+        let still_open = seed_task(&pool, &claimed()).await;
+        let open = seed_task(&pool, &claimed()).await;
+        let core_pool = core_pool_for_test_pool(&pool);
+
+        let before = live_row(&pool, closed).await;
+        let passed = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("the monotonic clock runs past one second");
+        let outcome = start_attempt_within(
+            &core_pool,
+            StatementLog::Off,
+            &start(closed),
+            StartWindow::Until(passed),
+        )
+        .await
+        .expect("start");
+        assert_eq!(outcome, WindowedStart::WindowClosed);
+        assert_eq!(live_row(&pool, closed).await, before);
+        assert_eq!(runner_beats(&pool, closed).await, 0);
+
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        for (task_id, window) in [
+            (still_open, StartWindow::Until(later)),
+            (open, StartWindow::Open),
+        ] {
+            let outcome =
+                start_attempt_within(&core_pool, StatementLog::Off, &start(task_id), window)
+                    .await
+                    .expect("start");
+            assert!(
+                matches!(outcome, WindowedStart::Ran(StartOutcome::Started { .. })),
+                "{outcome:?}"
+            );
+            assert_eq!(status_of(&pool, task_id).await, "RUNNING");
+        }
+        cleanup_tasks(&pool, &[closed, still_open, open]).await;
     }
 }
 

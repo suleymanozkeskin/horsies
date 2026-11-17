@@ -26,7 +26,6 @@ use crate::core::{
 };
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
 use crate::workflow_engine::args_merge::{child_build_input, ChildBuildInput};
-use crate::workflow_engine::engine::subworkflow_load_failed_error;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
 use crate::workflow_engine::start::{
@@ -517,6 +516,27 @@ pub(crate) fn node_failure_result(error: TaskError) -> Result<String, WorkflowEr
     Ok(serde_json::to_string(
         &TaskResult::<serde_json::Value>::Err(error),
     )?)
+}
+
+/// The error of the sub-workflow node `task_index` of the workflow named `parent_workflow_name` whose
+/// child definition is not registered under its definition key. A child is resolved only by its key
+/// (Python `core/workflows/engine.py:1034-1045`). The message names the parent workflow and the node;
+/// `data` holds the definition key (`null` when the node has none), as Python's `_fail_subworkflow_load`
+/// does (`core/workflows/engine.py:577-581`). Pure.
+pub(crate) fn subworkflow_load_failed_error(
+    parent_workflow_name: &str,
+    task_index: i32,
+    definition_key: Option<&str>,
+) -> TaskError {
+    TaskError {
+        data: Some(serde_json::json!({ "definition_key": definition_key })),
+        ..TaskError::builtin(
+            OperationalErrorCode::SubworkflowLoadFailed,
+            format!(
+                "Failed to load subworkflow definition for {parent_workflow_name}:{task_index}"
+            ),
+        )
+    }
 }
 
 /// A node index as the `integer` column stores it.

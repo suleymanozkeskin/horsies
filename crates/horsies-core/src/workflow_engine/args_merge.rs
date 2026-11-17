@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::core::codec::JsonReadError;
@@ -119,15 +118,19 @@ impl ArgsFromConflict {
             MergedNodeKind::Task => format!("task {task_index}"),
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };
-        crate::workflow_engine::engine::node_not_prepared_error(
-            workflow_id,
-            task_index,
-            OperationalErrorCode::WorkflowEnqueueFailed,
-            format!(
-                "args_from key '{}' conflicts with static kwarg ({node})",
-                self.key
-            ),
-        )
+        TaskError {
+            data: Some(serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "task_index": task_index,
+            })),
+            ..TaskError::builtin(
+                OperationalErrorCode::WorkflowEnqueueFailed,
+                format!(
+                    "args_from key '{}' conflicts with static kwarg ({node})",
+                    self.key
+                ),
+            )
+        }
     }
 }
 
@@ -146,7 +149,7 @@ fn static_member_conflict(
         .map(|key| ArgsFromConflict { key: key.clone() })
 }
 
-/// Merge args_from dependency results into the node's input (synchronous variant).
+/// Merge args_from dependency results into the node's input.
 ///
 /// With no args_from the input is returned unchanged. An `args_from` key that the static input
 /// also sets gives [`ArgsFromMerge::StaticMemberConflict`] and merges nothing. Otherwise, for each
@@ -173,71 +176,6 @@ pub(crate) fn merge_args_from_sync(
     }
 
     insert_args_from_entries(&mut object, args_from_map, dep_results)?;
-
-    Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DepRow {
-    task_index: i32,
-    node_id: Option<String>,
-    task_name: String,
-    sub_definition_key: Option<String>,
-    status: String,
-    result: Option<String>,
-}
-
-/// Merge args_from dependency results into the node's input (async variant).
-///
-/// Fetches dependency results from the database, then applies the same
-/// conflict check and wrapping logic as the synchronous variant.
-pub(crate) async fn merge_args_from_async(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    input: &str,
-    args_from: &Option<serde_json::Value>,
-    dep_indices: &[i32],
-) -> Result<ArgsFromMerge, WorkflowError> {
-    let args_from_map = match args_from {
-        Some(v) => match v.as_object() {
-            Some(obj) if !obj.is_empty() => obj,
-            _ => return Ok(ArgsFromMerge::Merged(input.to_owned())),
-        },
-        None => return Ok(ArgsFromMerge::Merged(input.to_owned())),
-    };
-
-    let rows: Vec<DepRow> = sqlx::query_as(
-        "SELECT task_index, node_id, task_name, sub_definition_key, status, result \
-         FROM horsies_workflow_tasks \
-         WHERE workflow_id = $1 AND task_index = ANY($2)",
-    )
-    .bind(workflow_id)
-    .bind(dep_indices)
-    .fetch_all(pool)
-    .await?;
-
-    let dep_map: HashMap<i32, DepResult> = rows
-        .into_iter()
-        .map(|r| {
-            (
-                r.task_index,
-                DepResult {
-                    node_id: r.node_id,
-                    task_name: r.task_name,
-                    sub_definition_key: r.sub_definition_key,
-                    status: r.status,
-                    result: r.result,
-                },
-            )
-        })
-        .collect();
-
-    let mut object = input_object(input)?;
-    if let Some(conflict) = static_member_conflict(&object, args_from_map) {
-        return Ok(ArgsFromMerge::StaticMemberConflict(conflict));
-    }
-
-    insert_args_from_entries(&mut object, args_from_map, &dep_map)?;
 
     Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
 }

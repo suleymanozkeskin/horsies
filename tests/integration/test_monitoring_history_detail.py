@@ -6,8 +6,7 @@ through the staged detail read when the live side is empty. Proven on
 installed databases with seeded history rows: the same response shapes
 come back with the history-side values — the terminal instant landing
 in the status-appropriate end stamp, the failure reason from the
-recorded terminal context, attempts decoded from the snapshot — and a
-pre-coverage database keeps absent-means-absent semantics.
+recorded terminal context, attempts decoded from the snapshot.
 """
 
 from __future__ import annotations

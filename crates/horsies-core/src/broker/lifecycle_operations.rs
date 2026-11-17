@@ -19,6 +19,8 @@
 //!   worker.
 //! - [`PostgresBroker::count_queue_starts`]: the count of the soft-cap
 //!   start check (a plain read, not a 0004 function).
+//! - [`PostgresBroker::start_attempt`]: `horsies_start_attempt`, the start
+//!   of a run in a worker's child, with the window of its deadline.
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -38,8 +40,9 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::{self, FinishFailedAttempt, FinishWorkflowSuccess};
 use crate::broker::claims::{
-    claim_pass, count_queue_starts, release_claims, ClaimPass, ClaimPassRequest, QueueStartCheck,
-    QueueStarts, ReleaseClaims, ReleaseOutcome,
+    claim_pass, count_queue_starts, release_claims, start_attempt_within, ClaimPass,
+    ClaimPassRequest, QueueStartCheck, QueueStarts, ReleaseClaims, ReleaseOutcome, StartAttempt,
+    StartWindow, WindowedStart,
 };
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
@@ -336,6 +339,33 @@ impl PostgresBroker {
         }
         let open = self.core_pools_for_read()?;
         count_queue_starts(open.main(), self.statement_log(), check).await
+    }
+
+    /// Start one claimed task in a worker's child (Python
+    /// `child_runner._confirm_ownership_and_set_running` and
+    /// `shared_lifecycle._set_running_on_a_connection`, the start statement
+    /// only): `horsies_start_attempt`, one statement in autocommit on the
+    /// main core pool, checked out as reserved work. Under the claim fence
+    /// it writes the RUNNING row, the first runner beat and, for a workflow
+    /// task, the node, or nothing on a miss. When `window` has closed by the
+    /// time the pool gives the connection, no statement runs and the row
+    /// stays CLAIMED ([`WindowedStart::WindowClosed`]). The path after a miss
+    /// (the expiry, the workflow stop) is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing sent for a
+    /// failed checkout; nothing written, or `OutcomeUnknown`: the row may be
+    /// RUNNING, and the same start sent again misses with `NotHeld`);
+    /// [`BrokerError::RowDecode`] and [`BrokerError::ClaimContract`] for a
+    /// row outside the function's contract.
+    pub async fn start_attempt(
+        &self,
+        command: &StartAttempt,
+        window: StartWindow,
+    ) -> Result<WindowedStart, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        start_attempt_within(open.main(), self.statement_log(), command, window).await
     }
 
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):

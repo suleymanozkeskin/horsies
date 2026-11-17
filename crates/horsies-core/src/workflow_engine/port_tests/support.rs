@@ -30,12 +30,17 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::db::CheckoutClass;
 use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
+use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
 use crate::workflow_engine::start::start_workflow;
+use crate::workflow_engine::steps::{
+    advance_parents, ChildBuild, OwedParentAdvances, ParentAdvance,
+};
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -886,6 +891,69 @@ pub(super) async fn finish_node(
         .unwrap_or_else(|| panic!("node {task_index} of {workflow_id} has no task"));
     finish_task(pool, task_id, outcome, registry).await;
     task_id
+}
+
+/// The completion check of `workflow_id` as the tree recovery pass runs it
+/// (`recovery::complete_in_tree`): the workflow row `FOR UPDATE`, then
+/// `horsies_workflow_try_complete`, in one transaction. Then the parent
+/// advance that a child it ends owes ([`advance_parent_of`]). Python:
+/// `check_workflow_completion`, which queues the parent propagation of a
+/// child that it ends.
+pub(super) async fn complete_workflow(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    registry: &WorkflowSpecRegistry,
+) {
+    let broker = broker(pool);
+    let advance = match complete_in_tree(&broker, workflow_id)
+        .await
+        .expect("the completion check")
+    {
+        TreeCompletion::Written { advance } => advance,
+        TreeCompletion::Unchanged => ParentAdvance::NotOwed,
+    };
+    drive_parent_advances(&broker, OwedParentAdvances::of(advance), registry).await;
+}
+
+/// Advances the parent node above the terminal child `child_workflow_id`,
+/// and each level above that the advance ends: `horsies_workflow_child_finish`,
+/// one transaction per level (`steps::advance_parents`), as phase 2 and
+/// recovery case 1.6 run it. Python: `on_subworkflow_complete`.
+pub(super) async fn advance_parent_of(
+    pool: &PgPool,
+    child_workflow_id: Uuid,
+    registry: &WorkflowSpecRegistry,
+) {
+    drive_parent_advances(
+        &broker(pool),
+        OwedParentAdvances::of(ParentAdvance::Owed { child_workflow_id }),
+        registry,
+    )
+    .await;
+}
+
+async fn drive_parent_advances(
+    broker: &PostgresBroker,
+    owed: OwedParentAdvances,
+    registry: &WorkflowSpecRegistry,
+) {
+    let retention = RetentionConfig::default();
+    advance_parents(
+        broker,
+        CheckoutClass::Reserved,
+        owed,
+        ChildBuild {
+            registry,
+            retention: &retention,
+        },
+    )
+    .await
+    .unwrap_or_else(|failure| {
+        panic!(
+            "the parent advance of child workflow {} failed: {:?}",
+            failure.failed_child_workflow_id, failure.error
+        )
+    });
 }
 
 /// A failure outcome with a user error code.

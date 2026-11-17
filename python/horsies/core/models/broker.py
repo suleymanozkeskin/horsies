@@ -3,10 +3,16 @@ from typing import Any, ClassVar, Final, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from horsies._catalog.manifest import (
+    KEEPALIVE_PROBES_MAX,
+    KEEPALIVE_PROBES_MIN,
+    KEEPALIVE_SECONDS_MAX,
+    KEEPALIVE_SECONDS_MIN,
     POOL_CONNECTIONS_MAX,
     POOL_CONNECTIONS_MIN,
     POOL_SIZE_MAX,
     POOL_SIZE_MIN,
+    TCP_USER_TIMEOUT_MS_MAX,
+    TCP_USER_TIMEOUT_MS_MIN,
     WHOLE_SECONDS_MAX,
     WHOLE_SECONDS_MIN,
 )
@@ -34,6 +40,9 @@ SQLALCHEMY_NEVER_RECYCLE: Final = -1
 
 SQLALCHEMY_UNLIMITED_POOL_SIZE: Final = 0
 """SQLAlchemy's `pool_size` for no size limit."""
+
+LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT: Final = 0
+"""libpq's `tcp_user_timeout` for the operating system's timeout."""
 
 MOVED_TO_WORKER_PROFILE: Final[Mapping[str, str]] = {
     'worker_child_pool_min_size': 'min_size=N',
@@ -65,6 +74,18 @@ def _pool_value_error(
     return ConfigurationError(
         message=f'invalid {field}',
         code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        notes=[f'got: {field}={value}', cause],
+        help_text=help_text,
+    )
+
+
+def _tcp_value_error(
+    field: str, value: int, cause: str, help_text: str,
+) -> ConfigurationError:
+    """The refusal of a TCP keepalive or user timeout value of `PostgresConfig`."""
+    return ConfigurationError(
+        message=f'invalid {field}',
+        code=ErrorCode.CONFIG_INVALID_KEEPALIVE,
         notes=[f'got: {field}={value}', cause],
         help_text=help_text,
     )
@@ -166,6 +187,13 @@ class PostgresConfig(BaseModel):
     # connection that dies in-flight. These apply to the broker engine pool
     # and the per-child connection pool; the LISTEN/NOTIFY listener sets its
     # own keepalives independently.
+    # Each TCP value has the core's bounds (horsies._catalog.manifest), which
+    # are Linux's limits (tcp(7)). macOS's limits are higher (TCP_KEEPALIVE
+    # and TCP_KEEPINTVL 4,294,967 s, TCP_KEEPCNT 2^31 - 1), and macOS has no
+    # TCP_USER_TIMEOUT (libpq ignores tcp_user_timeout there). So on each
+    # supported platform the core's bound is the lower one: a config that
+    # Pydantic accepts is one that the core and the socket accept. See
+    # validate_tcp_settings.
     tcp_keepalives: bool = Field(
         default=True,
         description='Enable libpq TCP keepalives on broker and child-process connections',
@@ -332,30 +360,67 @@ class PostgresConfig(BaseModel):
                 ],
                 help_text='use a direct/session-capable Postgres URL for session_database_url',
             )
-        if self.tcp_keepalives:
-            for name, value in (
-                ('tcp_keepalives_idle', self.tcp_keepalives_idle),
-                ('tcp_keepalives_interval', self.tcp_keepalives_interval),
-                ('tcp_keepalives_count', self.tcp_keepalives_count),
-            ):
-                if value < 1:
-                    raise ConfigurationError(
-                        message=f'invalid {name}',
-                        code=ErrorCode.CONFIG_INVALID_KEEPALIVE,
-                        notes=[f'{name}={value}', f'{name} must be >= 1 when tcp_keepalives is True'],
-                        help_text='use positive second/count values, or set tcp_keepalives=False to disable',
-                    )
-        if self.tcp_user_timeout_ms < 0:
-            raise ConfigurationError(
-                message='invalid tcp_user_timeout_ms',
-                code=ErrorCode.CONFIG_INVALID_KEEPALIVE,
-                notes=[
-                    f'tcp_user_timeout_ms={self.tcp_user_timeout_ms}',
-                    'tcp_user_timeout_ms must be >= 0',
-                ],
-                help_text='use a positive millisecond value, or 0 for the operating system default',
-            )
         return self
+
+    @model_validator(mode='after')
+    def validate_tcp_settings(self) -> 'PostgresConfig':
+        """Refuse a TCP value outside the core's bounds
+        (`horsies._catalog.manifest`), with `CONFIG_INVALID_KEEPALIVE`.
+
+        The three keepalive values are checked only when `tcp_keepalives`
+        is True: when it is False, no connection and no manifest reads
+        them. `tcp_user_timeout_ms` is `0` (the operating system's
+        timeout) or a number of milliseconds within the core's bounds. The
+        first value out of bounds is refused, in field order.
+        """
+        match self.tcp_keepalives:
+            case True:
+                for name, value, low, high in (
+                    (
+                        'tcp_keepalives_idle',
+                        self.tcp_keepalives_idle,
+                        KEEPALIVE_SECONDS_MIN,
+                        KEEPALIVE_SECONDS_MAX,
+                    ),
+                    (
+                        'tcp_keepalives_interval',
+                        self.tcp_keepalives_interval,
+                        KEEPALIVE_SECONDS_MIN,
+                        KEEPALIVE_SECONDS_MAX,
+                    ),
+                    (
+                        'tcp_keepalives_count',
+                        self.tcp_keepalives_count,
+                        KEEPALIVE_PROBES_MIN,
+                        KEEPALIVE_PROBES_MAX,
+                    ),
+                ):
+                    if not low <= value <= high:
+                        raise _tcp_value_error(
+                            name,
+                            value,
+                            f'{name} is from {low} to {high} when tcp_keepalives is True',
+                            f'give a number from {low} to {high}, or set '
+                            'tcp_keepalives=False to turn keepalives off',
+                        )
+            case False:
+                pass
+        timeout = self.tcp_user_timeout_ms
+        match timeout:
+            case _ if timeout == LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT:
+                return self
+            case _ if TCP_USER_TIMEOUT_MS_MIN <= timeout <= TCP_USER_TIMEOUT_MS_MAX:
+                return self
+            case _:
+                raise _tcp_value_error(
+                    'tcp_user_timeout_ms',
+                    timeout,
+                    f'tcp_user_timeout_ms is {LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT} '
+                    '(the operating system default) or '
+                    f'{TCP_USER_TIMEOUT_MS_MIN} to {TCP_USER_TIMEOUT_MS_MAX} milliseconds',
+                    f'give {LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT} or a number of '
+                    f'milliseconds from {TCP_USER_TIMEOUT_MS_MIN} to {TCP_USER_TIMEOUT_MS_MAX}',
+                )
 
     @property
     def effective_session_database_url(self) -> str:

@@ -1053,9 +1053,12 @@ $$;
 -- One level of promotion: the join verdict of every PENDING node of p_workflow_id that depends on a node of
 -- p_sources or is in p_candidates, written in two updates. Returns the indexes that went SKIPPED (an impossible
 -- join, or join all with a FAILED or SKIPPED dependency and no allow_failed_deps) and those that went ENQUEUED (a met
--- join). A node with workflow_ctx_from waits until its context nodes are terminal. The verdict table is Python's
+-- join). A node with workflow_ctx_from waits until its context nodes are terminal. A candidate with no dependencies
+-- is judged like any other: 0 of 0 dependencies are terminal, so join all is met and the node is ENQUEUED (it
+-- recovers a root that a start left PENDING); it is never a dependent of p_sources. The verdict table is Python's
 -- _evaluate_join and _plan_level (core/workflows/engine.py:2223-2344); the ctx gate is
--- try_make_ready_and_enqueue's (core/workflows/engine.py:2671-2683).
+-- try_make_ready_and_enqueue's (core/workflows/engine.py:2671-2683). Python's try_make_ready_and_enqueue leaves a
+-- node with no dependencies PENDING; the core's rule (enqueue it) is the decided one.
 -- Precondition: the caller holds the workflow row FOR UPDATE and the workflow is RUNNING.
 -- Locks: the node rows that the two updates write (the workflow row is held by the caller).
 CREATE FUNCTION horsies_workflow_promote_level(
@@ -1100,7 +1103,6 @@ BEGIN
         ) c
         WHERE d.workflow_id = p_workflow_id
           AND d.status = 'PENDING'
-          AND cardinality(d.dependencies) > 0
           AND (d.dependencies && p_sources OR d.task_index = ANY(p_candidates))
     ),
     skip_write AS (
@@ -3613,7 +3615,8 @@ $$;
 ------------------------------------------------------------------------------------------------------------------------
 
 -- Step function of recovery case 0: a PENDING node of a RUNNING workflow whose dependencies are all terminal (a join
--- that two concurrent steps both missed). In the caller's transaction (BEGIN; this; owed child starts; COMMIT).
+-- that two concurrent steps both missed), or that has no dependencies (a root that a start left PENDING: it goes
+-- ENQUEUED). In the caller's transaction (BEGIN; this; owed child starts; COMMIT).
 -- Steps: lock the workflow row FOR UPDATE; the join verdict of the node (horsies_workflow_promote with the node as
 -- the candidate: SKIPPED with the skip cascade, ENQUEUED with its task row minted, or a child start owed); then the
 -- completion check (horsies_workflow_try_complete).
