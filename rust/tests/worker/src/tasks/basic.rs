@@ -210,3 +210,23 @@ pub fn stamp(duration_ms: u64) -> Result<String, TaskError<Infallible>> {
         markers::unix_millis()
     ))
 }
+
+/// Python `e2e_softcap_slow_idempotent`: runs once per token, then sleeps
+/// `duration_ms`; a second run of a token fails with `DOUBLE_EXECUTION`.
+#[task("e2e_slow_idempotent")]
+pub async fn slow_idempotent(
+    token: String,
+    duration_ms: u64,
+) -> Result<String, TaskError<BasicCode>> {
+    match markers::create_once(&format!("idempotent-{token}"), "executed") {
+        Ok(true) => {
+            tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+            Ok(format!("executed:{token}"))
+        }
+        Ok(false) => Err(TaskError::user(
+            BasicCode::DoubleExecution,
+            format!("Token {token} already executed"),
+        )),
+        Err(cause) => Err(TaskError::user(BasicCode::MarkerFailed, cause.to_string())),
+    }
+}

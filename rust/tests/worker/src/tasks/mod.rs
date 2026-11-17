@@ -46,6 +46,7 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _panics = basic::panics::register(app)?;
     let _abort = basic::abort::register(app)?;
     let _idempotent = basic::idempotent::register(app)?;
+    let _slow_idempotent = basic::slow_idempotent::register(app)?;
     let _wait_inside_task = basic::wait_inside_task::register(app)?;
     let _async_sends = basic::async_sends::register(app)?;
     let _stamp = basic::stamp::register(app)?;
