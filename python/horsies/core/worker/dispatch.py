@@ -45,6 +45,8 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Result, is_err
+from horsies._core import CoreError
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.utils.db import autocommit_connection
 from horsies.core.worker.child_protocol import (
     RunFrame,
@@ -111,7 +113,7 @@ from horsies.core.worker.release import (
     HeldClaim,
     ReleaseOutcome,
     ReleasePlacement,
-    release_claims,
+    release_claims_in_core,
 )
 from horsies.core.worker.runner_heartbeat import (
     StaleRunningRecoveryOff,
@@ -128,6 +130,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from horsies._core import CoreHandle
     from horsies.core.worker.config import WorkerConfig
     from horsies.core.worker.finalize import _PersistedTerminal
 
@@ -195,6 +198,9 @@ class DispatchMixin:
         _slots: SlotPool | None
         _stop: asyncio.Event
 
+        @property
+        def core_handle(self) -> CoreHandle: ...
+
         # Cross-concern methods provided by sibling mixins / Worker.
         async def _finalize_after(
             self,
@@ -252,21 +258,23 @@ class DispatchMixin:
     ) -> _RequeueOutcome:
         """Return a claimed row that no child started to the queue.
 
-        One ``horsies_release_claims`` statement in autocommit, fenced on
-        this worker and the dispatch's claim generation; the row keeps its
-        execution class. ``DB_ERROR``: a database error, logged here; the
-        row is unchanged, or the release committed and its reply was lost.
+        One ``horsies_release_claims`` statement through the core
+        (``release_claims_in_core``), fenced on this worker and the
+        dispatch's claim generation; the row keeps its execution class.
+        ``DB_ERROR``: the release failed (``CoreOperationFailed``) or the
+        core of this process could not run it (``CoreError``), logged here;
+        the row is unchanged, or the release committed and its reply was
+        lost.
         """
         held = HeldClaim(task_id=task_id, claimed_at=claim.claimed_at)
         try:
-            async with self.sf() as s:
-                (released,) = await release_claims(
-                    await autocommit_connection(s),
-                    worker_id=self.worker_instance_id,
-                    claims=(held,),
-                    placement=ReleasePlacement.SAME_CLASS,
-                )
-        except Exception as exc:
+            (released,) = await release_claims_in_core(
+                self.core_handle,
+                worker_id=self.worker_instance_id,
+                claims=(held,),
+                placement=ReleasePlacement.SAME_CLASS,
+            )
+        except (CoreOperationFailed, CoreError) as exc:
             logger.error(
                 'DB error while requeueing task %s (%s): %s',
                 task_id,

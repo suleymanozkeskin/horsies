@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from collections.abc import Coroutine
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from psycopg import OperationalError
@@ -50,7 +51,7 @@ from horsies.core.worker.claiming import (
     read_claim_rows,
 )
 from horsies.core.utils.db import PooledStatements
-from horsies.core.worker.release import RELEASE_CLAIMS_SQL
+from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed, TooManyPendingCalls
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -1158,111 +1159,94 @@ class TestClaimerHeartbeatRenewsLease:
 # ---------------------------------------------------------------------------
 
 
-def _make_session_mock(
-    *,
-    outcome: str = 'NOT_HELD',
-    execute_side_effect: Exception | None = None,
-) -> AsyncMock:
-    """Build an AsyncMock session context for _requeue_claimed_task tests.
+REQUEUED_TASK = '019a8f3e-0000-7000-8000-0000000000a1'
 
-    The release runs on the session's autocommit connection, and its one
-    row carries ``outcome`` for the task id it was given."""
-    session = AsyncMock()
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=None)
-    session.commit = AsyncMock()
-    session.connection = AsyncMock(return_value=session)
 
-    def _released(statement: Any, params: dict[str, Any]) -> MagicMock:
-        return MagicMock(
-            fetchall=MagicMock(
-                return_value=[
-                    SimpleNamespace(
-                        ordinality=1,
-                        task_id=params['task_ids'][0],
-                        outcome=outcome,
-                    ),
-                ],
-            ),
-        )
+def _with_core_release(worker: Worker, answer: object) -> MagicMock:
+    """Give ``worker`` a broker whose core handle answers each release with
+    ``answer`` (a record, or an exception to raise). Returns the handle."""
+    handle = MagicMock()
+    match answer:
+        case BaseException():
+            handle.release_claims_async = AsyncMock(side_effect=answer)
+        case _:
+            handle.release_claims_async = AsyncMock(return_value=answer)
+    broker = MagicMock()
+    broker._core_handle = handle
+    worker.broker = broker
+    return handle
 
-    if execute_side_effect is not None:
-        session.execute = AsyncMock(side_effect=execute_side_effect)
-    else:
-        session.execute = AsyncMock(side_effect=_released)
 
-    return session
+def _released_record(row_class: type[ReleasedRow] | type[NotHeldRow]) -> MagicMock:
+    return MagicMock(
+        spec=ClaimsReleased,
+        rows=[MagicMock(spec=row_class, task_id=UUID(REQUEUED_TASK))],
+    )
 
 
 @pytest.mark.unit
 class TestRequeueClaimedTask:
-    """Tests for _requeue_claimed_task: all three _RequeueOutcome paths."""
+    """_requeue_claimed_task: one release through the core, and its outcomes."""
 
     @pytest.mark.asyncio
-    async def test_requeue_success_returns_requeued(self) -> None:
-        """When the release returns RELEASED, outcome is REQUEUED."""
+    async def test_a_released_row_is_requeued(self) -> None:
         worker = _make_worker()
-        session = _make_session_mock(outcome='RELEASED')
-        worker.sf = MagicMock(return_value=session)
+        handle = _with_core_release(worker, _released_record(ReleasedRow))
 
-        outcome = await worker._requeue_claimed_task(
-            'task-1',
-            'test reason',
-            CLAIM,
-        )
+        with patch('horsies.core.worker.release.ReleaseClaimsRequest') as request_class:
+            outcome = await worker._requeue_claimed_task(
+                REQUEUED_TASK,
+                'test reason',
+                CLAIM,
+            )
 
         assert outcome is _RequeueOutcome.REQUEUED
-        session.execute.assert_awaited_once()
-        call_args = session.execute.call_args[0]
-        assert call_args[0] is RELEASE_CLAIMS_SQL
-        assert call_args[1] == {
-            'task_ids': ['task-1'],
-            'claimed_ats': [CLAIMED_AT],
-            'worker_id': worker.worker_instance_id,
-            'placement': 'SAME_CLASS',
-        }
-        session.commit.assert_not_awaited()
+        request_class.assert_called_once_with(
+            worker_id=worker.worker_instance_id,
+            claims=[(UUID(REQUEUED_TASK), CLAIMED_AT)],
+            placement='SAME_CLASS',
+        )
+        handle.release_claims_async.assert_awaited_once_with(request_class.return_value)
 
     @pytest.mark.asyncio
-    async def test_requeue_guard_fail_returns_not_owner(self) -> None:
-        """When the release returns NOT_HELD, outcome is NOT_OWNER_OR_NOT_CLAIMED."""
+    async def test_a_row_not_held_is_not_owner_or_not_claimed(self) -> None:
         worker = _make_worker()
-        session = _make_session_mock(outcome='NOT_HELD')
-        worker.sf = MagicMock(return_value=session)
+        _ = _with_core_release(worker, _released_record(NotHeldRow))
 
-        outcome = await worker._requeue_claimed_task(
-            'task-2',
-            'owner mismatch',
-            CLAIM,
-        )
+        with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
+            outcome = await worker._requeue_claimed_task(
+                REQUEUED_TASK,
+                'owner mismatch',
+                CLAIM,
+            )
 
         assert outcome is _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
-        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_requeue_db_error_returns_db_error(self) -> None:
-        """When session.execute raises, outcome is DB_ERROR — exception does NOT propagate."""
+    async def test_a_failure_record_is_db_error(self) -> None:
         worker = _make_worker()
-        session = _make_session_mock(
-            execute_side_effect=OperationalError('connection lost')
+        _ = _with_core_release(
+            worker,
+            MagicMock(spec=ReleaseFailed, message='connection lost', retryable=True),
         )
-        worker.sf = MagicMock(return_value=session)
 
-        outcome = await worker._requeue_claimed_task('task-3', 'db failure', CLAIM)
+        with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
+            outcome = await worker._requeue_claimed_task(REQUEUED_TASK, 'db failure', CLAIM)
 
         assert outcome is _RequeueOutcome.DB_ERROR
-        # No exception escaped — the method returned cleanly
 
     @pytest.mark.asyncio
-    async def test_requeue_db_error_does_not_commit(self) -> None:
-        """On DB error, commit must not be called (exception fires before commit)."""
+    async def test_a_core_that_cannot_take_the_call_is_db_error(self) -> None:
         worker = _make_worker()
-        session = _make_session_mock(execute_side_effect=RuntimeError('boom'))
-        worker.sf = MagicMock(return_value=session)
+        _ = _with_core_release(
+            worker,
+            TooManyPendingCalls('CoreHandle.release_claims_async', 65_536),
+        )
 
-        await worker._requeue_claimed_task('task-4', 'no commit expected', CLAIM)
+        with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
+            outcome = await worker._requeue_claimed_task(REQUEUED_TASK, 'core busy', CLAIM)
 
-        session.commit.assert_not_awaited()
+        assert outcome is _RequeueOutcome.DB_ERROR
 
 
 # ---------------------------------------------------------------------------

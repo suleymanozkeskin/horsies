@@ -50,6 +50,7 @@ from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.sqltypes import NullType
 
 from horsies.core.logging import get_logger
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok, Result
 
 if TYPE_CHECKING:
@@ -260,10 +261,15 @@ def is_dbapi_disconnect(exc: DBAPIError) -> bool:
 
 
 def is_retryable_connection_error(exc: BaseException) -> bool:
-    """Check whether an exception is a transient connection error worth retrying."""
+    """Check whether an exception is a transient connection error worth retrying.
+
+    A ``CoreOperationFailed`` carries the core's classification of its cause.
+    """
     match exc:
         case OperationalError() | InterfaceError() | SAOperationalError():
             return True
+        case CoreOperationFailed(retryable=retryable):
+            return retryable
         # Engine pool checkout timeout ("QueuePool limit reached"): transient
         # infrastructure pressure, same class as a failed connect. It only
         # subclasses SQLAlchemyError, so the arms above never match it;

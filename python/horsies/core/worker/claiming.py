@@ -39,7 +39,6 @@ from horsies.core.models.tasks import Execution
 from horsies.core.utils.db import (
     SingleStatement,
     StatementRunner,
-    autocommit_connection,
     rows_or_raise,
 )
 from horsies.core.worker.claim_plan import (
@@ -60,7 +59,7 @@ from horsies.core.worker.release import (
     HeldClaim,
     ReleaseOutcome,
     ReleasePlacement,
-    release_claims,
+    release_claims_in_core,
 )
 from horsies.core.worker.row_class import (
     RowClassFits,
@@ -89,6 +88,7 @@ from horsies.core.worker.sql import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from horsies._core import CoreHandle
     from horsies.core.worker.config import WorkerConfig
     from horsies.core.worker.runtime import _RequeueOutcome
 
@@ -308,6 +308,9 @@ class ClaimMixin:
         worker_instance_id: str
         _registered_classes: Mapping[str, Execution]
         _queue_cap_hold: QueueCapHold
+
+        @property
+        def core_handle(self) -> CoreHandle: ...
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_slot_count(self) -> int: ...
@@ -613,21 +616,24 @@ class ClaimMixin:
         not dispatched either. Logs one warning per row. No rows sends
         nothing.
 
+        Runs in the core (``release_claims_in_core``).
+
         Raises:
-            Exception: DB errors propagate to the caller.
+            CoreOperationFailed: the release failed; the worker loop retries
+                a retryable one as a connection error.
+            CoreError: the core of this process stopped or did not start.
         """
         if not mismatched:
             return
-        async with self.sf() as s:
-            released = await release_claims(
-                await autocommit_connection(s),
-                worker_id=self.worker_instance_id,
-                claims=tuple(
-                    HeldClaim(task_id=str(row['id']), claimed_at=claim_time_of(row))
-                    for row, _ in mismatched
-                ),
-                placement=ReleasePlacement.ISOLATED,
-            )
+        released = await release_claims_in_core(
+            self.core_handle,
+            worker_id=self.worker_instance_id,
+            claims=tuple(
+                HeldClaim(task_id=str(row['id']), claimed_at=claim_time_of(row))
+                for row, _ in mismatched
+            ),
+            placement=ReleasePlacement.ISOLATED,
+        )
         for (row, mismatch), release in zip(mismatched, released, strict=True):
             match release.outcome:
                 case ReleaseOutcome.RELEASED:

@@ -19,4 +19,18 @@ LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('requeue_stale_claimed_async',),
     ),
+    DualRunOperation(
+        name='claim release, same class',
+        production_path='horsies.core.worker.dispatch:DispatchMixin._requeue_claimed_task',
+        reference_path='tests.dualrun.reference.release_caller:requeue_claimed_task',
+        mode=PoolMode(),
+        core_methods=('release_claims_async',),
+    ),
+    DualRunOperation(
+        name='claim release as ISOLATED',
+        production_path='horsies.core.worker.claiming:ClaimMixin._return_rows_as_isolated',
+        reference_path='tests.dualrun.reference.release_caller:return_rows_as_isolated',
+        mode=PoolMode(),
+        core_methods=('release_claims_async',),
+    ),
 )

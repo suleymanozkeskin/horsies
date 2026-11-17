@@ -16,6 +16,7 @@ from sqlalchemy.exc import (
     TimeoutError as SATimeoutError,
 )
 
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import (
     AUTOCOMMIT_EXECUTION_OPTIONS,
@@ -88,6 +89,12 @@ class TestIsRetryableConnectionError:
     def test_sqlalchemy_operational_error(self) -> None:
         exc = SAOperationalError('lost connection', {}, Exception('orig'))
         assert is_retryable_connection_error(exc) is True
+
+    def test_a_core_failure_keeps_the_core_classification(self) -> None:
+        retryable = CoreOperationFailed('release_claims', 'connection lost', True)
+        refused = CoreOperationFailed('release_claims', 'repeated task id', False)
+        assert is_retryable_connection_error(retryable) is True
+        assert is_retryable_connection_error(refused) is False
 
     def test_sqlalchemy_pool_timeout_retryable(self) -> None:
         """Engine pool checkout timeout is transient, never a permanent failure.

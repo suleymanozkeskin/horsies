@@ -27,6 +27,7 @@ from horsies.core.utils.db import (
 from horsies.core.utils.url import to_psycopg_url
 
 if TYPE_CHECKING:
+    from horsies._core import CoreHandle
     from horsies.core.brokers.postgres import PostgresBroker
 
 # --- Imports from sibling modules (extracted for maintainability) ---
@@ -380,6 +381,24 @@ class Worker(
             | MemoryBaselineExceedsThresholdError
             | None
         ) = None
+
+    @property
+    def core_handle(self) -> CoreHandle:
+        """The core handle of this worker process: its broker's handle.
+
+        The operations of the worker that run in the core use it. A worker
+        built without a broker has no handle; a running worker always has a
+        broker (``run_forever`` refuses to start without one), so the call
+        is a defect then: ``AssertionError``.
+        """
+        match self.broker:
+            case None:
+                raise AssertionError(
+                    'the worker has no broker, so it has no core handle; '
+                    'build the Worker with its PostgresBroker'
+                )
+            case broker:
+                return broker._core_handle
 
     def request_stop(self) -> None:
         """Request worker to stop gracefully."""

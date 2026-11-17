@@ -1,24 +1,30 @@
-"""``horsies.core.worker.release``: the call of ``horsies_release_claims`` and its decoder."""
+"""``horsies.core.worker.release``: the call of ``horsies_release_claims``, its
+decoder, and the same release through the core."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 
+from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.release import (
     MAX_RELEASE_ROWS,
     RELEASE_CLAIMS_SQL,
+    RELEASE_SUBJECT,
     ClaimRelease,
     HeldClaim,
     ReleaseOutcome,
     ReleasePlacement,
     decode_release_rows,
     release_claims,
+    release_claims_in_core,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -142,3 +148,136 @@ class TestReleaseClaims:
         sizes = [len(call.args[1]['task_ids']) for call in connection.execute.await_args_list]
         assert sizes == [MAX_RELEASE_ROWS, 1]
         assert tuple(each.claim for each in released) == claims
+
+
+def _released(*rows: object) -> MagicMock:
+    return MagicMock(spec=ClaimsReleased, rows=list(rows))
+
+
+def _released_row(task_id: str) -> MagicMock:
+    return MagicMock(spec=ReleasedRow, task_id=UUID(task_id))
+
+
+def _not_held_row(task_id: str) -> MagicMock:
+    return MagicMock(spec=NotHeldRow, task_id=UUID(task_id))
+
+
+def _core_handle(*answers: object) -> MagicMock:
+    handle = MagicMock()
+    handle.release_claims_async = AsyncMock(side_effect=list(answers))
+    return handle
+
+
+class TestReleaseClaimsInCore:
+    @pytest.mark.asyncio
+    async def test_each_record_pairs_with_the_claim_at_its_position(self) -> None:
+        claims = (_claim(TASK_A), _claim(TASK_B, minutes=1))
+        handle = _core_handle(_released(_released_row(TASK_A), _not_held_row(TASK_B)))
+
+        with patch('horsies.core.worker.release.ReleaseClaimsRequest') as request_class:
+            released = await release_claims_in_core(
+                handle,
+                worker_id='worker-1',
+                claims=claims,
+                placement=ReleasePlacement.ISOLATED,
+            )
+
+        assert released == (
+            ClaimRelease(claim=claims[0], outcome=ReleaseOutcome.RELEASED),
+            ClaimRelease(claim=claims[1], outcome=ReleaseOutcome.NOT_HELD),
+        )
+        request_class.assert_called_once_with(
+            worker_id='worker-1',
+            claims=[
+                (UUID(TASK_A), CLAIMED_AT),
+                (UUID(TASK_B), CLAIMED_AT + timedelta(minutes=1)),
+            ],
+            placement='ISOLATED',
+        )
+        handle.release_claims_async.assert_awaited_once_with(request_class.return_value)
+
+    @pytest.mark.asyncio
+    async def test_no_claims_send_nothing(self) -> None:
+        handle = _core_handle()
+
+        released = await release_claims_in_core(
+            handle,
+            worker_id='worker-1',
+            claims=(),
+            placement=ReleasePlacement.SAME_CLASS,
+        )
+
+        assert released == ()
+        handle.release_claims_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_list_longer_than_one_call_is_split_in_order(self) -> None:
+        ids = [f'019a8f3e-0000-7000-8000-{position:012x}' for position in range(MAX_RELEASE_ROWS + 1)]
+        claims = tuple(_claim(task_id) for task_id in ids)
+        handle = _core_handle(
+            _released(*(_released_row(task_id) for task_id in ids[:MAX_RELEASE_ROWS])),
+            _released(_not_held_row(ids[MAX_RELEASE_ROWS])),
+        )
+
+        with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
+            released = await release_claims_in_core(
+                handle,
+                worker_id='worker-1',
+                claims=claims,
+                placement=ReleasePlacement.SAME_CLASS,
+            )
+
+        assert handle.release_claims_async.await_count == 2
+        assert [each.claim for each in released] == list(claims)
+        assert released[-1].outcome is ReleaseOutcome.NOT_HELD
+
+    @pytest.mark.asyncio
+    async def test_a_failure_record_raises_with_its_retryable_flag(self) -> None:
+        handle = _core_handle(
+            MagicMock(spec=ReleaseFailed, message='release: connection lost', retryable=True),
+        )
+
+        with (
+            patch('horsies.core.worker.release.ReleaseClaimsRequest'),
+            pytest.raises(CoreOperationFailed) as raised,
+        ):
+            _ = await release_claims_in_core(
+                handle,
+                worker_id='worker-1',
+                claims=(_claim(TASK_A),),
+                placement=ReleasePlacement.SAME_CLASS,
+            )
+
+        assert raised.value.subject == RELEASE_SUBJECT
+        assert raised.value.message == 'release: connection lost'
+        assert raised.value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_a_record_of_another_task_is_refused(self) -> None:
+        handle = _core_handle(_released(_released_row(TASK_B)))
+
+        with (
+            patch('horsies.core.worker.release.ReleaseClaimsRequest'),
+            pytest.raises(OutcomeDecodeError),
+        ):
+            _ = await release_claims_in_core(
+                handle,
+                worker_id='worker-1',
+                claims=(_claim(TASK_A),),
+                placement=ReleasePlacement.SAME_CLASS,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_record_count_other_than_the_claim_count_is_refused(self) -> None:
+        handle = _core_handle(_released())
+
+        with (
+            patch('horsies.core.worker.release.ReleaseClaimsRequest'),
+            pytest.raises(OutcomeDecodeError),
+        ):
+            _ = await release_claims_in_core(
+                handle,
+                worker_id='worker-1',
+                claims=(_claim(TASK_A),),
+                placement=ReleasePlacement.SAME_CLASS,
+            )
