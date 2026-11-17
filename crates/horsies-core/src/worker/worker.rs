@@ -930,7 +930,6 @@ impl Worker {
             self.broker.reserve_maintenance_pool().clone(),
             Arc::clone(&self.workflow_registry),
             self.app_config.recovery.clone(),
-            self.app_config.payload.clone(),
             self.app_config.retention.clone(),
             health,
             self.cancel.clone(),
