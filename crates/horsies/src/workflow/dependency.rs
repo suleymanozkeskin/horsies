@@ -96,6 +96,18 @@ impl OutputlessResults {
     }
 }
 
+impl<'de> Deserialize<'de> for OutputlessResults {
+    /// An object of node id to the stored result of that node, each read as
+    /// a `TaskOutcome`. It lets an outputless definition meet the
+    /// `DeserializeOwned` bound of the registration, the start and the read;
+    /// the workflow handle reads the stored result of an outputless workflow
+    /// through its own envelope.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        BTreeMap::<String, TaskOutcome<serde_json::Value, UserCode>>::deserialize(deserializer)
+            .map(Self::new)
+    }
+}
+
 /// The text of the result member that the check of a node's input puts in
 /// place of each `args_from` member: a failed dependency
 /// (`UPSTREAM_SKIPPED`), which every `TaskOutcome<S, E>` reads.
@@ -156,6 +168,31 @@ mod tests {
             "ok": null,
             "err": {"error_code": "DECLINED", "message": "card declined"},
         })
+    }
+
+    #[test]
+    fn outputless_results_read_each_node_by_its_id() {
+        let stored = json!({
+            "a": {"__h_task_result__": true, "ok": {"rows": 2}, "err": null},
+            "b": declined(),
+        });
+        let results: OutputlessResults = serde_json::from_value(stored).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results.get("a"),
+            Some(&TaskOutcome::Succeeded(json!({"rows": 2})))
+        );
+        let Some(TaskOutcome::Failed(error)) = results.get("b") else {
+            panic!("a stored error reads as Failed");
+        };
+        assert_eq!(error.code().text(), "DECLINED");
+        assert_eq!(results.get("c"), None);
+    }
+
+    #[test]
+    fn outputless_results_refuse_a_node_that_is_not_a_stored_result() {
+        let refused = serde_json::from_value::<OutputlessResults>(json!({"a": 3}));
+        assert!(refused.is_err());
     }
 
     #[test]
