@@ -176,7 +176,7 @@ When the core of the process cannot run the call, the call returns its failure c
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON or not a JSON object, a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields), an `execution` that is not an `Execution` value, or a `cancel_grace_ms` that does not fit the class (100 to 10,000 ms for `SHARED_ASYNC`, absent or null for the others). The message names each failing field. Nothing was written | No |
-| `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, malformed args or kwargs JSON, args that are not null or an empty array, kwargs that are not an object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
+| `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, an `input_json` that does not parse, that repeats a key in an object, or that is not a JSON object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
 | `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
 | `WAIT_INSIDE_TASK` | A raw result read (`app.get_raw_result()`, `broker.get_raw_result_record()` or an `*_async` form) was called in a worker child, where task bodies run. Nothing ran. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
@@ -269,7 +269,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `retryable` | `bool` | The core's classification of the cause: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls` |
 | `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception. On `TaskSendLoopRunnerFailed` it is `BaseException`: always the `LoopRunnerError` |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
-| `size_bytes` | `int` | Length of the serialized kwargs |
+| `size_bytes` | `int` | Bytes of the UTF-8 text of the serialized input |
 | `limit_bytes` | `int` | The configured `payload.reject_bytes` |
 
 The repr of a variant shows its class name and its other fields. `payload`, `message` and `exception` are not in the repr.
@@ -304,7 +304,7 @@ For a validation failure, the cause names the field, the message and the type, n
 | `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue, or the core of the process could not run the send ([Calls That Run on the Core](#calls-that-run-on-the-core)); the row may or may not exist | Accepted |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
-| `PAYLOAD_TOO_LARGE` | The serialized kwargs exceed `payload.reject_bytes`; nothing was enqueued | Refused |
+| `PAYLOAD_TOO_LARGE` | The serialized input exceeds `payload.reject_bytes` bytes of UTF-8 text; nothing was enqueued | Refused |
 | `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted | Accepted |
 | `EVENT_LOOP_LIMIT` | Not returned: a send runs on the core of the process, which has no event loop limit. The variant stays in `TaskSendError` | Refused |
 | `LOOP_RUNNER_FAILED` | Not returned: a sync send calls the core on the calling thread, not on the broker's sync runner. The variant stays in `TaskSendError` and in `TaskSendRetryable` | Accepted |
@@ -565,7 +565,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 <!-- members: ErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
-| HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode or custom queue list: `custom_queues` in `DEFAULT` mode, missing or duplicate `custom_queues` in `CUSTOM` mode, or a `CustomQueueConfig.name` that is empty, has whitespace at the start or the end, or is longer than 100 characters |
+| HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode or custom queue list: `custom_queues` in `DEFAULT` mode, missing or duplicate `custom_queues` in `CUSTOM` mode, or a `CustomQueueConfig.name` that is empty, has whitespace at the start or the end, is longer than 52 bytes of UTF-8 text (`QUEUE_NAME_MAX_BYTES`), or has no UTF-8 text |
 | HRS-201 | `CONFIG_INVALID_CLUSTER_CAP` | Invalid cluster capacity |
 | HRS-202 | `CONFIG_INVALID_PREFETCH` | Invalid prefetch setting |
 | HRS-203 | `BROKER_INVALID_URL` | Invalid broker URL |
