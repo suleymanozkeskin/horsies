@@ -50,7 +50,7 @@ impl WorkflowError {
     /// - `Database`: the core's SQLSTATE rule ([`crate::broker::is_retryable_sqlx_error`]).
     /// - `Broker`: the broker error's rule ([`BrokerError::is_retryable`]).
     /// - `ChildSpecSource`: a build that did not run, yes; an interrupted
-    ///   build, no ([`ChildSpecUnavailable::is_retryable`]).
+    ///   build or one that raised, no ([`ChildSpecUnavailable::is_retryable`]).
     /// - Every other variant: no. The same call meets the same stored data,
     ///   the same refused argument or the same contract break again.
     pub fn is_retryable(&self) -> bool {

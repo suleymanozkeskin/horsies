@@ -123,7 +123,9 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
         ),
         WorkflowError::Broker(error) => (HandleErrorCode::DbOperationFailed, error.is_retryable()),
         // The step rolled back: a build that did not run is retryable; an
-        // interrupted one is not, and its caller raises the interrupt.
+        // interrupted one, or one that raised, is not. The Python client
+        // raises the interrupt, or the exception of a start or a resume,
+        // again to its caller before it reads this record.
         WorkflowError::ChildSpecSource(error) => {
             (HandleErrorCode::DbOperationFailed, error.is_retryable())
         }

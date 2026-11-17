@@ -13,9 +13,14 @@ node rows of the child. It answers:
   build fails it; also ``WORKFLOW_ENQUEUE_FAILED`` when the child's spec
   data does not encode (a text with a lone surrogate).
 
-An exception other than these answers is a defect of the client: the core
-fails the step loudly. ``KeyboardInterrupt`` and ``SystemExit`` pass
-through; the step rolls back and the operation raises them again.
+An exception of the source, such as ``SerializationError`` for task options
+of a child root that do not parse, is not a defect of the core: the step
+rolls back. A start, and a resume that failed with it, raise the same object
+again to their caller, as Python's start and resume let it propagate. Phase 2,
+the parent advance, the recovery passes, the worker and the web handler keep
+its type and text in their record, as Python's finalize and recovery catch
+it. ``KeyboardInterrupt`` and ``SystemExit`` pass through; the step rolls
+back and the operation raises them again.
 """
 
 from __future__ import annotations
@@ -82,7 +87,9 @@ def build_child_spec(
 
     Raises:
         SerializationError: a value of a child node row does not serialize,
-            or task options do not parse (a defect, as in ``build_child``).
+            or task options do not parse (a defect of the task function, as
+            in ``build_child``). The operation that asked rolls its step
+            back; see the module documentation for where the exception goes.
     """
     node = ChildOfNode(
         workflow_id=str(request.parent_workflow_id),

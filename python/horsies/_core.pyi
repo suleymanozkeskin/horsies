@@ -163,13 +163,15 @@ class CoreHandle:
         """
     def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed]:
         """Start one workflow. Writes; the children of its sub-workflow roots come from the child
-        spec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no
-        child spec source it raises RuntimeError.
+        spec source. A build that raised (KeyboardInterrupt, SystemExit, or an Exception such as
+        SerializationError) rolls the start back and raises it again. With no child spec source it
+        raises RuntimeError.
         """
     def resume_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowResumed | WorkflowNotPaused | WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed]:
         """Resume one workflow tree. Writes; the child starts it owes build their children through
         the child spec source. A build that raised KeyboardInterrupt or SystemExit raises it
-        again. With no child spec source it raises RuntimeError.
+        again; one that raised an Exception raises it again when the resume failed with it. With
+        no child spec source it raises RuntimeError.
         """
     def finish_workflow_node_async(self, request: NodeFinishRequest) -> asyncio.Future[NodeFinished | NodeFinishFailed]:
         """Phase 2 of one finished workflow task. Writes; the child starts it owes build their

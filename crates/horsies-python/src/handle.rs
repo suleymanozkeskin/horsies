@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::bridge::blocking::{call_blocking, call_blocking_within};
 use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
-use crate::child_spec::{PythonChildSpecSource, RegisteredSource};
+use crate::child_spec::{PythonChildSpecSource, RaisedExceptions, RegisteredSource};
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
@@ -170,13 +170,22 @@ impl CoreHandle {
         self.child_spec_source.get().map(Arc::clone)
     }
 
-    /// The child spec source of one operation on `core`.
+    /// The child spec source of one operation on `core`; an `Exception` of a
+    /// build goes where `raised_exceptions` says.
     ///
     /// Failure exits: `RuntimeError` when no source is registered (a defect
     /// of the client: the handle's workflow operations build children).
-    fn child_spec_source(&self, core: &'static Core) -> PyResult<PythonChildSpecSource> {
+    fn child_spec_source(
+        &self,
+        core: &'static Core,
+        raised_exceptions: RaisedExceptions,
+    ) -> PyResult<PythonChildSpecSource> {
         match self.child_spec_source.get() {
-            Some(callable) => Ok(PythonChildSpecSource::new(core, Arc::clone(callable))),
+            Some(callable) => Ok(PythonChildSpecSource::new(
+                core,
+                Arc::clone(callable),
+                raised_exceptions,
+            )),
             None => Err(PyRuntimeError::new_err(
                 "CoreHandle has no child spec source; call register_child_spec_source first",
             )),
@@ -722,7 +731,8 @@ impl CoreHandle {
     /// Start one workflow (`horsies_workflow_start`): `WorkflowStarted`,
     /// `WorkflowExists`, `WorkflowIdTaken` or `WorkflowStartFailed`. Writes;
     /// the children of its sub-workflow roots come from the child spec
-    /// source. A build that raised `KeyboardInterrupt` or `SystemExit`
+    /// source. A build that raised (`KeyboardInterrupt`, `SystemExit`, or an
+    /// `Exception` such as `SerializationError`) rolls the start back and
     /// raises it again. Awaitable only: its caller, `start_workflow_async`,
     /// is a coroutine. With no child spec source it raises `RuntimeError`.
     fn start_workflow_async<'py>(
@@ -731,7 +741,7 @@ impl CoreHandle {
         request: &Bound<'py, WorkflowStartRequest>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
-        let source = self.child_spec_source(core)?;
+        let source = self.child_spec_source(core, RaisedExceptions::ToCaller)?;
         call_async(
             py,
             core,
@@ -745,16 +755,17 @@ impl CoreHandle {
     /// `WorkflowNotPaused`, `WorkflowResumeRecoveryFailed`, `WorkflowAbsent`
     /// or `HandleFailed`. Writes; the child starts it owes build their
     /// children through the child spec source. A build that raised
-    /// `KeyboardInterrupt` or `SystemExit` raises it again. Awaitable only:
-    /// its callers run it on the loop runner. With no child spec source it
-    /// raises `RuntimeError`.
+    /// `KeyboardInterrupt` or `SystemExit` raises it again; one that raised
+    /// an `Exception` raises it again when the resume failed with it.
+    /// Awaitable only: its callers run it on the loop runner. With no child
+    /// spec source it raises `RuntimeError`.
     fn resume_workflow_async<'py>(
         &self,
         py: Python<'py>,
         workflow_id: Uuid,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
-        let source = self.child_spec_source(core)?;
+        let source = self.child_spec_source(core, RaisedExceptions::ToCaller)?;
         call_async(
             py,
             core,
@@ -767,16 +778,17 @@ impl CoreHandle {
     /// Phase 2 of one finished workflow task (`horsies_workflow_node_finish`):
     /// `NodeFinished` or `NodeFinishFailed`. Writes; the child starts it owes
     /// build their children through the child spec source. A build that
-    /// raised `KeyboardInterrupt` or `SystemExit` raises it again. Awaitable
-    /// only: its caller, the worker's finalize, is a coroutine. With no
-    /// child spec source it raises `RuntimeError`.
+    /// raised `KeyboardInterrupt` or `SystemExit` raises it again; an
+    /// `Exception` of a build is a `NodeFinishFailed` with its type and
+    /// text. Awaitable only: its caller, the worker's finalize, is a
+    /// coroutine. With no child spec source it raises `RuntimeError`.
     fn finish_workflow_node_async<'py>(
         &self,
         py: Python<'py>,
         request: &Bound<'py, NodeFinishRequest>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
-        let source = self.child_spec_source(core)?;
+        let source = self.child_spec_source(core, RaisedExceptions::InRecord)?;
         let request = request.get();
         call_async(
             py,
@@ -797,15 +809,16 @@ impl CoreHandle {
     /// (`horsies_workflow_child_finish`, one transaction per level):
     /// `ParentsAdvanced` or `ParentAdvanceStopped`. Writes; the child starts
     /// a level owes build their children through the child spec source. A
-    /// build that raised `KeyboardInterrupt` or `SystemExit` raises it again.
-    /// With no child spec source it raises `RuntimeError`.
+    /// build that raised `KeyboardInterrupt` or `SystemExit` raises it again;
+    /// an `Exception` of a build is a `ParentAdvanceStopped` with its type
+    /// and text. With no child spec source it raises `RuntimeError`.
     fn advance_workflow_parents_async<'py>(
         &self,
         py: Python<'py>,
         child_workflow_ids: Vec<Uuid>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
-        let source = self.child_spec_source(core)?;
+        let source = self.child_spec_source(core, RaisedExceptions::InRecord)?;
         call_async(
             py,
             core,
@@ -820,9 +833,9 @@ impl CoreHandle {
     /// `max_rows`, each in its own transaction: `Phase2RecoveryRecord` or
     /// `Phase2RecoveryFailed`. Writes; owed child starts build their children
     /// through the child spec source. A build that raised `KeyboardInterrupt`
-    /// or `SystemExit` raises it again after the pass. A negative value
-    /// raises `OverflowError`; with no child spec source it raises
-    /// `RuntimeError`.
+    /// or `SystemExit` raises it again after the pass; an `Exception` of a
+    /// build fails its record. A negative value raises `OverflowError`; with
+    /// no child spec source it raises `RuntimeError`.
     #[pyo3(signature = (*, grace_ms, max_rows, quarantine_after_attempts))]
     fn recover_workflow_phase2_async<'py>(
         &self,
@@ -832,7 +845,7 @@ impl CoreHandle {
         quarantine_after_attempts: u32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
-        let source = self.child_spec_source(core)?;
+        let source = self.child_spec_source(core, RaisedExceptions::InRecord)?;
         call_async(
             py,
             core,
@@ -853,8 +866,9 @@ impl CoreHandle {
     /// `RecoveryPassFailed`. Writes; each candidate commits alone, and owed
     /// child starts build their children through the child spec source. A
     /// build that raised `KeyboardInterrupt` or `SystemExit` raises it again
-    /// after the pass. A negative value raises `OverflowError`; with no child
-    /// spec source it raises `RuntimeError`.
+    /// after the pass; an `Exception` of a build fails its candidate, which
+    /// counts toward the limit. A negative value raises `OverflowError`; with
+    /// no child spec source it raises `RuntimeError`.
     #[pyo3(signature = (*, failure_limit))]
     fn recover_workflows_async<'py>(
         &self,
@@ -862,7 +876,7 @@ impl CoreHandle {
         failure_limit: u32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
-        let source = self.child_spec_source(core)?;
+        let source = self.child_spec_source(core, RaisedExceptions::InRecord)?;
         call_async(
             py,
             core,
