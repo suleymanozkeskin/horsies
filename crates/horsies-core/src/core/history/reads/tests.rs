@@ -828,7 +828,6 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
         drop_detached_leaf(
             &mut transaction,
             &DropDetachedHistoryLeaf::new(old_leaf.clone()),
-            &StagedLoaderPublisher,
         )
         .await
         .expect("drop old P4 leaf"),
