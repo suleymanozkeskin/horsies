@@ -36,7 +36,7 @@ tags: [workers, concurrency, claiming, limits]
 
 ## Worker-Level: Children
 
-Each worker runs the children of its worker profile. A profile with 8 isolated children runs up to 8 tasks at once. The API is on the client page [Worker Profiles](/horsies/workers/worker-profiles/) (Python). The Rust worker setup page is not written yet.
+Each worker runs the children of its worker profile. A profile with 8 isolated children runs up to 8 tasks at once. The API is on the client pages: [Worker Profiles](/horsies/workers/worker-profiles/) (Python) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
 
 - Limits concurrent task execution on this worker
 - Each isolated child handles one task at a time

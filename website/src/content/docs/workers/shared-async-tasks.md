@@ -34,7 +34,7 @@ Enqueue stores a `timeout_ms` and a `cancel_grace_ms` on every `SHARED_ASYNC` ro
 
 Declare the task with the `SHARED_ASYNC` class and a `timeout_ms`; `cancel_grace_ms` is optional. Start a worker whose profile has shared async children. A profile with 2 isolated children and 4 shared async children of 25 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats.
 
-The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) (Rust). The Rust worker setup page is not written yet.
+The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
 
 ### Keep a client for the life of the child
 
