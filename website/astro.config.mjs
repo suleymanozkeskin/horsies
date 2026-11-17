@@ -25,6 +25,31 @@ export default defineConfig({
 		'/rust/workers/worker-architecture': '/horsies/workers/worker-architecture/',
 		'/rust/scheduling/scheduler-overview': '/horsies/scheduling/scheduler-overview/',
 		'/rust/questions-and-answers': '/horsies/questions-and-answers/',
+		// A Rust API page that the 0.8.0 client replaced redirects to its new page;
+		// one whose API the client does not have yet redirects to the Rust overview.
+		'/rust/tasks/error-handling': '/horsies/rust/tasks/errors/',
+		'/rust/tasks/retry-policy': '/horsies/rust/tasks/defining-tasks/',
+		'/rust/concepts/result-handling': '/horsies/rust/tasks/retrieving-results/',
+		'/rust/configuration/broker-config': '/horsies/rust/configuration/app-config/',
+		'/rust/configuration/recovery-config': '/horsies/rust/configuration/app-config/',
+		'/rust/configuration/retention-config': '/horsies/rust/configuration/app-config/',
+		'/rust/monitoring/broker-methods': '/horsies/rust/monitoring/health-reads/',
+		'/rust/workers/concurrency': '/horsies/workers/concurrency/',
+		'/rust/internals/serialization': '/horsies/internals/serialization/',
+		'/rust/cli': '/horsies/rust/',
+		'/rust/concepts/workflows/subworkflows': '/horsies/rust/',
+		'/rust/concepts/workflows/typed-node-builder': '/horsies/rust/',
+		'/rust/concepts/workflows/workflow-api': '/horsies/rust/',
+		'/rust/monitoring/web-ui-deployment': '/horsies/rust/',
+		'/rust/operations/cutover-runbook': '/horsies/rust/',
+		'/rust/quick-start/getting-started': '/horsies/rust/',
+		'/rust/quick-start/01-configuring-horsies': '/horsies/rust/',
+		'/rust/quick-start/02-producing-tasks': '/horsies/rust/',
+		'/rust/quick-start/03-defining-workflows': '/horsies/rust/',
+		'/rust/quick-start/04-scheduling': '/horsies/rust/',
+		'/rust/quick-start/05-workflow-patterns': '/horsies/rust/',
+		'/rust/scheduling/schedule-config': '/horsies/rust/',
+		'/rust/scheduling/schedule-patterns': '/horsies/rust/',
 	},
 	integrations: [
 		starlight({
@@ -225,86 +250,74 @@ export default defineConfig({
 					],
 				},
 				{
-					// The API of the Rust client. Every slug is under rust/.
+					// The API of the Rust client. Every slug is under rust/. An item with the
+					// badge "not written" has no page yet and links to the issue that tracks it.
 					label: 'Rust API',
-					collapsed: true,
 					items: [
 						{ label: 'Overview', slug: 'rust' },
 						{
 							label: 'Quick Start',
 							items: [
-								{ label: 'Getting Started', slug: 'rust/quick-start/getting-started' },
-								{ label: 'Configuring Horsies', slug: 'rust/quick-start/01-configuring-horsies' },
-								{ label: 'Producing Tasks', slug: 'rust/quick-start/02-producing-tasks' },
-								{ label: 'Defining Workflows', slug: 'rust/quick-start/03-defining-workflows' },
-								{ label: 'Scheduling', slug: 'rust/quick-start/04-scheduling' },
-								{ label: 'Workflow Patterns', slug: 'rust/quick-start/05-workflow-patterns' },
+								{ label: 'Getting Started', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Tasks',
 							items: [
-								{ label: 'Result Handling', slug: 'rust/concepts/result-handling' },
 								{ label: 'Defining Tasks', slug: 'rust/tasks/defining-tasks' },
+								{ label: 'Task Errors', slug: 'rust/tasks/errors' },
 								{ label: 'Sending Tasks', slug: 'rust/tasks/sending-tasks' },
-								{ label: 'Error Handling', slug: 'rust/tasks/error-handling' },
-								{ label: 'Errors Reference', slug: 'rust/tasks/errors' },
 								{ label: 'Retrieving Results', slug: 'rust/tasks/retrieving-results' },
-								{ label: 'Retry Policy', slug: 'rust/tasks/retry-policy' },
+								{ label: 'Blocking API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Workflows',
 							items: [
-								{ label: 'Workflow API', slug: 'rust/concepts/workflows/workflow-api' },
-								{ label: 'Subworkflows', slug: 'rust/concepts/workflows/subworkflows' },
+								{ label: 'Workflow API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Typed Node Builder', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Subworkflows', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Configuration',
 							items: [
 								{ label: 'App Config', slug: 'rust/configuration/app-config' },
-								{ label: 'Broker Config', slug: 'rust/configuration/broker-config' },
-								{ label: 'Recovery Config', slug: 'rust/configuration/recovery-config' },
-								{ label: 'Retention Config', slug: 'rust/configuration/retention-config' },
 							],
 						},
 						{
 							label: 'Workers',
 							items: [
-								{ label: 'Concurrency', slug: 'rust/workers/concurrency' },
-							],
-						},
-						{
-							label: 'Monitoring',
-							items: [
-								{ label: 'Deployment & Authentication', slug: 'rust/monitoring/web-ui-deployment' },
-								{ label: 'Broker Methods', slug: 'rust/monitoring/broker-methods' },
+								{ label: 'Worker Setup', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Scheduling',
 							items: [
-								{ label: 'Schedule Patterns', slug: 'rust/scheduling/schedule-patterns' },
-								{ label: 'Schedule Config', slug: 'rust/scheduling/schedule-config' },
+								{ label: 'Schedule Config', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
-							label: 'CLI',
+							label: 'Monitoring',
 							items: [
-								{ label: 'CLI Reference', slug: 'rust/cli' },
+								{ label: 'Health Reads', slug: 'rust/monitoring/health-reads' },
+								{ label: 'Monitoring Queries', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Web UI Mount', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Operations',
 							items: [
-								{ label: 'Task-history Cutover', slug: 'rust/operations/cutover-runbook' },
+								{ label: 'Rerun in Your Transaction', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Async Frameworks', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Testing', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'CLI Reference', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
-							label: 'Internals',
+							label: 'Migrations',
 							items: [
-								{ label: 'Serialization', slug: 'rust/internals/serialization' },
+								{ label: 'Switching to 0.8.0', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 					],
