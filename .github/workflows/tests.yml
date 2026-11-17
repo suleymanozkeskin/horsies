@@ -108,6 +108,14 @@ jobs:
       - name: Run dual-run unit tests
         run: uv run --no-sync pytest tests/dualrun/ -m unit -v --tb=short
 
+      # The public API of the installed wheel against tests/public_api/
+      # baseline.json and baseline-pyright.json: exports, the deep imports of
+      # the docs, the skill files and the showcase, signatures, fields, enum
+      # members, the pyright completeness score and diagnostics. An intended
+      # change updates the baseline with `python -m tests.public_api.runner`.
+      - name: Compare the public API with the baseline
+        run: uv run --no-sync pytest tests/public_api/ -v --tb=short
+
   dualrun:
     needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'
