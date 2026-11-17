@@ -18,7 +18,8 @@ use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
-    rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+    rerun_first_statement, rerun_task_in_transaction, RerunEnqueuePolicy, RerunError, RerunOutcome,
+    RerunTask,
 };
 use crate::core::{
     EnqueueRetention, OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult,
@@ -70,8 +71,8 @@ use crate::broker::pools::{
     CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
 };
 use crate::db::{
-    BoundStatement, CheckoutClass, ParameterType, Row, StatementBound, TypedStatement,
-    WORKER_RESERVED_CONNECTIONS,
+    BoundStatement, CheckoutClass, IsolationLevel, NotSentCause, ParameterType, Row,
+    StatementBound, StatementFailure, TypedStatement, WORKER_RESERVED_CONNECTIONS,
 };
 
 /// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
@@ -1318,13 +1319,22 @@ impl PostgresBroker {
         self.pgbouncer_transaction_mode
     }
 
-    /// Rerun one retained terminal task in a broker-owned transaction.
+    /// Rerun one retained terminal task in a broker-owned transaction on the
+    /// main core pool ([`CheckoutClass::Batch`]): the source read, the key
+    /// claim of a keyed rerun and the insert of the new row
+    /// (`core::history::rerun::operations`). A close waits for it as for a
+    /// write.
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
     /// `RerunError::ClientFamilyMismatch`; a family row that could not be
     /// read is `RerunError::FamilyCheckFailed`. In both cases nothing is
     /// written.
+    ///
+    /// Errors: as the rerun in its transaction, and
+    /// [`RerunError::PoolSettings`] when a closed handle cannot open its
+    /// pools again. After an error nothing committed, except after
+    /// `OutcomeUnknown` at `COMMIT`.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
@@ -1333,8 +1343,19 @@ impl PostgresBroker {
         self.check_client_family_for_write()
             .await
             .map_err(rerun_family_error)?;
-        let mut transaction = self.pool.begin().await?;
-        let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
+        let (open, _write) = self.core.pools_for_write()?;
+        let mut connection = open
+            .main()
+            .checkout(CheckoutClass::Batch)
+            .await
+            .map_err(|cause| StatementFailure::NotSent {
+                statement: rerun_first_statement().name(),
+                cause: NotSentCause::Checkout(cause),
+            })?;
+        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
+        let outcome =
+            rerun_task_in_transaction(&mut transaction, self.statement_log, &command, &policy)
+                .await?;
         transaction.commit().await?;
         Ok(outcome)
     }
