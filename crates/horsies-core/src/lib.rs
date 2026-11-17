@@ -1,10 +1,5 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-// Test modules derive `WorkflowInput` from horsies-macros, a dev-dependency.
-// The derive output names `horsies::InputField` and `horsies::__private`.
-#[cfg(test)]
-extern crate self as horsies;
-
 // `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
 // and `#[derive(horsies_macros::ManifestSchema)]` names
 // `::horsies_core::manifest_schema`; this crate reaches both through its own
@@ -44,34 +39,26 @@ pub(crate) mod workflow_engine;
 // Public re-exports
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-pub(crate) use horsies_macros::WorkflowInput;
-
 // core re-exports
-pub use crate::core::BuilderHookName;
 pub use crate::core::RegisteredTask;
-pub use crate::core::SpecBuildError;
 pub use crate::core::{
-    mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
-    BuiltInTaskCode, CancelGraceMs, CancelGraceOutOfRange, ContractCode, CronEnumTerm,
-    CronNumericTerm, CronOrdinal, CronSchedule, CustomQueueConfig, CustomQueueConfigError,
-    DailySchedule, DaySelector, EnqueueRetention, ErrorCategory, ErrorCode, Execution,
-    ExecutionClass, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule,
-    InputField, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
-    OperationalErrorCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
+    mask_database_url, AnyNode, AppConfigError, BackoffStrategy, BuiltInTaskCode, CancelGraceMs,
+    CancelGraceOutOfRange, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
+    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
+    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperationError,
+    HandleResult, HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey,
+    OnError, OperationalErrorCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
     PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, RetentionChoice,
-    RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowFailure,
-    SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
-    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
-    TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
-    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
-    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
-    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
+    SchedulePattern, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
+    SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
+    TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode, UserCodeRefused,
+    ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
+    WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
+    WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
+    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
@@ -259,11 +246,3 @@ pub use crate::workflow_engine::recovery::{
 pub use crate::workflow_engine::spec_data::{
     parse_workflow_spec_data, SpecDataRefused, WorkflowSpecData, WORKFLOW_SPEC_DATA_VERSION,
 };
-
-#[cfg(test)]
-#[doc(hidden)]
-pub(crate) mod __private {
-    pub const fn input_field<I, F>(name: &'static str) -> crate::InputField<I, F> {
-        crate::InputField::raw(name)
-    }
-}
