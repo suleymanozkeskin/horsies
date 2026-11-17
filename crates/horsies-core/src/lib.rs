@@ -156,8 +156,8 @@ pub use crate::worker::{
     cli::LogLevel,
     config::WorkerConfig,
     scheduler::service::{
-        spawn_scheduler, ActiveScheduler, PreparedSchedules, ScheduleSendFacts, SchedulerService,
-        SchedulerStartError, SchedulerStarted, SchedulerStop, SchedulerTickError,
+        ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted, SchedulerStop,
+        SchedulerTickError,
     },
     worker::{OnStarted, Worker, WorkerStop},
     WorkerError,

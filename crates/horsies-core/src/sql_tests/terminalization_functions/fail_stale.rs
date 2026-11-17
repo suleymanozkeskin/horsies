@@ -11,12 +11,24 @@ fn milliseconds(value: i32) -> chrono::Duration {
     chrono::Duration::milliseconds(i64::from(value))
 }
 
+/// `value` seconds as a span of time.
+fn seconds(value: i32) -> chrono::Duration {
+    chrono::Duration::seconds(i64::from(value))
+}
+
 /// No heartbeat at all: staleness is judged from started_at.
 #[tokio::test]
 async fn a_silent_runner_is_failed() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
-    age(&session, task_id, Some(STALE_AFTER_SECONDS * 2), None).await;
+    let now = database_now(&session).await;
+    age(
+        &session,
+        task_id,
+        Some(now - seconds(STALE_AFTER_SECONDS * 2)),
+        None,
+    )
+    .await;
 
     match fail_stale(&session, task_id).await {
         TerminalizationOutcome::Applied { kind, observed, .. } => {
@@ -31,8 +43,59 @@ async fn a_silent_runner_is_failed() {
 async fn a_stale_heartbeat_is_failed() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
-    age(&session, task_id, Some(STALE_AFTER_SECONDS * 4), None).await;
-    heartbeat(&session, task_id, STALE_AFTER_SECONDS * 2, "runner").await;
+    let now = database_now(&session).await;
+    age(
+        &session,
+        task_id,
+        Some(now - seconds(STALE_AFTER_SECONDS * 4)),
+        None,
+    )
+    .await;
+    let _leaf = heartbeat(
+        &session,
+        task_id,
+        now - seconds(STALE_AFTER_SECONDS * 2),
+        "runner",
+    )
+    .await;
+
+    let outcome = fail_stale(&session, task_id).await;
+    assert!(
+        matches!(outcome, TerminalizationOutcome::Applied { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// [`a_stale_heartbeat_is_failed`] seeded 30 s after the start of the first
+/// hour that the coverage pass covers: the heartbeat 120 s before that
+/// instant is in the hour before, which no leaf holds until the heartbeat
+/// helper creates it. Both seeded times are before the start of that hour,
+/// so both are in the past at the evaluation, whatever the minute of the
+/// run.
+#[tokio::test]
+async fn a_stale_heartbeat_seeded_at_thirty_seconds_past_the_hour_is_failed() {
+    let session = covered().await;
+    let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
+    let seeded_at = first_heartbeat_hour(&session).await + seconds(30);
+    age(
+        &session,
+        task_id,
+        Some(seeded_at - seconds(STALE_AFTER_SECONDS * 4)),
+        None,
+    )
+    .await;
+    let leaf = heartbeat(
+        &session,
+        task_id,
+        seeded_at - seconds(STALE_AFTER_SECONDS * 2),
+        "runner",
+    )
+    .await;
+    assert_eq!(
+        leaf,
+        HeartbeatLeaf::Created,
+        "the heartbeat is in the hour before the first covered hour"
+    );
 
     let outcome = fail_stale(&session, task_id).await;
     assert!(
@@ -46,8 +109,15 @@ async fn a_stale_heartbeat_is_failed() {
 async fn a_recent_heartbeat_refuses_with_the_evidence() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
-    age(&session, task_id, Some(STALE_AFTER_SECONDS * 2), None).await;
-    heartbeat(&session, task_id, 1, "runner").await;
+    let now = database_now(&session).await;
+    age(
+        &session,
+        task_id,
+        Some(now - seconds(STALE_AFTER_SECONDS * 2)),
+        None,
+    )
+    .await;
+    let _leaf = heartbeat(&session, task_id, now - seconds(1), "runner").await;
 
     match fail_stale(&session, task_id).await {
         TerminalizationOutcome::SourceStateConflict {
@@ -77,35 +147,17 @@ async fn a_recent_heartbeat_refuses_with_the_evidence() {
 
 /// The millisecond thresholds reach the SQL guard unchanged. The start, the
 /// heartbeat and the call run in one transaction, so `NOW()` is one instant
-/// for all three and the heartbeat is exactly 1250 ms before the evaluation.
+/// for the seed and for `evaluated_at`, and the heartbeat is exactly 1250 ms
+/// before the evaluation.
 #[tokio::test]
 async fn fractional_second_threshold_is_not_truncated() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
 
     session.run_script("BEGIN", "BEGIN").await;
-    let _started = run(
-        &session,
-        "start the row ten seconds ago",
-        "UPDATE horsies_tasks
-         SET started_at = NOW() - INTERVAL '10 seconds'
-         WHERE id = $1",
-        &[&task_id],
-    )
-    .await;
-    let _sent = run(
-        &session,
-        "insert a heartbeat 1.25 seconds ago",
-        "INSERT INTO horsies_heartbeats (
-             task_id, sender_id, role, sent_at, hostname, pid
-         ) VALUES (
-             $1, 'fractional-threshold-test', 'runner',
-             NOW() - INTERVAL '1.25 seconds',
-             'terminalization-test-host', 4242
-         )",
-        &[&task_id],
-    )
-    .await;
+    let now = database_now(&session).await;
+    age(&session, task_id, Some(now - seconds(10)), None).await;
+    let _leaf = heartbeat(&session, task_id, now - milliseconds(1_250), "runner").await;
     let outcome = fail_stale_after(&session, task_id, 1_500, 2_750).await;
     session.run_script("COMMIT", "COMMIT").await;
 
@@ -133,8 +185,15 @@ async fn fractional_second_threshold_is_not_truncated() {
 async fn a_heartbeat_from_another_role_does_not_count() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
-    age(&session, task_id, Some(STALE_AFTER_SECONDS * 2), None).await;
-    heartbeat(&session, task_id, 1, "claimer").await;
+    let now = database_now(&session).await;
+    age(
+        &session,
+        task_id,
+        Some(now - seconds(STALE_AFTER_SECONDS * 2)),
+        None,
+    )
+    .await;
+    let _leaf = heartbeat(&session, task_id, now - seconds(1), "claimer").await;
 
     let outcome = fail_stale(&session, task_id).await;
     assert!(
@@ -172,7 +231,14 @@ async fn a_row_that_never_started_refuses() {
 async fn an_active_finalizer_defers() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
-    age(&session, task_id, Some(STALE_AFTER_SECONDS * 2), Some(1)).await;
+    let now = database_now(&session).await;
+    age(
+        &session,
+        task_id,
+        Some(now - seconds(STALE_AFTER_SECONDS * 2)),
+        Some(now - seconds(1)),
+    )
+    .await;
 
     match fail_stale(&session, task_id).await {
         TerminalizationOutcome::SourceStateConflict {
@@ -197,11 +263,12 @@ async fn an_active_finalizer_defers() {
 async fn a_stale_finalizer_does_not_defer() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
+    let now = database_now(&session).await;
     age(
         &session,
         task_id,
-        Some(STALE_AFTER_SECONDS * 2),
-        Some(FINALIZING_STALE_AFTER_SECONDS * 2),
+        Some(now - seconds(STALE_AFTER_SECONDS * 2)),
+        Some(now - seconds(FINALIZING_STALE_AFTER_SECONDS * 2)),
     )
     .await;
 
@@ -216,7 +283,14 @@ async fn a_stale_finalizer_does_not_defer() {
 async fn replay_is_already_applied() {
     let session = covered().await;
     let task_id = seed(&session, &Seed::claimed_by_this_worker("RUNNING", false)).await;
-    age(&session, task_id, Some(STALE_AFTER_SECONDS * 2), None).await;
+    let now = database_now(&session).await;
+    age(
+        &session,
+        task_id,
+        Some(now - seconds(STALE_AFTER_SECONDS * 2)),
+        None,
+    )
+    .await;
     let _first = fail_stale(&session, task_id).await;
 
     match fail_stale(&session, task_id).await {
