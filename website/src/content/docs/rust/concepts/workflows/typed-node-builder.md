@@ -125,6 +125,7 @@ async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError
 
 In the spec of [Build a Node](#build-a-node):
 
+<!-- rust-check: skip partial -- a fragment of checkout_spec above: builder and charged are its locals -->
 ```rust
 let _audit = builder.task(
     audit_checkout::node()?
@@ -186,6 +187,7 @@ let _audit = builder.task(
 
 **Do not name a context source that the node does not wait for.** `workflow_ctx_from` without a dependency on the node is `HRS-009`.
 
+<!-- rust-check: skip elided -- a Wrong / Correct pair of expressions -->
 ```rust
 // Wrong
 audit_checkout::node()?.workflow_ctx_from([charged])
