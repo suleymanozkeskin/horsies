@@ -3,13 +3,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::core::task::execution::ExecutionClass;
-use crate::core::task::result::TaskResult;
 use crate::core::types::status::TaskAttemptOutcome;
 use crate::core::types::TaskStatus;
 
 /// Metadata for a broker-backed task.
+///
+/// `R` is the form of the stored result. The broker's read gives the result
+/// envelope as stored, checked as strict JSON and as an object
+/// ([`crate::broker::StoredEnvelopeText`]), with no typed decode (Python
+/// `PostgresBroker.get_task_info_async`). A client reads it with the task's
+/// types through [`TaskInfo::try_map_result`] (Python
+/// `Horsies.get_task_info_async`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskInfo {
+pub struct TaskInfo<R> {
     pub task_id: Uuid,
     pub task_name: String,
     pub status: TaskStatus,
@@ -41,8 +47,9 @@ pub struct TaskInfo {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_reason: Option<String>,
+    /// The stored result, when the read asked for it and the task has one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<TaskResult<serde_json::Value>>,
+    pub result: Option<R>,
 
     /// Execution attempt history (opt-in via `include_attempts=true`).
     /// `None` when not requested, empty `Vec` when no attempts recorded.
@@ -52,6 +59,43 @@ pub struct TaskInfo {
     /// How a worker runs the task: the stored class of a live task, or
     /// [`ExecutionClass::NotKeptInHistory`] for a task read from history.
     pub execution: ExecutionClass,
+}
+
+impl<R> TaskInfo<R> {
+    /// The same info with its result read by `read`; the other fields do not
+    /// change. With no result, `read` is not called. Pure.
+    ///
+    /// Errors: the error of `read`.
+    pub fn try_map_result<S, X>(
+        self,
+        read: impl FnOnce(R) -> Result<S, X>,
+    ) -> Result<TaskInfo<S>, X> {
+        let result = self.result.map(read).transpose()?;
+        Ok(TaskInfo {
+            task_id: self.task_id,
+            task_name: self.task_name,
+            status: self.status,
+            queue_name: self.queue_name,
+            priority: self.priority,
+            retry_count: self.retry_count,
+            max_retries: self.max_retries,
+            next_retry_at: self.next_retry_at,
+            sent_at: self.sent_at,
+            enqueued_at: self.enqueued_at,
+            claimed_at: self.claimed_at,
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            failed_at: self.failed_at,
+            worker_hostname: self.worker_hostname,
+            worker_pid: self.worker_pid,
+            worker_process_name: self.worker_process_name,
+            error_code: self.error_code,
+            failed_reason: self.failed_reason,
+            result,
+            attempts: self.attempts,
+            execution: self.execution,
+        })
+    }
 }
 
 /// Metadata for a single task execution attempt.
@@ -85,9 +129,13 @@ pub struct TaskAttemptInfo {
 mod tests {
     use super::*;
     use crate::core::task::execution::Execution;
+    use crate::core::task::result::TaskResult;
+
+    /// A task info with its result read as a task result.
+    type ReadInfo = TaskInfo<TaskResult<serde_json::Value>>;
 
     /// Helper to build a minimal TaskInfo for testing.
-    fn make_task_info(result: Option<TaskResult<serde_json::Value>>) -> TaskInfo {
+    fn make_task_info<R>(result: Option<R>) -> TaskInfo<R> {
         TaskInfo {
             task_id: Uuid::nil(),
             task_name: "my_task".to_owned(),
@@ -116,7 +164,7 @@ mod tests {
 
     #[test]
     fn serialize_with_result_none_omits_field() {
-        let info = make_task_info(None);
+        let info: ReadInfo = make_task_info(None);
         let json = serde_json::to_value(&info).unwrap();
         // The "result" key should be absent when None due to skip_serializing_if
         assert!(
@@ -151,7 +199,7 @@ mod tests {
             "enqueued_at": "2025-01-01T00:00:00Z",
             "execution": "SHARED_ASYNC"
         });
-        let info: TaskInfo = serde_json::from_value(json).unwrap();
+        let info: ReadInfo = serde_json::from_value(json).unwrap();
         assert_eq!(
             info.task_id,
             Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
@@ -174,7 +222,7 @@ mod tests {
             "result": {"__h_task_result__": true, "ok": "hello world", "err": null},
             "execution": "NOT_KEPT_IN_HISTORY"
         });
-        let info: TaskInfo = serde_json::from_value(json).unwrap();
+        let info: ReadInfo = serde_json::from_value(json).unwrap();
         assert!(info.result.is_some());
         assert!(info.result.unwrap().is_ok());
     }
@@ -185,7 +233,7 @@ mod tests {
             serde_json::json!({"nested": [1, 2, 3]}),
         )));
         let json_string = serde_json::to_string(&info).unwrap();
-        let back: TaskInfo = serde_json::from_str(&json_string).unwrap();
+        let back: ReadInfo = serde_json::from_str(&json_string).unwrap();
         assert!(back.result.is_some());
         assert!(back.result.unwrap().is_ok());
         assert_eq!(back.task_id, info.task_id);
@@ -198,11 +246,11 @@ mod tests {
             ExecutionClass::Live(Execution::SharedThread),
             ExecutionClass::NotKeptInHistory,
         ] {
-            let mut info = make_task_info(None);
+            let mut info: ReadInfo = make_task_info(None);
             info.execution = execution;
             let json = serde_json::to_value(&info).unwrap();
             assert_eq!(json["execution"], execution.as_str());
-            let back: TaskInfo = serde_json::from_value(json).unwrap();
+            let back: ReadInfo = serde_json::from_value(json).unwrap();
             assert_eq!(back.execution, execution);
         }
     }
@@ -220,14 +268,44 @@ mod tests {
             "max_retries": 0,
             "enqueued_at": "2025-01-01T00:00:00Z"
         });
-        assert!(serde_json::from_value::<TaskInfo>(json).is_err());
+        assert!(serde_json::from_value::<ReadInfo>(json).is_err());
     }
 
     #[test]
     fn round_trip_preserves_none_result() {
-        let info = make_task_info(None);
+        let info: ReadInfo = make_task_info(None);
         let json_string = serde_json::to_string(&info).unwrap();
-        let back: TaskInfo = serde_json::from_str(&json_string).unwrap();
+        let back: ReadInfo = serde_json::from_str(&json_string).unwrap();
         assert!(back.result.is_none());
+    }
+
+    #[test]
+    fn try_map_result_reads_the_result_and_keeps_the_other_fields() {
+        let mut info = make_task_info(Some("7".to_owned()));
+        info.execution = ExecutionClass::NotKeptInHistory;
+        let read = info
+            .try_map_result(|text| text.parse::<u8>())
+            .expect("the result reads");
+        assert_eq!(read.result, Some(7));
+        assert_eq!(read.task_name, "my_task");
+        assert_eq!(read.max_retries, 3);
+        assert_eq!(read.execution, ExecutionClass::NotKeptInHistory);
+    }
+
+    #[test]
+    fn try_map_result_with_no_result_calls_nothing() {
+        let info = make_task_info::<String>(None);
+        let read = info
+            .try_map_result(|_text| -> Result<u8, std::num::ParseIntError> {
+                panic!("a task info with no result has nothing to read")
+            })
+            .expect("no result reads");
+        assert_eq!(read.result, None);
+    }
+
+    #[test]
+    fn try_map_result_gives_the_error_of_a_result_that_does_not_read() {
+        let info = make_task_info(Some("seven".to_owned()));
+        assert!(info.try_map_result(|text| text.parse::<u8>()).is_err());
     }
 }
