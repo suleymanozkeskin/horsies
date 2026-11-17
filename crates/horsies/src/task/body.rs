@@ -108,6 +108,9 @@ pub(crate) struct UnreadMember {
     pub(crate) path: String,
     /// The key of the member: the last part of `path`.
     pub(crate) key: String,
+    /// The number of keys and list positions in `path`: 1 for a member of
+    /// the input itself, 2 for `cfg.retries`, 3 for `items[2].name`.
+    pub(crate) depth: usize,
 }
 
 /// The first member of `given` with a value that is not `null` and that
@@ -163,6 +166,7 @@ fn unread_below(
                         None => Some(UnreadMember {
                             path: member,
                             key: key.clone(),
+                            depth: member_depth(levels_left),
                         }),
                         Some(read_value) => unread_below(value, Some(read_value), &member, below),
                     }
@@ -174,6 +178,7 @@ fn unread_below(
             .map(|(key, _value)| UnreadMember {
                 path: member_path(path, key),
                 key: key.clone(),
+                depth: member_depth(levels_left),
             }),
         (Value::Array(elements), Some(Value::Array(read_elements))) => {
             let below = level_below(levels_left, path);
@@ -212,6 +217,15 @@ fn unread_element(
         true => None,
         false => Some(unread),
     }
+}
+
+/// The depth ([`UnreadMember::depth`]) of a member of the object that
+/// [`unread_below`] reads with `levels_left` levels. The input itself is
+/// read with [`MAX_JSON_DEPTH`] levels, so its members have depth 1, and
+/// each object or list below takes one level and adds one part to the
+/// path. `levels_left` is never more than [`MAX_JSON_DEPTH`].
+fn member_depth(levels_left: usize) -> usize {
+    MAX_JSON_DEPTH - levels_left + 1
 }
 
 /// The levels of nesting allowed below the object or list at `path`.
@@ -254,7 +268,8 @@ pub fn decode_unit_input(input: &[u8]) -> Result<(), StoredTaskError> {
 
 /// `()` from the text `null` or `{}`. A non-empty object names its first
 /// key in serde's words for a type with no fields; any other value names
-/// only its kind. Pure.
+/// only its kind. The failure is at the value itself (`.`, depth 0), also
+/// for a key. Pure.
 pub(crate) fn decode_unit(input: &[u8]) -> Result<(), DecodeFailure> {
     let value = decode_checked::<serde_json::Value>(input)?;
     let text = match &value {
@@ -272,6 +287,7 @@ pub(crate) fn decode_unit(input: &[u8]) -> Result<(), DecodeFailure> {
     };
     Err(DecodeFailure {
         path: ".".to_owned(),
+        depth: 0,
         text,
     })
 }
@@ -371,6 +387,12 @@ pub(crate) struct DecodeFailure {
     /// The field path, `.` for the value itself (serde_path_to_error's
     /// form: `items[2].name`).
     pub(crate) path: String,
+    /// The number of keys and list positions in `path`: 0 for `.`, 1 for
+    /// `amount`, 2 for `cfg.retries` and for `items[2]`. It is counted from
+    /// the parts of the path, not from its text, in which a key may hold
+    /// `.` or `[`. serde gives a key that binds to no field the path of the
+    /// key itself.
+    pub(crate) depth: usize,
     /// The kind of the failure, with [`INPUT_PLACEHOLDER`] for input parts.
     pub(crate) text: String,
 }
@@ -390,10 +412,12 @@ pub(crate) fn decode_checked<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Dec
     let decoded: Result<T, _> = serde_path_to_error::deserialize(&mut deserializer);
     let value = decoded.map_err(|error| DecodeFailure {
         path: error.path().to_string(),
+        depth: error.path().iter().len(),
         text: value_free_decode_text(error.inner()),
     })?;
     deserializer.end().map_err(|error| DecodeFailure {
         path: ".".to_owned(),
+        depth: 0,
         text: value_free_decode_text(&error),
     })?;
     Ok(value)
@@ -655,8 +679,8 @@ mod tests {
     }
 
     /// [`unread_member`]: a member that `read` does not hold is named by its
-    /// key path at each depth: in the object, in a nested object, and in an
-    /// element of a list.
+    /// key path and its depth at each depth: in the object, in a nested
+    /// object, and in an element of a list.
     #[test]
     fn an_unread_member_is_named_by_its_key_path_at_each_depth() {
         let read = json!({"a": {"b": 1}, "list": [{"c": 1}, {"c": 2}]});
@@ -667,6 +691,7 @@ mod tests {
             Some(UnreadMember {
                 path: "x".to_owned(),
                 key: "x".to_owned(),
+                depth: 1,
             })
         );
         assert_eq!(
@@ -674,6 +699,7 @@ mod tests {
             Some(UnreadMember {
                 path: "a.y".to_owned(),
                 key: "y".to_owned(),
+                depth: 2,
             })
         );
         assert_eq!(
@@ -681,6 +707,7 @@ mod tests {
             Some(UnreadMember {
                 path: "list[1].z".to_owned(),
                 key: "z".to_owned(),
+                depth: 3,
             })
         );
     }
@@ -702,6 +729,36 @@ mod tests {
         let read = json!({"when": "2026-01-01"});
         let given = json!({"when": {"year": 2026, "month": 1, "day": 1}});
         assert_eq!(unread_member(&given, &read), None);
+    }
+
+    /// The input of [`a_decode_failure_has_the_depth_of_its_path`]: a key
+    /// that holds `.`.
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DottedKey {
+        #[serde(rename = "a.b")]
+        _inner: Item,
+    }
+
+    /// [`decode_checked`]: the depth of a failure is the number of keys and
+    /// list positions in its path, counted from its parts, so the key `a.b`
+    /// is one part. A key that binds to no field has the path of the key.
+    #[test]
+    fn a_decode_failure_has_the_depth_of_its_path() {
+        let depth = |text: &str| {
+            decode_checked::<DottedKey>(text.as_bytes())
+                .unwrap_err()
+                .depth
+        };
+        assert_eq!(depth("1"), 0);
+        assert_eq!(depth(r#"{"a.b": {"name": "x", "count": 1}} 1"#), 0);
+        assert_eq!(depth(r#"{"a.b": {"name": "x", "count": 1}, "c": 1}"#), 1);
+        assert_eq!(depth(r#"{"a.b": {"name": "x", "count": 1, "c": 1}}"#), 2);
+        let refused =
+            decode_checked::<Order>(br#"{"id": 1, "items": [{"name": "x", "count": "one"}]}"#)
+                .unwrap_err();
+        assert_eq!(refused.path, "items[0].count");
+        assert_eq!(refused.depth, 3);
     }
 
     #[test]
