@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,8 +9,8 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -1455,57 +1454,9 @@ async fn sse_route_emits_idle_heartbeat_comments() {
 #[tokio::test]
 #[serial]
 async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
-    let base_url = migrated_database_url().await;
-    let base_options = PgConnectOptions::from_str(&base_url).unwrap();
-    let admin_options = base_options.clone().database("postgres");
-    let mut admin = PgConnection::connect_with(&admin_options).await.unwrap();
-    sqlx::query("SELECT pg_advisory_lock(hashtext('core_w4_noddl_setup'))")
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let stale: Vec<String> = sqlx::query_scalar(
-        "SELECT d.datname
-         FROM pg_database d
-         WHERE left(d.datname, length('core_w4_noddl_')) = 'core_w4_noddl_'
-           AND NOT EXISTS (
-               SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname
-           )
-         ORDER BY d.datname",
-    )
-    .fetch_all(&mut admin)
-    .await
-    .unwrap();
-    for stale_name in stale {
-        let suffix = stale_name.strip_prefix("core_w4_noddl_").unwrap();
-        assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        sqlx::query(&format!("DROP DATABASE \"{stale_name}\""))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-    }
-    let name = format!("core_w4_noddl_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let options = base_options.database(&name);
-    let anchor = PgPoolOptions::new()
-        .min_connections(1)
-        .max_connections(1)
-        .max_lifetime(None)
-        .idle_timeout(None)
-        .connect_with(options.clone())
-        .await
-        .unwrap();
-    let unlocked: bool =
-        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_w4_noddl_setup'))")
-            .fetch_one(&mut admin)
-            .await
-            .unwrap();
-    assert!(unlocked);
-    let url = crate::broker::pools::test_url_of(&options);
+    let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
-        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
+        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(database.url()).broker)
             .await
             .unwrap(),
     );
@@ -1515,25 +1466,21 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     );
     broker.ensure_schema_initialized().await.unwrap();
     broker.migrate().await.unwrap();
-    let relations: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT to_regclass('horsies_tasks')::text, to_regclass('horsies_migrations')::text",
-    )
-    .fetch_one(broker.pool())
-    .await
-    .unwrap();
+    let row = database
+        .client()
+        .query_one(
+            "SELECT to_regclass('horsies_tasks')::text, to_regclass('horsies_migrations')::text",
+            &[],
+        )
+        .await
+        .unwrap();
+    let relations: (Option<String>, Option<String>) = (row.get(0), row.get(1));
     assert_eq!(relations, (None, None));
     let schema = SchemaProbe::new(Arc::clone(&broker)).status().await;
     assert_eq!(schema.state, SchemaState::Absent);
-    broker.pool().close().await;
-    broker.session_pool().close().await;
-    anchor.close().await;
+    broker.close().await;
     drop(broker);
-    let suffix = name.strip_prefix("core_w4_noddl_").unwrap();
-    assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
+    database.drop().await;
 }
 
 #[tokio::test]
@@ -1824,27 +1771,25 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
     );
 }
 
-/// Every database of [`an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing`]
-/// has this name prefix, then 32 hex digits.
-const EMPTY_DATABASE_PREFIX: &str = "core_web_empty_";
-
-/// The horsies relations and functions of the database that `connection`
+/// The horsies relations and functions of the database that `client`
 /// reads: `horsies_tasks`, `horsies_schema_version` and `horsies_migrations`
 /// by name, then every relation and function whose name starts with
 /// `horsies`.
 async fn horsies_objects(
-    connection: &mut PgConnection,
+    client: &tokio_postgres::Client,
 ) -> (Option<String>, Option<String>, Option<String>, i64) {
-    sqlx::query_as(
-        "SELECT to_regclass('horsies_tasks')::text,
-                to_regclass('horsies_schema_version')::text,
-                to_regclass('horsies_migrations')::text,
-                (SELECT count(*) FROM pg_class WHERE left(relname, 7) = 'horsies')
-                  + (SELECT count(*) FROM pg_proc WHERE left(proname, 7) = 'horsies')",
-    )
-    .fetch_one(connection)
-    .await
-    .expect("read the horsies objects")
+    let row = client
+        .query_one(
+            "SELECT to_regclass('horsies_tasks')::text,
+                    to_regclass('horsies_schema_version')::text,
+                    to_regclass('horsies_migrations')::text,
+                    (SELECT count(*) FROM pg_class WHERE left(relname, 7) = 'horsies')
+                      + (SELECT count(*) FROM pg_proc WHERE left(proname, 7) = 'horsies')",
+            &[],
+        )
+        .await
+        .expect("read the horsies objects");
+    (row.get(0), row.get(1), row.get(2), row.get(3))
 }
 
 /// Python `test_web_api.py::TestTheToolNeverRunsDdl::test_actions_are_refused_and_still_nothing_is_created`:
@@ -1855,17 +1800,8 @@ async fn horsies_objects(
 #[tokio::test]
 #[serial]
 async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing() {
-    let base_options = PgConnectOptions::from_str(&migrated_database_url().await).unwrap();
-    let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
-        .await
-        .expect("connect to the admin database");
-    let name = format!("{EMPTY_DATABASE_PREFIX}{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-        .execute(&mut admin)
-        .await
-        .expect("create the empty database");
-    let options = base_options.database(&name);
-    let url = options.to_url_lossy().to_string();
+    let database = crate::test_support::TestDatabase::create_empty().await;
+    let url = database.url().to_owned();
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
             .await
@@ -1890,18 +1826,11 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
         .unwrap();
     let status = response.status();
     let body = json(response).await;
-    let mut reader = PgConnection::connect_with(&options)
-        .await
-        .expect("connect to the empty database");
-    let objects = horsies_objects(&mut reader).await;
-    reader.close().await.expect("close the reader");
+    let objects = horsies_objects(database.client()).await;
     broker.pool().close().await;
     broker.session_pool().close().await;
     drop(broker);
-    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
-        .execute(&mut admin)
-        .await
-        .expect("drop the empty database");
+    database.drop().await;
 
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], SCHEMA_INCOMPATIBLE);

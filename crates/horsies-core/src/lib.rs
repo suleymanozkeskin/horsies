@@ -23,6 +23,8 @@ pub mod db;
 pub mod manifest;
 pub mod manifest_schema;
 pub mod monitoring;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(feature = "web")]
 pub mod web;
 pub(crate) mod worker;

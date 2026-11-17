@@ -2023,7 +2023,7 @@ mod tests {
     async fn gate_runs_ungated_only_for_static_single_connection_capacity() {
         let single = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
-            .connect_lazy(&test_db_url())
+            .connect_lazy(&crate::test_support::server_url())
             .unwrap();
         assert!(matches!(
             acquire_gate(&single, advisory_key_reaper()).await,
@@ -2032,7 +2032,7 @@ mod tests {
 
         let unavailable = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
-            .connect_lazy(&test_db_url())
+            .connect_lazy(&crate::test_support::server_url())
             .unwrap();
         unavailable.close().await;
         assert!(matches!(
@@ -2117,35 +2117,6 @@ mod tests {
             .execute(&seed)
             .await
             .unwrap();
-    }
-
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        if let Some(root) = root {
-            if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
-                for line in contents.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    if let Some((key, value)) = line.split_once('=') {
-                        if key.trim() == "DB_PASSWORD" {
-                            return format!(
-                                "postgresql://postgres:{}@localhost:5432/horsies-core",
-                                value.trim(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        panic!("database URL not found: set DATABASE_URL or add DB_PASSWORD to .env");
     }
 
     async fn test_pool() -> PgPool {

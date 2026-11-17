@@ -1,78 +1,37 @@
 //! Tests of the schema install.
 //!
 //! The pure tests cover the chain, the classification, the decision and the
-//! error forms. Each database test creates a database of its own, runs the
-//! install through a core handle on it, and drops it at the end; one test
+//! error forms. Each database test runs the install on an empty database of
+//! its own (`crate::test_support::TestDatabase::create_empty`) through a core
+//! handle, and reads the result through a plain driver connection; one test
 //! per install outcome.
 
-use std::str::FromStr;
 use std::time::Duration;
 
 use rand::Rng;
 use serial_test::serial;
 use sha2::{Digest, Sha384};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
 use tokio_postgres::error::SqlState;
-use uuid::Uuid;
+use tokio_postgres::Client;
 
 use super::*;
-use crate::broker::pools::{handle_for_test_pool, CoreHandle};
 use crate::db::{CheckoutFailure, PoolRole};
+use crate::test_support::{core_handle, TestDatabase};
 
-fn test_db_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let root = std::path::Path::new(manifest_dir)
-        .ancestors()
-        .find(|path| path.join(".env").exists());
-    let password = root
-        .and_then(|path| std::fs::read_to_string(path.join(".env")).ok())
-        .and_then(|contents| {
-            contents
-                .lines()
-                .filter_map(|line| line.trim().split_once('='))
-                .find(|(key, _)| key.trim() == "DB_PASSWORD")
-                .map(|(_, value)| value.trim().to_owned())
-        })
-        .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
-}
-
-/// The database of one test: created empty, dropped at the end. The sqlx
-/// pool sets up and reads the database; the install runs on core handles.
+/// An empty database of one test, with the install helpers.
 struct MigrationTestDatabase {
-    admin: PgConnection,
-    pool: PgPool,
-    name: String,
+    database: TestDatabase,
 }
 
 impl MigrationTestDatabase {
     async fn create() -> Self {
-        let base_options =
-            PgConnectOptions::from_str(&test_db_url()).expect("the test database URL parses");
-        let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
-            .await
-            .expect("connect the admin database");
-        let name = format!("core_install_{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create the test database");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(base_options.database(&name))
-            .await
-            .expect("connect the test database");
-        Self { admin, pool, name }
+        Self {
+            database: TestDatabase::create_empty().await,
+        }
     }
 
-    /// A core handle on this database. A test closes it before
-    /// [`MigrationTestDatabase::drop`].
-    fn handle(&self) -> CoreHandle {
-        handle_for_test_pool(&self.pool)
+    fn client(&self) -> &Client {
+        self.database.client()
     }
 
     /// Runs the install for `own` with `lock` through a new core handle, and
@@ -82,7 +41,7 @@ impl MigrationTestDatabase {
         own: ClientFamily,
         lock: InstallLockPlan,
     ) -> Result<(), SchemaInstallError> {
-        let handle = self.handle();
+        let handle = core_handle(self.database.url());
         let open = handle
             .pools()
             .expect("the statement layer accepts the test URL");
@@ -96,7 +55,7 @@ impl MigrationTestDatabase {
     /// Applies migration 1000 alone, with `own` as the family, as Python's
     /// install leaves a database.
     async fn install_baseline_only(&self, own: ClientFamily) {
-        let handle = self.handle();
+        let handle = core_handle(self.database.url());
         let open = handle
             .pools()
             .expect("the statement layer accepts the test URL");
@@ -120,33 +79,27 @@ impl MigrationTestDatabase {
     }
 
     /// A session of its own that holds the advisory lock `key` until it is
-    /// closed.
-    async fn hold_lock(&self, key: i64) -> PgConnection {
-        let mut holder = PgConnection::connect_with(&self.pool.connect_options())
-            .await
-            .expect("connect the lock holder");
-        let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-            .bind(key)
-            .fetch_one(&mut holder)
+    /// dropped.
+    async fn hold_lock(&self, key: i64) -> Client {
+        let holder = self.database.connect().await;
+        let row = holder
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&key])
             .await
             .expect("try the lock");
+        let held: bool = row.get(0);
         assert!(held, "the lock {key} is free");
         holder
     }
 
     async fn execute(&self, statement: &str) {
-        sqlx::query(statement)
-            .execute(&self.pool)
+        self.client()
+            .batch_execute(statement)
             .await
             .unwrap_or_else(|error| panic!("{statement}: {error}"));
     }
 
-    async fn drop(mut self) {
-        self.pool.close().await;
-        sqlx::query(&format!("DROP DATABASE \"{}\"", self.name))
-            .execute(&mut self.admin)
-            .await
-            .expect("drop the test database");
+    async fn drop(self) {
+        self.database.drop().await;
     }
 }
 
@@ -159,13 +112,19 @@ fn test_lock() -> InstallLockPlan {
 }
 
 /// The bookkeeping rows: version, description, success, checksum.
-async fn bookkeeping_rows(pool: &PgPool) -> Vec<(i64, String, bool, Vec<u8>)> {
-    sqlx::query_as(
-        "SELECT version, description, success, checksum FROM horsies_migrations ORDER BY version",
-    )
-    .fetch_all(pool)
-    .await
-    .expect("read the bookkeeping")
+async fn bookkeeping_rows(database: &MigrationTestDatabase) -> Vec<(i64, String, bool, Vec<u8>)> {
+    database
+        .client()
+        .query(
+            "SELECT version, description, success, checksum \
+             FROM horsies_migrations ORDER BY version",
+            &[],
+        )
+        .await
+        .expect("read the bookkeeping")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+        .collect()
 }
 
 /// The bookkeeping rows of the first `count` migrations of the chain.
@@ -184,26 +143,36 @@ fn chain_rows(count: usize) -> Vec<(i64, String, bool, Vec<u8>)> {
         .collect()
 }
 
-async fn installed_on(pool: &PgPool) -> Vec<(i64, String)> {
-    sqlx::query_as("SELECT version, installed_on::text FROM horsies_migrations ORDER BY version")
-        .fetch_all(pool)
+async fn installed_on(database: &MigrationTestDatabase) -> Vec<(i64, String)> {
+    database
+        .client()
+        .query(
+            "SELECT version, installed_on::text FROM horsies_migrations ORDER BY version",
+            &[],
+        )
         .await
         .expect("read the install times")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
 }
 
-async fn family_row(pool: &PgPool) -> Option<String> {
-    sqlx::query_scalar("SELECT family FROM horsies_client_family")
-        .fetch_optional(pool)
+async fn family_row(database: &MigrationTestDatabase) -> Option<String> {
+    database
+        .client()
+        .query_opt("SELECT family FROM horsies_client_family", &[])
         .await
         .expect("read the family row")
+        .map(|row| row.get(0))
 }
 
-async fn relation_exists(pool: &PgPool, name: &str) -> bool {
-    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-        .bind(name)
-        .fetch_one(pool)
+async fn relation_exists(database: &MigrationTestDatabase, name: &str) -> bool {
+    database
+        .client()
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&name])
         .await
         .expect("read the catalog")
+        .get(0)
 }
 
 /// Makes the first `failing` DDL commands of the database fail with SQLSTATE
@@ -338,7 +307,8 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
 }
 
 /// The chain starts at the baseline and ascends; only the baseline writes the
-/// family row; each checksum is SHA-384 of its text.
+/// family row and publishes the history readers; each checksum is SHA-384 of
+/// its text.
 #[test]
 fn the_chain_ascends_from_the_baseline_and_only_the_baseline_writes_the_family() {
     let chain = embedded_migrations();
@@ -351,11 +321,15 @@ fn the_chain_ascends_from_the_baseline_and_only_the_baseline_writes_the_family()
     assert_eq!(versions.last(), Some(&expected_schema_version()));
     assert_eq!(shipped_versions(), versions);
     for (index, migration) in chain.iter().enumerate() {
-        let family_row = match index {
-            0 => FamilyRow::WrittenWithMigration,
-            _ => FamilyRow::NotWritten,
+        let (family_row, readers) = match index {
+            0 => (
+                FamilyRow::WrittenWithMigration,
+                ReaderPublication::PublishedWithMigration,
+            ),
+            _ => (FamilyRow::NotWritten, ReaderPublication::NotPublished),
         };
         assert_eq!(migration.family_row, family_row, "{}", migration.version);
+        assert_eq!(migration.readers, readers, "{}", migration.version);
         assert_eq!(
             migration.checksum.as_slice(),
             Sha384::digest(migration.script.sql().as_bytes()).as_slice(),
@@ -376,6 +350,7 @@ fn test_chain() -> Vec<EmbeddedMigration> {
             description: "test",
             script: SqlScript::new("test_migration", "SELECT 1"),
             family_row: FamilyRow::NotWritten,
+            readers: ReaderPublication::NotPublished,
             checksum: [u8::try_from(version - 999).expect("a small test version"); CHECKSUM_BYTES],
         })
         .into()
@@ -737,27 +712,34 @@ async fn an_empty_database_gets_the_chain_the_guard_row_and_the_family() {
         .expect("install into an empty database");
 
     assert_eq!(
-        bookkeeping_rows(&database.pool).await,
+        bookkeeping_rows(&database).await,
         chain_rows(embedded_migrations().len())
     );
-    let run_facts: Vec<(i64, bool)> = sqlx::query_as(
-        "SELECT execution_time, installed_on <= now() FROM horsies_migrations ORDER BY version",
-    )
-    .fetch_all(&database.pool)
-    .await
-    .expect("read the run facts");
+    let run_facts: Vec<(i64, bool)> = database
+        .client()
+        .query(
+            "SELECT execution_time, installed_on <= now() FROM horsies_migrations ORDER BY version",
+            &[],
+        )
+        .await
+        .expect("read the run facts")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
     assert!(
         run_facts
             .iter()
             .all(|(nanos, recorded)| *nanos >= 0 && *recorded),
         "{run_facts:?}"
     );
-    let guard: i32 = sqlx::query_scalar("SELECT max(version) FROM horsies_schema_version")
-        .fetch_one(&database.pool)
+    let guard: i32 = database
+        .client()
+        .query_one("SELECT max(version) FROM horsies_schema_version", &[])
         .await
-        .expect("read the guard row");
+        .expect("read the guard row")
+        .get(0);
     assert_eq!(i64::from(guard), BASELINE_MIGRATION_VERSION);
-    assert_eq!(family_row(&database.pool).await.as_deref(), Some("RUST"));
+    assert_eq!(family_row(&database).await.as_deref(), Some("RUST"));
     database.drop().await;
 }
 
@@ -771,7 +753,7 @@ async fn a_current_database_is_left_alone_without_the_lock() {
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
         .expect("install into an empty database");
-    let before = installed_on(&database.pool).await;
+    let before = installed_on(&database).await;
     let lock = test_lock();
     let holder = database.hold_lock(lock.key).await;
 
@@ -780,8 +762,8 @@ async fn a_current_database_is_left_alone_without_the_lock() {
         .await
         .expect("a current database needs no lock");
 
-    assert_eq!(installed_on(&database.pool).await, before);
-    holder.close().await.expect("close the lock holder");
+    assert_eq!(installed_on(&database).await, before);
+    drop(holder);
     database.drop().await;
 }
 
@@ -792,11 +774,9 @@ async fn a_zero_x_python_database_is_refused_unchanged() {
     database
         .execute(
             "CREATE TABLE horsies_schema_version \
-             (version integer PRIMARY KEY, applied_at timestamptz NOT NULL)",
+             (version integer PRIMARY KEY, applied_at timestamptz NOT NULL); \
+             CREATE TABLE horsies_tasks (id text PRIMARY KEY)",
         )
-        .await;
-    database
-        .execute("CREATE TABLE horsies_tasks (id text PRIMARY KEY)")
         .await;
 
     let refused = database
@@ -813,7 +793,7 @@ async fn a_zero_x_python_database_is_refused_unchanged() {
         ),
         other => panic!("expected a 0.x refusal, got {other:?}"),
     }
-    assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
     database.drop().await;
 }
 
@@ -835,7 +815,7 @@ async fn horsies_tables_with_no_bookkeeping_are_refused_unchanged() {
         }
         other => panic!("expected an unknown-objects refusal, got {other:?}"),
     }
-    assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
     database.drop().await;
 }
 
@@ -848,16 +828,18 @@ async fn a_newer_version_is_refused_unchanged() {
         .await
         .expect("install into an empty database");
     let own = expected_schema_version();
-    sqlx::query(
-        "INSERT INTO horsies_migrations \
-             (version, description, installed_on, success, checksum, execution_time) \
-         VALUES ($1, 'from a newer build', now(), TRUE, '\\x00'::bytea, 0)",
-    )
-    .bind(own + 1)
-    .execute(&database.pool)
-    .await
-    .expect("record a newer version");
-    let before = installed_on(&database.pool).await;
+    let newer = own + 1;
+    database
+        .client()
+        .execute(
+            "INSERT INTO horsies_migrations \
+                 (version, description, installed_on, success, checksum, execution_time) \
+             VALUES ($1, 'from a newer build', now(), TRUE, '\\x00'::bytea, 0)",
+            &[&newer],
+        )
+        .await
+        .expect("record a newer version");
+    let before = installed_on(&database).await;
 
     let refused = database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
@@ -868,11 +850,11 @@ async fn a_newer_version_is_refused_unchanged() {
             stored,
             own: shipped,
         })) => {
-            assert_eq!((stored, shipped), (own + 1, own));
+            assert_eq!((stored, shipped), (newer, own));
         }
         other => panic!("expected a newer-schema refusal, got {other:?}"),
     }
-    assert_eq!(installed_on(&database.pool).await, before);
+    assert_eq!(installed_on(&database).await, before);
     database.drop().await;
 }
 
@@ -886,12 +868,8 @@ async fn a_horsies_rust_zero_x_ledger_is_refused_as_foreign() {
         .execute(
             "CREATE TABLE horsies_migrations (version bigint PRIMARY KEY, \
              description text NOT NULL, installed_on timestamptz NOT NULL, \
-             success boolean NOT NULL, checksum bytea NOT NULL, execution_time bigint NOT NULL)",
-        )
-        .await;
-    database
-        .execute(
-            "INSERT INTO horsies_migrations \
+             success boolean NOT NULL, checksum bytea NOT NULL, execution_time bigint NOT NULL); \
+             INSERT INTO horsies_migrations \
              SELECT v, 'zero x', now(), TRUE, '\\x00'::bytea, 0 FROM generate_series(1, 65) AS v",
         )
         .await;
@@ -906,7 +884,7 @@ async fn a_horsies_rust_zero_x_ledger_is_refused_as_foreign() {
         }
         other => panic!("expected a foreign-migrations refusal, got {other:?}"),
     }
-    assert!(!relation_exists(&database.pool, "horsies_tasks").await);
+    assert!(!relation_exists(&database, "horsies_tasks").await);
     database.drop().await;
 }
 
@@ -919,9 +897,12 @@ async fn a_failed_migration_row_is_refused_as_incomplete() {
         .await
         .expect("install into an empty database");
     let last = expected_schema_version();
-    sqlx::query("UPDATE horsies_migrations SET success = FALSE WHERE version = $1")
-        .bind(last)
-        .execute(&database.pool)
+    database
+        .client()
+        .execute(
+            "UPDATE horsies_migrations SET success = FALSE WHERE version = $1",
+            &[&last],
+        )
         .await
         .expect("record the last migration as failed");
 
@@ -946,9 +927,12 @@ async fn a_changed_checksum_is_refused_as_edited() {
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
         .expect("install into an empty database");
-    sqlx::query("UPDATE horsies_migrations SET checksum = '\\x00'::bytea WHERE version = $1")
-        .bind(BASELINE_MIGRATION_VERSION)
-        .execute(&database.pool)
+    database
+        .client()
+        .execute(
+            "UPDATE horsies_migrations SET checksum = '\\x00'::bytea WHERE version = $1",
+            &[&BASELINE_MIGRATION_VERSION],
+        )
         .await
         .expect("change the stored checksum");
 
@@ -978,7 +962,7 @@ async fn a_changed_checksum_is_refused_as_edited() {
 async fn a_database_with_the_baseline_only_gets_the_rest_of_the_chain() {
     let database = MigrationTestDatabase::create().await;
     database.install_baseline_only(ClientFamily::Python).await;
-    assert_eq!(bookkeeping_rows(&database.pool).await, chain_rows(1));
+    assert_eq!(bookkeeping_rows(&database).await, chain_rows(1));
 
     database
         .install(ClientFamily::Python, InstallLockPlan::fleet())
@@ -986,10 +970,10 @@ async fn a_database_with_the_baseline_only_gets_the_rest_of_the_chain() {
         .expect("apply the rest of the chain");
 
     assert_eq!(
-        bookkeeping_rows(&database.pool).await,
+        bookkeeping_rows(&database).await,
         chain_rows(embedded_migrations().len())
     );
-    assert_eq!(family_row(&database.pool).await.as_deref(), Some("PYTHON"));
+    assert_eq!(family_row(&database).await.as_deref(), Some("PYTHON"));
     database.drop().await;
 }
 
@@ -1015,7 +999,7 @@ async fn a_database_of_the_other_family_is_refused_before_any_write() {
         ),
         "{refused:?}"
     );
-    assert_eq!(bookkeeping_rows(&behind.pool).await, chain_rows(1));
+    assert_eq!(bookkeeping_rows(&behind).await, chain_rows(1));
     behind.drop().await;
 
     let current = MigrationTestDatabase::create().await;
@@ -1038,7 +1022,7 @@ async fn a_database_of_the_other_family_is_refused_before_any_write() {
         ),
         "{refused:?}"
     );
-    assert_eq!(family_row(&current.pool).await.as_deref(), Some("RUST"));
+    assert_eq!(family_row(&current).await.as_deref(), Some("RUST"));
     current.drop().await;
 }
 
@@ -1053,15 +1037,15 @@ async fn a_database_with_no_family_row_gets_this_client_s_row() {
         .await
         .expect("install into an empty database");
     database.execute("DELETE FROM horsies_client_family").await;
-    let before = installed_on(&database.pool).await;
+    let before = installed_on(&database).await;
 
     database
         .install(ClientFamily::Python, InstallLockPlan::fleet())
         .await
         .expect("record the family");
 
-    assert_eq!(family_row(&database.pool).await.as_deref(), Some("PYTHON"));
-    assert_eq!(installed_on(&database.pool).await, before);
+    assert_eq!(family_row(&database).await.as_deref(), Some("PYTHON"));
+    assert_eq!(installed_on(&database).await, before);
     database.drop().await;
 }
 
@@ -1083,17 +1067,23 @@ async fn a_busy_lock_refuses_after_its_wait_and_changes_nothing() {
         }
         other => panic!("expected the wait bound, got {other:?}"),
     }
-    assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
 
-    holder.close().await.expect("close the lock holder");
+    let released: bool = holder
+        .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+        .await
+        .expect("release the lock")
+        .get(0);
+    assert!(released);
     database
         .install(ClientFamily::Rust, lock)
         .await
         .expect("the free lock is taken");
     assert_eq!(
-        bookkeeping_rows(&database.pool).await,
+        bookkeeping_rows(&database).await,
         chain_rows(embedded_migrations().len())
     );
+    drop(holder);
     database.drop().await;
 }
 
@@ -1122,10 +1112,10 @@ async fn a_failed_migration_rolls_back_and_releases_the_lock() {
         }
         other => panic!("expected the refused migration, got {other:?}"),
     }
-    assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
-    assert!(!relation_exists(&database.pool, "horsies_client_family").await);
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, "horsies_client_family").await);
     let holder = database.hold_lock(lock.key).await;
-    holder.close().await.expect("close the lock holder");
+    drop(holder);
     database.drop().await;
 }
 
@@ -1134,7 +1124,7 @@ async fn a_failed_migration_rolls_back_and_releases_the_lock() {
 #[serial]
 async fn a_release_that_frees_no_lock_is_ownership_lost() {
     let database = MigrationTestDatabase::create().await;
-    let handle = database.handle();
+    let handle = core_handle(database.database.url());
     let open = handle
         .pools()
         .expect("the statement layer accepts the test URL");
@@ -1177,7 +1167,7 @@ async fn a_deadlock_runs_the_install_again() {
         .expect("the third run installs");
 
     assert_eq!(
-        bookkeeping_rows(&database.pool).await,
+        bookkeeping_rows(&database).await,
         chain_rows(embedded_migrations().len())
     );
     database.drop().await;
@@ -1203,94 +1193,239 @@ async fn a_deadlock_on_every_run_stops_after_the_last_attempt() {
         }
         other => panic!("expected the deadlock, got {other:?}"),
     }
-    let runs: i64 = sqlx::query_scalar("SELECT last_value FROM install_deadlock_probe")
-        .fetch_one(&database.pool)
+    let runs: i64 = database
+        .client()
+        .query_one("SELECT last_value FROM install_deadlock_probe", &[])
         .await
-        .expect("read the probe count");
+        .expect("read the probe count")
+        .get(0);
     assert_eq!(runs, i64::from(INSTALL_MAX_ATTEMPTS));
-    assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
+    database.drop().await;
+}
+
+// ---- The history readers of migration 1000 ----
+
+/// The install returns with the history readers published: each reader of
+/// `horsies_history_reader_signatures()` exists and is current, the manifest
+/// is the static forever leaf, and the detail reader answers an unknown id
+/// with no row (Python `test_install_returns_with_the_history_readers_published`).
+#[tokio::test]
+#[serial]
+async fn an_installed_database_has_its_history_readers() {
+    let database = MigrationTestDatabase::create().await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+
+    let client = database.client();
+    let missing: Vec<String> = client
+        .query(
+            "SELECT s.signature FROM horsies_history_reader_signatures() AS s \
+             WHERE to_regprocedure(s.signature) IS NULL ORDER BY 1",
+            &[],
+        )
+        .await
+        .expect("read the reader signatures")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(missing.is_empty(), "missing readers: {missing:?}");
+    let current: bool = client
+        .query_one("SELECT horsies_history_readers_current()", &[])
+        .await
+        .expect("read the reader stamps")
+        .get(0);
+    assert!(current);
+    let manifest: Vec<String> = client
+        .query(
+            "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
+            &[],
+        )
+        .await
+        .expect("read the manifest")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(
+        manifest,
+        vec!["horsies_task_history_forever_open".to_owned()]
+    );
+    let unknown = uuid::Uuid::new_v4();
+    let detail_rows: i64 = client
+        .query_one(
+            "SELECT count(*) FROM horsies_task_detail_staged($1)",
+            &[&unknown],
+        )
+        .await
+        .expect("call the detail reader")
+        .get(0);
+    assert_eq!(detail_rows, 0);
+    database.drop().await;
+}
+
+/// The transaction of a migration is READ COMMITTED whatever the server
+/// default is: the publication refuses any other isolation (25000).
+#[tokio::test]
+#[serial]
+async fn the_readers_are_published_under_a_serializable_server_default() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .execute(&format!(
+            "ALTER DATABASE \"{}\" SET default_transaction_isolation = 'serializable'",
+            database.database.name()
+        ))
+        .await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install under a serializable default");
+
+    let current: bool = database
+        .client()
+        .query_one("SELECT horsies_history_readers_current()", &[])
+        .await
+        .expect("read the reader stamps")
+        .get(0);
+    assert!(current);
+    database.drop().await;
+}
+
+/// A publication that fails rolls migration 1000 back with it: no
+/// bookkeeping row, no family row, no table. An event trigger fails the DDL
+/// of the publication statement only.
+#[tokio::test]
+#[serial]
+async fn a_failed_reader_publication_rolls_back_migration_1000() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .execute(
+            "CREATE FUNCTION install_publication_probe() RETURNS event_trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF current_query() LIKE 'SELECT outcome FROM horsies_publish_history_readers()%' THEN
+                     RAISE EXCEPTION 'injected publication failure';
+                 END IF;
+             END
+             $$",
+        )
+        .await;
+    database
+        .execute(
+            "CREATE EVENT TRIGGER install_publication_probe ON ddl_command_start
+             EXECUTE FUNCTION install_publication_probe()",
+        )
+        .await;
+
+    let failed = database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await;
+
+    match failed {
+        Err(SchemaInstallError::Statement(StatementFailure::StatementRefused {
+            statement,
+            cause,
+        })) => {
+            assert_eq!(statement, "publish_history_readers");
+            assert_eq!(cause.server_error().code(), &SqlState::RAISE_EXCEPTION);
+        }
+        other => panic!("expected the refused publication, got {other:?}"),
+    }
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, "horsies_client_family").await);
+    assert!(!relation_exists(&database, "horsies_task_lookup_manifest").await);
     database.drop().await;
 }
 
 // ---- Claim planning of migration 1001 ----
 
+/// An installed database with `pg_stat_statements` and 50,000 pending rows of
+/// one queue.
 async fn claim_planning_database() -> MigrationTestDatabase {
     let database = MigrationTestDatabase::create().await;
-    let pool = &database.pool;
-    sqlx::query("CREATE EXTENSION pg_stat_statements")
-        .execute(pool)
+    database
+        .execute("CREATE EXTENSION pg_stat_statements")
+        .await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .unwrap();
-    run_horsies_migrations(pool).await.unwrap();
-    sqlx::query("ALTER TABLE horsies_tasks SET (autovacuum_enabled = false)")
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, priority, input, task_options, execution,
-            retention_class_key, sent_at, created_at, command_fingerprint_version,
-            command_fingerprint, status, enqueued_at, retry_count, max_retries,
-            is_workflow_task, updated_at, retain_rerun_input
-         ) SELECT md5(n::text)::uuid, 'plan_test', 'plan_test', n % 5 + 1, 'null', NULL,
-            'ISOLATED', 'forever', NOW() - interval '1 hour', NOW() - interval '1 hour', 1,
-            decode(repeat('00', 32), 'hex'), 'PENDING', NOW() - interval '1 hour', 0, 0,
-            FALSE, NOW() - interval '1 hour', FALSE
-         FROM generate_series(1, 50000) n",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("VACUUM ANALYZE horsies_tasks")
-        .execute(pool)
-        .await
-        .unwrap();
+        .expect("install the claim planning database");
+    database
+        .execute("ALTER TABLE horsies_tasks SET (autovacuum_enabled = false)")
+        .await;
+    database
+        .execute(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at, command_fingerprint_version,
+                command_fingerprint, status, enqueued_at, retry_count, max_retries,
+                is_workflow_task, updated_at, retain_rerun_input
+             ) SELECT md5(n::text)::uuid, 'plan_test', 'plan_test', n % 5 + 1, 'null', NULL,
+                'ISOLATED', 'forever', NOW() - interval '1 hour', NOW() - interval '1 hour', 1,
+                decode(repeat('00', 32), 'hex'), 'PENDING', NOW() - interval '1 hour', 0, 0,
+                FALSE, NOW() - interval '1 hour', FALSE
+             FROM generate_series(1, 50000) n",
+        )
+        .await;
+    database.execute("VACUUM ANALYZE horsies_tasks").await;
     database
 }
 
-async fn candidate_planning_counts(connection: &mut PgConnection) -> (i64, i64) {
-    sqlx::query_as(
-        "SELECT COALESCE(sum(plans), 0)::bigint, COALESCE(sum(calls), 0)::bigint
-         FROM pg_stat_statements
-         WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-           AND NOT toplevel AND ltrim(query) LIKE 'WITH cand AS (%'",
-    )
-    .fetch_one(connection)
-    .await
-    .unwrap()
+async fn candidate_planning_counts(connection: &Client) -> (i64, i64) {
+    let row = connection
+        .query_one(
+            "SELECT COALESCE(sum(plans), 0)::bigint, COALESCE(sum(calls), 0)::bigint
+             FROM pg_stat_statements
+             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND NOT toplevel AND ltrim(query) LIKE 'WITH cand AS (%'",
+            &[],
+        )
+        .await
+        .expect("read the planning counters");
+    (row.get(0), row.get(1))
 }
 
-async fn rolled_back_claim(connection: &mut PgConnection) {
-    let mut transaction = sqlx::Acquire::begin(&mut *connection).await.unwrap();
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM horsies_claim(
-            'plan_worker', '[\"plan_test\"]'::jsonb, '{}'::jsonb, '{}'::jsonb,
-            TRUE, 32, 0, 32, 8, NULL, 60000, '[]'::jsonb
-         )",
-    )
-    .fetch_one(transaction.as_mut())
-    .await
-    .unwrap();
-    assert_eq!(count, 8);
-    transaction.rollback().await.unwrap();
-    let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
-        .fetch_one(connection)
+async fn rolled_back_claim(connection: &Client) {
+    connection
+        .batch_execute("BEGIN")
         .await
-        .unwrap();
+        .expect("begin the claim");
+    let count: i64 = connection
+        .query_one(
+            "SELECT count(*) FROM horsies_claim(
+                'plan_worker', '[\"plan_test\"]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                TRUE, 32, 0, 32, 8, NULL, 60000, '[]'::jsonb
+             )",
+            &[],
+        )
+        .await
+        .expect("claim")
+        .get(0);
+    assert_eq!(count, 8);
+    connection
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("roll the claim back");
+    let mode: String = connection
+        .query_one("SHOW plan_cache_mode", &[])
+        .await
+        .expect("read plan_cache_mode")
+        .get(0);
     assert_eq!(mode, "auto");
 }
 
-async fn configure_planning_counters(connection: &mut PgConnection) {
-    for statement in [
-        "SET plan_cache_mode = auto",
-        "SET pg_stat_statements.track = 'all'",
-        "SET pg_stat_statements.track_planning = on",
-    ] {
-        sqlx::query(statement)
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-    }
+async fn configure_planning_counters(connection: &Client) {
+    connection
+        .batch_execute(
+            "SET plan_cache_mode = auto; \
+             SET pg_stat_statements.track = 'all'; \
+             SET pg_stat_statements.track_planning = on",
+        )
+        .await
+        .expect("configure the planning counters");
 }
 
 #[tokio::test]
@@ -1298,15 +1433,15 @@ async fn configure_planning_counters(connection: &mut PgConnection) {
 #[ignore = "requires preloaded pg_stat_statements; release CI runs this test"]
 async fn claim_candidate_plan_is_reused_across_calls() {
     let database = claim_planning_database().await;
-    let mut connection = database.pool.acquire().await.unwrap();
-    configure_planning_counters(&mut connection).await;
-    rolled_back_claim(&mut connection).await;
-    let first = candidate_planning_counts(&mut connection).await;
+    let connection = database.database.connect().await;
+    configure_planning_counters(&connection).await;
+    rolled_back_claim(&connection).await;
+    let first = candidate_planning_counts(&connection).await;
     assert_eq!(first, (1, 1));
     for _ in 0..30 {
-        rolled_back_claim(&mut connection).await;
+        rolled_back_claim(&connection).await;
     }
-    let repeated = candidate_planning_counts(&mut connection).await;
+    let repeated = candidate_planning_counts(&connection).await;
     assert_eq!(repeated, (1, 31));
     drop(connection);
     database.drop().await;
@@ -1317,24 +1452,24 @@ async fn claim_candidate_plan_is_reused_across_calls() {
 #[ignore = "requires preloaded pg_stat_statements; release CI runs this test"]
 async fn claim_candidate_plan_rebuilds_once_after_analyze() {
     let database = claim_planning_database().await;
-    let mut connection = database.pool.acquire().await.unwrap();
-    configure_planning_counters(&mut connection).await;
+    let connection = database.database.connect().await;
+    configure_planning_counters(&connection).await;
     for _ in 0..8 {
-        rolled_back_claim(&mut connection).await;
+        rolled_back_claim(&connection).await;
     }
-    let before = candidate_planning_counts(&mut connection).await;
+    let before = candidate_planning_counts(&connection).await;
     assert_eq!(before, (1, 8));
-    sqlx::query("ANALYZE horsies_tasks")
-        .execute(&mut *connection)
+    connection
+        .batch_execute("ANALYZE horsies_tasks")
         .await
-        .unwrap();
-    rolled_back_claim(&mut connection).await;
-    let rebuilt = candidate_planning_counts(&mut connection).await;
+        .expect("analyze");
+    rolled_back_claim(&connection).await;
+    let rebuilt = candidate_planning_counts(&connection).await;
     assert_eq!(rebuilt, (before.0 + 1, before.1 + 1));
     for _ in 0..30 {
-        rolled_back_claim(&mut connection).await;
+        rolled_back_claim(&connection).await;
     }
-    let repeated = candidate_planning_counts(&mut connection).await;
+    let repeated = candidate_planning_counts(&connection).await;
     assert_eq!(repeated, (rebuilt.0, rebuilt.1 + 30));
     drop(connection);
     database.drop().await;
