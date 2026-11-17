@@ -328,7 +328,8 @@ async fn a_stuck_async_run_ends_at_its_timeout_and_retries_isolated() {
         .await,
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::Isolated
+            retry: RetryPlacement::Isolated,
+            cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
         }
     );
 }
@@ -392,7 +393,8 @@ async fn a_thread_child_is_killed_once_no_run_has_time_left() {
         .await,
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::Isolated
+            retry: RetryPlacement::Isolated,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
 }
@@ -411,7 +413,8 @@ async fn the_backstop_kills_a_frozen_child() {
         .await,
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::SameClass
+            retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
 }

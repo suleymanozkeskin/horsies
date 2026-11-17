@@ -107,6 +107,42 @@ impl LoopKillCode {
     }
 }
 
+/// How a shared async run that passed its deadline ended in its child, read
+/// from the child's frames. Stored as `cancel_end` in the `data` of its
+/// `TASK_TIMEOUT` error, for Python and Rust children alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelEnd {
+    /// The task and its work ended within the cancel grace after the cancel
+    /// at the deadline: the child sent no `second_cancel`.
+    ReturnedAfterSignal,
+    /// Something of the run was alive after the cancel grace: the child sent
+    /// `second_cancel` and stopped it (a Rust child drops the future).
+    DroppedAfterGrace,
+}
+
+impl CancelEnd {
+    /// The stored value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReturnedAfterSignal => "RETURNED_AFTER_SIGNAL",
+            Self::DroppedAfterGrace => "DROPPED_AFTER_GRACE",
+        }
+    }
+}
+
+/// What the attempt of a run that passed its deadline records about the
+/// cancel at that deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutCancel {
+    /// An isolated or a shared thread run: the deadline sends no cancel.
+    NoSignal,
+    /// A shared async run whose child reported its end.
+    Ended(CancelEnd),
+    /// A shared async run that ended when the worker killed its child. Its
+    /// `TASK_TIMEOUT` data has no `cancel_end`.
+    EndedByKill,
+}
+
 /// How one attempt ended in the executor. Each submitted task gets exactly
 /// one. The outcome writer maps it to one statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +157,7 @@ pub enum AttemptEnd {
     TimedOut {
         timeout: TaskTimeoutMs,
         retry: RetryPlacement,
+        cancel: TimeoutCancel,
     },
     /// A blocked event loop ended the run (a shared async child).
     KilledForLoop {

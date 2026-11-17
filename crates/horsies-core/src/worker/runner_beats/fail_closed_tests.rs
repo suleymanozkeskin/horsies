@@ -30,7 +30,7 @@ use crate::worker::executor::protocol::{
 use crate::worker::executor::slots::{
     AttemptEnd, ChildLayout, ClaimedTask, ExecutionClass, ExitNotSeen, IsolatedDeadline,
     IsolatedPool, IsolatedPoolConfig, MemoryLimit, NotRunCause, PoolBoard, RetryFacts, Submitted,
-    TaskKind, TaskLimit,
+    TaskKind, TaskLimit, TimeoutCancel,
 };
 use crate::worker::executor::supervisor::channel::KillMark;
 use crate::worker::executor::supervisor::{
@@ -1219,6 +1219,7 @@ async fn a_task_killed_at_its_deadline_is_no_longer_held() {
         AttemptEnd::TimedOut {
             timeout,
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     assert_eq!(live.snapshot(), nothing_held());

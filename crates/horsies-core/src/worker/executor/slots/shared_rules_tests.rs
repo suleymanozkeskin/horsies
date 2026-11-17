@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::dispatch::{AttemptEnd, LoopKillCode};
+use super::dispatch::{AttemptEnd, CancelEnd, LoopKillCode, TimeoutCancel};
 use super::pool::{MemoryLimit, TaskLimit};
 use super::seat_runs::*;
 use super::shared_stop::*;
@@ -209,7 +209,8 @@ fn an_async_run_reports_its_stop_in_order() {
         end,
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::Isolated
+            retry: RetryPlacement::Isolated,
+            cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
         }
     );
     assert_eq!(runs.count(), 0);
@@ -480,7 +481,8 @@ fn a_run_of_a_lost_child_gets_the_verdict_of_its_kill() {
         end_at_loss(&past, &kill, CloseCulprit::NotNamed, killed, now),
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::SameClass
+            retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::EndedByKill,
         }
     );
     assert!(matches!(
@@ -547,14 +549,16 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
         end_past_deadlines(&culprit, SharedChildKind::Thread, reason),
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::Isolated
+            retry: RetryPlacement::Isolated,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     assert_eq!(
         end_past_deadlines(&other, SharedChildKind::Thread, reason),
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::SameClass
+            retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     let mut stuck = seat(3, async_work(), sent_at);
@@ -563,7 +567,8 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
         end_past_deadlines(&stuck, SharedChildKind::Async, CloseReason::SecondCancel),
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::Isolated
+            retry: RetryPlacement::Isolated,
+            cancel: TimeoutCancel::EndedByKill,
         }
     );
     let mut leftover = seat(4, async_work(), sent_at);
@@ -590,7 +595,8 @@ fn a_late_exit_after_the_first_backstop_is_a_timeout_or_a_crash() {
         end_at_late_backstop_exit(thread_work(), run_ref(1), killed),
         AttemptEnd::TimedOut {
             timeout: timeout(),
-            retry: RetryPlacement::SameClass
+            retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     assert!(matches!(

@@ -205,8 +205,20 @@ fn the_write_of_a_report_is_the_same_for_the_same_report() {
     );
     assert_eq!(crash(), crash());
     assert_eq!(
-        timeout_write(&claimed, WORKER, timeout, RetryPlacement::Isolated),
-        timeout_write(&claimed, WORKER, timeout, RetryPlacement::Isolated)
+        timeout_write(
+            &claimed,
+            WORKER,
+            timeout,
+            RetryPlacement::Isolated,
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace)
+        ),
+        timeout_write(
+            &claimed,
+            WORKER,
+            timeout,
+            RetryPlacement::Isolated,
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace)
+        )
     );
 }
 
