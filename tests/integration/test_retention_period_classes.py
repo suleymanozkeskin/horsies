@@ -48,6 +48,7 @@ from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
 from tests.integration.conftest import DB_URL
+from tests.integration.terminal_writes import complete_plain_task
 
 pytestmark = [
     pytest.mark.integration,
@@ -206,21 +207,17 @@ class TestEveryPathStampsThePeriodClass:
                 await connection.execute(
                     text(
                         "UPDATE horsies_tasks SET status = 'RUNNING', "
-                        'claimed_by_worker_id = :worker, started_at = NOW() '
+                        'claimed_by_worker_id = :worker, claimed_at = NOW(), '
+                        'started_at = NOW(), worker_pid = 4242, '
+                        "worker_hostname = 'it-host', worker_process_name = 'it-proc' "
                         'WHERE id = CAST(:task_id AS uuid)'
                     ),
                     {'task_id': task_id, 'worker': WORKER},
                 )
-                outcome = (
-                    await connection.execute(
-                        text(
-                            'SELECT * FROM horsies_complete_locked_task('
-                            'CAST(:task_id AS uuid), :worker, :result)'
-                        ),
-                        {'task_id': task_id, 'worker': WORKER, 'result': '{"ok":5}'},
-                    )
-                ).one()
-            assert outcome.outcome == 'APPLIED', outcome
+                outcome = await complete_plain_task(
+                    connection, str(task_id), worker_id=WORKER, result_json='{"ok":5}'
+                )
+            assert outcome == 'APPLIED', outcome
             async with engine.connect() as connection:
                 partition = (
                     await connection.execute(

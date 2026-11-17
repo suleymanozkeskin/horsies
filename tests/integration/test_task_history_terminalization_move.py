@@ -91,39 +91,53 @@ async def complete_fused(
     ).one()
 
 
+async def claim_generation(connection: AsyncConnection, task_id: str) -> datetime:
+    """The claim generation (``claimed_at``) that the live row holds."""
+    generation = (
+        await connection.execute(
+            text('SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)'),
+            {'task_id': task_id},
+        )
+    ).scalar_one()
+    assert isinstance(generation, datetime), generation
+    return generation
+
+
 async def complete_locked(
     connection: AsyncConnection,
     task_id: str,
     *,
+    claimed_at: datetime,
     worker: str = WORKER,
     result: str = '{"ok":true}',
 ) -> Any:
-    """The other member of the completion class."""
+    """The other member of the completion class: phase 1 of a workflow
+    task's success (``horsies_finish_workflow_success``, kind
+    COMPLETE_LOCKED) under the claim ``worker`` held at ``claimed_at``."""
     return (
         await connection.execute(
             text(
-                'SELECT * FROM horsies_complete_locked_task('
-                'CAST(:task_id AS uuid), :worker, :result)'
+                'SELECT * FROM horsies_finish_workflow_success('
+                'CAST(:task_id AS uuid), :worker, '
+                'CAST(:claimed_at AS TIMESTAMPTZ), :result)'
             ),
-            {'task_id': task_id, 'worker': worker, 'result': result},
+            {
+                'task_id': task_id,
+                'worker': worker,
+                'claimed_at': claimed_at,
+                'result': result,
+            },
         )
     ).one()
 
 
-async def cancel_admin(
-    connection: AsyncConnection,
-    task_id: str,
-    *,
-    permitted: tuple[str, ...] = ('PENDING', 'CLAIMED', 'RUNNING'),
-) -> Any:
-    """A member of a different class — CANCEL_ADMIN stands alone."""
+async def cancel_admin(connection: AsyncConnection, task_id: str) -> Any:
+    """A member of a different class — CANCEL_ADMIN stands alone
+    (``horsies_cancel_task``, a RUNNING row included)."""
     return (
         await connection.execute(
-            text(
-                'SELECT * FROM horsies_cancel_locked_task('
-                'CAST(:task_id AS uuid), :permitted)'
-            ),
-            {'task_id': task_id, 'permitted': list(permitted)},
+            text('SELECT * FROM horsies_cancel_task(CAST(:task_id AS uuid), TRUE)'),
+            {'task_id': task_id},
         )
     ).one()
 
@@ -292,8 +306,11 @@ class TestMissClassification:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_storage(connection)
             task_id = await insert_live_task(connection)
+            generation = await claim_generation(connection, task_id)
             first = await complete_fused(connection, task_id)
-            sibling = await complete_locked(connection, task_id)
+            sibling = await complete_locked(
+                connection, task_id, claimed_at=generation
+            )
             assert sibling.outcome == 'ALREADY_APPLIED'
             assert sibling.terminalization_kind == 'COMPLETE_FUSED'
             assert sibling.terminal_at == first.terminal_at
@@ -377,13 +394,17 @@ class TestMoveInvariants:
                 ),
                 node_status='RUNNING',
             )
+            # The move itself, with no result: the writers of a run refuse
+            # a NULL result before they call it.
             with pytest.raises(DBAPIError) as raised:
                 await connection.execute(
                     text(
-                        'SELECT * FROM horsies_complete_locked_task('
-                        'CAST(:task_id AS uuid), :worker, NULL)'
+                        'SELECT horsies_move_task_to_history('
+                        '(SELECT t FROM horsies_tasks AS t '
+                        'WHERE t.id = CAST(:task_id AS uuid) FOR UPDATE), '
+                        "'COMPLETED', 'COMPLETE_LOCKED', NOW(), NULL, NULL, NULL)"
                     ),
-                    {'task_id': task_id, 'worker': WORKER},
+                    {'task_id': task_id},
                 )
             # The MESSAGE, not merely a failure. With the refusal
             # removed the operation still fails — on

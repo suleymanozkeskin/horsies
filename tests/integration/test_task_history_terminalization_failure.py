@@ -50,26 +50,30 @@ terminalization_schema = terminalization_schema_fixture(
 )
 
 
-async def fail_locked(
+async def fail_running(
     connection: AsyncConnection,
     task_id: str,
     *,
     worker: str = WORKER,
-    result: str | None = '{"error":{"code":"BOOM"}}',
     error_code: str | None = 'BOOM',
     failed_reason: str | None = 'exploded',
 ) -> Any:
+    """The worker's failure of a RUNNING task (``horsies_finish_failed_attempt``,
+    no retry, kind FAIL_RUNNING) under the claim that the row holds."""
     return (
         await connection.execute(
             text(
-                'SELECT * FROM horsies_fail_locked_task('
-                'CAST(:task_id AS uuid), :worker, :result, '
-                ':error_code, :failed_reason)'
+                'SELECT * FROM horsies_finish_failed_attempt('
+                'CAST(:task_id AS uuid), :worker, '
+                '(SELECT claimed_at FROM horsies_tasks '
+                'WHERE id = CAST(:task_id AS uuid)), '
+                "'NONE', NULL, NULL, NULL, :result, :error_code, :failed_reason, "
+                "'FAILED', NULL, :failed_reason, 'REFUSE', TRUE)"
             ),
             {
                 'task_id': task_id,
                 'worker': worker,
-                'result': result,
+                'result': '{"error":{"code":"BOOM"}}',
                 'error_code': error_code,
                 'failed_reason': failed_reason,
             },
@@ -83,12 +87,16 @@ async def fail_stale(
     *,
     stale_after_ms: int = 1_000,
 ) -> Any:
+    """The stale RUNNING pass's failure (``horsies_finish_stale_attempt``, no
+    retry, kind FAIL_STALE)."""
     return (
         await connection.execute(
             text(
-                'SELECT * FROM horsies_fail_stale_task('
-                'CAST(:task_id AS uuid), :stale_ms, :finalizing_ms, '
-                "'{\"error\":{\"code\":\"STALE\"}}', 'STALE', 'went silent')"
+                'SELECT * FROM horsies_finish_stale_attempt('
+                'CAST(:task_id AS uuid), CAST(:stale_ms AS INTEGER), '
+                "CAST(:finalizing_ms AS INTEGER), 'NONE', NULL, NULL, "
+                "'{\"error\":{\"code\":\"STALE\"}}', 'STALE', 'went silent', "
+                "'went silent', 'went silent')"
             ),
             {
                 'task_id': task_id,
@@ -129,7 +137,7 @@ class TestDispositionLadder:
                 worker=WORKER,
                 retain=False,
             )
-            outcome = await fail_locked(connection, task_id)
+            outcome = await fail_running(connection, task_id)
             assert outcome.outcome == 'APPLIED'
             row = await history_disposition(connection, task_id)
             assert row.status == 'FAILED'
@@ -151,7 +159,7 @@ class TestDispositionLadder:
                 retain=True,
                 input_text=input_text,
             )
-            await fail_locked(connection, task_id)
+            await fail_running(connection, task_id)
             row = await history_disposition(connection, task_id)
             assert row.rerun_input_disposition == 'INLINE'
             assert bytes(row.rerun_input_inline) == payload
@@ -177,7 +185,7 @@ class TestDispositionLadder:
                 workflow_id=workflow_id,
                 node_status='RUNNING',
             )
-            outcome = await fail_locked(connection, task_id)
+            outcome = await fail_running(connection, task_id)
             assert outcome.outcome == 'APPLIED'
             row = await history_disposition(connection, task_id)
             assert row.rerun_input_disposition == 'NEVER_ELIGIBLE'
@@ -241,10 +249,20 @@ class TestDeferredResultFence:
                 ),
                 node_status='RUNNING',
             )
+            # The move itself, with no result: the writers of a run refuse
+            # a NULL result before they call it.
             with pytest.raises(
                 DBAPIError, match='requires a result payload'
             ):
-                await fail_locked(connection, task_id, result=None)
+                await connection.execute(
+                    text(
+                        'SELECT horsies_move_task_to_history('
+                        '(SELECT t FROM horsies_tasks AS t '
+                        'WHERE t.id = CAST(:task_id AS uuid) FOR UPDATE), '
+                        "'FAILED', 'FAIL_RUNNING', NOW(), NULL, 'BOOM', 'exploded')"
+                    ),
+                    {'task_id': task_id},
+                )
 
 
 class TestFailedReasonOwnership:
@@ -257,7 +275,7 @@ class TestFailedReasonOwnership:
             task_id = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
-            await fail_locked(
+            await fail_running(
                 connection, task_id, error_code=None, failed_reason=None
             )
             row = await history_disposition(connection, task_id)
