@@ -46,15 +46,6 @@ pub struct MonitoringQueryError {
 }
 
 impl MonitoringQueryError {
-    pub(crate) fn database(operation: &str, error: sqlx::Error) -> Self {
-        Self {
-            code: MonitoringQueryErrorCode::DbOperationFailed,
-            message: format!("{operation} failed: {error}"),
-            retryable: is_retryable_sqlx_error(&error),
-            source: MonitoringQueryErrorSource::Database(error),
-        }
-    }
-
     /// A history read failure: a database error keeps its driver
     /// classification; every other history error is stored data that does
     /// not decode.

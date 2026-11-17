@@ -310,7 +310,7 @@ fn ok_envelope(value: &[u8]) -> Result<String, String> {
 /// A finalize batcher for an outcome writer under test: a worker pool of 5
 /// connections (2 flushers) and a queue of 64 rows.
 #[cfg(test)]
-pub(super) fn test_successes(
+pub(crate) fn test_successes(
     broker: &Arc<PostgresBroker>,
     worker_id: &str,
 ) -> FinalizeBatcher<WorkerPoolSuccessWrite> {

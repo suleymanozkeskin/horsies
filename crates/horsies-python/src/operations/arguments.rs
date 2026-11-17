@@ -6,6 +6,7 @@
 //! `TypeError` or `ValueError` here: it is a defect of the client.
 
 use chrono::{DateTime, Utc};
+use horsies_core::ThresholdMs;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
@@ -186,6 +187,14 @@ pub fn utc_instant(value: &Bound<'_, PyAny>) -> PyResult<DateTime<Utc>> {
     }
     let utc = Utc.into_pyobject(value.py())?;
     value.call_method1("astimezone", (utc,))?.extract()
+}
+
+/// A threshold of the recovery functions in whole milliseconds, 0 to
+/// 2 147 483 647, or the refusal as text that names the threshold. Pure.
+pub fn threshold_ms(name: &str, value_ms: i64) -> Result<ThresholdMs, String> {
+    let millis = u64::try_from(value_ms)
+        .map_err(|_| format!("the {name} of {value_ms} ms is negative; it must be 0 ms or more"))?;
+    ThresholdMs::from_millis(millis).map_err(|refused| format!("the {name}: {refused}"))
 }
 
 #[cfg(test)]

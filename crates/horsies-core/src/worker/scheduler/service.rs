@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::broker::PostgresBroker;
+use crate::broker::{PostgresBroker, SendKind};
 use crate::core::app::{PreparedSchedules, ScheduleSendFacts};
 use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
 
@@ -105,6 +105,13 @@ pub enum SchedulerStartError {
          Horsies::prepare_schedules from the same config"
     )]
     NotPrepared { schedule: String },
+    /// The client family check before the first schedule-state write
+    /// failed: `BrokerError::ClientFamilyMismatch` when the database records
+    /// another family or none (not retryable), or the error of the family
+    /// read (`BrokerError::is_retryable` tells whether a later start may
+    /// pass).
+    #[error("the client family check before the first schedule write failed: {0}")]
+    ClientFamily(#[source] crate::broker::BrokerError),
 }
 
 /// Why one slot was not enqueued.
@@ -229,7 +236,8 @@ fn check_schedules_at_start(
 ///
 /// The scheduler:
 /// 1. Refuses to start, writing nothing, when the schedule section is invalid
-///    or an enabled pattern has no next slot. The join handle then yields the
+///    or an enabled pattern has no next slot, or when the broker's client
+///    family check fails. The join handle then yields the
 ///    [`SchedulerStartError`]; the host exits non-zero.
 /// 2. Initializes schedule state for all configured schedules; one schedule's
 ///    failure is logged and the others go on (the existence heal retries it).
@@ -262,8 +270,8 @@ pub fn spawn_scheduler(
     ))
 }
 
-/// The body of [`spawn_scheduler`]: start checks, state initialization, then
-/// the tick loop until `cancel` fires.
+/// The body of [`spawn_scheduler`]: start checks, the client family check,
+/// state initialization, then the tick loop until `cancel` fires.
 async fn run_scheduler(
     broker: Arc<PostgresBroker>,
     schedule_config: ScheduleConfig,
@@ -277,6 +285,12 @@ async fn run_scheduler(
     }
 
     check_schedules_at_start(&schedule_config, &prepared, Utc::now())?;
+    // The state initialization is the first schedule-state write. The slot
+    // enqueue checks the family again inside the broker's send.
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(SchedulerStartError::ClientFamily)?;
     initialize_schedules(broker.pool(), &schedule_config.schedules).await;
 
     let lock_pool = scheduler_lock_pool(broker.pool());
@@ -1024,6 +1038,7 @@ async fn enqueue_scheduled_task(
             None,
             retention,
             None,
+            SendKind::First,
         )
         .await
         .map_err(|source| ScheduleFireError::Broker {
@@ -1338,6 +1353,49 @@ mod tests {
             Err(SchedulerStartError::InvalidScheduleConfig(ref message))
                 if message.contains("Not/A_Timezone")
         ));
+    }
+
+    /// A broker handle of the other client family is refused before the
+    /// first schedule-state write: the join handle yields
+    /// `SchedulerStartError::ClientFamily` with the mismatch, not retryable,
+    /// and no state row is written.
+    #[tokio::test]
+    #[serial]
+    async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() {
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+
+        let pool = test_pool().await;
+        let broker = Arc::new(
+            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python),
+        );
+        let name = format!("scheduler_family_{}", uuid::Uuid::new_v4().simple());
+        let schedule = interval_schedule_secs(&name, 60);
+        let prepared = prepared_for(std::slice::from_ref(&schedule));
+
+        let outcome = spawn_scheduler(
+            broker,
+            ScheduleConfig::new(vec![schedule]),
+            default_app_config(),
+            prepared,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("scheduler task joins");
+
+        let refusal = match outcome {
+            Err(SchedulerStartError::ClientFamily(refusal)) => refusal,
+            other => panic!("expected the client family refusal, got {other:?}"),
+        };
+        assert!(matches!(
+            refusal,
+            BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Rust),
+                own: ClientFamily::Python,
+            }
+        ));
+        assert!(!refusal.is_retryable());
+        assert!(state::get_state(&pool, &name).await.unwrap().is_none());
     }
 
     #[test]

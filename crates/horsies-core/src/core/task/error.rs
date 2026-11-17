@@ -833,6 +833,7 @@ impl std::error::Error for TaskError {}
 mod tests {
     use super::*;
     use crate::core::task::result::TaskResult;
+    use crate::core::workflow::status::WorkflowStatus;
     use serde_json::json;
 
     fn user_code(text: &str) -> TaskErrorCode {
@@ -841,7 +842,7 @@ mod tests {
 
     fn failed_summary() -> SubWorkflowSummary {
         SubWorkflowSummary {
-            status: "FAILED".to_owned(),
+            status: WorkflowStatus::Failed,
             output: None,
             total_tasks: 3,
             completed_tasks: 1,

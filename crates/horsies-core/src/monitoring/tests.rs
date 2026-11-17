@@ -246,7 +246,23 @@ fn every_w2_model_serializes_the_contract_field_set() {
         queue_s: Some(0),
         exec_s: None,
     };
-    let group = GroupRow::empty("TOTAL");
+    let counts = BreakdownCounts {
+        total: 0,
+        pending: 0,
+        claimed: 0,
+        running: 0,
+        completed: 0,
+        failed: 0,
+        cancelled: 0,
+        expired: 0,
+        retried: 0,
+    };
+    let group = GroupRow {
+        counts: counts.clone(),
+        group: BreakdownGroup::Value {
+            value: "w1".to_owned(),
+        },
+    };
     let run = WorkflowRunSummary {
         id: task_id,
         name: "w".to_owned(),
@@ -343,9 +359,8 @@ fn every_w2_model_serializes_the_contract_field_set() {
             ],
         ),
         (
-            keys(group.clone()),
+            keys(counts.clone()),
             vec![
-                "group",
                 "total",
                 "pending",
                 "claimed",
@@ -358,11 +373,28 @@ fn every_w2_model_serializes_the_contract_field_set() {
             ],
         ),
         (
+            keys(group.clone()),
+            vec![
+                "total",
+                "pending",
+                "claimed",
+                "running",
+                "completed",
+                "failed",
+                "cancelled",
+                "expired",
+                "retried",
+                "group",
+            ],
+        ),
+        (keys(group.group.clone()), vec!["kind", "value"]),
+        (keys(BreakdownGroup::Unclaimed), vec!["kind"]),
+        (
             keys(Breakdown {
                 group_by: "worker".to_owned(),
-                groups: vec![],
-                total: group,
-                group_count: 0,
+                groups: vec![group],
+                total: counts,
+                group_count: 1,
             }),
             vec!["group_by", "groups", "total", "group_count"],
         ),
@@ -605,6 +637,18 @@ fn every_w2_model_serializes_the_contract_field_set() {
     for (actual, expected) in cases {
         assert_eq!(actual, expected, "model field drift");
     }
+    // Python's discriminated union of the breakdown group.
+    assert_eq!(
+        serde_json::to_value(BreakdownGroup::Value {
+            value: "w1".to_owned()
+        })
+        .unwrap(),
+        json!({"kind": "value", "value": "w1"})
+    );
+    assert_eq!(
+        serde_json::to_value(BreakdownGroup::Unclaimed).unwrap(),
+        json!({"kind": "unclaimed"})
+    );
     assert_eq!(
         serde_json::to_value(task_id).unwrap(),
         json!(task_id.to_string())
@@ -738,15 +782,18 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     .expect("seed W2 task");
 }
 
+/// Insert attempt `attempt` of a live task: FAILED with `code`. Every column
+/// of the baseline attempt row is named.
 async fn seed_attempt(pool: &PgPool, task_id: Uuid, attempt: i32, code: &str) {
     sqlx::query(
         "INSERT INTO horsies_task_attempts (
              task_id, attempt, outcome, will_retry, started_at, finished_at,
-             error_code, error_message, failed_reason, worker_hostname
+             error_code, error_message, failed_reason, worker_id, worker_hostname,
+             worker_pid, worker_process_name
          ) VALUES (
              $1, $2, 'FAILED', $2 = 1, NOW() - INTERVAL '20 seconds',
              NOW() - INTERVAL '10 seconds', $3, 'attempt message',
-             'attempt reason', 'w2-host'
+             'attempt reason', 'w2-worker', 'w2-host', 4242, 'w2-process'
          )",
     )
     .bind(task_id)
@@ -1010,17 +1057,21 @@ async fn live_and_history_aggregates_merge_before_caps() {
     assert_eq!(breakdown.groups.len(), 2);
     assert_eq!(breakdown.group_count, 90);
     assert_eq!(breakdown.total.total, 142);
-    assert_eq!(breakdown.groups[0].group, shared_name);
-    assert_eq!(breakdown.groups[0].total, 3);
-    assert_eq!(breakdown.groups[0].pending, 1);
-    assert_eq!(breakdown.groups[0].completed, 2);
+    assert_eq!(
+        breakdown.groups[0].group,
+        BreakdownGroup::Value {
+            value: shared_name.clone()
+        }
+    );
+    assert_eq!(breakdown.groups[0].counts.total, 3);
+    assert_eq!(breakdown.groups[0].counts.pending, 1);
+    assert_eq!(breakdown.groups[0].counts.completed, 2);
 
     clean_w2(&pool, &scope).await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("list");
@@ -1153,9 +1204,25 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     clean_w2(&pool, &scope).await;
 }
 
+/// The count of each status under `filters`, by status text.
+async fn stats_by_status(broker: &PostgresBroker, filters: TaskFilters) -> BTreeMap<String, i64> {
+    task_stats(
+        broker,
+        &TaskStatsQuery::new(test_window()).with_filters(filters),
+    )
+    .await
+    .expect("filtered W2 stats")
+    .into_iter()
+    .map(|row| (row.status, row.count))
+    .collect()
+}
+
+/// Every filter dimension scopes the stats and the list on both sides,
+/// with the baseline rule for error codes: a live row has no error code, so
+/// an error code or category filter selects history rows only. A history
+/// row's spans are closed; a live row's run span counts up.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("filters");
@@ -1164,7 +1231,6 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
 
     let match_name = scope.task("filter_match");
     let mut live_match = scope.running("filter_match");
-    live_match.error_code = Some("TASK_EXCEPTION".to_owned());
     live_match.retry_count = 2;
     live_match.enqueued_seconds_ago = 60;
     live_match.started_seconds_ago = Some(40);
@@ -1177,94 +1243,85 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     seed_task(&pool, &history_match).await;
     fail_task(&pool, history_match.id, "TASK_EXCEPTION").await;
 
-    for (name, queue, worker, code, retry_count) in [
-        (
-            "wrong_name",
-            "matching",
-            Some("w2-worker"),
-            Some("TASK_EXCEPTION"),
-            2,
-        ),
-        (
-            "filter_match",
-            "wrong_queue",
-            Some("w2-worker"),
-            Some("TASK_EXCEPTION"),
-            2,
-        ),
-        (
-            "filter_match",
-            "matching",
-            Some("another-worker"),
-            Some("TASK_EXCEPTION"),
-            2,
-        ),
-        (
-            "filter_match",
-            "matching",
-            Some("w2-worker"),
-            Some("WAIT_TIMEOUT"),
-            2,
-        ),
-        (
-            "filter_match",
-            "matching",
-            Some("w2-worker"),
-            Some("TASK_EXCEPTION"),
-            0,
-        ),
+    // A history row that differs from the history match only in its code.
+    let mut wrong_code = live_match.clone();
+    wrong_code.id = Uuid::new_v4();
+    seed_task(&pool, &wrong_code).await;
+    fail_task(&pool, wrong_code.id, "WAIT_TIMEOUT").await;
+
+    // Live rows that differ from the live match in one dimension each.
+    for (name, queue, worker, retry_count) in [
+        ("wrong_name", "matching", "w2-worker", 2),
+        ("filter_match", "other", "w2-worker", 2),
+        ("filter_match", "matching", "another-worker", 2),
+        ("filter_match", "matching", "w2-worker", 0),
     ] {
         let mut decoy = scope.running(name);
-        decoy.queue = if queue == "matching" {
-            scope.queue.clone()
-        } else {
-            format!("{}wrong-queue", scope.prefix)
+        decoy.queue = match queue {
+            "matching" => scope.queue.clone(),
+            other => format!("{}{other}", scope.prefix),
         };
-        decoy.worker = worker.map(str::to_owned);
-        decoy.error_code = code.map(str::to_owned);
+        decoy.worker = Some(worker.to_owned());
         decoy.retry_count = retry_count;
         seed_task(&pool, &decoy).await;
     }
 
-    let filters = TaskFilters {
+    let without_codes = TaskFilters {
         task_names: vec![match_name.clone()],
         queues: vec![scope.queue.clone()],
         workers: vec!["w2-worker".to_owned()],
-        error_codes: vec!["TASK_EXCEPTION".to_owned()],
-        error_categories: vec![ErrorCategory::Operational],
         retried_only: true,
         ..TaskFilters::default()
     };
-    let stats = task_stats(
-        &broker,
-        &TaskStatsQuery::new(test_window()).with_filters(filters.clone()),
-    )
-    .await
-    .expect("filtered W2 stats");
-    let counts: BTreeMap<_, _> = stats
-        .into_iter()
-        .map(|row| (row.status, row.count))
-        .collect();
-    assert_eq!(counts["RUNNING"], 1);
-    assert_eq!(counts["FAILED"], 1);
-    assert_eq!(counts.values().sum::<i64>(), 2);
+    let with_codes = TaskFilters {
+        error_codes: vec!["TASK_EXCEPTION".to_owned()],
+        error_categories: vec![ErrorCategory::Operational],
+        ..without_codes.clone()
+    };
+
+    let both_sides = stats_by_status(&broker, without_codes.clone()).await;
+    assert_eq!(both_sides["RUNNING"], 1);
+    assert_eq!(both_sides["FAILED"], 2);
+    assert_eq!(both_sides.values().sum::<i64>(), 3);
+    let history_only = stats_by_status(&broker, with_codes.clone()).await;
+    assert_eq!(history_only["FAILED"], 1);
+    assert_eq!(history_only.values().sum::<i64>(), 1);
 
     let rows = list_tasks(
         &broker,
         &TaskListQuery::new(test_window())
-            .with_filters(filters)
+            .with_filters(without_codes)
             .with_sort(TaskSortField::ExecutionSeconds, SortDirection::Descending),
     )
     .await
     .expect("filtered W2 list");
-    assert_eq!(rows.total, 2);
-    assert_eq!(rows.rows.len(), 2);
-    assert_eq!(rows.rows[0].id, history_match.id);
+    assert_eq!(rows.total, 3);
+    assert_eq!(
+        rows.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![history_match.id, wrong_code.id, live_match.id]
+    );
     assert_eq!(rows.rows[0].queue_s, Some(30));
     assert!(rows.rows[0].exec_s.is_some_and(|seconds| seconds >= 60));
-    assert_eq!(rows.rows[1].id, live_match.id);
-    assert_eq!(rows.rows[1].queue_s, Some(20));
-    assert!(rows.rows[1].exec_s.is_some_and(|seconds| seconds >= 40));
+    assert_eq!(rows.rows[2].queue_s, Some(20));
+    assert!(rows.rows[2].exec_s.is_some_and(|seconds| seconds >= 40));
+
+    let history_rows = list_tasks(
+        &broker,
+        &TaskListQuery::new(test_window())
+            .with_filters(with_codes)
+            .with_sort(TaskSortField::ExecutionSeconds, SortDirection::Descending),
+    )
+    .await
+    .expect("filtered W2 list with codes");
+    assert_eq!(history_rows.total, 1);
+    assert_eq!(
+        history_rows
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![history_match.id]
+    );
 
     let mut pending = scope.pending("pending_duration");
     pending.enqueued_seconds_ago = 30;
@@ -1284,6 +1341,8 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     assert!(pending_row.queue_s.is_some_and(|seconds| seconds >= 30));
     assert_eq!(pending_row.exec_s, None);
 
+    // Only the status and `retried_only` scope the facets: the two FAILED
+    // retried rows of the name count, the live rows do not.
     let failed_facets = task_facets(
         &broker,
         &TaskFacetsQuery::new(test_window()).with_filters(TaskFilters {
@@ -1302,7 +1361,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
             .iter()
             .find(|facet| facet.value == match_name)
             .map(|facet| facet.count),
-        Some(1)
+        Some(2)
     );
 
     clean_w2(&pool, &scope).await;
@@ -1372,7 +1431,6 @@ async fn seed_node(
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("detail");
@@ -1469,7 +1527,6 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("workflow");
@@ -1483,7 +1540,7 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     seed_workflow(&pool, child, &child_name, "FAILED").await;
     sqlx::query(
         "UPDATE horsies_workflows
-         SET parent_workflow_id = $1, root_workflow_id = $1, depth = 1
+         SET parent_workflow_id = $1, parent_task_index = 2, root_workflow_id = $1, depth = 1
          WHERE id = $2",
     )
     .bind(root)
@@ -1507,16 +1564,6 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     .await;
     seed_node(&pool, &scope, child, 0, "COMPLETED", &[], None, None).await;
     seed_node(&pool, &scope, child, 1, "FAILED", &[0], None, None).await;
-    sqlx::query(
-        "UPDATE horsies_workflow_tasks
-         SET sub_workflow_id = $1
-         WHERE workflow_id = $2 AND task_index = 1",
-    )
-    .bind(child)
-    .bind(root)
-    .execute(&pool)
-    .await
-    .expect("seed non-subworkflow child reference");
 
     assert!(list_workflow_names(&broker)
         .await
@@ -1589,19 +1636,26 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     assert!(subworkflow.leaf.is_none());
     assert!(subworkflow.attempts.is_empty());
 
+    // The baseline row names every column: a schedule that ran has its last
+    // run time and task, and `next_run_at` is never NULL.
     let now = Utc::now();
     for (name, next, count) in [
-        (scope.schedule("later"), Some(now + Duration::hours(3)), 1),
-        (scope.schedule("none"), None, 2),
-        (scope.schedule("soon"), Some(now + Duration::minutes(5)), 3),
+        (scope.schedule("later"), now + Duration::hours(3), 1),
+        (scope.schedule("tomorrow"), now + Duration::days(1), 2),
+        (scope.schedule("soon"), now + Duration::minutes(5), 3),
     ] {
         sqlx::query(
             "INSERT INTO horsies_schedule_state (
-                 schedule_name, next_run_at, run_count, updated_at
-             ) VALUES ($1, $2, $3, NOW())",
+                 schedule_name, next_run_at, last_run_at, last_task_id, run_count,
+                 config_hash, updated_at
+             ) VALUES (
+                 $1, $2, NOW() - INTERVAL '1 hour', $3, $4, decode(repeat('00', 32), 'hex'),
+                 NOW()
+             )",
         )
         .bind(name)
         .bind(next)
+        .bind(Uuid::new_v4())
         .bind(count)
         .execute(&pool)
         .await
@@ -1610,16 +1664,21 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let schedules = list_schedules(&broker).await.expect("W2 schedules");
     let soon = scope.schedule("soon");
     let later = scope.schedule("later");
-    let none = scope.schedule("none");
+    let tomorrow = scope.schedule("tomorrow");
     let scoped_schedules = schedules
         .iter()
         .filter(|schedule| {
-            [soon.as_str(), later.as_str(), none.as_str()]
+            [soon.as_str(), later.as_str(), tomorrow.as_str()]
                 .contains(&schedule.schedule_name.as_str())
         })
         .collect::<Vec<_>>();
-    assert_eq!(scoped_schedules.len(), 3);
-    assert_eq!(scoped_schedules[0].schedule_name, soon);
+    assert_eq!(
+        scoped_schedules
+            .iter()
+            .map(|schedule| schedule.schedule_name.as_str())
+            .collect::<Vec<_>>(),
+        [soon.as_str(), later.as_str(), tomorrow.as_str()]
+    );
     assert_eq!(scoped_schedules[0].run_count, 3);
 
     clean_w2(&pool, &scope).await;
@@ -1640,10 +1699,12 @@ async fn database_failure_is_typed_and_retryable() {
     assert!(error.message.contains("task list query failed"));
 }
 
+/// A published reader dropped out of band fails the detail read with a
+/// named database error, not an absence; once the readers are published
+/// again, the read finds the task (owner decision of 2026-11-16 on #838).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
-async fn unpublished_staged_detail_preserves_absent_semantics() {
+async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("unpub");
     clean_w2(&pool, &scope).await;
@@ -1660,7 +1721,17 @@ async fn unpublished_staged_detail_preserves_absent_semantics() {
     .execute(&pool)
     .await
     .expect("drop staged detail function");
-    assert_eq!(get_task_detail(&broker, task.id).await.unwrap(), None);
+    let error = get_task_detail(&broker, task.id)
+        .await
+        .expect_err("a dropped reader is an error, not an absence");
+    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
+    assert!(
+        error
+            .message
+            .contains(crate::core::history::names::TASK_DETAIL_FUNCTION),
+        "{}",
+        error.message
+    );
 
     let mut transaction = pool.begin().await.expect("publication transaction");
     StagedLoaderPublisher

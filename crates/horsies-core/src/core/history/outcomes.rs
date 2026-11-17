@@ -6,13 +6,22 @@ use crate::core::history::errors::HistoryError;
 
 /// Why a leaf's catalog row and relation disagree with the expected leaf.
 /// The leaf-creation functions of `0008_history_maintenance_functions.sql`
-/// (`horsies_history_leaf_state`, `horsies_create_history_leaf`) name the
-/// same kinds.
+/// (`horsies_history_leaf_state`, `horsies_create_history_leaf`) and the leaf
+/// inspection of `0006_history_functions.sql` (`horsies_inspect_history_leaf`)
+/// name the same kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogConflictKind {
     RelationWithoutCatalog,
     MetadataMismatch,
     PhysicalNonconformant,
+    /// A finite leaf's catalog row has an open lower bound.
+    OpenLowerBound,
+    /// The catalog recorded a drop and the relation exists.
+    DroppedRelationExists,
+    /// The leaf is attached to a parent other than its class parent.
+    ForeignParent,
+    /// The catalog recorded a detach and the leaf is attached.
+    DetachRecordedWhileAttached,
     /// The parent relation does not exist.
     ParentMissing,
     /// Another relation holds a canonical index name of the leaf.
@@ -30,6 +39,10 @@ impl CatalogConflictKind {
             Self::RelationWithoutCatalog => "RELATION_WITHOUT_CATALOG",
             Self::MetadataMismatch => "METADATA_MISMATCH",
             Self::PhysicalNonconformant => "PHYSICAL_NONCONFORMANT",
+            Self::OpenLowerBound => "OPEN_LOWER_BOUND",
+            Self::DroppedRelationExists => "DROPPED_RELATION_EXISTS",
+            Self::ForeignParent => "FOREIGN_PARENT",
+            Self::DetachRecordedWhileAttached => "DETACH_RECORDED_WHILE_ATTACHED",
             Self::ParentMissing => "PARENT_MISSING",
             Self::ForeignIndex => "FOREIGN_INDEX",
             Self::CatalogWithoutRelation => "CATALOG_WITHOUT_RELATION",
@@ -43,6 +56,10 @@ impl CatalogConflictKind {
             "RELATION_WITHOUT_CATALOG" => Ok(Self::RelationWithoutCatalog),
             "METADATA_MISMATCH" => Ok(Self::MetadataMismatch),
             "PHYSICAL_NONCONFORMANT" => Ok(Self::PhysicalNonconformant),
+            "OPEN_LOWER_BOUND" => Ok(Self::OpenLowerBound),
+            "DROPPED_RELATION_EXISTS" => Ok(Self::DroppedRelationExists),
+            "FOREIGN_PARENT" => Ok(Self::ForeignParent),
+            "DETACH_RECORDED_WHILE_ATTACHED" => Ok(Self::DetachRecordedWhileAttached),
             "PARENT_MISSING" => Ok(Self::ParentMissing),
             "FOREIGN_INDEX" => Ok(Self::ForeignIndex),
             "CATALOG_WITHOUT_RELATION" => Ok(Self::CatalogWithoutRelation),
@@ -169,6 +186,10 @@ mod tests {
             CatalogConflictKind::RelationWithoutCatalog,
             CatalogConflictKind::MetadataMismatch,
             CatalogConflictKind::PhysicalNonconformant,
+            CatalogConflictKind::OpenLowerBound,
+            CatalogConflictKind::DroppedRelationExists,
+            CatalogConflictKind::ForeignParent,
+            CatalogConflictKind::DetachRecordedWhileAttached,
             CatalogConflictKind::ParentMissing,
             CatalogConflictKind::ForeignIndex,
             CatalogConflictKind::CatalogWithoutRelation,
@@ -179,7 +200,7 @@ mod tests {
             LeafAttachment::DetachInterrupted,
             LeafAttachment::Detached,
         ];
-        assert_eq!(conflict_kinds.len(), 7);
+        assert_eq!(conflict_kinds.len(), 11);
         for kind in conflict_kinds {
             assert_eq!(CatalogConflictKind::parse(kind.as_str()).unwrap(), kind);
         }

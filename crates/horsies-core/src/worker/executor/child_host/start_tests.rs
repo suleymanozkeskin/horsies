@@ -16,7 +16,7 @@ use super::link::FrameWriter;
 use super::run::{start_attempt, HostContext, RunFacts, Started};
 use crate::broker::PostgresBroker;
 use crate::core::registry::task::TaskRegistry;
-use crate::worker::executor::protocol::{StopReason, TaskKind};
+use crate::worker::executor::protocol::StopReason;
 
 const WORKER_ID: &str = "start-attempt-worker";
 const PID: i32 = 4242;
@@ -78,7 +78,6 @@ fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
         task_id,
         task_name: "app.tasks.start".to_owned(),
         worker_id: WORKER_ID.to_owned(),
-        task_kind: TaskKind::Plain,
         claimed_at,
     }
 }

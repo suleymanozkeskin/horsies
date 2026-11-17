@@ -3779,3 +3779,6 @@ mod cap_tests {
             .ok();
     }
 }
+
+#[cfg(test)]
+mod status_and_yield_tests;

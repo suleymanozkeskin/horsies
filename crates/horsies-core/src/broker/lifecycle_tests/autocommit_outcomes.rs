@@ -8,7 +8,7 @@
 //! The Python tests reach the writes through the worker's finalize. The
 //! core's phase-1 retry is private to the worker; these ports call the
 //! writer and repeat the same command, as the retry does. The completion
-//! runs on a core pool; the claim pass still runs on sqlx.
+//! and the claim pass run on a core pool.
 //! `test_a_second_statement_is_refused_by_the_server` tests a Python helper
 //! and is not ported (test map: NOT CORE).
 
@@ -18,8 +18,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
+use crate::broker::claims::claim_pass;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::error::BrokerError;
 use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization;
@@ -284,15 +285,18 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
     unpinged.close().await;
 }
 
-/// Python `test_a_dead_connection_fails_the_claim_pass_as_retryable`: a claim
-/// pass on the dead pooled connection is a retryable error, and the next pass
-/// claims the row.
+/// Python `test_a_dead_connection_fails_the_claim_pass_as_retryable`, on a
+/// core pool with no idle ping. The pool replaces a pooled connection that
+/// its driver already saw closed, at checkout; a connection that it sees
+/// closed only at the send fails the pass before the server got it. Either
+/// way the row is claimed once: the first pass claims it, or it fails as
+/// retryable with the row still PENDING and the next pass claims it.
 #[tokio::test]
 #[serial]
 async fn a_dead_connection_fails_the_claim_pass_as_retryable() {
     let pool = pool().await;
-    let unpinged = unpinged_single_connection_pool(database_options(&pool)).await;
-    let pid = pooled_backend_pid(&unpinged).await;
+    let unpinged = unpinged_single_connection_core_pool(&database_options(&pool));
+    let pid = core_pool_backend_pid(&unpinged).await;
     let task_id = seed_task(
         &pool,
         &TaskSeed {
@@ -302,24 +306,25 @@ async fn a_dead_connection_fails_the_claim_pass_as_retryable() {
     )
     .await;
     terminate_backend(&pool, pid).await;
-    let broker = PostgresBroker::from_pool(unpinged.clone());
+    let request = claim_request(CLAIM_QUEUE);
 
-    match broker.claim_batch(&claim_pass(CLAIM_QUEUE)).await {
-        Err(BrokerError::Database(error)) => {
-            assert!(is_retryable_sqlx_error(&error), "not retryable: {error}");
+    let pass = match claim_pass(&unpinged, StatementLog::Off, &request).await {
+        Ok(pass) => pass,
+        Err(error @ BrokerError::Statement(_)) => {
+            assert!(error.is_retryable(), "not retryable: {error}");
+            assert_eq!(status_of(&pool, task_id).await, "PENDING");
+            claim_pass(&unpinged, StatementLog::Off, &request)
+                .await
+                .expect("the next pass on a new connection")
         }
-        other => panic!("expected a retryable database error, got {other:?}"),
-    }
-    assert_eq!(status_of(&pool, task_id).await, "PENDING");
+        Err(other) => panic!("expected a retryable statement failure, got {other:?}"),
+    };
 
-    let rows = broker
-        .claim_batch(&claim_pass(CLAIM_QUEUE))
-        .await
-        .expect("the next pass");
     assert_eq!(
-        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        pass.claimed.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![task_id]
     );
-    unpinged.close().await;
+    assert_ne!(core_pool_backend_pid(&unpinged).await, pid);
+    unpinged.close();
     cleanup_tasks(&pool, &[task_id]).await;
 }

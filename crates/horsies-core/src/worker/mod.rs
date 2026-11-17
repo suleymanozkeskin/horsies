@@ -14,6 +14,7 @@ pub mod finalize_batch;
 pub mod heartbeat;
 pub mod memory_fit;
 pub mod profile_fit;
+pub mod queue_cap_hold;
 pub mod recovery;
 pub mod retry;
 pub mod runner_beats;

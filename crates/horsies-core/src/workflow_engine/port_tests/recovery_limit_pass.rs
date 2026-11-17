@@ -1079,7 +1079,6 @@ async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
 /// `test_a_raised_row_is_counted_and_fails_the_workflow_at_the_bound`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #819"]
 async fn a_raised_phase2_row_is_counted_and_fails_the_workflow_at_the_bound() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = start_a_then_b(&db.pool).await;
@@ -1136,7 +1135,6 @@ async fn a_transient_phase2_raise_stays_uncounted() {
 /// write again.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #819"]
 async fn a_failed_phase2_limit_write_keeps_the_row_under_the_bound() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = start_a_then_b(&db.pool).await;

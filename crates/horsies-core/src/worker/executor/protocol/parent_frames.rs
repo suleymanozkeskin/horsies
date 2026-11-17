@@ -77,9 +77,9 @@ impl ChildLogLevel {
     }
 }
 
-/// Whether a task is a node of a workflow. The start of a workflow task
-/// also hands its node over. The frames carry it until the start statement
-/// reads it from the locked row.
+/// Whether a claimed task is a node of a workflow: its phase 2 finishes the
+/// node. The run frames do not carry it: the start statement
+/// (`horsies_start_attempt`) reads it from the locked row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
     Plain,
@@ -89,21 +89,6 @@ pub enum TaskKind {
 impl TaskKind {
     pub fn is_workflow_task(self) -> bool {
         matches!(self, Self::WorkflowTask)
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Plain => "plain",
-            Self::WorkflowTask => "workflow_task",
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "plain" => Some(Self::Plain),
-            "workflow_task" => Some(Self::WorkflowTask),
-            _ => None,
-        }
     }
 }
 
@@ -302,7 +287,6 @@ pub struct RunFrame {
     /// The worker that holds the claim. The child fences each write of the
     /// attempt on it and on `claimed_at`.
     pub worker_id: String,
-    pub task_kind: TaskKind,
     /// The claim generation: the `claimed_at` that the claim returned.
     pub claimed_at: DateTime<Utc>,
     pub work: IsolatedWork,
@@ -317,7 +301,6 @@ pub struct SharedRunFrame {
     pub task_id: Uuid,
     pub task_name: String,
     pub worker_id: String,
-    pub task_kind: TaskKind,
     pub claimed_at: DateTime<Utc>,
     pub work: SharedWork,
     pub input: TaskInputText,
@@ -372,7 +355,6 @@ enum ParentWire<'a> {
         task_id: Uuid,
         task_name: &'a str,
         worker_id: &'a str,
-        task_kind: &'static str,
         claimed_at: String,
         work: IsolatedWorkWire<'a>,
     },
@@ -381,7 +363,6 @@ enum ParentWire<'a> {
         task_id: Uuid,
         task_name: &'a str,
         worker_id: &'a str,
-        task_kind: &'static str,
         claimed_at: String,
         work: SharedWorkWire<'a>,
     },
@@ -633,7 +614,6 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_id: run.task_id,
                 task_name: &run.task_name,
                 worker_id: &run.worker_id,
-                task_kind: run.task_kind.as_str(),
                 claimed_at: claim_time_text(&run.claimed_at),
                 work: isolated_work_wire(&run.work),
             },
@@ -645,7 +625,6 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_id: run.task_id,
                 task_name: &run.task_name,
                 worker_id: &run.worker_id,
-                task_kind: run.task_kind.as_str(),
                 claimed_at: claim_time_text(&run.claimed_at),
                 work: shared_work_wire(&run.work),
             },
@@ -914,18 +893,12 @@ fn decode_shared_work(work: &Fields<'_>) -> Result<SharedWork, MalformedFrame> {
     }
 }
 
-fn decode_task_kind(fields: &Fields<'_>) -> Result<TaskKind, MalformedFrame> {
-    TaskKind::parse(fields.text("task_kind")?)
-        .ok_or_else(|| fields.broken_rule("task_kind", "is not one of plain, workflow_task"))
-}
-
 fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedFrame> {
     fields.only(&[
         "kind",
         "task_id",
         "task_name",
         "worker_id",
-        "task_kind",
         "claimed_at",
         "work",
     ])?;
@@ -933,7 +906,6 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         task_id: fields.task_id("task_id")?,
         task_name: fields.owned_text("task_name")?,
         worker_id: fields.owned_text("worker_id")?,
-        task_kind: decode_task_kind(fields)?,
         claimed_at: fields.time("claimed_at")?,
         work: decode_isolated_work(&fields.object("work")?)?,
         input: TaskInputText::new(text_body(body)?),
@@ -947,7 +919,6 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         "task_id",
         "task_name",
         "worker_id",
-        "task_kind",
         "claimed_at",
         "work",
     ])?;
@@ -956,7 +927,6 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         task_id: fields.task_id("task_id")?,
         task_name: fields.owned_text("task_name")?,
         worker_id: fields.owned_text("worker_id")?,
-        task_kind: decode_task_kind(fields)?,
         claimed_at: fields.time("claimed_at")?,
         work: decode_shared_work(&fields.object("work")?)?,
         input: TaskInputText::new(text_body(body)?),

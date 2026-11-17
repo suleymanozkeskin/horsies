@@ -125,8 +125,9 @@ pub enum BrokerError {
     #[error("invalid claim argument: {0}")]
     InvalidClaimArgument(String),
 
-    /// A row of the claim, the start, the release or the stale claim
-    /// requeue breaks its function's row contract (`broker::claims`,
+    /// A row of the claim, the start, the release, the settle of claimed
+    /// workflow tasks or the stale claim requeue breaks its function's row
+    /// contract (`broker::claims`, `broker::workflow_claim_settle`,
     /// `broker::stale_recovery`). Not retryable: the same call meets it
     /// again.
     #[error("claim contract violation: {0}")]

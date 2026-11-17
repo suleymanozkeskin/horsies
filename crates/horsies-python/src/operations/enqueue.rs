@@ -1,7 +1,9 @@
 //! The send operation: one enqueue of one task through the core.
 //!
-//! The Python client builds one frozen `EnqueueRequest` per send and keeps
-//! it: a resend of the same task id passes the same request. The outcome is
+//! The Python client builds one frozen `EnqueueRequest` per send attempt: a
+//! resend of the same task id passes the same values with the send kind
+//! `REPEAT`, so a task that finished answers from history and does not run
+//! again. The outcome is
 //! `Enqueued` or one class per variant of the core's send error catalog
 //! (`TaskSendError`), each with only the facts of its state.
 
@@ -10,8 +12,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::{
-    BrokerError, EnqueueRetention, RetentionChoice, TaskSendError, TaskSendPayload,
+    BrokerError, EnqueueRetention, RetentionChoice, SendKind, TaskSendError, TaskSendPayload,
 };
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -36,6 +39,7 @@ pub struct EnqueueCommand {
     idempotency_key: Option<String>,
     retention: RetentionRequest,
     rerun_input: RerunInputPolicy,
+    send_kind: SendKind,
 }
 
 impl EnqueueCommand {
@@ -61,7 +65,9 @@ impl EnqueueCommand {
 }
 
 /// A frozen send request. `None` for `good_until`, `task_options_json` or
-/// `idempotency_key` means no deadline, no options, no key.
+/// `idempotency_key` means no deadline, no options, no key. `send_kind` is
+/// `FIRST` for the first send of the task id and `REPEAT` for a send retry;
+/// another text raises `ValueError`.
 #[pyclass(module = "horsies._core", frozen)]
 pub struct EnqueueRequest {
     command: Arc<EnqueueCommand>,
@@ -89,7 +95,8 @@ impl EnqueueRequest {
         task_options_json,
         idempotency_key,
         retention,
-        rerun_input
+        rerun_input,
+        send_kind
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -105,6 +112,7 @@ impl EnqueueRequest {
         idempotency_key: Option<String>,
         retention: RetentionArgument<'_>,
         rerun_input: &str,
+        send_kind: &str,
     ) -> PyResult<Self> {
         let good_until = match good_until {
             Some(instant) => Some(utc_instant(&instant)?),
@@ -123,6 +131,7 @@ impl EnqueueRequest {
             idempotency_key,
             retention: retention.request(),
             rerun_input: RerunInputPolicy::parse(rerun_input)?,
+            send_kind: send_kind_of(send_kind).map_err(PyValueError::new_err)?,
         };
         Ok(Self {
             command: Arc::new(command),
@@ -133,6 +142,17 @@ impl EnqueueRequest {
     #[getter]
     fn task_id(&self) -> Uuid {
         self.command.task_id
+    }
+}
+
+/// The send kind of a request: `FIRST` or `REPEAT`. Pure.
+fn send_kind_of(text: &str) -> Result<SendKind, String> {
+    match text {
+        "FIRST" => Ok(SendKind::First),
+        "REPEAT" => Ok(SendKind::Repeat),
+        other => Err(format!(
+            "send_kind must be 'FIRST' or 'REPEAT', not {other:?}"
+        )),
     }
 }
 
@@ -313,6 +333,7 @@ pub async fn enqueue_operation(
             command.idempotency_key.as_deref(),
             retention,
             command.rerun_input.keep(),
+            command.send_kind,
         )
         .await;
     match enqueued {
@@ -347,6 +368,14 @@ mod tests {
             enqueue_retention(RetentionRequest::Forever),
             Ok(EnqueueRetention::Forever)
         );
+    }
+
+    #[test]
+    fn the_two_send_kinds_are_read_and_any_other_text_is_refused() {
+        assert_eq!(send_kind_of("FIRST"), Ok(SendKind::First));
+        assert_eq!(send_kind_of("REPEAT"), Ok(SendKind::Repeat));
+        let refused = send_kind_of("repeat").expect_err("send kind texts are upper case");
+        assert!(refused.contains("\"repeat\""), "{refused}");
     }
 
     #[test]
