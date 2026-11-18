@@ -675,3 +675,6 @@ async fn end_after_return(
         }
     }
 }
+
+#[cfg(test)]
+mod answer_tests;

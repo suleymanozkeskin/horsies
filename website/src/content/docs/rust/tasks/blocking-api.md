@@ -90,7 +90,7 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 | A health read | `BrokerOperationError::AsyncContext`, not retryable |
 | `check_live` | `CheckReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
 | A workflow start or `retry_start` | `WorkflowStartError::AsyncContext` with the `workflow_id` of the start, not retryable, and nothing written |
-| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `HandleErrorCode::AsyncContext`, not retryable |
+| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::AsyncContext`, not retryable |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::AsyncContext { message }` |
 
 `retry_send(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Retry a Failed Send](/horsies/rust/tasks/sending-tasks/#retry-a-failed-send).
@@ -117,7 +117,7 @@ When the process runtime of the core cannot run the call, the call returns the d
 | A health read | `BrokerOperationError::OperationFailed` with the code of the read |
 | `check_live` | `CheckReport` with the connectivity refusal |
 | A workflow start | `WorkflowStartError::EnqueueFailed` with the `workflow_id` of the start |
-| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `DbOperationFailed` |
+| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::DbOperationFailed` |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DbOperationFailed` |
 
 The process runtime cannot run in a process that was forked after it started (not retryable), and when the operating system refused its threads (retryable: the next call tries again).

@@ -16,7 +16,7 @@
 //! function's contract raises `PanicException`, as Python raises
 //! `OutcomeDecodeError`.
 
-use horsies_core::{HandleErrorCode, HandleOperationError, HandleResult};
+use horsies_core::{HandleOperationError, HandleResult};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -88,32 +88,28 @@ impl<'py> IntoPyObject<'py> for WorkflowResumeOutcome {
 
 /// The record of a resume's handle error. Pure.
 ///
-/// Panics: a code that the core gives only in Python (`LOOP_RUNNER_FAILED`,
-/// `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`): a defect of the core.
+/// Panics: `ASYNC_CONTEXT`, which only a sync or blocking form gives: a
+/// defect of the core.
 fn failed_record(workflow_id: Uuid, error: &HandleOperationError) -> WorkflowResumeOutcome {
-    match error.code {
-        HandleErrorCode::WorkflowNotFound => {
+    match error {
+        HandleOperationError::WorkflowNotFound { .. } => {
             WorkflowResumeOutcome::Absent(WorkflowAbsent { workflow_id })
         }
-        HandleErrorCode::DbOperationFailed | HandleErrorCode::StoredDataInvalid => {
-            WorkflowResumeOutcome::Failed(HandleFailed::of_handle_error(
-                SUBJECT,
-                workflow_id,
-                error,
-            ))
-        }
-        HandleErrorCode::ResumeRecoveryFailed => {
+        HandleOperationError::DbOperationFailed { .. }
+        | HandleOperationError::StoredDataInvalid { .. } => WorkflowResumeOutcome::Failed(
+            HandleFailed::of_handle_error(SUBJECT, workflow_id, error),
+        ),
+        HandleOperationError::ResumeRecoveryFailed { message, .. } => {
             WorkflowResumeOutcome::RecoveryFailed(WorkflowResumeRecoveryFailed {
                 workflow_id,
-                message: error.message.clone(),
+                message: message.clone(),
                 exception: FailureException::of_handle_error(SUBJECT, error),
             })
         }
-        HandleErrorCode::LoopRunnerFailed
-        | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::AsyncContext => panic!(
+        HandleOperationError::AsyncContext { .. } => panic!(
             "a resume of workflow {workflow_id} answered {} (a defect): {}",
-            error.code, error.message
+            error.code(),
+            error.message()
         ),
     }
 }
@@ -169,14 +165,40 @@ pub async fn resume_workflow_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horsies_core::HandleErrorCode;
 
     fn handle_error(code: HandleErrorCode, retryable: bool) -> HandleOperationError {
-        HandleOperationError {
-            code,
-            message: "planned".to_owned(),
-            retryable,
-            workflow_id: Uuid::nil(),
-            cause: horsies_core::FailureCause::Connection,
+        let message = "planned".to_owned();
+        let workflow_id = Uuid::nil();
+        let cause = horsies_core::FailureCause::Connection;
+        match code {
+            HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
+                message,
+                workflow_id,
+            },
+            HandleErrorCode::DbOperationFailed => HandleOperationError::DbOperationFailed {
+                message,
+                retryable,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
+                message,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::ResumeRecoveryFailed => HandleOperationError::ResumeRecoveryFailed {
+                message,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
+                message,
+                workflow_id,
+            },
+            HandleErrorCode::LoopRunnerFailed | HandleErrorCode::EventLoopLimit => {
+                unreachable!("{code} is a code of the Python client only")
+            }
         }
     }
 
@@ -270,7 +292,7 @@ mod tests {
     fn a_python_only_code_panics() {
         let _outcome = resume_outcome(
             Uuid::nil(),
-            Err(handle_error(HandleErrorCode::EventLoopLimit, false)),
+            Err(handle_error(HandleErrorCode::AsyncContext, false)),
             None,
             None,
         );

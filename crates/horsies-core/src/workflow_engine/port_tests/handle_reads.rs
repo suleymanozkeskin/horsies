@@ -140,9 +140,9 @@ async fn status_of_an_unknown_id_is_workflow_not_found() {
         .await
         .expect_err("an unknown id has no status");
 
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
-    assert!(!error.retryable);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert!(!error.retryable());
+    assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// A PAUSED workflow of one failed node, set back an hour so that a paused
@@ -677,9 +677,9 @@ async fn a_lost_database_makes_status_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("status() with no database");
 
-    assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
-    assert!(error.retryable);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert!(error.retryable());
+    assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// `TestWorkflowHandleInfraErrors.test_get_db_error_returns_taskresult_broker_error`:
@@ -707,8 +707,8 @@ async fn a_lost_database_makes_cancel_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("cancel() with no database");
 
-    assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
-    assert!(error.retryable);
+    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert!(error.retryable());
 }
 
 /// `TestWorkflowHandleInfraErrors.test_results_db_error_returns_err_db_operation_failed`
@@ -721,8 +721,8 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
         .await
         .expect_err("results() with no database");
 
-    assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// `TestListenerFallbackContract.test_handle_get_async_polls_on_listener_err`:
