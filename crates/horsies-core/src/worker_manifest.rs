@@ -243,7 +243,9 @@ impl ManifestValue for DrainTimeoutMs {
 }
 
 /// The manifest of a worker process.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerManifest {
     /// Always `WORKER_MANIFEST_VERSION`, the one version this core reads.
@@ -269,7 +271,9 @@ pub struct WorkerManifest {
 /// The connection settings of a worker. The pool of the worker process
 /// holds the resolved pool of its profile with no overflow; the size and the
 /// overflow of the app's pool do not apply to a worker.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDatabaseManifest {
     /// The URL of the worker process and of each child.
@@ -299,7 +303,7 @@ pub struct WorkerDatabaseManifest {
 
 /// A limit on a number of tasks.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TaskLimit {
@@ -311,7 +315,7 @@ pub enum TaskLimit {
 
 /// A limit on the resident memory (RSS) of a child.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum MemoryLimit {
@@ -323,7 +327,7 @@ pub enum MemoryLimit {
 
 /// The most connections of a pool whose size can follow the seats.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PoolMaxSize {
@@ -335,7 +339,7 @@ pub enum PoolMaxSize {
 
 /// The threads of the default executor of a shared async child.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum DefaultExecutor {
@@ -347,7 +351,7 @@ pub enum DefaultExecutor {
 
 /// When the worker replaces an isolated child with a new one.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct IsolatedRecycleManifest {
@@ -359,7 +363,7 @@ pub struct IsolatedRecycleManifest {
 
 /// When the worker replaces a shared child with a new one.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct SharedRecycleManifest {
@@ -371,7 +375,7 @@ pub struct SharedRecycleManifest {
 
 /// The connection pool that each isolated child opens.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct IsolatedPoolManifest {
@@ -385,7 +389,7 @@ pub struct IsolatedPoolManifest {
 
 /// The connection pool that each shared child opens. Its seats share it.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct SharedPoolManifest {
@@ -398,7 +402,7 @@ pub struct SharedPoolManifest {
 
 /// The isolated children of a profile.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum Isolated {
@@ -417,7 +421,7 @@ pub enum Isolated {
 
 /// The shared async children of a profile.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SharedAsync {
@@ -437,7 +441,7 @@ pub enum SharedAsync {
 
 /// The shared thread children of a profile.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SharedThread {
@@ -456,7 +460,7 @@ pub enum SharedThread {
 
 /// The connection pool of the worker process, with no overflow.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct ParentPoolManifest {
@@ -465,7 +469,7 @@ pub struct ParentPoolManifest {
 
 /// Limits on the tasks that the worker claims.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct ClaimLimitsManifest {
@@ -477,7 +481,7 @@ pub struct ClaimLimitsManifest {
 
 /// What a preload parent imports before it forks children (Linux only).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Preload {
@@ -491,7 +495,7 @@ pub enum Preload {
 
 /// The settings of one worker (Python `WorkerProfile`), every value given.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct WorkerProfileManifest {
@@ -509,7 +513,7 @@ pub struct WorkerProfileManifest {
 
 /// The most RUNNING tasks of one custom queue.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum QueueConcurrency {
@@ -520,7 +524,9 @@ pub enum QueueConcurrency {
 }
 
 /// One custom queue of the app (Python `CustomQueueConfig`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct CustomQueueManifest {
     pub name: String,
@@ -530,7 +536,9 @@ pub struct CustomQueueManifest {
 
 /// The queues of the app (Python `AppConfig.queue_mode`). A worker serves
 /// every queue of the app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum Queues {
     /// The custom queues, in the order of the config.
@@ -541,7 +549,7 @@ pub enum Queues {
 
 /// The lease of a claim (Python `AppConfig.claim_lease_ms`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum ClaimLease {
@@ -553,7 +561,7 @@ pub enum ClaimLease {
 
 /// The most RUNNING tasks of the cluster (Python `AppConfig.cluster_wide_cap`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum ClusterWideCap {
@@ -564,7 +572,9 @@ pub enum ClusterWideCap {
 }
 
 /// The queue and claim settings of the app, which every worker of it shares.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerClaimManifest {
     pub queues: Queues,
@@ -581,7 +591,9 @@ pub struct WorkerClaimManifest {
 /// The program that starts each child and its first arguments, the
 /// interpreter flags included. The core appends the descriptor number of
 /// the child's socket and the worker pid.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ChildCommandManifest {
     pub program: String,
@@ -590,7 +602,9 @@ pub struct ChildCommandManifest {
 
 /// How the preload process of a worker starts (Linux). A profile whose
 /// `preload` is `LIBRARY` or `APP` runs it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PreloadLaunch {
     /// The program and its first arguments. The core appends the descriptor
@@ -603,7 +617,9 @@ pub enum PreloadLaunch {
 }
 
 /// What a child runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum ChildProgram {
     /// A Python child: it imports the app before it reports ready.
@@ -624,7 +640,7 @@ pub enum ChildProgram {
 
 /// The log level of the worker and its children (`horsies worker --loglevel`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkerLogLevel {
@@ -637,7 +653,9 @@ pub enum WorkerLogLevel {
 
 /// How each child of the worker starts. The children connect with the
 /// `database_url` of the database section.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ChildLaunchManifest {
     pub command: ChildCommandManifest,

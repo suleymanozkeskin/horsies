@@ -18,7 +18,7 @@ use crate::failure_cause::FailureCause;
 /// `NO_TYPE_AVAILABLE`; only the Python client produces `EVENT_LOOP_LIMIT`,
 /// `ASYNC_CONTEXT` and `LOOP_RUNNER_FAILED`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "broker", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

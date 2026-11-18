@@ -1012,7 +1012,7 @@ dependencies = [
  "futures",
  "futures-core",
  "gethostname",
- "horsies-macros",
+ "horsies-core-derive",
  "http",
  "http-body-util",
  "include_dir",
@@ -1046,6 +1046,15 @@ dependencies = [
  "tracing",
  "uuid",
  "whoami 2.1.3",
+]
+
+[[package]]
+name = "horsies-core-derive"
+version = "0.1.0-alpha.36"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

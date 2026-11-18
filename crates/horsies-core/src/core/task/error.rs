@@ -20,7 +20,7 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 /// Members, wire values and order are Python's (`python/horsies/core/models/tasks.py`), plus
 /// `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -76,7 +76,7 @@ impl OperationalErrorCode {
 ///
 /// Typical caller behavior: fix code or type assumptions, do not blindly retry.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -101,7 +101,7 @@ impl ContractCode {
 ///
 /// Typical caller behavior: wait, poll again, handle missing value as normal flow.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -146,7 +146,7 @@ impl RetrievalCode {
 ///
 /// Typical caller behavior: branch on outcome, continue control flow.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
