@@ -17,7 +17,7 @@ const CONCURRENCY_SQL: &str = include_str!("cases/history_functions_concurrency.
 
 /// The checks of `history_functions_cases.sql`. A check added to the file
 /// changes it.
-const PASSED_CASES: usize = 99;
+const PASSED_CASES: usize = 100;
 
 /// The checks of `history_functions_concurrency.sql`. A check added to the
 /// file changes it.

@@ -343,9 +343,10 @@ impl CoreHandle {
         )
     }
 
-    /// Apply the embedded migrations and check the schema version, once per
-    /// handle: `SchemaInstalled`, `SchemaInstallNotRun` (an `OBSERVE_ONLY` or
-    /// `ASSUME_INITIALIZED` handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
+    /// Apply the embedded migrations, check the schema version, then run the
+    /// startup coverage pass, once per handle: `SchemaInstalled`,
+    /// `SchemaInstallNotRun` (an `OBSERVE_ONLY` or `ASSUME_INITIALIZED`
+    /// handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
     fn install_schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(

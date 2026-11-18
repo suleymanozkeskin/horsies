@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 from typing import Final, LiteralString
 
 import psycopg
@@ -17,14 +18,18 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.history.reads.publisher import (
     PUBLISHED_READER_SIGNATURES,
     StagedLoaderPublisher,
 )
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, is_ok
+from horsies.core.types.status import TaskStatus
+from horsies.monitoring import cancel_task
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.utils.url import sqlalchemy_url
 from tests.integration.conftest import DB_URL
@@ -178,12 +183,91 @@ async def test_install_returns_with_the_history_readers_published(database_url: 
             "'0190a0b0-0000-7000-8000-000000000000'::uuid)"
         )
         assert await cursor.fetchone() == (0,)
-        assert await _fetch_one(
-            connection, 'SELECT leaf_name FROM horsies_task_lookup_manifest'
-        ) == ('horsies_task_history_forever_open',)
+        # The manifest holds every history leaf: the static forever leaf, and
+        # the daily leaves that the install's coverage pass created.
+        manifest = await connection.execute(
+            'SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY leaf_name'
+        )
+        history_leaves = await connection.execute(
+            'SELECT leaf_name FROM horsies_task_history_leaf_catalog '
+            "WHERE class_key <> 'heartbeats' ORDER BY leaf_name"
+        )
+        manifest_leaves = await manifest.fetchall()
+        assert ('horsies_task_history_forever_open',) in manifest_leaves
+        assert manifest_leaves == await history_leaves.fetchall()
     finally:
         await connection.close()
     assert await _publication_is_current(database_url)
+
+
+_DEFAULT_CLASS_COVERS_NOW_SQL: Final[LiteralString] = """
+    SELECT count(*) FROM horsies_task_history_leaf_catalog
+    WHERE class_key = 'standard_30d'
+      AND lower_anchor <= now() AND now() < upper_anchor
+      AND detached_at IS NULL
+"""
+
+_HISTORY_ROWS_SQL: Final[LiteralString] = """
+    SELECT task_id, status::text, retention_class_key::text
+    FROM horsies_task_history
+    WHERE task_id = ANY(%(task_ids)s)
+    ORDER BY status
+"""
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_fresh_install_covers_a_cancel_and_an_expiry_with_no_worker(
+    database_url: str,
+) -> None:
+    """The install ends with the startup coverage pass that the worker start
+    runs: with no worker ever started, an administrative cancel (the single
+    move to history) and a pending expiry (the batch move) find the leaf of
+    the default class for the current UTC day. Without the pass, the cancel
+    failed with 23514: no partition for the row."""
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database_url)))
+    try:
+        assert await broker.ensure_schema_initialized() == Ok(None)
+        connection = await _connect(database_url)
+        try:
+            assert await _fetch_one(
+                connection, 'SELECT count(*) FROM horsies_worker_states'
+            ) == (0,)
+            assert await _fetch_one(connection, _DEFAULT_CLASS_COVERS_NOW_SQL) == (1,)
+
+            cancelled = mint_task_id()
+            expired = mint_task_id()
+            for task_id in (cancelled, expired):
+                sent = await broker.enqueue_async(
+                    'install.coverage',
+                    task_id=task_id,
+                    send_kind=SendKind.FIRST,
+                    input_json='{}',
+                    sent_at=datetime.now(timezone.utc),
+                )
+                assert is_ok(sent), sent
+
+            cancel = await cancel_task(broker, cancelled)
+            assert is_ok(cancel), cancel
+            assert cancel.ok_value.was_status is TaskStatus.PENDING
+
+            _ = await connection.execute(
+                "UPDATE horsies_tasks SET good_until = now() - interval '1 second' "
+                'WHERE id = %(task_id)s',
+                {'task_id': expired},
+            )
+            assert await broker.expire_pending_tasks() == Ok(1)
+
+            history = await connection.execute(
+                _HISTORY_ROWS_SQL, {'task_ids': [cancelled, expired]}
+            )
+            assert await history.fetchall() == [
+                (cancelled, 'CANCELLED', 'standard_30d'),
+                (expired, 'EXPIRED', 'standard_30d'),
+            ]
+        finally:
+            await connection.close()
+    finally:
+        _ = await broker.close_async()
 
 
 @pytest.mark.asyncio(loop_scope='function')

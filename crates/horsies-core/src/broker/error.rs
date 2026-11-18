@@ -8,6 +8,7 @@ use crate::broker::core_rows::RowDecodeError;
 use crate::broker::pools::PoolSettingsError;
 use crate::core::codec::JsonReadError;
 use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
+use crate::core::history::errors::HistoryError;
 use crate::db::{StatementFailure, Transience};
 
 /// Why the core refused a send before any statement (Python's
@@ -185,6 +186,15 @@ pub enum BrokerError {
     #[error("schema install lock: {0}")]
     InstallLock(InstallLockFailure),
 
+    /// The coverage pass of the schema install had no outcome: a probe, the
+    /// coverage gate, the class registration or the reader publication
+    /// failed, or a row broke its function's contract
+    /// ([`PostgresBroker::ensure_schema_initialized`](crate::broker::PostgresBroker::ensure_schema_initialized)).
+    /// The migrations committed, and the leaf transactions that committed
+    /// before the failure stay. Retryable by the history error's own rule.
+    #[error("the coverage pass of the schema install failed: {0}")]
+    InstallCoverage(HistoryError),
+
     /// The broker's listener stopped while a wait used it.
     #[error("the broker's listener stopped")]
     ListenerClosed,
@@ -250,14 +260,16 @@ impl BrokerError {
     /// Retryable: `Database` when the driver error is retryable (see
     /// [`is_retryable_sqlx_error`]), `Statement` when its cause is transient
     /// (see [`is_retryable_statement_failure`]), `ConnectionFailed`,
-    /// `ListenerClosed`. Every other variant is a refusal or a broken
-    /// contract, which the same call meets again.
+    /// `ListenerClosed`, `InstallLock` and `InstallCoverage` by their own
+    /// rules. Every other variant is a refusal or a broken contract, which
+    /// the same call meets again.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Database(e) => is_retryable_sqlx_error(e),
             Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::InstallLock(failure) => failure.is_retryable(),
+            Self::InstallCoverage(error) => error.is_retryable(),
             Self::SchemaRefused(_)
             | Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover

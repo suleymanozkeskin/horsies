@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::broker::terminalization::terminalize_in_tx;
 use crate::broker::BrokerError;
 use crate::core::history::ddl::classes::register_period_class;
+use crate::core::history::errors::HISTORY_LEAF_MISSING_SQLSTATE;
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
 };
@@ -210,7 +211,8 @@ async fn a_heartbeat_beyond_the_recency_bound_cannot_flip_the_verdict() {
 /// `test_missing_history_leaf_rolls_back_fused_attempt_and_live_delete`
 /// (prototype) and `test_missing_history_leaf_rolls_back_location_transition`
 /// (identity prototype): a row whose class has no leaf for its terminal time
-/// cannot move; the live row stays and its key reservation stays LIVE.
+/// cannot move (55H01, the class partition exists and the leaf does not);
+/// the live row stays and its key reservation stays LIVE.
 #[tokio::test]
 #[serial]
 async fn a_move_with_no_history_leaf_keeps_the_task_and_its_reservation_live() {
@@ -249,7 +251,7 @@ async fn a_move_with_no_history_leaf_keeps_the_task_and_its_reservation_live() {
     let claimed_at = claim_generation(&mut transaction, task_id).await;
     assert_eq!(
         refused_sqlstate(&mut transaction, &complete(task_id, claimed_at)).await,
-        "23514"
+        HISTORY_LEAF_MISSING_SQLSTATE
     );
     assert!(is_live(&mut transaction, task_id).await);
     let disposition: String = sqlx::query_scalar(

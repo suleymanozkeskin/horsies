@@ -1965,7 +1965,10 @@ class PostgresBroker:
         The core installs the baseline into an empty database, or completes
         or checks an installed one, under the fleet schema lock: the
         migration with this client's family row, then the published history
-        readers. A handle with migrations off or ``assume_initialized`` runs
+        readers. The install ends with the startup coverage pass that the
+        worker start runs, so the history leaves of the current UTC day and
+        of the lookahead exist before any terminal write, with or without a
+        worker. A handle with migrations off or ``assume_initialized`` runs
         no schema statement. After a success the broker does not call the
         core again; a broker built with ``assume_initialized=True`` never
         calls it.

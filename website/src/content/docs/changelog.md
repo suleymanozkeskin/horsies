@@ -344,6 +344,26 @@ written in Rust, on a new baseline schema.
 
 ### Fixed
 
+- **The schema install creates the history leaves of the current day, so a
+  terminal write works before any worker starts.** The install
+  (`PostgresBroker.ensure_schema_initialized`, and the first send or read of
+  a client) ends with the startup coverage pass that the worker start runs:
+  the leaves of the current UTC day and of the lookahead
+  (`history_leaf_horizon_days`) for the forever class, the 30-day default
+  class and, in the Rust client, every period of `AppConfig.retention`, and
+  the heartbeat leaves. A cancel, a pending expiry or a workflow cancel of a
+  producer with no worker then moves its tasks to history. 0.7 had the same
+  gap: its install created no leaf; only the worker start and the reaper
+  did.
+
+- **A terminal write that finds no history leaf fails with SQLSTATE
+  `55H01`.** The message names the class and the missing UTC day as a range
+  (`no task-history leaf of class standard_30d covers
+  [2026-11-18T00:00:00Z, 2026-11-19T00:00:00Z)`), the detail names the
+  missing relation, and the error is retryable: the next coverage pass
+  creates the leaf. It was `23514` (`no partition of relation
+  "horsies_task_history" found for row`), not retryable.
+
 - **A stored retry policy that does not validate fails the task at claim.**
   The task fails with `WORKER_SERIALIZATION_ERROR`, its body does not run,
   and it does not retry. 0.7 ran the task and retried it with default

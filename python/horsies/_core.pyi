@@ -147,7 +147,10 @@ class CoreHandle:
         limit. No profile, or PgBouncer transaction mode, connects nothing. Reads only.
         """
     def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerFailure:
-        """Apply the embedded migrations and check the schema version, once per handle. Writes."""
+        """Apply the embedded migrations, check the schema version, then run the startup coverage
+        pass that creates the history leaves of the current UTC day and the lookahead, once per
+        handle. Writes.
+        """
     def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerFailure]:
         """The awaitable form of the method above."""
     def schema_status(self) -> SchemaStatusRecord:

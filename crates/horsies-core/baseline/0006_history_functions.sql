@@ -1,8 +1,9 @@
 -- horsies baseline schema, part 6: the history and retention functions of the core design.
 --
 -- Each function is the one statement of a history operation in the core design: the move to history of one locked
--- row and of a batch of locked rows, the absence reason of a task id, the rerun read, and the transactional parts
--- of pruning. The terminal writes of 0003_interim_functions.sql and 0004_lifecycle_functions.sql call the two moves;
+-- row and of a batch of locked rows (with the leaf check that both run before their insert), the absence reason of a
+-- task id, the rerun read, and the transactional parts of pruning. The terminal writes of 0003_interim_functions.sql
+-- and 0004_lifecycle_functions.sql call the two moves;
 -- horsies_monitoring_task_detail (0007_scheduler_monitoring_functions.sql) calls horsies_task_absence_reason. No
 -- client calls the other functions yet. Each function names the Python code it replaces (paths at the 0.7.0 tag,
 -- under horsies/core/).
@@ -11,6 +12,61 @@
 --
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
 -- checksum over the result.
+
+------------------------------------------------------------------------------------------------------------------------
+-- Move to history: the leaf check
+------------------------------------------------------------------------------------------------------------------------
+
+-- horsies_require_history_leaf(p_class_key text, p_terminal_at timestamptz): refuse a move whose row no history
+-- leaf can take, before the row is written, with SQLSTATE 55H01 (history leaf missing).
+--
+-- The leaf that takes a row: under the class partition horsies_task_history_<class key>, the static leaf
+-- horsies_task_history_forever_open for the forever class (0001_tables.sql), else the daily leaf
+-- horsies_history_leaf_name(<class key>, <UTC day of p_terminal_at>) (0008_history_maintenance_functions.sql).
+-- The check reads the two relation names only (to_regclass, the system catalog cache): no table, no lock.
+-- Refusal: 55H01 when the class partition or the leaf does not exist. The message names the class and the missing
+-- range, the UTC day of p_terminal_at as [lower, upper) in ISO 8601 UTC; DETAIL names the missing relation; HINT
+-- names what creates it. The class is in SQLSTATE class 55 (object not in prerequisite state), so both clients
+-- classify the refusal as retryable: the next coverage pass creates the leaf, and the same move then succeeds.
+-- A leaf that exists but is detached or being detached still fails the insert with 23514: retention detaches only
+-- leaves older than the class retention, so a p_terminal_at from the database clock never meets one.
+-- Callers: horsies_move_task_to_history and horsies_move_tasks_to_history, after their other refusals and right
+-- before their insert, where partition routing refused the row with 23514 before this check.
+-- Returns: nothing.
+CREATE FUNCTION horsies_require_history_leaf(p_class_key text, p_terminal_at timestamp with time zone) RETURNS void
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_day timestamp with time zone;
+    v_partition text;
+    v_leaf text;
+    v_missing text;
+BEGIN
+    v_day := date_trunc('day', p_terminal_at, 'UTC');
+    v_partition := 'horsies_task_history_' || p_class_key;
+    IF p_class_key = 'forever' THEN
+        v_leaf := 'horsies_task_history_forever_open';
+    ELSE
+        v_leaf := horsies_history_leaf_name(p_class_key, v_day);
+    END IF;
+    IF to_regclass(v_partition) IS NULL THEN
+        v_missing := format('the class partition %s does not exist: the class is not registered', v_partition);
+    ELSIF to_regclass(v_leaf) IS NULL THEN
+        v_missing := format('the leaf %s does not exist', v_leaf);
+    ELSE
+        RETURN;
+    END IF;
+    RAISE EXCEPTION 'no task-history leaf of class % covers [%, %)',
+        p_class_key,
+        to_char(v_day AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+        to_char((v_day + interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        USING ERRCODE = '55H01',
+              DETAIL = v_missing,
+              HINT = 'The schema install, the worker start and the reaper create the leaves of the current UTC day '
+                     'and of the lookahead for the classes of their retention config; run one of them for this '
+                     'class, then repeat the write.';
+END
+$$;
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Move to history: one locked row
@@ -37,15 +93,17 @@
 -- - XX001 data_corrupted: the duplicate identity guard finds the id in history or in the clock exceptions.
 -- - 23502 not_null_violation: a deferred kind on a workflow task with no result.
 -- - P0002 no_data_found: a deferred kind on a workflow task with no node row.
--- - 23514 check_violation: no history leaf takes the row (partition routing), also when retention detached the
---   leaf of p_terminal_at, is detaching it, or dropped it.
+-- - 55H01 (history leaf missing): the class partition or the leaf of p_terminal_at does not exist, also when
+--   retention dropped the leaf (horsies_require_history_leaf).
+-- - 23514 check_violation: the leaf of p_terminal_at exists but takes no row (partition routing): retention detached
+--   it or is detaching it.
 -- Retention: before its first read of history the move takes pg_advisory_xact_lock_shared on
 -- horsies_task_history_leaf_lock_key(retention_class_key, p_terminal_at), the key of the leaf that takes the row.
 -- Moves share it; leaf creation, the detach and the drop take it exclusively with a try-lock. So maintenance answers
 -- BUSY for a leaf while a move into it has not ended, and a move waits while maintenance holds its leaf; when it
--- continues into a leaf that is detached, detaching or dropped it raises 23514. Without the lock, a detach that
--- began while a move was writing would wait for the move's commit and then detach the leaf with the new row and the
--- phase-2 pending row that points at it.
+-- continues into a leaf that is detached or detaching it raises 23514, and 55H01 for a dropped one. Without the
+-- lock, a detach that began while a move was writing would wait for the move's commit and then detach the leaf with
+-- the new row and the phase-2 pending row that points at it.
 -- Lock order: task advisory lock and live row FOR UPDATE (both taken by the caller); the leaf lock (shared); the
 -- node row FOR UPDATE; the history leaf (ROW EXCLUSIVE, by the insert); the clock exception row; the phase-2
 -- pending row; the reservation row (UPDATE); the attempt rows and the live row (DELETE). Maintenance takes the
@@ -222,6 +280,8 @@ BEGIN
         v_result_digest := sha256(v_result_payload);
     END IF;
 
+    -- The leaf that takes the row exists: else 55H01, which names the class and the missing range.
+    PERFORM horsies_require_history_leaf(p_task.retention_class_key, p_terminal_at);
     INSERT INTO horsies_task_history (
         task_id, task_name, queue_name, priority, command_fingerprint_version, command_fingerprint,
         status, terminalization_kind, terminal_at, retention_class_key,
@@ -310,7 +370,9 @@ $$;
 -- - 23502 not_null_violation: EXPIRE_PENDING of a workflow task with no result.
 -- - 23503 foreign_key_violation: EXPIRE_PENDING of a workflow task with no node row.
 -- - XX001 data_corrupted: the duplicate identity guard finds a listed id.
--- - 23514 check_violation: no history leaf takes a row.
+-- - 55H01 (history leaf missing): the class partition or the leaf at p_terminal_at of a class of the batch does not
+--   exist (horsies_require_history_leaf).
+-- - 23514 check_violation: the leaf exists but takes no row (detached or detaching).
 -- Lock order: the caller's row locks; the shared leaf lock of each class of the batch at p_terminal_at, in key
 -- order (as the single move, Retention); then as the single move (history leaves, clock exception rows, pending
 -- rows, reservation rows, attempt and live row deletes). Node rows are read, not locked, as in Python.
@@ -424,6 +486,15 @@ BEGIN
         v_result_payload := convert_to(p_result, 'UTF8');
         v_result_digest := sha256(v_result_payload);
     END IF;
+
+    -- The leaf of each class in the batch exists: else 55H01, which names a class that has none and its range.
+    PERFORM horsies_require_history_leaf(c.class_key, p_terminal_at)
+    FROM (
+        SELECT DISTINCT t.retention_class_key::text AS class_key
+        FROM horsies_tasks AS t
+        WHERE t.id = ANY(p_task_ids)
+    ) AS c
+    ORDER BY c.class_key;
 
     WITH attempt_data AS MATERIALIZED (
         SELECT u.id, horsies_encode_task_attempts(u.id) AS snapshot

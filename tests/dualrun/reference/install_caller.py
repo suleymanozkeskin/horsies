@@ -12,6 +12,14 @@ reader publication (``publish_history_readers``) and the family record
 stay on ``PostgresBroker``; the functions below are the two callers' bodies.
 Each takes the broker as its first parameter, so the dual-run rebinding can
 put it in the place of the method.
+
+The install now ends with the startup coverage pass that the worker start
+runs, so a producer leaves the leaves of the current UTC day and of the
+lookahead with or without a worker. The reference runs the Python pass of
+the worker start before the switch (``ensure_startup_coverage_in_database``
+on the resource set's partition maintenance database) after the Python
+install, with the default retention config: the request of a broker that
+no app configures.
 """
 
 from __future__ import annotations
@@ -21,11 +29,16 @@ from horsies.core.brokers.postgres import (
     _loop_limit_err,
     _operation_failed,
 )
+from horsies.core.brokers.resources import BrokerResources
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
     BrokerEventLoopLimit,
     BrokerOperationFailed,
 )
+from horsies.core.history.maintenance.coverage import (
+    ensure_startup_coverage_in_database,
+)
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, Result
 
 
@@ -46,7 +59,28 @@ async def ensure_initialized(self: PostgresBroker) -> None:
         case Ok(resources):
             pass
     await self._run_with_schema_engine(resources, self._maybe_run_schema_init)
+    match self.run_schema_migrations:
+        case True:
+            await cover_after_install(resources)
+        case False:
+            pass
     self._initialized = True
+
+
+async def cover_after_install(resources: BrokerResources) -> None:
+    """The startup coverage pass at the end of the install: the worker
+    start's pass with the default retention config.
+
+    The outcome is discarded, as the core install logs a contained refusal
+    and ends. Raises what the pass raises for a pass with no outcome.
+    """
+    retention = RetentionConfig()
+    _ = await ensure_startup_coverage_in_database(
+        resources.partition_maintenance,
+        history_horizon_days=retention.history_leaf_horizon_days,
+        heartbeat_horizon_hours=retention.heartbeat_leaf_horizon_hours,
+        declared_classes=retention.registrable_classes(),
+    )
 
 
 async def ensure_schema_initialized(

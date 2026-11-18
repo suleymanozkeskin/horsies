@@ -51,6 +51,7 @@ use crate::broker::client_family::{
     admit_family, recorded_family_from, ClientFamily, FamilyCheckError, FamilyCheckFailure,
     RecordedFamily,
 };
+use crate::broker::partition_maintenance::default_install_coverage;
 use crate::broker::process_listener::{
     default_payload_capacity, fixed_channel, ListenError, ProcessListener, SessionCheckFailure,
     TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
@@ -59,6 +60,7 @@ use crate::broker::task_lists::{
     bounded_list_from_rows, BoundedTaskList, ListShapeError, StaleMinutes, TASK_LIST_BOUND,
 };
 use crate::broker::wait_limit::WaitLimit;
+use crate::core::history::maintenance::coverage::CoverageRequest;
 use crate::db::{
     PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
 };
@@ -967,6 +969,11 @@ pub struct PostgresBroker {
     listener: ProcessListener,
     schema_initialized: tokio::sync::OnceCell<()>,
     schema_initialization_mode: SchemaInitializationMode,
+    /// The coverage pass that the schema install runs after the migrations
+    /// ([`PostgresBroker::ensure_schema_initialized`]): the request of the
+    /// default retention config, or the one that the client set with
+    /// [`PostgresBroker::with_install_coverage`].
+    install_coverage: CoverageRequest,
     /// The client family of this handle. The constructors of this type serve
     /// the Rust client; the Python bridge sets `Python` with
     /// [`PostgresBroker::with_client_family`].
@@ -1039,6 +1046,7 @@ impl PostgresBroker {
             listener,
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
+            install_coverage: default_install_coverage(),
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
             result_reader: ResultReaderSeen::default(),
@@ -1171,6 +1179,7 @@ impl PostgresBroker {
             ),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
+            install_coverage: default_install_coverage(),
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
             result_reader: ResultReaderSeen::default(),
@@ -1253,6 +1262,15 @@ impl PostgresBroker {
         self.client_family
     }
 
+    /// The same handle, whose schema install runs the coverage pass of
+    /// `request`: the request of the client's retention config
+    /// ([`CoverageRequest::of_retention`]), so the install covers every class
+    /// that the client's sends can stamp.
+    pub fn with_install_coverage(mut self, request: CoverageRequest) -> Self {
+        self.install_coverage = request;
+        self
+    }
+
     /// The same handle with no listener (Python's
     /// `PostgresBroker(assume_initialized=True)`): a result wait reads again
     /// every 200 ms (`TASK_RESULT_REPOLL_POLLING`), and an operation that
@@ -1324,13 +1342,27 @@ impl PostgresBroker {
         Ok(recorded_family_from(stored))
     }
 
-    /// Install the schema once for this broker ([`PostgresBroker::migrate`]).
+    /// Install the schema once for this broker: the migrations
+    /// ([`PostgresBroker::migrate`]), then the gated coverage pass of the
+    /// install's coverage request ([`PostgresBroker::install_coverage`]), the
+    /// pass that the worker start runs. The history leaves of the current
+    /// UTC day and of the lookahead then exist for every class of the
+    /// request before the first terminal write of any process, with or
+    /// without a worker. A contained refusal of the pass is logged; a
+    /// terminal write whose leaf is still missing fails with SQLSTATE
+    /// `55H01`.
     ///
-    /// The first successful call installs or checks the schema; later calls
-    /// are a no-op. A failure is not kept, so a later call runs the install
-    /// again. The install ends only at this build's whole chain (a newer or
-    /// unknown schema is refused), and it records or checks this handle's
-    /// family, so writes of this handle need no second family read.
+    /// The first successful call installs or checks the schema and runs the
+    /// pass; later calls are a no-op. A failure is not kept, so a later call
+    /// runs the install again. The install ends only at this build's whole
+    /// chain (a newer or unknown schema is refused), and it records or checks
+    /// this handle's family, so writes of this handle need no second family
+    /// read. A handle built with [`SchemaInitializationMode::ObserveOnly`]
+    /// runs nothing.
+    ///
+    /// Errors: as [`PostgresBroker::migrate`], and
+    /// [`BrokerError::InstallCoverage`] when the pass had no outcome (the
+    /// migrations stay committed).
     pub async fn ensure_schema_initialized(&self) -> Result<(), BrokerError> {
         match self.schema_initialization_mode {
             SchemaInitializationMode::ObserveOnly => return Ok(()),
@@ -1340,10 +1372,15 @@ impl PostgresBroker {
             .get_or_try_init(|| async {
                 self.migrate().await?;
                 let _already_admitted = self.client_family_admitted.set(());
-                Ok::<(), BrokerError>(())
+                self.cover_after_install().await
             })
             .await?;
         Ok(())
+    }
+
+    /// The coverage request of the schema install of this handle.
+    pub fn install_coverage(&self) -> &CoverageRequest {
+        &self.install_coverage
     }
 
     /// The schema behavior selected when this broker was constructed.
