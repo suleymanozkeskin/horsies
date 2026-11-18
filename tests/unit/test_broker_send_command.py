@@ -18,8 +18,13 @@ from pydantic import SecretStr
 from horsies.core.brokers.postgres import PostgresBroker, SendCommand
 from horsies.core.brokers.result_types import BrokerInvalidInput, BrokerInvalidTaskOptions
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.codec.json_io import Json
+from horsies.core.codec.task_options import (
+    options_integer_out_of_range,
+    serialize_task_options,
+)
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskOptions
+from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
 from horsies.core.history.identity.fingerprint import COMMAND_FINGERPRINT_VERSION
 
@@ -153,3 +158,64 @@ def test_options_that_do_not_parse_are_refused_as_task_options() -> None:
             assert refused.message.startswith('task_options JSON corrupt: ')
         case other:
             raise AssertionError(f'expected a task options refusal, got {other!r}')
+
+
+def _exponential_options_text(max_delay_seconds: int) -> str:
+    """The options text of a task whose exponential policy caps its delay."""
+    match serialize_task_options(
+        TaskOptions(
+            task_name='tasks.report',
+            retry_policy=RetryPolicy.exponential(
+                1,
+                max_retries=1,
+                auto_retry_for=['E1'],
+                max_delay_seconds=max_delay_seconds,
+            ),
+        ),
+    ):
+        case Ok(text):
+            return text
+        case Err(failed):
+            raise AssertionError(f'the options do not encode: {failed}')
+
+
+def test_options_with_an_integer_above_u64_max_are_refused_as_the_core_refuses_them() -> None:
+    """``RetryPolicy`` takes a ``max_delay_seconds`` of any size; the send
+    refuses one above ``2**64 - 1``, with the core's text."""
+    match _broker().prepare_send_command(
+        task_name='tasks.report',
+        queue_name='default',
+        priority=100,
+        kwargs_json=None,
+        task_options=_exponential_options_text(2**64),
+    ):
+        case Err(BrokerInvalidTaskOptions() as refused):
+            assert refused.message == (
+                'task_options JSON holds an integer outside '
+                '-9223372036854775808 to 18446744073709551615'
+            )
+            assert isinstance(refused.exception, NoCause)
+        case other:
+            raise AssertionError(f'expected a task options refusal, got {other!r}')
+
+
+def test_options_with_an_integer_of_u64_max_are_sent() -> None:
+    command = _command(_broker(), task_options=_exponential_options_text(2**64 - 1))
+
+    assert command.max_retries == 1
+
+
+def test_the_options_integer_range_is_i64_min_to_u64_max_at_any_depth() -> None:
+    inside: list[Json] = [
+        {'a': [-(2**63), 2**64 - 1, 0]},
+        {'a': 1.8446744073709552e19, 'b': True, 'c': None},
+        {'123456789012345678901234567890': '123456789012345678901234567890'},
+    ]
+    outside: list[Json] = [
+        {'a': 2**64},
+        {'a': [1, {'b': -(2**63) - 1}]},
+        10**400,
+    ]
+
+    assert [options_integer_out_of_range(options) for options in inside] == [False] * 3
+    assert [options_integer_out_of_range(options) for options in outside] == [True] * 3

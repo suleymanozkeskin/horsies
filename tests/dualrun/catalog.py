@@ -27,6 +27,7 @@ from the run start.
 from __future__ import annotations
 
 from datetime import timedelta
+from enum import Enum
 from typing import Final
 
 from tests.dualrun.rules import (
@@ -35,10 +36,12 @@ from tests.dualrun.rules import (
     ColumnSpec,
     DigestOf,
     EachItem,
+    EachMember,
     Exact,
     FormatVersion,
     GeneratedName,
     IdFamily,
+    IdsInText,
     Ignored,
     Index,
     JsonPath,
@@ -46,6 +49,9 @@ from tests.dualrun.rules import (
     JsonTime,
     Key,
     NormalisedId,
+    PathStep,
+    RunMeasure,
+    RunMeasuresInText,
     RunWindowReference,
     SnapshotCatalog,
     StoredJson,
@@ -90,6 +96,54 @@ _PROCESS_SAMPLE: Final = Ignored(
 JSON: Final = StoredJson(storage=JsonStorage.TEXT, format=Unversioned(), paths=())
 """A JSON text with no ids or clock values inside."""
 
+WORKFLOW_IDS_IN_TEXT: Final = IdsInText(family=IdFamily.WORKFLOW)
+"""A message that can name a workflow by its id."""
+
+_RUN_CLOCK_TEXT: Final = JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK)
+
+
+def stored_error_paths(error: tuple[PathStep, ...]) -> tuple[JsonPath, ...]:
+    """The rules of a stored error (a ``TaskError`` as JSON) at the path ``error``.
+
+    The library writes these ids, clock values and texts into an error:
+
+    - ``data.task_id`` and ``data.worker_id``: the task and the worker of a
+      worker failure (``{"task_id": ..., "worker_id": ...}``); the stale
+      recovery's crash data names the worker and holds ``data.started_at``
+      and ``data.detected_at``, as in the result envelope;
+    - ``data.workflow_id``: the workflow of the recovery limit error and of
+      the output-skipped error (``WORKFLOW_OUTPUT_SKIPPED``);
+    - ``sub_workflow_id``: the child of a ``SUBWORKFLOW_FAILED`` error;
+    - ``message`` and ``sub_workflow_summary.error_summary``: texts that name
+      a workflow by its id (``Subworkflow <id> failed``, ``Workflow <id> is
+      COMPLETED and has no output: ...``).
+    """
+    data = (*error, Key(name='data'))
+    return (
+        JsonPath(steps=(*data, Key(name='task_id')), rule=TASK_ID),
+        JsonPath(steps=(*data, Key(name='worker_id')), rule=WORKER_ID),
+        JsonPath(steps=(*data, Key(name='workflow_id')), rule=WORKFLOW_ID),
+        JsonPath(steps=(*data, Key(name='started_at')), rule=_RUN_CLOCK_TEXT),
+        JsonPath(steps=(*data, Key(name='detected_at')), rule=_RUN_CLOCK_TEXT),
+        JsonPath(steps=(*error, Key(name='sub_workflow_id')), rule=WORKFLOW_ID),
+        JsonPath(steps=(*error, Key(name='message')), rule=WORKFLOW_IDS_IN_TEXT),
+        JsonPath(
+            steps=(*error, Key(name='sub_workflow_summary'), Key(name='error_summary')),
+            rule=WORKFLOW_IDS_IN_TEXT,
+        ),
+    )
+
+
+_RESULTS_BY_ID_ERROR: Final = (
+    Key(name='results_by_id'),
+    EachMember(),
+    Key(name='err'),
+)
+"""The error of each stored task result of a ``results_by_id`` map (node id to
+result envelope)."""
+
+_CONTEXT: Final = Key(name='__h_workflow_ctx__')
+
 TASK_INPUT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
@@ -98,33 +152,72 @@ TASK_INPUT: Final = StoredJson(
             steps=(Key(name='__h_workflow_meta__'), Key(name='workflow_id')),
             rule=WORKFLOW_ID,
         ),
+        JsonPath(steps=(_CONTEXT, Key(name='workflow_id')), rule=WORKFLOW_ID),
+        *stored_error_paths((_CONTEXT, *_RESULTS_BY_ID_ERROR)),
+        JsonPath(
+            steps=(
+                _CONTEXT,
+                Key(name='summaries_by_id'),
+                EachMember(),
+                Key(name='error_summary'),
+            ),
+            rule=WORKFLOW_IDS_IN_TEXT,
+        ),
     ),
 )
 """A task's input. The input of an engine-minted workflow task names its
-workflow in ``__h_workflow_meta__``."""
+workflow in ``__h_workflow_meta__``. The input of a task that receives the
+workflow context names its workflow in ``__h_workflow_ctx__.workflow_id``,
+holds the result of each dependency in ``__h_workflow_ctx__.results_by_id``
+(each error by ``stored_error_paths``) and the summary of each sub-workflow
+dependency in ``__h_workflow_ctx__.summaries_by_id`` (``error_summary`` can
+name a workflow)."""
 
 WORKFLOW_ERROR: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
-    paths=(
-        JsonPath(steps=(Key(name='data'), Key(name='workflow_id')), rule=WORKFLOW_ID),
-    ),
+    paths=stored_error_paths(()),
 )
-"""A stored workflow error. The recovery limit error names its workflow in
-``data.workflow_id``."""
+"""A stored workflow error, by ``stored_error_paths``: the recovery limit
+error names its workflow in ``data.workflow_id``; the error of a workflow
+that a failed child paused names the child in ``sub_workflow_id`` and in
+``message`` (``Subworkflow <id> failed``); the error that a failed task left
+holds the data of that task's error."""
 
 NODE_RESULT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
+    paths=stored_error_paths((Key(name='err'),)),
+)
+"""A stored node result, its error by ``stored_error_paths``: the recovery
+limit result names its workflow in ``err.data.workflow_id``; the result of a
+sub-workflow node whose child failed names the child in
+``err.sub_workflow_id``, in ``err.message`` (``Subworkflow <id> failed with
+status <status>``) and in ``err.sub_workflow_summary.error_summary``; the
+result of a task node holds its task's error data."""
+
+WORKFLOW_RESULT: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
     paths=(
-        JsonPath(
-            steps=(Key(name='err'), Key(name='data'), Key(name='workflow_id')),
-            rule=WORKFLOW_ID,
-        ),
+        *stored_error_paths((Key(name='err'),)),
+        *stored_error_paths((Key(name='ok'), *_RESULTS_BY_ID_ERROR)),
     ),
 )
-"""A stored node result. The recovery limit result names its workflow in
-``err.data.workflow_id``."""
+"""A stored workflow result, its error by ``stored_error_paths`` (the
+output-skipped error names the workflow in ``err.data.workflow_id`` and in
+``err.message``). The result of a workflow without an output node holds the
+result of each terminal node in ``ok.results_by_id``
+(``{"__h_outputless_terminals__": true, "ok": {"results_by_id": ...}}``),
+each error by ``stored_error_paths``."""
+
+SUB_WORKFLOW_SUMMARY: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(JsonPath(steps=(Key(name='error_summary'),), rule=WORKFLOW_IDS_IN_TEXT),),
+)
+"""The stored summary of a sub-workflow node's child; ``error_summary`` can
+name a workflow (``Workflow <id> is COMPLETED and has no output: ...``)."""
 
 TASK_OPTIONS: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -192,6 +285,30 @@ RERUN_ENVELOPE: Final = StoredJson(
     ),
 )
 """Rerun envelope version 1: ``{"input": <input>, "options": <task options>}``."""
+
+BLOCKED_TIME: Final = RunMeasure(
+    name='blocked_ms',
+    pattern=r' for (\d+) ms, past the block limit',
+)
+"""The time that a task held the event loop of its shared async child, as the
+worker measured it, in the ``TASK_BLOCKED_LOOP`` and ``NEIGHBOUR_BLOCKED_LOOP``
+reports: ``... held the event loop of its shared async child for <n> ms, past
+the block limit, ...`` (``python/horsies/core/worker/shared_finalize.py``,
+``crates/horsies-core/src/worker/executor/slots/seat_runs.rs``)."""
+
+KILLED_CHILD_PID: Final = RunMeasure(
+    name='killed_child_pid',
+    pattern=r'the worker killed the child \(pid=(\d+), ',
+)
+"""The process id of the worker child that the worker killed, in the
+``the worker killed the child (pid=<n>, <exit>)`` part of a kill report. Each
+run starts its own processes; the whole-run catalog ignores the process id
+columns for the same reason (``tests/dualrun/worker_run.py``)."""
+
+KILL_REPORT_MEASURES: Final = RunMeasuresInText(measures=(BLOCKED_TIME, KILLED_CHILD_PID))
+"""The rule of a stored text that can hold a kill report: the measured block
+time and the killed child's process id become tokens; the rest of the text,
+the codes and the other fields compare exactly."""
 
 SLOTS_DOWN: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -307,7 +424,7 @@ _WORKFLOWS: Final = TableRules(
         ('on_error', EXACT),
         ('output_task_index', EXACT),
         ('success_policy', JSON),
-        ('result', JSON),
+        ('result', WORKFLOW_RESULT),
         ('error', WORKFLOW_ERROR),
         ('parent_workflow_id', WORKFLOW_ID),
         ('parent_task_index', EXACT),
@@ -327,9 +444,12 @@ _WORKFLOWS: Final = TableRules(
         'name',
         'definition_key',
         'sent_at',
+        'status',
     ),
     identity=('id',),
 )
+"""``status`` orders the workflows that a test seeds with one name and one
+send time and that differ only in their status."""
 
 _WORKFLOW_TASKS: Final = TableRules(
     name='horsies_workflow_tasks',
@@ -361,7 +481,7 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('sub_workflow_name', EXACT),
         ('sub_definition_key', EXACT),
         ('sub_workflow_params', EXACT),
-        ('sub_workflow_summary', JSON),
+        ('sub_workflow_summary', SUB_WORKFLOW_SUMMARY),
         ('result', NODE_RESULT),
         ('error', JSON),
         ('created_at', RUN_CLOCK),
@@ -417,9 +537,15 @@ _TASKS: Final = TableRules(
         'input',
         'sent_at',
         'enqueued_at',
+        'execution',
+        'status',
     ),
     identity=('id',),
 )
+"""``execution`` and ``status`` order the tasks that a test seeds with one
+name, queue, priority, input and send time and that differ only in their
+execution class or their status (a claim test's rows of three classes, the
+rows that a claim took and the rows it left)."""
 
 _TASK_HISTORY: Final = TableRules(
     name='horsies_task_history',
@@ -693,3 +819,74 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
     ),
 )
 """The rules of the 20 baseline tables, in labelling order."""
+
+
+# ---- Notifications ----
+
+
+class NotificationPayload(Enum):
+    """What the payload of a notification channel holds."""
+
+    TASK_ID = 'a task id'
+    WORKFLOW_ID = 'a workflow id'
+    TEXT = 'a fixed text'
+
+
+TASK_CHANNELS: Final = ('task_new', 'task_done', 'horsies_task_status')
+"""Channels whose payload is a task id (``0001_tables.sql`` triggers, ``0006_history_functions.sql`` moves)."""
+
+WORKFLOW_CHANNELS: Final = ('workflow_done', 'horsies_workflow_status')
+"""Channels whose payload is a workflow id."""
+
+QUEUE_CHANNEL_PREFIX: Final = 'task_queue_'
+"""The wake channel of a queue, ``task_queue_<queue>``; its payload is
+``new``, ``capacity`` or ``class``."""
+
+
+def notification_payload(channel: str) -> NotificationPayload:
+    """The payload kind of ``channel``. A channel outside the three lists is a
+    defect of the caller, which listens only on known channels (asserted)."""
+    match channel:
+        case _ if channel in TASK_CHANNELS:
+            return NotificationPayload.TASK_ID
+        case _ if channel in WORKFLOW_CHANNELS:
+            return NotificationPayload.WORKFLOW_ID
+        case _ if channel.startswith(QUEUE_CHANNEL_PREFIX):
+            return NotificationPayload.TEXT
+        case _:
+            raise AssertionError(
+                f'no payload rule for the notification channel {channel!r}'
+            )
+
+
+NOTIFICATIONS: Final = TableRules(
+    name='notifications',
+    columns=_columns(
+        ('channel', EXACT),
+        ('task_id', TASK_ID),
+        ('workflow_id', WORKFLOW_ID),
+        ('payload', EXACT),
+    ),
+    order_by=('channel', 'payload', 'task_id', 'workflow_id'),
+    identity=('channel', 'task_id', 'workflow_id', 'payload'),
+)
+"""The notifications of a run, one row each: the channel, and the payload in
+the column of its kind (``notification_row``). Rows with one identity
+compare as a multiset, so the section compares as a multiset per channel."""
+
+NOTIFIED_CATALOG: Final = SnapshotCatalog(
+    tables=(*BASELINE_CATALOG.tables, NOTIFICATIONS),
+)
+"""The baseline tables, then the notifications: a payload id takes the label
+that its row in a table gave it."""
+
+
+def notification_row(channel: str, payload: str) -> tuple[str | None, ...]:
+    """One raw row of ``NOTIFICATIONS``."""
+    match notification_payload(channel):
+        case NotificationPayload.TASK_ID:
+            return (channel, payload, None, None)
+        case NotificationPayload.WORKFLOW_ID:
+            return (channel, None, payload, None)
+        case NotificationPayload.TEXT:
+            return (channel, None, None, payload)

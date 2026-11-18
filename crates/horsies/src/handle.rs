@@ -18,11 +18,17 @@ use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
 use horsies_core::catalog::CodeEnum;
-use horsies_core::core::codec::{task_result_from_json_str, JsonReadError};
+use horsies_core::core::codec::{
+    from_json_bytes_with, task_result_from_json_str, JsonReadError, TextRule,
+};
+use horsies_core::core::task::result::{
+    read_task_result_text, TaskResultText, TaskResultTextRefused,
+};
+use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
     process_role, wait_inside_task_message, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BuiltInTaskCode, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRead,
+    BuiltInTaskCode, JsonText, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRead,
     RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead, TaskResult,
 };
 use serde::de::DeserializeOwned;
@@ -40,10 +46,11 @@ pub use horsies_core::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_
 pub use horsies_core::{TaskAttemptInfo, TaskStatus};
 
 /// The info of a task. Its `result` is the stored result read as a
-/// `TaskResult`: the `ok` slot as JSON, the `err` slot as a stored task
-/// error. The core's read returns the envelope as stored, and the client
-/// reads it (Python `Horsies.get_task_info_async`).
-pub type TaskInfo = horsies_core::TaskInfo<TaskResult<serde_json::Value>>;
+/// `TaskResult`: the `ok` slot as its stored text (`JsonText::decode` reads
+/// it with the task's type), the `err` slot as a stored task error. The
+/// core's read returns the envelope as stored, and the client reads it
+/// (Python `Horsies.get_task_info_async`).
+pub type TaskInfo = horsies_core::TaskInfo<TaskResult<JsonText>>;
 
 /// What a task ended with.
 #[derive(Debug, Clone, PartialEq)]
@@ -328,7 +335,7 @@ fn task_info_of_stored(
 ) -> Result<TaskInfo, ReadError> {
     let task_id = info.task_id;
     info.try_map_result(|envelope| {
-        task_result_from_json_str::<serde_json::Value>(envelope.as_str()).map_err(|error| {
+        task_result_from_json_str::<JsonText>(envelope.as_str()).map_err(|error| {
             ReadError::StoredResultUnreadable {
                 task_id,
                 cause: unreadable_cause(&error),
@@ -377,10 +384,10 @@ where
         }
         (_, Some(envelope)) => envelope,
     };
-    let stored = task_result_from_json_str::<T>(envelope.as_str()).map_err(|error| {
+    let stored = read_stored_result::<T>(envelope.as_str()).map_err(|refused| {
         ReadError::StoredResultUnreadable {
             task_id,
-            cause: unreadable_cause(&error),
+            cause: refused.cause,
         }
     })?;
     match stored {
@@ -392,6 +399,70 @@ where
                 code: unknown.code,
                 code_type: unknown.code_type,
             }),
+    }
+}
+
+/// Why a stored result envelope does not read with the value type. The
+/// cause names no value of the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredResultRefused {
+    pub(crate) cause: String,
+}
+
+/// A stored result envelope read with the value type `T` (Python
+/// `decode_task_result`). The core reads the shape of the envelope and its
+/// `err` slot (`read_task_result_text`); the `ok` slot decodes as `T` from
+/// its own text, under the rules of a user value (no engine key, at most
+/// 200 levels). So an integer outside the `i64` and `u64` range reads as
+/// `T` asks (`u128`, `i128`), as Python reads any integer: a read through
+/// `serde_json::Value` holds it as an `f64`, which `T` refuses. Pure.
+///
+/// Errors: [`StoredResultRefused`] for a text that is not a task result
+/// envelope, an `err` slot that is not a stored task error, and an `ok`
+/// slot that breaks the rules of a user value or does not decode as `T`.
+pub(crate) fn read_stored_result<T: DeserializeOwned>(
+    text: &str,
+) -> Result<TaskResult<T>, StoredResultRefused> {
+    match read_task_result_text(text) {
+        Err(refused) => Err(StoredResultRefused {
+            cause: envelope_refused_cause(&refused),
+        }),
+        Ok(TaskResultText::Err(error)) => Ok(TaskResult::Err(error)),
+        Ok(TaskResultText::Ok(value)) => {
+            from_json_bytes_with::<T>(value.get().as_bytes(), TextRule::UserValue)
+                .map(TaskResult::Ok)
+                .map_err(|error| StoredResultRefused {
+                    cause: unreadable_cause(&error),
+                })
+        }
+    }
+}
+
+/// The cause of an envelope that the core's read refuses, with no value: a
+/// shape refusal names its rule or a key; a decode failure keeps only its
+/// kind; a field of the stored error that does not parse is named without
+/// the parse text, which can hold the value. Pure.
+fn envelope_refused_cause(refused: &TaskResultTextRefused) -> String {
+    match refused {
+        TaskResultTextRefused::NotStrictJson(rule) => {
+            format!("the text breaks the strict rule: {rule}")
+        }
+        TaskResultTextRefused::Undecodable(error) => value_free_decode_text(error),
+        TaskResultTextRefused::ErrorRefused(StoredErrorRefused::FieldInvalid { field, .. }) => {
+            format!("field {field} of a stored task error does not parse")
+        }
+        TaskResultTextRefused::ErrorRefused(
+            StoredErrorRefused::NotJson(_)
+            | StoredErrorRefused::NotAnObject
+            | StoredErrorRefused::UnknownKey(_)
+            | StoredErrorRefused::MissingField(_)
+            | StoredErrorRefused::UserValue { .. },
+        )
+        | TaskResultTextRefused::NotAnObject
+        | TaskResultTextRefused::MarkerMissing
+        | TaskResultTextRefused::ExtraKey { .. }
+        | TaskResultTextRefused::MissingSlot
+        | TaskResultTextRefused::BothSlotsSet => refused.to_string(),
     }
 }
 
@@ -533,7 +604,12 @@ mod tests {
             panic!("a cancelled task is a failed outcome");
         };
         assert_eq!(error.code().text(), "TASK_CANCELLED");
-        assert_eq!(error.data(), Some(&json!({"task_id": task().to_string()})));
+        assert_eq!(
+            error
+                .data()
+                .map(|data| data.decode::<serde_json::Value>().unwrap()),
+            Some(json!({"task_id": task().to_string()}))
+        );
         // A result stored for a cancelled task is not read.
         let Ok(TaskOutcome::Failed(stored)) = outcome(record(
             TaskStatus::Cancelled,
@@ -615,6 +691,76 @@ mod tests {
             panic!("a value of another type is unreadable");
         };
         assert!(!cause.contains(MARKER), "{cause}");
+    }
+
+    /// The record of a completed task whose stored envelope is `text`.
+    fn completed_text(text: &str) -> RawResultRecord {
+        RawResultRecord {
+            task_id: task(),
+            task_name: "charge".to_owned(),
+            status: TaskStatus::Completed,
+            raw_result: Some(
+                StoredEnvelopeText::parse(text.to_owned())
+                    .unwrap()
+                    .expect("an envelope is an object"),
+            ),
+        }
+    }
+
+    /// The value decodes from its own text: an integer outside the `i64`
+    /// and `u64` range reads as `u128` or `i128`, as Python reads it. A read
+    /// through `serde_json::Value` holds it as an `f64`, which both refuse.
+    #[test]
+    fn a_stored_integer_outside_i64_and_u64_reads_as_its_type() {
+        let max = outcome_of_record::<u128, ChargeCode>(completed_text(
+            r#"{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null}"#,
+        ));
+        assert_eq!(max, Ok(TaskOutcome::Succeeded(u128::MAX)));
+        let below = outcome_of_record::<i128, ChargeCode>(completed_text(
+            r#"{"__h_task_result__":true,"ok":-9223372036854775809,"err":null}"#,
+        ));
+        assert_eq!(below, Ok(TaskOutcome::Succeeded(i128::from(i64::MIN) - 1)));
+    }
+
+    /// The value keeps the rules of a user value: a key that only the engine
+    /// writes, at any depth, and more than 200 levels are refused; 200
+    /// levels read.
+    #[test]
+    fn a_stored_value_keeps_the_rules_of_a_user_value() {
+        let read = |ok: &str| {
+            outcome_of_record::<Value, ChargeCode>(completed_text(&format!(
+                r#"{{"__h_task_result__":true,"ok":{ok},"err":null}}"#
+            )))
+        };
+        assert!(matches!(
+            read(r#"{"a": [{"__h_marker": 1}]}"#),
+            Err(ReadError::StoredResultUnreadable { .. })
+        ));
+        let nested = |levels: usize| format!("{}{}", "[".repeat(levels), "]".repeat(levels));
+        assert!(read(&nested(200)).is_ok());
+        assert!(matches!(
+            read(&nested(201)),
+            Err(ReadError::StoredResultUnreadable { .. })
+        ));
+    }
+
+    /// A field of the stored error that does not parse is named without its
+    /// parse text, which holds the value.
+    #[test]
+    fn a_stored_error_field_that_does_not_parse_is_unreadable_without_the_value() {
+        let read = outcome(record(
+            TaskStatus::Failed,
+            Some(json!({
+                "__h_task_result__": true,
+                "ok": null,
+                "err": {"exception": MARKER, "error_code": "DECLINED", "data": null, "message": "no"}
+            })),
+        ));
+        let Err(ReadError::StoredResultUnreadable { cause, .. }) = read else {
+            panic!("a stored error with a field that does not parse is unreadable");
+        };
+        assert!(!cause.contains(MARKER), "{cause}");
+        assert!(cause.contains("field exception"), "{cause}");
     }
 
     #[test]
@@ -804,7 +950,7 @@ mod tests {
         let Some(TaskResult::Ok(value)) = info.result else {
             panic!("a stored value is an ok result");
         };
-        assert_eq!(value, json!(3));
+        assert_eq!(value.get(), "3");
         assert_eq!(info.task_name, "charge");
         assert_eq!(info.retry_count, 1);
 
@@ -823,6 +969,22 @@ mod tests {
 
         let none = task_info_of_stored(stored_info(None)).expect("no result reads");
         assert!(none.result.is_none());
+
+        // The value keeps its stored text: an integer outside the `i64` and
+        // `u64` range keeps every digit.
+        for wide in [
+            "340282366920938463463374607431768211455",
+            "-9223372036854775809",
+        ] {
+            let text = format!(r#"{{"__h_task_result__":true,"ok":{wide},"err":null}}"#);
+            let mut stored = stored_info(None);
+            stored.result = StoredEnvelopeText::parse(text).unwrap();
+            let info = task_info_of_stored(stored).expect("a wide value reads");
+            let Some(TaskResult::Ok(value)) = info.result else {
+                panic!("a stored value is an ok result");
+            };
+            assert_eq!(value.get(), wide);
+        }
     }
 
     /// The core returns any stored object; the client's typed read refuses
@@ -850,6 +1012,14 @@ mod tests {
         assert_eq!(limit_duration(WaitLimit::NoLimit), None);
         let limit = WaitLimit::parse(Some(Duration::from_secs(2))).unwrap();
         assert_eq!(limit_duration(limit), Some(Duration::from_secs(2)));
+    }
+
+    /// A handle prints and crosses threads: Debug, Send and Sync.
+    #[test]
+    fn a_task_handle_is_debug_send_and_sync() {
+        fn assert_debug_send_sync<V: std::fmt::Debug + Send + Sync>() {}
+        assert_debug_send_sync::<TaskHandle<u32, ChargeCode>>();
+        assert_debug_send_sync::<TaskHandle<Value, std::convert::Infallible>>();
     }
 
     /// A kept read is returned with no statement: the app's handle never

@@ -21,10 +21,12 @@ from tests.dualrun.rules import (
     AnchorReference,
     DigestOf,
     EachItem,
+    EachMember,
     Exact,
     FormatVersion,
     GeneratedName,
     IdFamily,
+    IdsInText,
     Ignored,
     Index,
     JsonPath,
@@ -32,10 +34,13 @@ from tests.dualrun.rules import (
     JsonTime,
     Key,
     NormalisedId,
+    RunMeasure,
+    RunMeasuresInText,
     RunWindowReference,
     StoredJson,
     TableRules,
     TimeEncoding,
+    TimeOrderBeforeRun,
     TimeOrderOnly,
     TimeWithin,
     Unversioned,
@@ -57,6 +62,8 @@ from tests.dualrun.values import (
     JsonObject,
     JsonScalar,
     LiteralTime,
+    MeasuredText,
+    MeasureToken,
     NormalizedValue,
     NullValue,
     OffsetFromAnchor,
@@ -76,6 +83,12 @@ _UTC_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _DATED_NAME: Final = re.compile(
     r'(?P<prefix>.+)_(?P<year>\d{4})_(?P<month>\d{2})_(?P<day>\d{2})(?:_(?P<hour>\d{2}))?',
 )
+_CANONICAL_UUID: Final = re.compile(
+    r'(?<![0-9A-Za-z-])'
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    r'(?![0-9A-Za-z-])',
+)
+"""An id inside a text under ``IdsInText``: the text form of a uuid column."""
 
 # ---- Raw input (from the capture) ----
 
@@ -182,14 +195,39 @@ class PendingId:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingText:
+    """A text of an ``IdsInText`` path whose ids wait for their labels.
+
+    ``parts`` holds the literal text and the ids in text order.
+    """
+
+    parts: tuple[str | PendingId, ...]
+
+
+PendingLeaf = NormalizedValue | PendingId | PendingText
+"""A path-rule leaf of a document before labelling."""
+
+
+@dataclass(frozen=True, slots=True)
 class PendingDocument:
     """A JSON document whose id leaves wait for their labels."""
 
-    root: JsonNode[NormalizedValue | PendingId]
+    root: JsonNode[PendingLeaf]
 
 
 StableCell = NormalizedValue | PendingId | PendingDocument
 StableRow = tuple[StableCell, ...]
+
+
+def leaf_ids(leaf: PendingLeaf) -> list[PendingId]:
+    """The ids of a document leaf that wait for labels, in text order."""
+    match leaf:
+        case PendingId():
+            return [leaf]
+        case PendingText(parts=parts):
+            return [part for part in parts if isinstance(part, PendingId)]
+        case _:
+            return []
 
 
 def cell_ids(cell: StableCell) -> list[PendingId]:
@@ -198,9 +236,60 @@ def cell_ids(cell: StableCell) -> list[PendingId]:
         case PendingId():
             return [cell]
         case PendingDocument(root=root):
-            return [leaf for leaf in json_leaves(root) if isinstance(leaf, PendingId)]
+            return [pending for leaf in json_leaves(root) for pending in leaf_ids(leaf)]
         case _:
             return []
+
+
+def text_with_ids(text: str, family: IdFamily) -> PendingText:
+    """``text`` split into its literal parts and the ids of ``family`` that
+    ``_CANONICAL_UUID`` finds in it. Empty literal parts are left out."""
+    parts: list[str | PendingId] = []
+    position = 0
+    for found in _CANONICAL_UUID.finditer(text):
+        if found.start() > position:
+            parts.append(text[position : found.start()])
+        parts.append(PendingId(raw=found.group(), family=family))
+        position = found.end()
+    if position < len(text):
+        parts.append(text[position:])
+    return PendingText(parts=tuple(parts))
+
+
+def _split_at_measure(
+    text: str, pattern: re.Pattern[str], token: MeasureToken
+) -> list[str | MeasureToken]:
+    """``text`` with the group of each match of ``pattern`` replaced by ``token``."""
+    pieces: list[str | MeasureToken] = []
+    position = 0
+    for found in pattern.finditer(text):
+        start, end = found.span(1)
+        assert start >= 0, f'the group of {pattern.pattern!r} did not take part in a match'
+        pieces.append(text[position:start])
+        pieces.append(token)
+        position = end
+    pieces.append(text[position:])
+    return pieces
+
+
+def measured_text(text: str, measures: tuple[RunMeasure, ...]) -> MeasuredText:
+    """``text`` with the number of each match of each measure replaced by its
+    token. Measures apply in order; each one reads only the literal text that
+    the measures before it left. Empty literal parts are left out. Each
+    pattern has one group (``catalog_defects`` checks it)."""
+    parts: list[str | MeasureToken] = [text]
+    for measure in measures:
+        pattern = re.compile(measure.pattern)
+        token = MeasureToken(name=measure.name)
+        split: list[str | MeasureToken] = []
+        for part in parts:
+            match part:
+                case MeasureToken():
+                    split.append(part)
+                case str():
+                    split.extend(_split_at_measure(part, pattern, token))
+        parts = split
+    return MeasuredText(parts=tuple(part for part in parts if part != ''))
 
 
 # ---- Clock columns ----
@@ -241,6 +330,38 @@ def _ranked(times: list[TimeValue | None]) -> list[StableCell]:
         NullValue() if time is None else TimeRank(rank=rank_of[time_sort_token(time)])
         for time in times
     ]
+
+
+def _written_during_run(time: TimeValue, window: RunWindow) -> bool:
+    """Whether ``time`` is a finite value at or after the run start."""
+    match time:
+        case FiniteTime(at=at):
+            return at >= window.start
+        case InfinitePast() | InfiniteFuture():
+            return False
+
+
+def _ranked_before_run(
+    times: list[TimeValue | None], window: RunWindow
+) -> list[StableCell]:
+    """``TimeOrderBeforeRun``: ``DuringRun`` from the run start on; the
+    values before it ranked among themselves."""
+    before = [
+        time
+        for time in times
+        if time is not None and not _written_during_run(time, window)
+    ]
+    rank_of = _rank_map(before)
+    cells: list[StableCell] = []
+    for time in times:
+        match time:
+            case None:
+                cells.append(NullValue())
+            case _ if _written_during_run(time, window):
+                cells.append(DuringRun())
+            case _:
+                cells.append(TimeRank(rank=rank_of[time_sort_token(time)]))
+    return cells
 
 
 def _windowed_value(
@@ -378,7 +499,7 @@ class _ToRank:
     time: TimeValue
 
 
-_Building = NormalizedValue | PendingId | _ToRank
+_Building = PendingLeaf | _ToRank
 _Alive = tuple[tuple[int, int], ...]
 """Path rules that still match the current location: (rule index, steps matched)."""
 
@@ -407,6 +528,8 @@ def _advance(alive: _Alive, paths: tuple[JsonPath, ...], key: str | int) -> _Ali
             case Index(position=position), int() if position == key:
                 moved.append((path_index, matched + 1))
             case EachItem(), int():
+                moved.append((path_index, matched + 1))
+            case EachMember(), str():
                 moved.append((path_index, matched + 1))
             case _:
                 pass
@@ -444,6 +567,18 @@ def _leaf(
                     return Ok(_building_leaf(PendingId(raw=value, family=family)))
                 case _:
                     return Err(f'id path {path.steps} holds {value!r}, not text')
+        case IdsInText(family=family):
+            match value:
+                case str():
+                    return Ok(_building_leaf(text_with_ids(value, family)))
+                case _:
+                    return Err(f'text path {path.steps} holds {value!r}, not text')
+        case RunMeasuresInText(measures=measures):
+            match value:
+                case str():
+                    return Ok(_building_leaf(measured_text(value, measures)))
+                case _:
+                    return Err(f'text path {path.steps} holds {value!r}, not text')
         case JsonTime(encoding=encoding, rule=time_rule):
             match _json_time(value, encoding):
                 case str() as cause:
@@ -551,7 +686,7 @@ def _ranked_documents(documents: list[JsonNode[_Building] | None]) -> list[Stabl
                     by_path.setdefault(leaf.path, []).append(leaf.time)
     ranks = {path: _rank_map(times) for path, times in by_path.items()}
 
-    def settle(leaf: _Building) -> NormalizedValue | PendingId:
+    def settle(leaf: _Building) -> PendingLeaf:
         match leaf:
             case _ToRank(path=path, time=time):
                 return TimeRank(rank=ranks[path][time_sort_token(time)])
@@ -636,6 +771,12 @@ def _column_cells(
             return _json_cells(table, index, rule, rows, window)
         case TimeOrderOnly():
             return _parse_times(table.name, spec.name, texts).map(_ranked)
+        case TimeOrderBeforeRun():
+            match _parse_times(table.name, spec.name, texts):
+                case Err(error):
+                    return Err(error)
+                case Ok(times):
+                    return Ok(_ranked_before_run(times, window))
         case TimeWithin(reference=reference, bound=bound):
             match reference:
                 case AnchorReference(column=anchor):

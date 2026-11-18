@@ -12,23 +12,23 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    args_from_inner, broker, child_of, claim_once, claim_pass, code, err, finish_node, finish_task,
-    handle, history_row, node, node_status, node_task_input, ok, registry_of, seed_node,
-    seed_node_task, seed_workflow, shared_pool, spec, start, stored_result_error,
+    args_from_inner, broker, child_of, child_specs_of, claim_once, claim_pass, code, err,
+    finish_node, finish_task, handle, history_row, node, node_status, node_task_input, ok,
+    seed_node, seed_node_task, seed_workflow, shared_pool, spec, start, stored_result_error,
     sub_workflow_node, task_node, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed,
     ParentLink, WorkflowDoneListener, WorkflowSeed, PORT_QUEUE, WORKER,
 };
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::outcomes::{GuardEvidence, ObservedWorkflowState};
 use crate::core::lifecycle::{
     OwnedClaim, OwnedClaimBatch, TerminalizationCommand, TerminalizationOutcome,
 };
 use crate::core::workflow::handle_types::HandleErrorCode;
-use crate::core::{OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry, WorkflowStatus};
-use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
-use crate::workflow_engine::phase2_recovery::drive_phase2_recovery;
+use crate::core::{OnError, TaskResult, WorkflowSpec, WorkflowStatus};
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_client_workflow};
+use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
+use crate::workflow_engine::steps::ChildBuild;
 
 /// How long a test waits to see that a call is blocked on a lock.
 const BLOCKED_WAIT: Duration = Duration::from_millis(500);
@@ -48,16 +48,10 @@ fn single(name: &str) -> WorkflowSpec {
     spec(name, vec![task_node(0, &format!("{name}_a"))])
 }
 
-async fn resume(pool: &PgPool, workflow_id: Uuid, registry: &WorkflowSpecRegistry) -> bool {
-    resume_workflow(
-        &broker(pool),
-        workflow_id,
-        registry,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
-    .expect("resume")
+async fn resume(pool: &PgPool, workflow_id: Uuid, child_specs: &TestChildSpecs) -> bool {
+    resume_client_workflow(&broker(pool), workflow_id, child_specs)
+        .await
+        .expect("resume")
 }
 
 /// `TestWorkflowHandleCancel.test_cancel_skips_pending`
@@ -65,12 +59,7 @@ async fn resume(pool: &PgPool, workflow_id: Uuid, registry: &WorkflowSpecRegistr
 #[serial]
 async fn cancel_skips_a_pending_node() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("cancel_skip"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("cancel_skip"), &TestChildSpecs::empty()).await;
     let workflow_handle = handle(&pool, workflow_id);
 
     workflow_handle.cancel().await.expect("cancel()");
@@ -88,9 +77,16 @@ async fn cancel_skips_a_pending_node() {
 #[serial]
 async fn cancel_of_a_completed_workflow_changes_nothing() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(&pool, &single("cancel_noop"), &registry).await;
-    let _task = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(10)), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(&pool, &single("cancel_noop"), &child_specs).await;
+    let _task = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(10)),
+        &child_specs,
+    )
+    .await;
     let workflow_handle = handle(&pool, workflow_id);
     assert_eq!(
         workflow_handle.status().await.expect("status()"),
@@ -116,7 +112,7 @@ async fn a_descendant_cancel_locks_the_workflow_row_before_its_nodes() {
     let parent = start(
         &pool,
         &single("descendant_cancel_lock_order"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
     let child = seed_workflow(&pool, &WorkflowSeed::child(ParentLink::of_root(parent, 0))).await;
@@ -166,7 +162,7 @@ async fn cancel_leaves_no_queueable_node_and_moves_the_root_task_to_history() {
     let workflow_id = start(
         &pool,
         &chain("cancel_guarantee_states"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
     let root_task = node(&pool, workflow_id, 0)
@@ -204,7 +200,7 @@ async fn cancel_moves_a_claimed_task_that_did_not_start_to_history() {
     let workflow_id = start(
         &pool,
         &single("cancel_guarantee_claimed"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
     let task_id = node(&pool, workflow_id, 0)
@@ -250,7 +246,7 @@ async fn a_claim_cannot_take_a_task_while_its_cancel_is_uncommitted() {
     let workflow_id = start(
         &db.pool,
         &single("cancel_claim_race"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
     let task_id = node(&db.pool, workflow_id, 0)
@@ -316,9 +312,16 @@ async fn cancel_of_an_unknown_id_is_workflow_not_found() {
 #[serial]
 async fn pause_of_a_completed_workflow_returns_false() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(&pool, &single("pause_completed"), &registry).await;
-    let _task = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(10)), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(&pool, &single("pause_completed"), &child_specs).await;
+    let _task = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(10)),
+        &child_specs,
+    )
+    .await;
 
     let paused = handle(&pool, workflow_id).pause().await.expect("pause()");
 
@@ -339,7 +342,7 @@ async fn pause_and_resume_of_an_unknown_id_are_workflow_not_found() {
         .await
         .expect_err("pause of an unknown id");
     let resumed = workflow_handle
-        .resume()
+        .resume(&TestChildSpecs::empty())
         .await
         .expect_err("resume of an unknown id");
 
@@ -389,7 +392,7 @@ async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
     .await;
 
     let error = handle(&db.pool, workflow_id)
-        .resume()
+        .resume(&TestChildSpecs::empty())
         .await
         .expect_err("the resume meets the refused node write");
 
@@ -451,7 +454,7 @@ async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
     .await;
 
     let error = handle(&db.pool, workflow_id)
-        .resume()
+        .resume(&TestChildSpecs::empty())
         .await
         .expect_err("the recovery pass after the commit meets the lost search path");
 
@@ -525,7 +528,7 @@ async fn an_on_error_pause_notifies_each_paused_workflow_once() {
         &db.pool,
         failing_task,
         &err("NODE_FAILED", "node failed"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -606,14 +609,7 @@ fn assert_refused_by_a_running_workflow(
 async fn the_claim_filter_dispatches_a_claim_whose_workflow_was_resumed() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;
-    assert!(
-        resume(
-            &db.pool,
-            workflow_id,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
-        )
-        .await
-    );
+    assert!(resume(&db.pool, workflow_id, &TestChildSpecs::empty()).await);
 
     let stopped = broker(&db.pool)
         .filter_non_runnable_workflow_tasks(&[(task_id, claimed_at)], WORKER)
@@ -639,14 +635,7 @@ async fn the_claim_filter_dispatches_a_claim_whose_workflow_was_resumed() {
 async fn the_batch_abandon_refuses_after_a_committed_resume() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;
-    assert!(
-        resume(
-            &db.pool,
-            workflow_id,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
-        )
-        .await
-    );
+    assert!(resume(&db.pool, workflow_id, &TestChildSpecs::empty()).await);
 
     let outcomes = terminalize(
         &db.pool,
@@ -680,14 +669,7 @@ async fn the_batch_abandon_refuses_after_a_committed_resume() {
 async fn the_start_abandon_refuses_after_a_committed_resume() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;
-    assert!(
-        resume(
-            &db.pool,
-            workflow_id,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
-        )
-        .await
-    );
+    assert!(resume(&db.pool, workflow_id, &TestChildSpecs::empty()).await);
 
     let outcomes = terminalize(
         &db.pool,
@@ -730,7 +712,7 @@ fn pausing_child() -> WorkflowSpec {
 #[serial]
 async fn a_cascade_resume_finalizes_a_child_whose_nodes_all_ended() {
     let pool = shared_pool().await;
-    let registry = registry_of(&[pausing_child()]);
+    let child_specs = child_specs_of(&[pausing_child()]);
     let mut parent = spec(
         "cascade_resume_parent",
         vec![
@@ -740,7 +722,7 @@ async fn a_cascade_resume_finalizes_a_child_whose_nodes_all_ended() {
     );
     parent.output_index = Some(1);
     parent.on_error = OnError::Pause;
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
     let child_id = child_of(&pool, parent_id, 1).await;
 
     let _c = finish_node(
@@ -748,7 +730,7 @@ async fn a_cascade_resume_finalizes_a_child_whose_nodes_all_ended() {
         child_id,
         0,
         &err("CHILD_FAIL", "C failed"),
-        &registry,
+        &child_specs,
     )
     .await;
     assert_eq!(workflow_status(&pool, child_id).await, "PAUSED");
@@ -757,12 +739,12 @@ async fn a_cascade_resume_finalizes_a_child_whose_nodes_all_ended() {
         parent_id,
         0,
         &err("PARENT_FAIL", "A failed"),
-        &registry,
+        &child_specs,
     )
     .await;
     assert_eq!(workflow_status(&pool, parent_id).await, "PAUSED");
 
-    assert!(resume(&pool, parent_id, &registry).await);
+    assert!(resume(&pool, parent_id, &child_specs).await);
 
     assert_eq!(node_status(&pool, child_id, 1).await, "SKIPPED");
     assert_eq!(workflow_status(&pool, child_id).await, "FAILED");
@@ -775,7 +757,7 @@ async fn a_cascade_resume_finalizes_a_child_whose_nodes_all_ended() {
 #[serial]
 async fn a_resumed_node_receives_its_dependency_result() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let mut consumer = task_node(1, "resume_dep_consumer");
     consumer.dependencies = vec![0];
     consumer.args_from.insert("value".to_owned(), 0);
@@ -784,13 +766,13 @@ async fn a_resumed_node_receives_its_dependency_result() {
         vec![task_node(0, "resume_dep_producer"), consumer],
     );
     workflow_spec.output_index = Some(1);
-    let workflow_id = start(&db.pool, &workflow_spec, &registry).await;
+    let workflow_id = start(&db.pool, &workflow_spec, &child_specs).await;
     let _producer = finish_node(
         &db.pool,
         workflow_id,
         0,
         &ok(serde_json::json!(42)),
-        &registry,
+        &child_specs,
     )
     .await;
     sqlx::query(
@@ -810,7 +792,7 @@ async fn a_resumed_node_receives_its_dependency_result() {
         .await
         .expect("pause()"));
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "READY");
-    assert!(resume(&db.pool, workflow_id, &registry).await);
+    assert!(resume(&db.pool, workflow_id, &child_specs).await);
 
     let input = node_task_input(&db.pool, workflow_id, 1).await;
     match args_from_inner(&input, "value") {
@@ -825,12 +807,7 @@ async fn a_resumed_node_receives_its_dependency_result() {
 #[serial]
 async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("pause_then_cancel"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("pause_then_cancel"), &TestChildSpecs::empty()).await;
     let workflow_handle = handle(&pool, workflow_id);
     assert!(workflow_handle.pause().await.expect("pause()"));
 
@@ -848,7 +825,7 @@ async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
 #[serial]
 async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     seed_node(
@@ -898,13 +875,12 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     .await
     .expect("the stale pass");
     assert_eq!(failed, 2);
-    let _summary = drive_phase2_recovery(
+    let _summary = drive_phase2_recovery_with(
         &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        &registry,
+        ChildBuild::Client(&child_specs),
         0,
         100,
         3,
-        &RetentionConfig::default(),
     )
     .await
     .expect("phase-2 recovery");
@@ -932,7 +908,7 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
             workflow_id,
             task_index,
             &ok(serde_json::json!(task_index)),
-            &registry,
+            &child_specs,
         )
         .await;
     }

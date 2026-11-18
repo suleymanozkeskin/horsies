@@ -19,6 +19,15 @@
 //!   `horsies_workflow_child_start` for each owed child start
 //!   (`child_start.rs`), then `COMMIT`. The parent node, the child rows and
 //!   the link commit together.
+//! - The engine awaits a step, a run of child starts, a parent advance, a
+//!   recovery pass or a recovery case through `Box::pin`. An `async fn`
+//!   holds each future that it awaits inline in its own state, so the
+//!   futures of nested steps add up. In a debug build, the poll function of
+//!   each level also reserves stack for each future that it builds, and the
+//!   deepest workflow paths needed close to the 2 MiB stack of a tokio
+//!   worker or test thread. On the heap, a level holds a pointer to the
+//!   future of the level below. `port_tests/stack_margin.rs` runs the
+//!   deepest paths on a thread with a 1.5 MiB stack in a debug build.
 
 use std::collections::HashMap;
 
@@ -26,8 +35,6 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, one_row, query_in, query_on, roll_back, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType,
@@ -460,18 +467,11 @@ pub(crate) struct CommittedStep<D> {
 }
 
 /// Where the host build of a child gets the child's spec
-/// (`child_spec.rs`), and where the typed facts of the child's task nodes
-/// get the retention class of their queue.
+/// (`child_spec.rs`): a client that builds the child in its own language and
+/// sends the spec as data, with the class of each task queue.
 #[derive(Clone, Copy)]
 pub(crate) enum ChildBuild<'a> {
-    /// The registered definitions of the Rust client, and the retention
-    /// config of the process.
-    Registry {
-        registry: &'a WorkflowSpecRegistry,
-        retention: &'a RetentionConfig,
-    },
-    /// A client that builds the child in its own language and sends the
-    /// spec as data, with the class of each task queue.
+    /// The client's child spec source.
     Client(&'a dyn ChildSpecSource),
 }
 
@@ -644,12 +644,12 @@ pub(crate) async fn resume(
     workflow_id: Uuid,
     build: ChildBuild<'_>,
 ) -> Result<CommittedStep<ResumeDisposition>, WorkflowError> {
-    run_in_transaction(
+    Box::pin(run_in_transaction(
         broker,
         CheckoutClass::Batch,
         &RESUME.bind().value(&workflow_id).finish(),
         build,
-    )
+    ))
     .await
 }
 
@@ -707,7 +707,7 @@ pub(crate) async fn node_finish_in_transaction(
     build: ChildBuild<'_>,
 ) -> Result<CommittedStep<NodeFinishDisposition>, WorkflowError> {
     let dependents_text = Dependents::Read.as_sql();
-    run_in_transaction(
+    Box::pin(run_in_transaction(
         broker,
         CheckoutClass::Reserved,
         &NODE_FINISH
@@ -717,7 +717,7 @@ pub(crate) async fn node_finish_in_transaction(
             .value(&dependents_text)
             .finish(),
         build,
-    )
+    ))
     .await
 }
 
@@ -735,7 +735,7 @@ pub(crate) async fn phase2_recover(
     attempt_bound: i32,
     build: ChildBuild<'_>,
 ) -> Result<CommittedStep<NodeFinishDisposition>, WorkflowError> {
-    run_in_transaction(
+    Box::pin(run_in_transaction(
         broker,
         CheckoutClass::Reserved,
         &PHASE2_RECOVER
@@ -744,7 +744,7 @@ pub(crate) async fn phase2_recover(
             .value(&attempt_bound)
             .finish(),
         build,
-    )
+    ))
     .await
 }
 
@@ -770,7 +770,7 @@ pub(crate) async fn advance_parents(
 ) -> Result<(), ParentAdvanceFailure> {
     let mut drive = ParentAdvanceDrive::new(&owed);
     while let Some(child_workflow_id) = drive.next()? {
-        match advance_parent(broker, class, child_workflow_id, build).await {
+        match Box::pin(advance_parent(broker, class, child_workflow_id, build)).await {
             Ok(next) => drive.push(&next),
             Err(error) => return Err(drive.failure(child_workflow_id, error)),
         }
@@ -795,12 +795,12 @@ async fn advance_parent(
     child_workflow_id: Uuid,
     build: ChildBuild<'_>,
 ) -> Result<OwedParentAdvances, WorkflowError> {
-    let committed = run_in_transaction::<ChildFinishDisposition>(
+    let committed = Box::pin(run_in_transaction::<ChildFinishDisposition>(
         broker,
         class,
         &CHILD_FINISH.bind().value(&child_workflow_id).finish(),
         build,
-    )
+    ))
     .await?;
     match committed.disposition {
         ChildFinishDisposition::Applied => {}
@@ -893,12 +893,12 @@ pub(crate) async fn run_in_transaction<D: StepDisposition>(
         }
     };
     let mut parent_advances = OwedParentAdvances::of(step.outcome.parent_advance);
-    let child_starts = run_child_starts(
+    let child_starts = Box::pin(run_child_starts(
         &mut transaction,
         broker.statement_log(),
         step.owed_child_starts,
         build,
-    )
+    ))
     .await;
     match child_starts {
         Ok(advances) => parent_advances.extend(advances),

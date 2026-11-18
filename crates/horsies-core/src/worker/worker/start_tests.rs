@@ -10,27 +10,34 @@
 //! - A stop during a retry wait ends the start, and the run, without an
 //!   error.
 //! - The claim loop waits for a stop or its poll interval.
+//! - A queue notification wakes the claim loop, which then takes at most
+//!   `coalesce_notifies` more signals that are already pending.
 
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use super::{wait_for_claim_wake, ClaimWake, ClaimWakes, StartOutcome, Worker};
+use super::{
+    wait_for_claim_wake, ClaimWake, ClaimWakes, StartOutcome, Worker, WorkerSubscriptions,
+};
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::{AppConfig, WorkerResilienceConfig};
-use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::db::{ChannelName, PayloadFilter};
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
 use crate::worker::executor::protocol::{
     ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
 };
-use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
+use crate::worker::executor::slots::scripted::{idle_child_of_any_kind, idle_child_recording_pid};
+use crate::worker::executor::slots::{ChildLayout, PoolBoard};
+use crate::worker::executor::supervisor::ChildCommand;
 
 /// The longest wait for an event a test expects.
 const WAIT: Duration = Duration::from_secs(30);
@@ -47,18 +54,35 @@ fn resilience(initial_ms: u64, max_attempts: u64) -> WorkerResilienceConfig {
 /// A worker on `broker` of one isolated child that boots, then exits at the
 /// next frame it reads.
 fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) -> Worker {
+    worker_with(broker, resilience, WorkerConfig::default())
+}
+
+/// [`worker_on`] with the worker config `worker_config`.
+fn worker_with(
+    broker: Arc<PostgresBroker>,
+    resilience: WorkerResilienceConfig,
+    worker_config: WorkerConfig,
+) -> Worker {
+    worker_of(broker, resilience, worker_config, idle_child_of_any_kind())
+}
+
+/// [`worker_with`] whose child runs `command`.
+fn worker_of(
+    broker: Arc<PostgresBroker>,
+    resilience: WorkerResilienceConfig,
+    worker_config: WorkerConfig,
+    command: ChildCommand,
+) -> Worker {
     let mut app_config = AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies");
     app_config.resilience = resilience;
     let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
     let connection = ChildConnection::of_config(&app_config.broker)
         .expect("the config of the test database validates");
-    Worker::new(
+    Worker::of_child_specs(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         app_config,
-        WorkerConfig::default(),
+        worker_config,
         SelectedProfile {
             name: "default".to_owned(),
             profile: serde_json::from_value(serde_json::json!({
@@ -67,7 +91,7 @@ fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) ->
             .expect("a valid test profile"),
         },
         ChildLaunch {
-            command: idle_child_of_any_kind(),
+            command,
             preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
             program: ChildProgram::Rust,
             log_level: ChildLogLevel::Info,
@@ -84,6 +108,16 @@ fn no_claim_wakes() -> ClaimWakes {
     ClaimWakes {
         subscriptions: Vec::new(),
     }
+}
+
+/// A board of one isolated slot whose child never reports ready: its
+/// child-ready wake never fires.
+fn quiet_board() -> PoolBoard {
+    PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    })
 }
 
 /// A broker on a port where no server listens: each statement fails after
@@ -215,6 +249,7 @@ async fn a_stop_ends_the_claim_wait() {
         wait_for_claim_wake(
             &cancel,
             &Notify::new(),
+            &quiet_board(),
             &claim_wakes,
             Duration::from_secs(3_600),
         ),
@@ -232,10 +267,172 @@ async fn the_claim_wait_ends_at_the_poll_interval() {
     let wake = wait_for_claim_wake(
         &CancellationToken::new(),
         &Notify::new(),
+        &quiet_board(),
         &claim_wakes,
         Duration::from_millis(50),
     )
     .await;
     assert_eq!(wake, ClaimWake::PollElapsed);
     assert!(started.elapsed() >= Duration::from_millis(50));
+}
+
+/// The queues of the burst test. A wake subscription holds one signal per
+/// queue, so a burst is one notification on each queue.
+const BURST_QUEUES: [&str; 4] = ["burst_a", "burst_b", "burst_c", "burst_d"];
+
+/// One notification on each queue of [`BURST_QUEUES`], in one transaction,
+/// in list order, then the wait until `witness` (on the last queue) has its
+/// signal. The listener delivers the notifications of a transaction in
+/// order, each to every subscriber of its channel at once, so then every
+/// subscription of the burst holds its signal.
+async fn send_burst(broker: &PostgresBroker, witness: &crate::db::WakeSubscription) {
+    let notifies: Vec<String> = BURST_QUEUES
+        .iter()
+        .map(|queue| format!("pg_notify('task_queue_{queue}', 'wake')"))
+        .collect();
+    sqlx::query(&format!("SELECT {}", notifies.join(", ")))
+        .execute(broker.pool())
+        .await
+        .expect("send the burst");
+    let witnessed = tokio::time::timeout(WAIT, witness.recv())
+        .await
+        .expect("the last notification of the burst arrives");
+    assert_eq!(witnessed, crate::db::WakeEvent::Notified);
+}
+
+/// Python `TestWaitForAnyNotify::test_notification_received_drains_burst`:
+/// a queue notification wakes the claim wait, and the drain then takes the
+/// signals of the burst that are already pending, at most
+/// `coalesce_notifies` of them.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
+    let session_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        crate::broker::terminalization_matrix::migrated_pool().await,
+        &session_url,
+    ));
+    let worker = worker_with(
+        Arc::clone(&broker),
+        resilience(100, 1),
+        WorkerConfig {
+            queues: BURST_QUEUES
+                .iter()
+                .map(|queue| (*queue).to_owned())
+                .collect(),
+            coalesce_notifies: 5,
+            ..WorkerConfig::default()
+        },
+    );
+    let WorkerSubscriptions {
+        claim_wakes,
+        pings: _pings,
+    } = worker
+        .try_connect_listener()
+        .await
+        .expect("the session check passes and the subscriptions start");
+    let last_queue = BURST_QUEUES[BURST_QUEUES.len() - 1];
+    let witness = broker
+        .listener()
+        .subscribe_wake(
+            ChannelName::parse(&format!("task_queue_{last_queue}")).expect("a valid channel"),
+            PayloadFilter::AnyPayload,
+        )
+        .await
+        .expect("the witness subscription starts");
+    let released = Notify::new();
+    let board = quiet_board();
+    let claim_wait = || {
+        wait_for_claim_wake(
+            &worker.cancel,
+            &released,
+            &board,
+            &claim_wakes,
+            Duration::from_secs(3_600),
+        )
+    };
+
+    // The wait takes one signal; the drain (limit 5) takes the other three.
+    send_burst(&broker, &witness).await;
+    let wake = tokio::time::timeout(WAIT, claim_wait())
+        .await
+        .expect("the burst wakes the claim wait");
+    assert_eq!(wake, ClaimWake::DatabaseNotification);
+    claim_wakes
+        .drain_pending(worker.worker_config.coalesce_notifies)
+        .await;
+    assert!(
+        claim_wait().now_or_never().is_none(),
+        "the drain took every signal of the burst"
+    );
+
+    // A drain takes at most its limit: with 2, one signal is left, and the
+    // next wait returns at once.
+    send_burst(&broker, &witness).await;
+    let wake = tokio::time::timeout(WAIT, claim_wait())
+        .await
+        .expect("the burst wakes the claim wait");
+    assert_eq!(wake, ClaimWake::DatabaseNotification);
+    claim_wakes.drain_pending(2).await;
+    assert_eq!(
+        claim_wait().now_or_never(),
+        Some(ClaimWake::DatabaseNotification),
+        "one signal of the burst is left after a drain of two"
+    );
+    assert!(
+        claim_wait().now_or_never().is_none(),
+        "no signal of the burst is left"
+    );
+}
+
+/// Python `TestCleanupAfterFailedStart::test_cleans_listener_and_slot_pool`,
+/// `::test_listener_close_error_logged`,
+/// `TestFailedStartCleanup::test_cleanup_cancels_service_tasks` and
+/// `test_runner_heartbeat.py::test_a_failed_start_stops_the_heartbeat`. In
+/// the core the listener, the service loops and the runner heartbeats start
+/// in `Worker::serve`, after the database start. A database start that fails
+/// stops the children that started before it, and starts no listener, no
+/// service loop and no runner heartbeat: the run ends with the database
+/// error, the child's process is gone, and the reaper, the first service
+/// loop, never logged its start (`spawn_reaper` logs `reaper started` before
+/// its first pass).
+#[tokio::test]
+async fn a_failed_database_start_stops_the_children_and_starts_no_service_loop() {
+    let dir = std::env::temp_dir().join(format!(
+        "horsies-failed-start-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).expect("create the test folder");
+    let pid_file = dir.join("child.pid");
+    let worker = worker_of(
+        unreachable_broker(),
+        resilience(100, 1),
+        WorkerConfig::default(),
+        idle_child_recording_pid(&pid_file),
+    );
+    let capture = crate::test_support::LogCapture::new();
+    let guard = capture.set_default();
+    let ended = tokio::time::timeout(WAIT, worker.run())
+        .await
+        .expect("the run ends within the bound");
+    drop(guard);
+
+    let error = ended.expect_err("a database that cannot be reached fails the run");
+    assert!(error.is_retryable(), "{error}");
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the child wrote its pid")
+        .trim()
+        .parse()
+        .expect("the pid file holds a pid");
+    // SAFETY: signal 0 sends nothing; it only checks that the process exists.
+    let exists = unsafe { libc::kill(pid, 0) } == 0;
+    assert!(!exists, "the child {pid} still runs after the failed start");
+    let reaper_starts: Vec<String> = capture
+        .events()
+        .into_iter()
+        .filter(|event| event.message == "reaper started")
+        .map(|event| event.message)
+        .collect();
+    assert!(reaper_starts.is_empty(), "{reaper_starts:?}");
+    std::fs::remove_dir_all(&dir).expect("remove the test folder");
 }

@@ -204,6 +204,7 @@ worker writes the context into that parameter.
 
 ## Sub-Workflows
 
+<!-- rust-check: skip partial -- fetch_report is a task that the file does not define -->
 ```rust
 use horsies::{
     HorsiesError, OutputlessResults, SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition,
@@ -364,6 +365,7 @@ Fields: `code`, `message`, `retryable`, `workflow_name`, `workflow_id`
 | `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, or a start before the registration in the process |
 | `WorkflowIdConflict` | The id belongs to another workflow name. Nothing was written |
 | `EnqueueFailed` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. A start again with the same id finds the workflow when the commit reply was lost |
+| `AsyncContext` | A blocking start (`horsies::blocking`) on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable |
 
 `WorkflowFunction::retry_start(&error)` starts again with the error's
 `workflow_id`. It refuses with `ValidationFailed` an error that is not
@@ -391,8 +393,9 @@ with the error's id.
   workflow is `Failed` with `WORKFLOW_PAUSED`; a resume can continue it.
 - A workflow with no output node is read as `OutputlessResults`: `get(id)`,
   `iter()`, `len()`, `is_empty()`, each outcome as
-  `TaskOutcome<serde_json::Value, UserCode>`.
-- `NodeResult` is `Outcome(TaskOutcome<serde_json::Value, UserCode>)` or
+  `TaskOutcome<JsonText, UserCode>`: the value as its stored text, read with
+  `decode::<T>()`.
+- `NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or
   `Unreadable { cause }`.
 - `WorkflowNodeInfo` has `node_id`, `index`, `name`, `status`
   (`WorkflowTaskStatus`), `result`, `started_at`, `completed_at`,
@@ -406,6 +409,7 @@ with the error's id.
 | `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types |
 | `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
+| `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed |
 
 `HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
@@ -413,7 +417,8 @@ with the error's id.
 operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
 `StoredDataInvalid` (`status`, `tasks`, `resume`), and
 `ResumeRecoveryFailed` (`resume` committed and the work after it failed:
-the workflow is RUNNING).
+the workflow is RUNNING). A blocking form (`handle.blocking()`) on a thread
+that runs a tokio runtime is `AsyncContext`, and nothing ran.
 
 ## Success Policy and `on_error`
 
@@ -453,6 +458,7 @@ dependencies).
 A function that builds a spec at run time has no registration that
 `check()` can build. Register check cases for it:
 
+<!-- rust-check: skip partial -- fetch_report is a task that the file does not define -->
 ```rust
 use horsies::{Horsies, HorsiesError, WorkflowSpec, WorkflowSpecBuilder};
 
@@ -486,13 +492,13 @@ is refused (`HRS-027`).
 | `HRS-013` | A quorum outside 1 to the node's dependencies, or `arg_from` on an `any` or quorum join |
 | `HRS-016` | A definition with an empty definition key |
 | `HRS-017` | A definition key or a workflow name that another registered definition has |
-| `HRS-019` | An input member that binds to no field, or a member name of the engine (`__h_...`, `__horsies_...`) |
+| `HRS-019` | A key of the input that binds to no parameter, or a member name of the engine (`__h_...`, `__horsies_...`) |
 | `HRS-020` | A missing parameter; at start, a sub-workflow node of an unregistered definition |
 | `HRS-021` | A parameter that both `set` and `arg_from` give |
 | `HRS-022` | Params given to a definition without params |
 | `HRS-025` | An output type that is not the declared or the handle's type |
 | `HRS-026` | An input that is not a JSON object |
-| `HRS-031` | A value that does not encode, does not read back, or has another type |
+| `HRS-031` | A value that does not encode, does not read back, or has another type; a key that binds to no field, or a field with no value, inside the value of a parameter |
 | `HRS-034` | A priority outside 1 to 100 |
 | `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or repeats at once |
 

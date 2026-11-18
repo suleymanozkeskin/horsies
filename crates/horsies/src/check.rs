@@ -11,7 +11,9 @@
 //!    a nesting is refused only when it reaches the depth limit for certain
 //!    (Python's phases 3.1 and 3.2).
 //! 2. Task options: the rules of each registered task's options that the
-//!    task attribute checks at compile time, for a task registered by hand.
+//!    task attribute checks at compile time, for a task registered by hand,
+//!    and Python's text rule of each `auto_retry_for` code
+//!    (`check_error_code_text`).
 //! 3. Schedules (not for a worker, which never sends a scheduled task): per
 //!    enabled schedule, its task, its queue, its input read back with the
 //!    task's input type, and the input size.
@@ -25,6 +27,7 @@
 //! 5. Worker connections: each worker profile against the server's
 //!    connection limit (none through a transaction pooler).
 
+use horsies_core::core::task::error::check_error_code_text;
 use horsies_core::{
     check_worker_connections, ConnectivityRefusal, Execution, RegisteredTask, TaskOptions,
 };
@@ -275,8 +278,32 @@ fn options_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
         )),
         (None, None) | (_, Some(_)) => {}
     }
+    refusals.extend(retry_code_refusals(name, options));
     refusals.extend(class_refusal(name, options));
     refusals
+}
+
+/// The refusal of each `auto_retry_for` code whose text the retry code rule
+/// refuses (`check_error_code_text`), with Python's text. Python checks the
+/// text of each code, a built-in code's value included, when the
+/// `RetryPolicy` is built (`validate_error_code_fields`). Pure.
+fn retry_code_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
+    options
+        .auto_retry_for
+        .iter()
+        .flatten()
+        .filter_map(|code| {
+            let text = code.to_string();
+            check_error_code_text(&text).err().map(|refusal| {
+                option_error(
+                    name,
+                    refusal.message("auto_retry_for", &text),
+                    "name each auto_retry_for code in UPPER_SNAKE_CASE, as the codes of a \
+                     UserErrorCode type are named",
+                )
+            })
+        })
+        .collect()
 }
 
 /// The refusal of a class without its settings: a shared class needs
@@ -322,7 +349,7 @@ mod tests {
     use std::sync::Arc;
 
     use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
-    use horsies_core::{CancelGraceMs, RetryPolicy, TaskErrorCode, TaskResult};
+    use horsies_core::{CancelGraceMs, RetryPolicy, TaskErrorCode, TaskResult, UserCode};
 
     use super::*;
     use crate::AppConfig;
@@ -375,6 +402,40 @@ mod tests {
         assert!(refusal_texts("echo", &shared).is_empty());
     }
 
+    /// Python `check(live=True)` runs the static check first: its refusal
+    /// returns before any connect, so an address with no server gives the
+    /// refusal of the static check, not the connectivity refusal.
+    #[tokio::test]
+    async fn the_live_check_refuses_with_the_static_check_before_any_connect() {
+        let mut app = Horsies::new(AppConfig::for_database_url(
+            "postgresql://postgres@127.0.0.1:1/horsies",
+        ))
+        .unwrap();
+        let policy_only = TaskOptions {
+            retry_policy: Some(RetryPolicy::fixed(vec![1], false).unwrap()),
+            ..options("bad_retry")
+        };
+        app.register("bad_retry", task(policy_only)).unwrap();
+        let report = app.check_live().await.unwrap_err();
+        assert_eq!(report.phase(), CHECK);
+        let messages: Vec<&str> = report
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        assert!(
+            messages.contains(&"retry_policy requires auto_retry_for"),
+            "{messages:?}"
+        );
+        assert!(
+            report
+                .errors()
+                .iter()
+                .all(|error| error.code != Some(ErrorCode::BrokerInvalidUrl)),
+            "{report}"
+        );
+    }
+
     #[test]
     fn a_task_name_that_differs_from_the_registration_is_refused() {
         let texts = refusal_texts("echo", &options("other"));
@@ -407,6 +468,37 @@ mod tests {
             ..policy_only
         };
         assert!(refusal_texts("echo", &both).is_empty());
+    }
+
+    /// A user code accepts any text that is not a built-in or reserved name
+    /// (`UserCode::parse`, Python's `TaskError` rule); `auto_retry_for`
+    /// takes only the codes of the retry code rule, as Python's
+    /// `RetryPolicy` does.
+    #[test]
+    fn a_retry_code_outside_the_retry_code_rule_is_refused_with_python_s_text() {
+        let codes: Vec<TaskErrorCode> = ["my_error", "RateLimitError", "", "RATE_LIMITED"]
+            .into_iter()
+            .map(|text| TaskErrorCode::User(UserCode::parse(text).expect("a user code")))
+            .chain([TaskErrorCode::from(horsies_core::OutcomeCode::TaskTimeout)])
+            .collect();
+        let refused = TaskOptions {
+            retry_policy: Some(RetryPolicy::fixed(vec![1], false).unwrap()),
+            auto_retry_for: Some(codes),
+            ..options("echo")
+        };
+        assert_eq!(
+            refusal_texts("echo", &refused),
+            vec![
+                "auto_retry_for 'my_error' is invalid; expected UPPER_SNAKE_CASE (e.g. \
+                 RATE_LIMITED)",
+                "auto_retry_for 'RateLimitError' looks like an exception class name; retry \
+                 matching is error-code-only, use UPPER_SNAKE_CASE code names",
+                "auto_retry_for must be a non-empty string, got ''",
+            ]
+        );
+        let error = &options_refusals("echo", &refused)[0];
+        assert_eq!(error.code, Some(ErrorCode::TaskInvalidOptions));
+        assert_eq!(error.notes, vec!["task 'echo'"]);
     }
 
     #[test]

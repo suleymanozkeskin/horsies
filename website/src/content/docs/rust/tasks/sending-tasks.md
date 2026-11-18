@@ -118,6 +118,7 @@ The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#sen
 
 ### Retry a Failed Send
 
+<!-- rust-check: alone -->
 ```rust
 use horsies::{task, TaskError, TaskFunction, TaskHandle, TaskSendError};
 

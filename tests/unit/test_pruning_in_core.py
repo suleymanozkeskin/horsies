@@ -16,7 +16,6 @@ import pytest
 
 import horsies._core as core
 from horsies.core.history.maintenance.pruning import (
-    PRUNING_SUBJECT,
     HistoryLeafSwept,
     PrunePass,
     PrunePassSummary,
@@ -30,7 +29,6 @@ from horsies.core.history.outcomes import (
     LeafPendingBlocked,
     PruneReach,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.reaper import ReaperMixin
 
 pytestmark = [pytest.mark.unit]
@@ -92,19 +90,25 @@ async def test_a_pass_record_is_the_summary_of_its_facts(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('retryable', [True, False])
-async def test_a_failed_pass_raises_with_its_subject_cause_and_retry_rule(
+async def test_a_failed_pass_raises_the_record_exception(
     retryable: bool,
 ) -> None:
+    cause = core.CoreConnectionError(
+        'prune_expired_partitions', 'candidates: connection refused', retryable,
+    )
     handle = _handle(
-        _record(core.PruneFailed, message='candidates: connection refused', retryable=retryable)
+        _record(
+            core.PruneFailed,
+            message='candidates: connection refused',
+            retryable=retryable,
+            exception=cause,
+        )
     )
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with pytest.raises(core.CoreConnectionError) as raised:
         _ = await prune_expired_partitions_in_core(handle)
 
-    assert raised.value.subject == PRUNING_SUBJECT
-    assert raised.value.message == 'candidates: connection refused'
-    assert raised.value.retryable is retryable
+    assert raised.value is cause
 
 
 def test_the_summary_of_a_python_pass_keeps_its_counts_and_reach() -> None:

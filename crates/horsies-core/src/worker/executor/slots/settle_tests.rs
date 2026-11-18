@@ -18,8 +18,6 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::executor::protocol::{
     CancelGraceMs, FailureDetail, IsolatedWork, RunEnd, SharedWork, StopReason,
     StoredOptionsRefusal,
@@ -295,12 +293,9 @@ fn writer(pool: PgPool) -> OutcomeWriter {
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }

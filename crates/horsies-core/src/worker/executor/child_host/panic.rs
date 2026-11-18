@@ -180,7 +180,9 @@ pub(super) fn panic_error(task_name: &str, module: TaskModule, record: PanicReco
             record.text
         ),
     );
-    error.data = Some(serde_json::json!({ "exception_type": PANIC_TYPE_NAME }));
+    error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &serde_json::json!({ "exception_type": PANIC_TYPE_NAME }),
+    ));
     error.exception = Some(ExceptionRecord {
         type_name: PANIC_TYPE_NAME.to_owned(),
         module: match module {
@@ -252,7 +254,7 @@ mod tests {
             Some("Unhandled exception in task app.tasks.fetch: panic: index out of bounds")
         );
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({ "exception_type": "panic" }))
         );
         assert_eq!(

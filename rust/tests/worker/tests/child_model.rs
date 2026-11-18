@@ -69,9 +69,12 @@ where
             assert_eq!(error.code().text(), "TASK_TIMEOUT");
             error
                 .data()
-                .and_then(|data| data.get("cancel_end"))
-                .and_then(|end| end.as_str())
-                .map(str::to_owned)
+                .map(|data| {
+                    data.decode::<serde_json::Value>()
+                        .expect("the data decodes as a JSON value")
+                })
+                .and_then(|data| data.get("cancel_end").cloned())
+                .and_then(|end| end.as_str().map(str::to_owned))
         }
         TaskOutcome::Succeeded(value) => panic!("the task succeeded with {value:?}"),
     }
@@ -110,7 +113,11 @@ async fn shared_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished() {
     match outcome(&hang, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
             assert_eq!(error.code().text(), "TASK_TIMEOUT");
-            let data = error.data().expect("TASK_TIMEOUT stores data");
+            let data: serde_json::Value = error
+                .data()
+                .expect("TASK_TIMEOUT stores data")
+                .decode()
+                .expect("the data decodes as a JSON value");
             assert_eq!(data["cancel_end"], serde_json::json!("DROPPED_AFTER_GRACE"));
             assert_eq!(data["timeout_ms"], serde_json::json!(2_000));
         }
@@ -279,7 +286,11 @@ async fn thread_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished() {
     match outcome(&hang, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
             assert_eq!(error.code().text(), "TASK_TIMEOUT");
-            let data = error.data().expect("TASK_TIMEOUT stores data");
+            let data: serde_json::Value = error
+                .data()
+                .expect("TASK_TIMEOUT stores data")
+                .decode()
+                .expect("the data decodes as a JSON value");
             assert!(
                 data.get("cancel_end").is_none(),
                 "only a shared async timeout stores cancel_end: {data}"

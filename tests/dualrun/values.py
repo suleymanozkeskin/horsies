@@ -300,6 +300,55 @@ def render_json[L](node: JsonNode[L], render_leaf: Callable[[L], str]) -> str:
             return render_leaf(value)
 
 
+def render_text[I](parts: tuple[str | I, ...], render_id: Callable[[I], str]) -> str:
+    """Canonical text of a text with ids: ``<text ...>``, each literal part as
+    a JSON string and each id as ``render_id`` gives it, separated by spaces.
+
+    A literal part is quoted and an id is not, so two different part lists
+    never give the same text.
+    """
+    rendered: list[str] = []
+    for part in parts:
+        match part:
+            case str():
+                rendered.append(json.dumps(part, ensure_ascii=False))
+            case _:
+                rendered.append(render_id(part))
+    return '<text ' + ' '.join(rendered) + '>'
+
+
+@dataclass(frozen=True, slots=True)
+class LabelledText:
+    """A text of an ``IdsInText`` path whose ids are replaced by their labels.
+
+    ``parts`` holds the literal text and the labels in text order.
+    """
+
+    parts: tuple[str | IdLabel, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MeasureToken:
+    """The place of a run measure (``RunMeasure``) inside a text."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredText:
+    """A text of a ``RunMeasuresInText`` path whose run measures are tokens.
+
+    ``parts`` holds the literal text and the tokens in text order.
+    """
+
+    parts: tuple[str | MeasureToken, ...]
+
+
+def render_measure(token: MeasureToken) -> str:
+    """Text of a run measure token: ``<name>``."""
+    return f'<{token.name}>'
+
+
 @dataclass(frozen=True, slots=True)
 class JsonDocument:
     """A stored JSON value, parsed; path-rule leaves are normalized values."""
@@ -319,6 +368,8 @@ NormalizedValue = (
     | DatedName
     | DigestMatches
     | DigestMismatch
+    | LabelledText
+    | MeasuredText
     | JsonDocument
 )
 
@@ -374,6 +425,10 @@ def sort_token(value: OrderKeyValue) -> tuple[int, str]:
             return (12, render_json(root, render_value))
         case RenderedDocument(text=text):
             return (12, text)
+        case LabelledText(parts=parts):
+            return (13, render_text(parts, lambda label: sort_token(label)[1]))
+        case MeasuredText(parts=parts):
+            return (14, render_text(parts, render_measure))
 
 
 def render_value(value: OrderKeyValue) -> str:
@@ -407,6 +462,10 @@ def render_value(value: OrderKeyValue) -> str:
             return render_json(root, render_value)
         case RenderedDocument(text=text):
             return text
+        case LabelledText(parts=parts):
+            return render_text(parts, render_value)
+        case MeasuredText(parts=parts):
+            return render_text(parts, render_measure)
 
 
 @dataclass(frozen=True, slots=True)

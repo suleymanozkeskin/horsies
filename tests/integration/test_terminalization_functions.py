@@ -11,6 +11,15 @@ operations write CANCELLED and two write COMPLETED, so "already terminal at my
 target status" cannot distinguish this operation's own committed work from
 somebody else's — and a caller told its work was already done will not repeat
 the coupled write that should have accompanied it.
+
+The refusals that the database decides before it changes a row (the live
+status check, the batch bounds, the id-keyed batch arrays) are Rust database
+tests of the core crate, in
+``crates/horsies-core/src/sql_tests/terminalization_functions.rs``. The tests
+that called the writers of COMPLETE_LOCKED, FAIL_RUNNING, FAIL_STALE and
+CANCEL_ADMIN with their own SQL and only decoded the outcome with
+``decode_outcome_row`` are there too. The tests here read each outcome
+through the Python lifecycle.
 """
 
 from __future__ import annotations
@@ -24,7 +33,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
@@ -59,7 +68,6 @@ from horsies.core.lifecycle.outcomes import (
     ObservedClaim,
     ObservedDeadline,
     ObservedForeignTerminalization,
-    ObservedStaleness,
     ObservedWorkflowLink,
     SourceStateConflict,
     TaskAbsent,
@@ -289,28 +297,6 @@ _WORKFLOW_SUCCESS_SQL: Final = text(f"""
     )
 """)
 
-_FAILED_ATTEMPT_SQL: Final = text(f"""
-    SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_failed_attempt(
-        CAST(:task_id AS uuid), :worker_id, CAST(:claimed_at AS TIMESTAMPTZ),
-        'NONE', NULL, NULL, NULL, :result, :error_code, :failed_reason,
-        'FAILED', NULL, :failed_reason, 'REFUSE', TRUE
-    )
-""")
-
-_STALE_ATTEMPT_SQL: Final = text(f"""
-    SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_stale_attempt(
-        CAST(:task_id AS uuid), CAST(:stale_after_ms AS INTEGER),
-        CAST(:finalizing_stale_after_ms AS INTEGER), 'NONE', NULL, NULL,
-        :result, :error_code, :failed_reason, :failed_reason, :failed_reason
-    )
-""")
-
-_CANCEL_TASK_SQL: Final = text(f"""
-    SELECT {_OUTCOME_COLUMNS} FROM horsies_cancel_task(
-        CAST(:task_id AS uuid), CAST(:include_running AS BOOLEAN)
-    )
-""")
-
 
 async def _outcome_of(
     session: AsyncSession,
@@ -347,13 +333,6 @@ async def _locked(
     )
 
 
-async def _workflow_task(session: AsyncSession) -> str:
-    """A RUNNING workflow task of ``WORKER`` with its RUNNING node."""
-    task_id = await _seed(session, is_workflow_task=True)
-    _ = await _link_workflow_task(session, task_id, node_status='RUNNING')
-    return task_id
-
-
 def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused:
     return CompleteTaskFused(
         task_id=task_id,
@@ -362,68 +341,7 @@ def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused
     )
 
 
-class TestLiveStatusInvariant:
-    async def test_the_live_table_refuses_a_terminal_status(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """A terminal task leaves the live table; the live row cannot hold a
-        terminal status (CHECK horsies_tasks_status_live)."""
-        task_id = await _seed(
-            session,
-            status='PENDING',
-            worker_id=None,
-            claimed_at=None,
-        )
-
-        with pytest.raises(IntegrityError, match='horsies_tasks_status_live'):
-            await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'CANCELLED'
-                    WHERE id = :id
-                """),
-                {'id': task_id},
-            )
-            await session.commit()
-        await session.rollback()
-
-        row = (
-            await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'PENDING'
-
-
 class TestAppliedTransitions:
-    async def test_locked_completion_applies_and_stamps_its_kind(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _workflow_task(session)
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.COMPLETE_LOCKED
-        assert outcome.terminal_at is not None
-
-    async def test_applied_reports_the_image_it_matched(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Not decoration: the pre-transition image is what the guard saw."""
-        task_id = await _workflow_task(session)
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.observed.status is TaskStatus.RUNNING
-        assert outcome.observed.worker_id == WORKER
-        assert outcome.observed.claimed_at == GENERATION
-
     async def test_fused_completion_writes_its_attempt_row(
         self,
         session: AsyncSession,
@@ -442,28 +360,6 @@ class TestAppliedTransitions:
         assert await read_attempt_history(session, task_id) == [
             (1, 'COMPLETED', None),
         ]
-
-    async def test_transition_leaves_the_row_terminal_and_attributed(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _workflow_task(session)
-        await _locked(session, task_id)
-        await session.commit()
-
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, terminal_at, terminalization_kind, result
-                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'COMPLETED'
-        assert row.terminal_at is not None
-        assert row.terminalization_kind == 'COMPLETE_LOCKED'
-        assert row.result == '{"ok": 1}'
 
     async def test_completion_clears_an_earlier_attempts_failure_summary_fused(
         self,
@@ -485,25 +381,6 @@ class TestAppliedTransitions:
         outcome = await apply_async(await session.connection(), _fused(task_id))
         await session.commit()
         assert isinstance(outcome, Applied)
-
-        await _assert_completed_after_attempt_one(session, task_id)
-
-    async def test_completion_clears_an_earlier_attempts_failure_summary_locked(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """The same invariant for the writer of COMPLETE_LOCKED, phase 1 of a
-        workflow task's success: it records the completion as attempt two
-        too."""
-        task_id = await _workflow_task(session)
-        await _requeued_after_failed_attempt(
-            session, task_id, failed_reason='attempt one crashed',
-        )
-
-        outcome = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.COMPLETE_LOCKED
 
         await _assert_completed_after_attempt_one(session, task_id)
 
@@ -535,19 +412,6 @@ async def _assert_completed_after_attempt_one(
 
 
 class TestAlreadyApplied:
-    async def test_replay_of_the_same_operation(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _workflow_task(session)
-        await _locked(session, task_id)
-        await session.commit()
-
-        replay = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(replay, AlreadyApplied)
-        assert replay.kind is TerminalizationKind.COMPLETE_LOCKED
-
     async def test_the_other_completion_operation_counts_as_the_same_work(
         self,
         session: AsyncSession,
@@ -562,42 +426,8 @@ class TestAlreadyApplied:
         assert isinstance(replay, AlreadyApplied)
         assert replay.kind is TerminalizationKind.COMPLETE_FUSED
 
-    async def test_a_foreign_kind_is_a_conflict_not_a_replay(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Someone else ended this task, and the caller has to hear that.
-
-        Reported as already-applied, a workflow cancellation's row would let a
-        completion replay assume work it never did.
-        """
-        task_id = await _seed(session)
-        await _force_terminal(
-            session, task_id, status='CANCELLED', kind='CANCEL_ADMIN',
-        )
-
-        outcome = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        evidence = outcome.evidence
-        assert isinstance(evidence, ObservedForeignTerminalization)
-        assert evidence.observed_status is TaskStatus.CANCELLED
-        assert evidence.committed_kind is TerminalizationKind.CANCEL_ADMIN
-        assert evidence.terminal_at is not None
-
 
 class TestRefusals:
-    async def test_another_worker_holds_the_claim(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, worker_id='someone-else')
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, LostClaim)
-        assert outcome.observed.worker_id == 'someone-else'
-
     async def test_the_claim_generation_moved_on(
         self,
         session: AsyncSession,
@@ -616,543 +446,6 @@ class TestRefusals:
 
         assert isinstance(outcome, LostClaim)
         assert outcome.observed.claimed_at == GENERATION
-
-    async def test_a_requeued_row_reports_a_lost_claim(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """PENDING with the claim cleared is the requeue case.
-
-        Fenced commands classify it as a lost claim rather than a state
-        conflict: the generation that held it is gone, which is precisely what
-        the caller must act on.
-        """
-        task_id = await _seed(
-            session, status='PENDING', worker_id='someone-else', claimed_at=None,
-        )
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET claimed_by_worker_id = NULL
-                WHERE id = :id
-            """),
-            {'id': task_id},
-        )
-        await session.commit()
-
-        outcome = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, LostClaim)
-        assert outcome.observed.status is TaskStatus.PENDING
-
-    async def test_the_source_status_is_wrong(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Owned by this worker at this generation, but not yet running."""
-        task_id = await _seed(session, status='CLAIMED')
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        assert outcome.observed.status is TaskStatus.CLAIMED
-        assert outcome.evidence == ObservedClaim(
-            worker_id=WORKER, claimed_at=GENERATION,
-        )
-
-    async def test_a_task_that_does_not_exist(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Absence is an outcome, not an empty result."""
-        outcome = await _locked(session, str(uuid.uuid4()))
-        await session.commit()
-        assert isinstance(outcome, TaskAbsent)
-
-
-STALE_AFTER_MS = 60_000
-FINALIZING_STALE_AFTER_MS = 30_000
-STALE_AFTER_SECONDS = STALE_AFTER_MS // 1000
-FINALIZING_STALE_AFTER_SECONDS = FINALIZING_STALE_AFTER_MS // 1000
-
-
-async def _fail_locked(
-    session: AsyncSession,
-    task_id: str,
-    failed_reason: str | None = None,
-) -> TerminalizationOutcome:
-    """The writer of FAIL_RUNNING: a failed attempt with no retry
-    (``horsies_finish_failed_attempt``) under ``WORKER`` at ``GENERATION``.
-    The attempt row records ``failed_reason`` too."""
-    return await _outcome_of(
-        session,
-        _FAILED_ATTEMPT_SQL,
-        {
-            'task_id': task_id,
-            'worker_id': WORKER,
-            'claimed_at': GENERATION,
-            'result': '{"err": 1}',
-            'error_code': 'TASK_EXCEPTION',
-            'failed_reason': failed_reason,
-        },
-    )
-
-
-async def _fail_stale(
-    session: AsyncSession,
-    task_id: str,
-    *,
-    stale_after_ms: int = STALE_AFTER_MS,
-    finalizing_stale_after_ms: int = FINALIZING_STALE_AFTER_MS,
-) -> TerminalizationOutcome:
-    """The writer of FAIL_STALE: the stale RUNNING recovery with no retry
-    (``horsies_finish_stale_attempt``)."""
-    return await _outcome_of(
-        session,
-        _STALE_ATTEMPT_SQL,
-        {
-            'task_id': task_id,
-            'stale_after_ms': stale_after_ms,
-            'finalizing_stale_after_ms': finalizing_stale_after_ms,
-            'result': '{"err": 2}',
-            'error_code': 'WORKER_CRASHED',
-            'failed_reason': 'Worker crashed',
-        },
-    )
-
-
-async def _age(
-    session: AsyncSession,
-    task_id: str,
-    *,
-    started_seconds_ago: int | None,
-    finalizing_seconds_ago: int | None = None,
-) -> None:
-    """Put the row's liveness columns where a staleness case needs them."""
-    await session.execute(
-        text("""
-            UPDATE horsies_tasks
-            SET started_at = CASE
-                    WHEN CAST(:started AS INTEGER) IS NULL THEN NULL
-                    ELSE NOW() - make_interval(secs => :started)
-                END,
-                finalizing_at = CASE
-                    WHEN CAST(:finalizing AS INTEGER) IS NULL THEN NULL
-                    ELSE NOW() - make_interval(secs => :finalizing)
-                END
-            WHERE id = :id
-        """),
-        {
-            'id': task_id,
-            'started': started_seconds_ago,
-            'finalizing': finalizing_seconds_ago,
-        },
-    )
-    await session.commit()
-
-
-async def _heartbeat(
-    session: AsyncSession,
-    task_id: str,
-    *,
-    seconds_ago: int,
-    role: str = 'runner',
-) -> None:
-    await session.execute(
-        text("""
-            INSERT INTO horsies_heartbeats (
-                task_id, sender_id, role, sent_at, hostname, pid
-            )
-            VALUES (
-                :id, 'staleness-test', :role, NOW() - make_interval(secs => :ago),
-                'terminalization-test-host', 4242
-            )
-        """),
-        {'id': task_id, 'role': role, 'ago': seconds_ago},
-    )
-    await session.commit()
-
-
-class TestFailLocked:
-    """The writer of FAIL_RUNNING, ``horsies_finish_failed_attempt``."""
-
-    async def test_applies_and_stamps_its_kind(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        outcome = await _fail_locked(session, task_id, 'worker failure')
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.FAIL_RUNNING
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, failed_at, failed_reason, error_code, result
-                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'FAILED'
-        assert row.failed_at is not None
-        assert row.failed_reason == 'worker failure'
-        assert row.error_code == 'TASK_EXCEPTION'
-        assert row.result == '{"err": 1}'
-
-    async def test_a_null_reason_clears_an_earlier_attempts_reason(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """The terminal writer owns the complete final-attempt summary.
-
-        Attempt one failed with a reason and requeued; the final attempt
-        fails with none. A NULL reason means this final attempt has no
-        failure reason: the requeued attempt's residue on the row is cleared,
-        while attempt one's history row keeps its reason untouched.
-        """
-        task_id = await _seed(session)
-        await _requeued_after_failed_attempt(
-            session, task_id, failed_reason='attempt one crashed',
-        )
-
-        outcome = await _fail_locked(session, task_id, None)
-        await session.commit()
-        assert isinstance(outcome, Applied)
-
-        reason = (
-            await session.execute(
-                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert reason is None
-
-        attempts = await read_attempt_history(session, task_id)
-        assert attempts == [
-            (1, 'FAILED', 'attempt one crashed'),
-            (2, 'FAILED', None),
-        ]
-
-    async def test_a_supplied_reason_overwrites(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-
-        await _fail_locked(session, task_id, 'attempt two crashed')
-        await session.commit()
-
-        reason = (
-            await session.execute(
-                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert reason == 'attempt two crashed'
-
-    async def test_replay_is_already_applied(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        await _fail_locked(session, task_id)
-        await session.commit()
-
-        replay = await _fail_locked(session, task_id)
-        await session.commit()
-        assert isinstance(replay, AlreadyApplied)
-        assert replay.kind is TerminalizationKind.FAIL_RUNNING
-
-    async def test_a_stale_failure_is_a_conflict_not_a_replay(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Both write FAILED; they are deliberately not one class.
-
-        Distinctness is the conservative direction: a conflict makes the
-        caller look, an already-applied lets it walk away.
-        """
-        task_id = await _seed(session)
-        await _force_terminal(session, task_id, status='FAILED', kind='FAIL_STALE')
-
-        outcome = await _fail_locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
-        assert outcome.evidence.committed_kind is TerminalizationKind.FAIL_STALE
-
-    async def test_another_worker_holds_the_claim(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, worker_id='someone-else')
-        outcome = await _fail_locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, LostClaim)
-        assert outcome.observed.worker_id == 'someone-else'
-
-    async def test_the_source_status_is_wrong(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-        outcome = await _fail_locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        assert outcome.observed.status is TaskStatus.CLAIMED
-        assert outcome.evidence == ObservedClaim(
-            worker_id=WORKER, claimed_at=GENERATION,
-        )
-
-    async def test_a_task_that_does_not_exist(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        outcome = await _fail_locked(session, str(uuid.uuid4()))
-        await session.commit()
-        assert isinstance(outcome, TaskAbsent)
-
-
-class TestFailStale:
-    """The writer of FAIL_STALE, ``horsies_finish_stale_attempt``."""
-
-    async def test_a_silent_runner_is_failed(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """No heartbeat at all: staleness is judged from started_at."""
-        task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.FAIL_STALE
-        assert outcome.observed.worker_id == WORKER
-
-    async def test_a_stale_heartbeat_is_failed(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 4)
-        await _heartbeat(session, task_id, seconds_ago=STALE_AFTER_SECONDS * 2)
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, Applied)
-
-    async def test_a_recent_heartbeat_refuses_with_the_evidence(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """The refusal carries what the guard judged, not just that it refused."""
-        task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
-        await _heartbeat(session, task_id, seconds_ago=1)
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        assert outcome.observed.status is TaskStatus.RUNNING
-        evidence = outcome.evidence
-        assert isinstance(evidence, ObservedStaleness)
-        assert evidence.last_heartbeat_at is not None
-        assert evidence.started_at is not None
-        assert evidence.finalizing_at is None
-        assert evidence.stale_after_ms == STALE_AFTER_MS
-        assert evidence.finalizing_stale_after_ms == FINALIZING_STALE_AFTER_MS
-        # The refusal is reconstructible from its own evidence: the heartbeat
-        # sits inside the freshness window the guard judged it against.
-        assert evidence.last_heartbeat_at >= evidence.evaluated_at - timedelta(
-            milliseconds=STALE_AFTER_MS,
-        )
-
-    async def test_fractional_second_threshold_is_not_truncated(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """The public millisecond contract reaches the SQL guard unchanged."""
-        task_id = await _seed(session)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET started_at = NOW() - INTERVAL '10 seconds'
-                WHERE id = :id
-            """),
-            {'id': task_id},
-        )
-        await session.execute(
-            text("""
-                INSERT INTO horsies_heartbeats (
-                    task_id, sender_id, role, sent_at, hostname, pid
-                ) VALUES (
-                    :id, 'fractional-threshold-test', 'runner',
-                    NOW() - INTERVAL '1.25 seconds',
-                    'terminalization-test-host', 4242
-                )
-            """),
-            {'id': task_id},
-        )
-
-        outcome = await _fail_stale(
-            session,
-            task_id,
-            stale_after_ms=1_500,
-            finalizing_stale_after_ms=2_750,
-        )
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        evidence = outcome.evidence
-        assert isinstance(evidence, ObservedStaleness)
-        assert evidence.stale_after_ms == 1_500
-        assert evidence.finalizing_stale_after_ms == 2_750
-        assert evidence.last_heartbeat_at is not None
-        assert evidence.last_heartbeat_at == (
-            evidence.evaluated_at - timedelta(milliseconds=1_250)
-        )
-
-    async def test_a_heartbeat_from_another_role_does_not_count(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Only the runner's heartbeats prove the runner is alive."""
-        task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
-        await _heartbeat(session, task_id, seconds_ago=1, role='claimer')
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, Applied)
-
-    async def test_a_row_that_never_started_refuses(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """RUNNING with no started_at is not judgeable as stale.
-
-        The evidence says why: a null started_at, so the guard had no instant
-        to measure silence from.
-        """
-        task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=None)
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        evidence = outcome.evidence
-        assert isinstance(evidence, ObservedStaleness)
-        assert evidence.started_at is None
-        assert evidence.last_heartbeat_at is None
-        assert evidence.evaluated_at is not None
-
-    async def test_an_active_finalizer_defers(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """A finalizer inside its window holds the row against stale-failure.
-
-        The evidence must explain this refusal on its own: the runner is
-        silent past its threshold, so the only arm that can have refused is
-        the finalizer's — and the finalizing instant it carries sits inside
-        the window it was judged against.
-        """
-        task_id = await _seed(session)
-        await _age(
-            session,
-            task_id,
-            started_seconds_ago=STALE_AFTER_SECONDS * 2,
-            finalizing_seconds_ago=1,
-        )
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        evidence = outcome.evidence
-        assert isinstance(evidence, ObservedStaleness)
-        assert evidence.finalizing_at is not None
-        assert evidence.finalizing_at >= evidence.evaluated_at - timedelta(
-            milliseconds=FINALIZING_STALE_AFTER_MS,
-        )
-        assert evidence.started_at is not None
-        assert evidence.started_at < evidence.evaluated_at - timedelta(
-            milliseconds=STALE_AFTER_MS,
-        )
-        assert evidence.last_heartbeat_at is None
-
-    async def test_a_stale_finalizer_does_not_defer(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        await _age(
-            session,
-            task_id,
-            started_seconds_ago=STALE_AFTER_SECONDS * 2,
-            finalizing_seconds_ago=FINALIZING_STALE_AFTER_SECONDS * 2,
-        )
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, Applied)
-
-    async def test_replay_is_already_applied(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
-        await _fail_stale(session, task_id)
-        await session.commit()
-
-        replay = await _fail_stale(session, task_id)
-        await session.commit()
-        assert isinstance(replay, AlreadyApplied)
-        assert replay.kind is TerminalizationKind.FAIL_STALE
-
-    async def test_a_locked_failure_is_a_conflict_not_a_replay(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        await _force_terminal(session, task_id, status='FAILED', kind='FAIL_RUNNING')
-
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
-        assert outcome.evidence.committed_kind is TerminalizationKind.FAIL_RUNNING
-
-    async def test_the_source_status_is_wrong(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Not RUNNING, so no staleness was judged and no evidence is claimed."""
-        task_id = await _seed(session, status='CLAIMED')
-        outcome = await _fail_stale(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        assert outcome.observed.status is TaskStatus.CLAIMED
-        assert outcome.evidence == ObservedClaim(
-            worker_id=WORKER, claimed_at=GENERATION,
-        )
-
-    async def test_a_task_that_does_not_exist(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        outcome = await _fail_stale(session, str(uuid.uuid4()))
-        await session.commit()
-        assert isinstance(outcome, TaskAbsent)
 
 
 def _expire_claim(task_id: str) -> ExpireOwnedClaim:
@@ -1577,40 +870,6 @@ class TestExpirePendingTasks:
         await session.commit()
         assert outcomes == []
 
-    @pytest.mark.parametrize('batch_size', ['NULL', '0', '-1'])
-    async def test_an_unbounded_or_absurd_batch_mutates_nothing(
-        self,
-        session: AsyncSession,
-        clean_workflow_tables: None,
-        batch_size: str,
-    ) -> None:
-        """LIMIT NULL means no limit at all, so NULL must be an error.
-
-        The bound exists to keep one pass from committing an unbounded
-        notification burst; a call that disables it is refused before any
-        row is touched.
-        """
-        task_id = await _seed(session, status='PENDING')
-        await _deadline(session, task_id, seconds_ago=60)
-
-        with pytest.raises(Exception, match='positive integer'):
-            await session.execute(
-                text(f"""
-                    SELECT * FROM horsies_expire_pending_tasks(
-                        CAST({batch_size} AS INTEGER), '{{}}', 'TASK_EXPIRED'
-                    )
-                """),
-            )
-        await session.rollback()
-
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'PENDING'
-
     async def test_a_row_a_concurrent_claim_holds_is_stepped_around(
         self,
         session: AsyncSession,
@@ -1635,21 +894,6 @@ class TestExpirePendingTasks:
             await holder.rollback()
 
         assert {o.task_id for o in outcomes} == {free}
-
-
-async def _cancel_task(
-    session: AsyncSession,
-    task_id: str,
-    *,
-    include_running: bool = False,
-) -> TerminalizationOutcome:
-    """The writer of CANCEL_ADMIN: the administrative cancel of a plain task
-    (``horsies_cancel_task``); a RUNNING row only with ``include_running``."""
-    return await _outcome_of(
-        session,
-        _CANCEL_TASK_SQL,
-        {'task_id': task_id, 'include_running': include_running},
-    )
 
 
 def _cancel_owned_orphan(
@@ -1720,126 +964,6 @@ async def _link_workflow_task(
     )
     await session.commit()
     return workflow_id
-
-
-class TestCancelTask:
-    """The writer of CANCEL_ADMIN, ``horsies_cancel_task``."""
-
-    async def test_applies_with_the_operator_owned_literals_and_pre_image(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-
-        outcome = await _cancel_task(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.CANCEL_ADMIN
-        assert outcome.observed.status is TaskStatus.CLAIMED
-        assert outcome.observed.worker_id == WORKER
-        assert outcome.observed.claimed_at == GENERATION
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, error_code, failed_reason, failed_at,
-                           terminal_at, claimed, claimed_by_worker_id,
-                           claimed_at, finalizing_at,
-                           finalizing_by_worker_id
-                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'CANCELLED'
-        assert row.error_code == 'TASK_CANCELLED'
-        assert row.failed_reason == 'Cancelled via monitoring API'
-        assert row.failed_at is not None
-        assert row.terminal_at == outcome.terminal_at
-        # No claim state survives the move; the claim's timestamp is
-        # preserved on the history record as provenance.
-        assert row.claimed is False
-        assert row.claimed_by_worker_id is None
-        assert row.claimed_at == GENERATION
-        assert row.finalizing_at is None
-        assert row.finalizing_by_worker_id is None
-
-    async def test_running_requires_explicit_permission(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        refused_id = await _seed(session)
-        refused = await _cancel_task(session, refused_id)
-        await session.commit()
-        assert isinstance(refused, SourceStateConflict)
-        assert refused.observed.status is TaskStatus.RUNNING
-
-        allowed_id = await _seed(session)
-        allowed = await _cancel_task(session, allowed_id, include_running=True)
-        await session.commit()
-        assert isinstance(allowed, Applied)
-        assert allowed.observed.status is TaskStatus.RUNNING
-
-    async def test_a_workflow_backing_task_is_never_administratively_cancelled(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(
-            session,
-            status='CLAIMED',
-            is_workflow_task=True,
-        )
-
-        outcome = await _cancel_task(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'CLAIMED'
-
-    async def test_replay_is_already_applied(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-        await _cancel_task(session, task_id)
-        await session.commit()
-
-        replay = await _cancel_task(session, task_id)
-        await session.commit()
-        assert isinstance(replay, AlreadyApplied)
-        assert replay.kind is TerminalizationKind.CANCEL_ADMIN
-
-    async def test_a_finished_task_of_another_kind_is_never_overwritten(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-        await _force_terminal(
-            session,
-            task_id,
-            status='CANCELLED',
-            kind='CANCEL_ORPHAN',
-        )
-
-        outcome = await _cancel_task(session, task_id, include_running=True)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
-        assert outcome.evidence.committed_kind is TerminalizationKind.CANCEL_ORPHAN
-
-    async def test_absence_is_an_outcome(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        outcome = await _cancel_task(session, str(uuid.uuid4()))
-        await session.commit()
-        assert isinstance(outcome, TaskAbsent)
 
 
 class TestCancelOwnedOrphan:
@@ -2115,37 +1239,6 @@ class TestCancelOrphanedTasks:
         )
         await session.commit()
         assert outcomes == []
-
-    @pytest.mark.parametrize('batch_size', ['NULL', '0', '-1'])
-    async def test_an_invalid_bound_raises_before_mutation(
-        self,
-        session: AsyncSession,
-        clean_workflow_tables: None,
-        batch_size: str,
-    ) -> None:
-        task_id = await _seed(
-            session,
-            status='CLAIMED',
-            is_workflow_task=True,
-        )
-
-        with pytest.raises(Exception, match='positive integer'):
-            await session.execute(
-                text(f"""
-                    SELECT * FROM horsies_cancel_orphaned_tasks(
-                        CAST({batch_size} AS INTEGER)
-                    )
-                """),
-            )
-        await session.rollback()
-
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'CLAIMED'
 
     async def test_a_locked_orphan_is_stepped_around(
         self,
@@ -2647,64 +1740,6 @@ class TestIdKeyedWorkflowBatches:
         else:
             assert summary.error_code is None
             assert summary.failed_reason is None
-
-    @pytest.mark.parametrize(
-        'function_name',
-        ['horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'],
-    )
-    @pytest.mark.parametrize(
-        ('ids_sql', 'generations_sql', 'message'),
-        [
-            ('NULL', "ARRAY['2026-08-04 09:00:00+00']", 'non-NULL'),
-            ("ARRAY['one']", 'NULL', 'non-NULL'),
-            (
-                "ARRAY['one', '00000000-0000-4000-8000-000000000002']",
-                "ARRAY['2026-08-04 09:00:00+00']",
-                'lengths differ',
-            ),
-            (
-                'ARRAY[NULL]::uuid[]',
-                "ARRAY['2026-08-04 09:00:00+00']",
-                'non-NULL',
-            ),
-            (
-                "ARRAY['one', 'one']",
-                "ARRAY['2026-08-04 09:00:00+00', " "'2026-08-04 09:00:01+00']",
-                'distinct',
-            ),
-        ],
-    )
-    async def test_invalid_arrays_raise_before_mutation(
-        self,
-        session: AsyncSession,
-        function_name: str,
-        ids_sql: str,
-        generations_sql: str,
-        message: str,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
-        ids = ids_sql.replace('one', task_id)
-
-        with pytest.raises(Exception, match=message):
-            await session.execute(
-                text(f"""
-                    SELECT * FROM {function_name}(
-                        CAST({ids} AS uuid[]),
-                        CAST({generations_sql} AS TIMESTAMPTZ[]),
-                        :worker_id
-                    )
-                """),
-                {'worker_id': WORKER},
-            )
-        await session.rollback()
-
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'CLAIMED'
 
     @pytest.mark.parametrize('command_type', [AbandonOwnedNodes, CancelOwnedNodes])
     async def test_a_null_generation_is_refused(

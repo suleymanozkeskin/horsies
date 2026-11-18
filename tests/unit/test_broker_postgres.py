@@ -73,7 +73,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     RawResultRecord,
 )
-from horsies.core.codec.json_io import SerializationError
+from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
     AllSlotsServing,
@@ -934,6 +934,61 @@ class TestEnqueueAsync:
         session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_empty_kwargs_text_is_refused_as_invalid_input(self) -> None:
+        """An empty text is not JSON; no input is None."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await _python_enqueue_async(
+            broker,
+            'my_task',
+            task_id='test-task-id',
+            sent_at=datetime.now(timezone.utc),
+            send_kind=SendKind.FIRST,
+            input_json='',
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert message == (
+                    'kwargs JSON corrupt for my_task: '
+                    'JSON parse failed: the text is empty'
+                )
+                assert isinstance(cause, EmptyJsonTextError)
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_task_options_text_is_refused(self) -> None:
+        """An empty text is not JSON; no options are None."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await _python_enqueue_async(
+            broker,
+            'my_task',
+            task_id='test-task-id',
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            task_options='',
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidTaskOptions(message=message, exception=cause):
+                assert message == (
+                    'task_options JSON corrupt: JSON parse failed: the text is empty'
+                )
+                assert isinstance(cause, EmptyJsonTextError)
+            case other:
+                raise AssertionError(f'expected INVALID_TASK_OPTIONS, got {other!r}')
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_lone_surrogate_in_kwargs_is_refused_as_invalid_input(self) -> None:
         """A lone surrogate never reaches the UTF-8 encode of the input envelope."""
         broker = _make_broker()
@@ -1713,6 +1768,20 @@ class TestGetRawResultRecordAsync:
         assert isinstance(result.err_value.exception, NoCause)
 
     @pytest.mark.asyncio
+    async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
+        broker = self._broker_answering(self._record('COMPLETED', ''))
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {RESULT_TASK_ID}: '
+            'JSON parse failed: the text is empty'
+        )
+
+    @pytest.mark.asyncio
     async def test_corrupt_stored_data_found_by_the_core_is_invalid_json_payload(
         self,
     ) -> None:
@@ -1864,6 +1933,37 @@ class TestPythonRawResultRead:
         assert record.status == status
         assert record.raw_result is None
         assert session.execute.await_count == 1
+
+    def test_no_stored_result_text_builds_a_record_with_no_result(self) -> None:
+        """NULL is checked before the parse: no stored result, no payload."""
+        broker = _make_broker()
+
+        result = broker._build_raw_result_record(  # pyright: ignore[reportPrivateUsage]
+            RESULT_TASK_ID, 'my_task', TaskStatus.COMPLETED, None,
+        )
+
+        assert result == Ok(RawResultRecord(
+            task_id=RESULT_TASK_ID,
+            task_name='my_task',
+            status=TaskStatus.COMPLETED,
+            raw_result=None,
+        ))
+
+    def test_an_empty_stored_result_text_is_invalid_json_payload(self) -> None:
+        """An empty text is not JSON, and not "no result"."""
+        broker = _make_broker()
+
+        result = broker._build_raw_result_record(  # pyright: ignore[reportPrivateUsage]
+            RESULT_TASK_ID, 'my_task', TaskStatus.COMPLETED, '',
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {RESULT_TASK_ID}: '
+            'JSON parse failed: the text is empty'
+        )
 
     @pytest.mark.asyncio
     async def test_cancelled_row_returns_record_with_none_payload(self) -> None:
@@ -3200,6 +3300,22 @@ class TestGetTaskInfoAsync:
         assert is_err(result)
         assert isinstance(result.err_value, BrokerInvalidJsonPayload)
         assert isinstance(result.err_value.exception, exception_class)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
+        broker = self._broker_answering(
+            _task_info_record(status='COMPLETED', result_json=''),
+        )
+
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {TASK_INFO_ID}: '
+            'JSON parse failed: the text is empty'
+        )
 
     @pytest.mark.asyncio
     async def test_attempts_keep_the_core_order(self) -> None:

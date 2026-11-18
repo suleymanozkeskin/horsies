@@ -43,7 +43,6 @@ from horsies._core import (
     CoveredForeverRecord,
     CoveredUntilRecord,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok
 
 from ..commands import (
@@ -1108,10 +1107,6 @@ class CoverageSerialization(Enum):
     overlap with a startup pass (``serialize_damaged_work=False``)."""
 
 
-COVERAGE_SUBJECT: Final = 'CoreHandle.ensure_partition_coverage_async'
-"""The subject of a ``CoreOperationFailed`` of the core coverage pass."""
-
-
 def _history_coverage_of_record(
     record: CoveredForeverRecord | CoveredUntilRecord,
 ) -> HistoryCoverage:
@@ -1144,9 +1139,11 @@ async def maintain_partition_coverage_in_core(
     - ``ValueError`` before any core call: a declared class that is not the
       class of a period of whole days (``declared_days``), or a horizon that
       the core request refuses;
-    - ``CoreOperationFailed`` when the pass has no outcome (the connect, the
-      client family check, a probe, the gate, the registration or the final
-      publication failed); the leaves that committed before stay;
+    - the record's ``CoreFailure`` (the core's class of the cause, with the
+      subject ``ensure_partition_coverage``) when the pass has no outcome
+      (the connect, the client family check, a probe, the gate, the
+      registration or the final publication failed); the leaves that
+      committed before stay;
     - ``CoreError`` when the core of this process cannot run the pass.
 
     A cancel of the caller does not stop the pass: the core runs it to its
@@ -1180,8 +1177,8 @@ async def maintain_partition_coverage_in_core(
                 heartbeat_covered_now=record.heartbeat_covered_now,
                 absent_leaves=tuple(record.absent_leaves),
             )
-        case CoverageFailed(message=message, retryable=retryable):
-            raise CoreOperationFailed(COVERAGE_SUBJECT, message, retryable)
+        case CoverageFailed(exception=exception):
+            raise exception
         case _ as unreachable:
             assert_never(unreachable)
 
