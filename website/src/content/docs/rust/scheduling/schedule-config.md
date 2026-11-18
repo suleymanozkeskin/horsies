@@ -19,7 +19,6 @@ use horsies::{
     task, AppConfig, DailySchedule, Horsies, HorsiesError, IntervalSchedule, ScheduleConfig,
     SchedulePattern, TaskError, TaskSchedule,
 };
-use serde_json::json;
 
 #[task("build_report")]
 async fn build_report(region: String) -> Result<String, TaskError<Infallible>> {
@@ -38,7 +37,7 @@ fn schedules() -> Result<ScheduleConfig, Box<dyn std::error::Error>> {
         "build_report",
         SchedulePattern::Daily(DailySchedule { time: three_am }),
     )
-    .input(json!({ "region": "eu" }))
+    .input(&build_report::Input { region: "eu".to_owned() })?
     .timezone("Europe/Berlin");
     let cache_cleanup = TaskSchedule::new(
         "cache-cleanup",
@@ -85,14 +84,16 @@ The `scheduler` command, its options and its exit codes are on [CLI Reference](/
 | `name` | `new` | `String` | – |
 | `task_name` | `new` | `String`: a registered task | – |
 | `pattern` | `new` | `SchedulePattern` | – |
-| `input` | `.input(value)` | `serde_json::Value` | `Null`: the task gets the input `{}` |
+| `input` | `.input(&value)?` | `Option<JsonText>`: the input's JSON text | `None`: the task gets the input `{}` |
 | `queue_name` | `.queue(name)` | `Option<String>` | `None`: the queue of the task |
 | `enabled` | `.enabled(bool)` | `bool` | `true` |
 | `timezone` | `.timezone(name)` | `String`: an IANA name | `UTC` |
 | `catch_up_missed` | `.catch_up_missed(bool)` | `bool` | `false` |
 | `max_catch_up_runs` | `.max_catch_up_runs(n)` | `u32`: 1 to 10,000 | 100 |
 
-- `input` is the task input in the stored form: one member per task parameter, by name. A task `fn build_report(region: String)` reads `{"region": "eu"}`. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/#define-a-task).
+- `input` is the task input in the stored form: one member per task parameter, by name. A task `fn build_report(region: String)` reads `{"region": "eu"}`, which `build_report::Input { region }` writes. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/#define-a-task).
+- `.input(&value)` writes `value` with the strict writer of every stored form and returns `Result<TaskSchedule, JsonTextRefused>`. An integer keeps every digit: a `u128` field of `u128::MAX` is stored as `340282366920938463463374607431768211455`. `JsonTextRefused::NotJsonNative` is a value that does not write as JSON (a non-finite float, a map key that is not a text); `JsonTextRefused::NotStrictJson` is a text deeper than 300 levels, with an integer of more than 4,300 digits, or with a repeated key.
+- A JSON config text read with serde_json keeps the text of the `input` member as written. `null` is no input. A TOML config text (`toml::from_str`, `horsies web CONFIG`) holds no `input`: its read refuses the member, because only serde_json gives the text of a value.
 - A time of day is in the schedule's `timezone`.
 - The meaning of `catch_up_missed` and `max_catch_up_runs` is on [Scheduler Overview](/horsies/scheduling/scheduler-overview/#catch-up-logic).
 
@@ -203,6 +204,6 @@ Several schedulers can run against one database: each fire locks the state row o
 
 ## Things to Avoid
 
-**Do not write the fields of a struct parameter at the top level of `input`.** A task `fn build_report(request: ReportRequest)` reads `{"request": {...}}`.
+**Do not pass a struct parameter as the `input`.** A task `fn build_report(request: ReportRequest)` reads `{"request": {...}}`: pass `build_report::Input { request }`, not the `ReportRequest`.
 
 **Do not rename a task parameter that a schedule's `input` names.** The parameter name is the stored key. The check refuses the old key, and a slot that the scheduler already sent fails with `WORKER_SERIALIZATION_ERROR`.

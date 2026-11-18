@@ -102,22 +102,14 @@ struct SiteKey {
 enum Allowed {
     /// The value is not a user value.
     NotUserValue(&'static str),
-    /// A user value read only for its member names and kinds: no number of it
-    /// is written or decoded from the `Value`, and the text goes on as it is.
-    ShapeOnly(&'static str),
     /// A user value on no production path.
     NoProductionCaller(&'static str),
-    /// A user value whose fix changes a public type: the open issue.
-    OpenIssue(&'static str),
 }
 
 impl Allowed {
     fn reason(self) -> &'static str {
         match self {
-            Self::NotUserValue(reason)
-            | Self::ShapeOnly(reason)
-            | Self::NoProductionCaller(reason)
-            | Self::OpenIssue(reason) => reason,
+            Self::NotUserValue(reason) | Self::NoProductionCaller(reason) => reason,
         }
     }
 }
@@ -230,17 +222,6 @@ const KNOWN_SITES: &[Known] = &[
         allowed: Allowed::NotUserValue("the retention config"),
     },
     Known {
-        file: "crates/horsies-core/src/core/config/schedule.rs",
-        item: "TaskSchedule",
-        kind: SiteKind::DeserializeField,
-        count: 1,
-        allowed: Allowed::OpenIssue(
-            "#1892: the schedule input of the Rust client's config is a Value, built in code or \
-             read from a config text; the scheduler reads each input as its text (`input_json` \
-             of the manifest)",
-        ),
-    },
-    Known {
         file: "crates/horsies-core/src/core/history/archive/attempts.rs",
         item: "decode_attempt_rows",
         kind: SiteKind::TypedLetParse,
@@ -322,56 +303,11 @@ const KNOWN_SITES: &[Known] = &[
         allowed: Allowed::NotUserValue("a database URL text"),
     },
     Known {
-        file: "crates/horsies/src/task/body.rs",
-        item: "check_input",
-        kind: SiteKind::TurbofishValue,
-        count: 2,
-        allowed: Allowed::ShapeOnly(
-            "the member keys of a task input and of its read-back; the typed decode of the same \
-             text runs first (#1893)",
-        ),
-    },
-    Known {
-        file: "crates/horsies/src/task/body.rs",
-        item: "decode_unit",
-        kind: SiteKind::TurbofishValue,
-        count: 1,
-        allowed: Allowed::ShapeOnly(
-            "the kind and the first key of the input of a task with no parameters (#1893)",
-        ),
-    },
-    Known {
         file: "crates/horsies/src/workflow/handle.rs",
         item: "node_info",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("the stored status text of a node"),
-    },
-    Known {
-        file: "crates/horsies/src/workflow/node.rs",
-        item: "unread_node_member",
-        kind: SiteKind::TurbofishValue,
-        count: 2,
-        allowed: Allowed::ShapeOnly(
-            "the member keys of a node input and of its read-back; the typed decode of the same \
-             text runs first (#1893)",
-        ),
-    },
-    Known {
-        file: "crates/horsies/src/workflow/registry.rs",
-        item: "decode_unit_params",
-        kind: SiteKind::TurbofishValue,
-        count: 1,
-        allowed: Allowed::ShapeOnly(
-            "the kind and the first key of the params of a definition with none (#1893)",
-        ),
-    },
-    Known {
-        file: "crates/horsies/src/workflow/registry.rs",
-        item: "static_members",
-        kind: SiteKind::TurbofishValue,
-        count: 1,
-        allowed: Allowed::ShapeOnly("the member keys of the params text of a node (#1893)"),
     },
 ];
 
@@ -1034,7 +970,7 @@ fn every_read_into_value_of_the_core_and_the_rust_client_is_listed() {
 
 #[test]
 fn each_listed_site_has_a_reason_and_a_file_of_a_scanned_crate() {
-    assert_eq!(KNOWN_SITES.len(), 30);
+    assert_eq!(KNOWN_SITES.len(), 24);
     for site in KNOWN_SITES {
         assert!(!site.allowed.reason().is_empty(), "{}", site.file);
         assert!(site.count > 0, "{}", site.file);

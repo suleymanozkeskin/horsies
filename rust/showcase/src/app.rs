@@ -216,14 +216,18 @@ fn cron(
 
 /// One schedule of `task_name` with `input`, the task's stored input: one
 /// member per parameter. The schedule sends to the task's queue.
+///
+/// Panics: when `input` does not write as strict JSON. Each input of the
+/// table is a `json!` object of texts and integers, which writes.
 fn schedule(
     name: &str,
     task_name: &str,
     pattern: SchedulePattern,
-    input: serde_json::Value,
+    input: &serde_json::Value,
 ) -> TaskSchedule {
     TaskSchedule::new(name, task_name, pattern)
         .input(input)
+        .expect("a json! object of texts and integers writes as strict JSON")
         .catch_up_missed(false)
 }
 
@@ -235,7 +239,7 @@ pub fn schedules() -> ScheduleConfig {
             &format!("supplier-feed-{supplier}"),
             "sync_supplier_feed",
             interval_seconds(crate::tuning::SUPPLIER_FEED_INTERVAL_SECONDS + offset * 30),
-            json!({"supplier": supplier}),
+            &json!({"supplier": supplier}),
         ));
     }
     for (offset, region) in (0_u32..).zip(crate::tuning::REGIONS.iter()) {
@@ -243,13 +247,13 @@ pub fn schedules() -> ScheduleConfig {
             &format!("rollup-{region}"),
             "regional_rollup",
             hourly(10 + offset * 5),
-            json!({"region": region}),
+            &json!({"region": region}),
         ));
         schedules.push(schedule(
             &format!("cache-warm-{region}"),
             "warm_cache_edge",
             interval_minutes(crate::tuning::CACHE_WARM_INTERVAL_MINUTES + u64::from(offset)),
-            json!({"campaign_id": format!("steady-{region}")}),
+            &json!({"campaign_id": format!("steady-{region}")}),
         ));
     }
     schedules.extend([
@@ -257,99 +261,99 @@ pub fn schedules() -> ScheduleConfig {
             "search-prewarm",
             "prewarm_search",
             interval_minutes(crate::tuning::SEARCH_PREWARM_INTERVAL_MINUTES),
-            json!({"campaign_id": "steady-state"}),
+            &json!({"campaign_id": "steady-state"}),
         ),
         schedule(
             "abandoned-cart-sweep",
             "abandoned_cart_sweep",
             hourly(u32::from(crate::tuning::ABANDONED_CART_MINUTE)),
-            json!({"older_than_minutes": crate::tuning::ABANDONED_CART_AGE_MINUTES}),
+            &json!({"older_than_minutes": crate::tuning::ABANDONED_CART_AGE_MINUTES}),
         ),
         schedule(
             "retention-audit-hourly",
             "retention_audit",
             hourly(50),
-            json!({"older_than_days": crate::tuning::RETENTION_AUDIT_DAYS}),
+            &json!({"older_than_days": crate::tuning::RETENTION_AUDIT_DAYS}),
         ),
         schedule(
             "sales-rollup-daily",
             "sales_rollup",
             daily(u32::from(crate::tuning::SALES_ROLLUP_HOUR), 0),
-            json!({"window": "daily"}),
+            &json!({"window": "daily"}),
         ),
         schedule(
             "retention-audit-daily",
             "retention_audit",
             daily(3, 30),
-            json!({"older_than_days": 90}),
+            &json!({"older_than_days": 90}),
         ),
         schedule(
             "nightly-stocktake",
             "replenish_catalog",
             daily(4, 15),
-            json!({"target_units": crate::tuning::CATALOG_STOCK_PER_SKU}),
+            &json!({"target_units": crate::tuning::CATALOG_STOCK_PER_SKU}),
         ),
         schedule(
             "reconcile-daily",
             "reconcile_payments",
             daily(4, 0),
-            json!({"window": "daily"}),
+            &json!({"window": "daily"}),
         ),
         schedule(
             "winback-blast",
             "marketing_blast",
             daily(9, 0),
-            json!({"segment": "winback"}),
+            &json!({"segment": "winback"}),
         ),
         schedule(
             "newsletter-blast",
             "marketing_blast",
             daily(10, 0),
-            json!({"segment": "newsletter"}),
+            &json!({"segment": "newsletter"}),
         )
         .enabled(false),
         schedule(
             "weekly-sales-review",
             "sales_rollup",
             weekly(vec![Weekday::Monday], 6, 0),
-            json!({"window": "weekly"}),
+            &json!({"window": "weekly"}),
         ),
         schedule(
             "weekly-supplier-audit",
             "sync_supplier_feed",
             weekly(vec![Weekday::Wednesday], 7, 0),
-            json!({"supplier": crate::tuning::SUPPLIERS[0]}),
+            &json!({"supplier": crate::tuning::SUPPLIERS[0]}),
         ),
         schedule(
             "weekend-flash-prep",
             "prewarm_search",
             weekly(vec![Weekday::Friday, Weekday::Saturday], 12, 0),
-            json!({"campaign_id": "weekend"}),
+            &json!({"campaign_id": "weekend"}),
         ),
         schedule(
             "weekly-retention-audit",
             "retention_audit",
             weekly(vec![Weekday::Sunday], 2, 0),
-            json!({"older_than_days": 180}),
+            &json!({"older_than_days": 180}),
         )
         .enabled(false),
         schedule(
             "monthly-close",
             "reconcile_payments",
             monthly(1, 5, 0),
-            json!({"window": "monthly"}),
+            &json!({"window": "monthly"}),
         ),
         schedule(
             "monthly-catalog-audit",
             "retention_audit",
             monthly(15, 8, 0),
-            json!({"older_than_days": 365}),
+            &json!({"older_than_days": 365}),
         ),
         schedule(
             "monthly-markdown-review",
             "sales_rollup",
             monthly(28, 11, 0),
-            json!({"window": "monthly"}),
+            &json!({"window": "monthly"}),
         ),
         schedule(
             "payment-reconciliation",
@@ -359,7 +363,7 @@ pub fn schedules() -> ScheduleConfig {
                 vec![step(crate::tuning::RECONCILE_HOUR_STEP)],
                 DaySelector::EveryDay,
             ),
-            json!({"window": "4h"}),
+            &json!({"window": "4h"}),
         ),
         schedule(
             "price-sync-quarter-hour",
@@ -369,7 +373,7 @@ pub fn schedules() -> ScheduleConfig {
                 vec![every()],
                 DaySelector::EveryDay,
             ),
-            json!({"campaign_id": "price-sync"}),
+            &json!({"campaign_id": "price-sync"}),
         ),
         schedule(
             "fraud-review-friday-13th",
@@ -385,7 +389,7 @@ pub fn schedules() -> ScheduleConfig {
                     }],
                 },
             }),
-            json!({"window": "fraud-review"}),
+            &json!({"window": "fraud-review"}),
         ),
         schedule(
             "nightly-export",
@@ -399,7 +403,7 @@ pub fn schedules() -> ScheduleConfig {
                 }],
                 DaySelector::EveryDay,
             ),
-            json!({"export_id": "nightly"}),
+            &json!({"export_id": "nightly"}),
         )
         .enabled(false),
         schedule(
@@ -415,7 +419,7 @@ pub fn schedules() -> ScheduleConfig {
                     day_of_month: vec![values(&[1])],
                 },
             }),
-            json!({"supplier": crate::tuning::SUPPLIERS[2]}),
+            &json!({"supplier": crate::tuning::SUPPLIERS[2]}),
         ),
     ]);
     ScheduleConfig::new(schedules)

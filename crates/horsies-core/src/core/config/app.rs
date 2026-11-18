@@ -1216,7 +1216,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),

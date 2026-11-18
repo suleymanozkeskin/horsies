@@ -35,7 +35,7 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.typed import encode_task_error
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies._core import CoreServerError
 from horsies.core.types.result import Err, Ok, is_ok, is_err
 from horsies.core.workflows.functions import EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL
 from horsies.core.workflows.lifecycle import expire_paused_workflows
@@ -2329,7 +2329,8 @@ class TestResumeCommitSplit:
         assert is_err(resume_r)
         err = resume_r.err_value
         assert isinstance(err, HandleResumeRecoveryFailed)
-        assert isinstance(err.exception, CoreOperationFailed)
+        # The tree read after the commit meets a search_path with no tables.
+        assert isinstance(err.exception, CoreServerError)
         assert err.workflow_id == handle.workflow_id
         status_r = await handle.status_async()
         assert is_ok(status_r)
@@ -2380,7 +2381,9 @@ class TestResumeCommitSplit:
         assert is_err(resume_r)
         err = resume_r.err_value
         assert isinstance(err, HandleDbOperationFailed)
-        assert isinstance(err.exception, CoreOperationFailed)
+        assert isinstance(err.exception, CoreServerError)
+        assert err.exception.sqlstate == '57P01'
+        assert err.exception.message == 'resume refused by the test'
         assert 'resume refused by the test' in err.message
         assert err.retryable is True
         status_r = await handle.status_async()
