@@ -27,7 +27,7 @@ fn start_child() -> WorkflowSpec {
     child
 }
 
-/// A second one-node child (Python `ImportableChildWorkflow`).
+/// A second one-node child.
 fn importable_child() -> WorkflowSpec {
     let mut child = spec(
         "importable_child_workflow",

@@ -409,8 +409,6 @@ class WorkflowSpec(Generic[OutT]):
         # Phase B: freeze copies in-place (after back-propagation).
         self._freeze_graph()
 
-        self._register_for_subworkflows()
-
     def _isolate_inputs(self) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
         """Copy input node graph so each spec has independent nodes.
 
@@ -1719,14 +1717,6 @@ class WorkflowSpec(Generic[OutT]):
                 visit(node.workflow_def)
 
         return errors
-
-    def _register_for_subworkflows(self) -> None:
-        """Register this spec for subworkflow dispatch at runtime."""
-        has_subworkflow = any(isinstance(t, SubWorkflowNode) for t in self.tasks)
-        if has_subworkflow:
-            from horsies.core.workflows.registry import register_workflow_spec
-
-            register_workflow_spec(self)
 
     def _require_definition_key(self) -> str:
         """Require a stable non-empty definition key for top-level workflows."""
