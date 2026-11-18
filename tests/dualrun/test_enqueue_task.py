@@ -51,7 +51,7 @@ from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import Connection
-from tests.dualrun.clients import open_broker
+from tests.dualrun.clients import install_as_a_client, open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
@@ -270,6 +270,7 @@ def _reference_label(answer: reference.SendAnswer, seed: _Seed) -> str:
 def _reference_sends(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
     """The old statements per send; then the delete of the second live rows of
     the finished tasks, which the candidate does not write."""
+    install_as_a_client(database)
     with psycopg.connect(database.url, autocommit=True) as connection:
         report: dict[str, str] = {}
         for each in seed.sends:

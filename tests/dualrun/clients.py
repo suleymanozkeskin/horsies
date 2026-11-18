@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -34,3 +35,23 @@ async def open_broker(database: DualRunDatabase) -> AsyncGenerator[PostgresBroke
         yield broker
     finally:
         _ = await broker.close_async()
+
+
+def install_as_a_client(database: DualRunDatabase) -> None:
+    """The schema install that a client's broker runs before its first operation.
+
+    The install ends with the coverage pass of the default retention config
+    (``PostgresBroker.ensure_schema_initialized``). A side that runs raw
+    statements runs it first, when the other side runs its operation through
+    a broker of ``open_broker``: both sides then start their operation from
+    the state that the install leaves, and the pair compares the operation.
+    The install itself has its own pair (``tests/dualrun/test_schema_install.py``).
+
+    Raises ``AssertionError`` when the broker refuses the schema.
+    """
+
+    async def install() -> None:
+        async with open_broker(database):
+            pass
+
+    asyncio.run(install())

@@ -40,7 +40,7 @@ from horsies.monitoring.task_actions import (
     cancel_task,
 )
 from tests.dualrun.capture import Connection
-from tests.dualrun.clients import open_broker
+from tests.dualrun.clients import install_as_a_client, open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
@@ -158,6 +158,7 @@ def _seed(connection: Connection) -> tuple[_Case, ...]:
 def _reference_cancel(
     database: DualRunDatabase, cases: tuple[_Case, ...]
 ) -> dict[str, reference.LiveMiss | reference.CancelCalled]:
+    install_as_a_client(database)
     with psycopg.connect(database.url, autocommit=True) as connection:
         install_interim_terminal_writes(connection)
         return {

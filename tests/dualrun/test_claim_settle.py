@@ -30,7 +30,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.claiming import ClaimMixin
 from tests.dualrun.capture import Connection
-from tests.dualrun.clients import open_broker
+from tests.dualrun.clients import install_as_a_client, open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
@@ -123,6 +123,7 @@ def _report(seed: _Seed, dispatched: list[uuid.UUID]) -> tuple[str, ...]:
 
 def _reference(database: DualRunDatabase, seed: _Seed) -> tuple[str, ...]:
     cover_history(database)
+    install_as_a_client(database)
     with psycopg.connect(database.url, autocommit=True) as connection:
         return _report(seed, reference.settle(connection, worker_id=_WORKER, claims=seed.claims))
 
