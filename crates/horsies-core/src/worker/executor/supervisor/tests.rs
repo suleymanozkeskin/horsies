@@ -163,6 +163,9 @@ fn a_ready_frame_of_another_version_is_a_protocol_mismatch() {
 // Restart rules
 // ---------------------------------------------------------------------------
 
+/// Python `_boot_child`: a cause that repeats counts every attempt; the
+/// last counted attempt is recorded as a failed attempt before the pool
+/// fails.
 #[test]
 fn a_cause_that_repeats_counts_up_to_the_bound() {
     let mut counts = BootCounts::default();
@@ -184,7 +187,8 @@ fn a_cause_that_repeats_counts_up_to_the_bound() {
     assert_eq!(
         counts.after_failure(cause, POOL_ALONE_AT_START, 0),
         BootDecision::Exhausted {
-            attempts: CHILD_BOOT_ATTEMPTS
+            attempts: CHILD_BOOT_ATTEMPTS,
+            last: LastRecord::AttemptFailed,
         }
     );
 }
@@ -206,6 +210,10 @@ fn a_cause_that_can_clear_is_spared_while_another_slot_serves() {
     }
 }
 
+/// Python `TestBoot::test_a_task_loop_failure_on_the_only_slot_uses_every_attempt`:
+/// a cause that can clear counts while every other slot is down. The last
+/// counted attempt is recorded as a slot down, with its failed boots and its
+/// wait, before the pool fails.
 #[test]
 fn a_cause_that_can_clear_counts_when_every_other_slot_is_down() {
     let mut counts = BootCounts::default();
@@ -218,9 +226,16 @@ fn a_cause_that_can_clear_counts_when_every_other_slot_is_down() {
         counts.after_failure(cause, POOL_ALONE_AT_START, 1),
         BootDecision::SlotDown { counted: 2, .. }
     ));
+    let third = NonZeroU32::new(3).unwrap();
     assert_eq!(
         counts.after_failure(cause, POOL_ALONE_AT_START, 2),
-        BootDecision::Exhausted { attempts: 3 }
+        BootDecision::Exhausted {
+            attempts: 3,
+            last: LastRecord::SlotDown {
+                failed_boots: third,
+                wait: Duration::from_secs(4),
+            },
+        }
     );
 }
 

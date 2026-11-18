@@ -28,6 +28,14 @@ the baseline, runs the seed sequence of the integration tests
 session database: the PgBouncer lane (``HORSIES_PGBOUNCER_TEST=1``) has none
 and is refused.
 
+The two cases of a pair share the key ``_pair_key``: the case's node id
+without the id of ``implementation``. In each case of a pair, the ``uuid4``
+that test code holds draws from a generator seeded by that key
+(``_install_paired_draws``), so a name that a test makes with a random part
+is the same in both cases and compares exactly. Test code is every module of
+the ``tests`` package outside ``tests.dualrun``; the harness, the Python
+reference and the library keep the system ``uuid4``.
+
 This plugin imports no ``horsies`` module at import: the tables name their
 functions by path, and the fixture loads them.
 """
@@ -35,8 +43,13 @@ functions by path, and the fixture loads them.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
-from collections.abc import Generator, Iterator, Mapping
+import random
+import sys
+import types
+import uuid
+from collections.abc import Callable, Generator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -147,6 +160,13 @@ _PAIR_CASE_KEY: Final = pytest.StashKey['PairCase']()
 PGBOUNCER_LANE_VARIABLE: Final = 'HORSIES_PGBOUNCER_TEST'
 """Set to ``1`` in the PgBouncer lane, which has no session database (``tests/session_database.py``)."""
 
+TEST_CODE_PACKAGE: Final = 'tests'
+"""The package whose modules are test code for the paired draws."""
+
+HARNESS_PACKAGE: Final = 'tests.dualrun'
+"""The harness and the Python reference of each operation: they keep the
+system ``uuid4``, because the reference is code under test."""
+
 
 @dataclass(frozen=True, slots=True)
 class SingleRun:
@@ -240,7 +260,11 @@ def _implementations(module: SwitchModule, node_id: str) -> list[Implementation]
             )
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Parametrize ``implementation`` before every other parameter of the
+    test (its markers, its fixture parameters), so the id of the
+    implementation is the first part of each case id (``_pair_key``)."""
     if selected_module(metafunc.config) is None:
         return
     if 'implementation' not in metafunc.fixturenames:
@@ -393,22 +417,95 @@ def _base_node_id(node_id: str) -> str:
 
 
 def _pair_key(item: pytest.Item) -> PairKey:
-    """The key that the two cases of a pair share."""
+    """The key that the two cases of a pair share: the case's node id without
+    the id of ``implementation``.
+
+    The ids of the other parameters are the same in both cases. Their
+    indices are not: pytest numbers a direct parameter by the position of the
+    case in the whole product, so ``[python-X]`` and ``[core-X]`` hold
+    different indices of ``X``. ``pytest_generate_tests`` parametrizes
+    ``implementation`` first, so its id starts the case id; a case id that
+    does not start with it is a defect of this plugin (asserted).
+    """
     from tests.dualrun.pair_outcomes import PairKey
 
     assert isinstance(item, pytest.Function), f'a dual-run case is a test function: {item!r}'
-    indices = tuple(
-        sorted(
-            (name, index)
-            for name, index in item.callspec.indices.items()
-            if name != 'implementation'
-        )
+    implementation: object = item.callspec.params.get('implementation')
+    assert isinstance(implementation, Implementation), (
+        f'{item.nodeid}: a dual-run case has an implementation parameter, not {implementation!r}'
     )
-    return PairKey(base_node_id=_base_node_id(item.nodeid), parameter_indices=indices)
+    case_id = item.callspec.id
+    first = implementation.value
+    prefix = f'{first}-'
+    base = _base_node_id(item.nodeid)
+    match case_id:
+        case _ if case_id == first:
+            return PairKey(case_name=base)
+        case _ if case_id.startswith(prefix):
+            return PairKey(case_name=f'{base}[{case_id.removeprefix(prefix)}]')
+        case _:
+            raise AssertionError(
+                f'{item.nodeid}: the case id {case_id!r} does not start with the '
+                f'implementation id {first!r}'
+            )
+
+
+def _paired_uuid4(key: PairKey) -> Callable[[], uuid.UUID]:
+    """A ``uuid4`` whose draws come from a generator seeded by ``key``: the
+    n-th draw of a pair's Python case equals the n-th draw of its core case.
+    Each draw is a version 4 UUID."""
+    digest = hashlib.sha256(key.case_name.encode('utf-8')).digest()
+    generator = random.Random(int.from_bytes(digest, 'big'))
+
+    def draw() -> uuid.UUID:
+        return uuid.UUID(int=generator.getrandbits(128), version=4)
+
+    return draw
+
+
+def _is_test_code(module_name: str) -> bool:
+    """Whether ``module_name`` is a module of ``TEST_CODE_PACKAGE`` outside ``HARNESS_PACKAGE``."""
+    in_tests = module_name == TEST_CODE_PACKAGE or module_name.startswith(
+        f'{TEST_CODE_PACKAGE}.'
+    )
+    in_harness = module_name == HARNESS_PACKAGE or module_name.startswith(
+        f'{HARNESS_PACKAGE}.'
+    )
+    return in_tests and not in_harness
+
+
+def _install_paired_draws(key: PairKey, monkeypatch: pytest.MonkeyPatch) -> None:
+    """For this case, give test code a ``uuid4`` that draws from ``_paired_uuid4(key)``.
+
+    In each loaded module of test code (``_is_test_code``), a global that
+    holds the ``uuid`` module gets a copy of it whose ``uuid4`` is the paired
+    draw, and a global that holds ``uuid.uuid4`` gets the paired draw. The
+    teardown of ``monkeypatch`` restores them. Does not change the ``uuid``
+    module itself: the library and the Python reference keep the system
+    draw. A ``uuid`` imported inside a function body, or a module loaded
+    after this call, keeps the system draw.
+    """
+    system_uuid4 = uuid.uuid4
+    draw = _paired_uuid4(key)
+    paired_uuid = types.ModuleType(uuid.__name__, uuid.__doc__)
+    vars(paired_uuid).update(vars(uuid))
+    vars(paired_uuid)['uuid4'] = draw
+    for name, module in tuple(sys.modules.items()):
+        if not _is_test_code(name):
+            continue
+        for attribute, value in tuple(vars(module).items()):
+            match value:
+                case types.ModuleType() if value is uuid:
+                    monkeypatch.setattr(module, attribute, paired_uuid)
+                case _ if value is system_uuid4:
+                    monkeypatch.setattr(module, attribute, draw)
+                case _:
+                    pass
 
 
 def _open_pair_case(
     item: pytest.Item,
+    key: PairKey,
     module: SwitchModule,
     implementation: Implementation,
     counts: CallCounts,
@@ -434,7 +531,7 @@ def _open_pair_case(
         case Ok(listener):
             pass
     return PairCase(
-        key=_pair_key(item),
+        key=key,
         implementation=implementation,
         counts=counts,
         url=url,
@@ -588,8 +685,10 @@ def implementation(
             assert_never(unreachable)
     pair = len(_implementations(switched, _base_node_id(item.nodeid))) == 2
     if pair:
+        key = _pair_key(item)
+        _install_paired_draws(key, monkeypatch)
         item.stash[_PAIR_CASE_KEY] = _open_pair_case(
-            item, switched, implementation_run, counts, url
+            item, key, switched, implementation_run, counts, url
         )
     try:
         yield DualRunCase(module=switched, implementation=implementation_run, counts=counts)

@@ -48,7 +48,8 @@ pub use queries::{
     list_schedules, list_tasks, list_workflow_names, list_workflow_runs, normalize_optional_text,
     span_s, task_breakdown, task_facets, task_stats, PaginationRefused, SortDirection,
     TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskSortField,
-    TaskStatsQuery, WorkflowRunsQuery, MAX_TASK_PAGE_REACH,
+    TaskStatsQuery, WorkflowRunsQuery, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
+    MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,
 };
 pub use task_actions::{
     cancel_task, TaskActionError, TaskActionErrorCode, TaskActionResult, TaskCancelled,
