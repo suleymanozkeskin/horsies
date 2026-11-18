@@ -2,9 +2,10 @@
 
 ``crates/horsies-core/src/worker/scheduler/calculator_vectors.json`` holds, per
 row, a pattern in the text of ``model_dump(mode='json')``, a timezone, an
-instant and the next run that ``calculate_next_run`` gives after it. The core
-test ``calculator::tests::each_python_vector_gives_python_s_next_run`` pins
-the same table, so a change of either calculator fails one of the two tests.
+instant and the next run after it. This test pins the pattern text that the
+Python schedule model writes; the core test
+``calculator::tests::each_python_vector_gives_python_s_next_run`` pins the next
+run of each row.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from pydantic import TypeAdapter
 
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.schedule import SchedulePattern
-from horsies.core.scheduler.calculator import calculate_next_run
 from horsies.core.types.result import Ok
 
 _VECTORS_PATH: Final = (
@@ -71,4 +71,3 @@ def test_each_vector_is_python_s_next_run(vector: _Vector) -> None:
     pattern = _PATTERNS.validate_json(vector.pattern_json)
 
     assert dumps_json(pattern.model_dump(mode='json')) == Ok(vector.pattern_json)
-    assert calculate_next_run(pattern, vector.after, vector.timezone) == vector.next_run_at
