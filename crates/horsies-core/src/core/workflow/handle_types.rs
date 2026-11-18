@@ -36,8 +36,8 @@ pub enum HandleErrorCode {
     /// The broker already holds resource sets for its limit of open event loops, and this call ran on a
     /// new one. Nothing ran. Python client only; removed before 0.8.0.
     EventLoopLimit,
-    /// A sync handle method was called on a thread that runs an event loop. Its wait would stall that
-    /// loop, so nothing ran. Python client only.
+    /// A sync or blocking handle method was called on a thread that runs an event loop or a tokio
+    /// runtime. Its wait would stall that loop, so nothing ran.
     AsyncContext,
 }
 

@@ -97,7 +97,8 @@ where
     /// Start the workflow again after a failed start, with its id.
     ///
     /// Errors: `VALIDATION_FAILED` for an error that is not
-    /// `ENQUEUE_FAILED` or of another workflow; else the start errors.
+    /// `ENQUEUE_FAILED` or `ASYNC_CONTEXT`, or of another workflow; else the
+    /// start errors.
     pub async fn retry_start(
         &self,
         error: &WorkflowStartError,
