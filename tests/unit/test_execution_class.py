@@ -39,6 +39,7 @@ from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
     Execution,
+    OperationalErrorCode,
     TaskError,
     TaskOptions,
     TaskResult,
@@ -693,6 +694,37 @@ class TestWorkflowPaths:
         )
         assert isinstance(outcome, Err)
         assert outcome.err_value.message.startswith('Invalid execution for task 3:')
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('field', 'message'),
+        [
+            ('task_options_str', 'Corrupt task_options JSON for task 3'),
+            ('node_input', 'Corrupt kwargs JSON for task 3'),
+            ('args_from', 'Corrupt args_from JSON for task 3'),
+        ],
+        ids=['task-options', 'input', 'args-from'],
+    )
+    async def test_node_promotion_refuses_an_empty_stored_text(
+        self, field: str, message: str,
+    ) -> None:
+        """The Python engine reads an empty stored text as the baseline
+        promotion does (horsies_workflow_task_node_refusal): corrupt data,
+        not "none"."""
+        from horsies.core.workflows.engine import _build_enqueued_task_params  # pyright: ignore[reportPrivateUsage]
+
+        arguments = self._promotion_arguments(None)
+        arguments[field] = ''
+        outcome = await _build_enqueued_task_params(
+            MagicMock(),
+            'workflow-1',
+            3,
+            **arguments,
+        )
+        assert isinstance(outcome, Err)
+        assert outcome.err_value.message == message
+        assert outcome.err_value.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
 
 
 class TestPerSendOptions:

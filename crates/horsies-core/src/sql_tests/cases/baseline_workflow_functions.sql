@@ -771,10 +771,13 @@ BEGIN
                       AND (wft_node(v_wf, 2)).good_until = '2031-01-01T00:00:00Z',
                       'stored deadline: a null good_until gives no deadline whatever the node column holds');
     PERFORM wft_check(wft_task_of(v_wf, 3) IS NOT NULL
-                      AND (SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 3)) IS NULL
-                      AND wft_task_of(v_wf, 4) IS NOT NULL
-                      AND (SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 4)) IS NULL,
-                      'stored deadline: no options and empty options give no deadline');
+                      AND (SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 3)) IS NULL,
+                      'stored deadline: no options give no deadline');
+    PERFORM wft_check((wft_node(v_wf, 4)).status = 'FAILED' AND (wft_node(v_wf, 4)).task_id IS NULL
+                      AND (wft_node(v_wf, 4)).result = horsies_task_error_envelope(
+                          'WORKER_SERIALIZATION_ERROR', 'Corrupt task_options JSON for task 4',
+                          '{"workflow_id":"' || v_wf || '","task_index":4}', NULL, NULL),
+                      'stored deadline: empty options are corrupt data, refused before a task is minted');
 END $$;
 
 DO $$
@@ -2807,4 +2810,136 @@ BEGIN
                                'E', '', 3)$q$, v_live), '22023', 'raise record refuses a NULL pass id');
     PERFORM wft_check((SELECT failed_passes FROM horsies_workflow_recovery_failures WHERE workflow_id = v_live) = 3,
                       'raise record refusals write nothing');
+END $$;
+
+-- Empty stored texts --------------------------------------------------------------------------------------------------
+-- No writer stores an empty text in a node result, a workflow error or node task options; NULL is the one stored form
+-- of "no value". Each reader reads an empty text as corrupt data: the outcome of a text that does not read, not the
+-- outcome of NULL.
+
+DO $$
+BEGIN
+    PERFORM wft_check(horsies_workflow_json_or_null(NULL) IS NULL
+                      AND horsies_workflow_json_or_null('') IS NULL
+                      AND horsies_workflow_json_or_null('{bad') IS NULL
+                      AND horsies_workflow_json_or_null('null')::text = 'null',
+                      'empty text: json_or_null reads an empty text as a text that is not JSON');
+END $$;
+
+DO $$
+DECLARE
+    c_cause CONSTANT text := 'Stored task result is not JSON: JSON parse failed: the text is empty';
+BEGIN
+    PERFORM wft_check(horsies_workflow_result_kind(NULL) = 'ABSENT'
+                      AND horsies_workflow_result_kind('') = 'UNREADABLE',
+                      'empty text: the result kind of an empty text is UNREADABLE, of NULL ABSENT');
+    PERFORM wft_check(horsies_workflow_unreadable_result_cause('') = c_cause,
+                      'empty text: the cause of an empty result is the text of Python''s EmptyJsonTextError');
+    PERFORM wft_check(horsies_workflow_err_slot(NULL) IS NULL
+                      AND horsies_workflow_err_slot('')
+                          = horsies_task_error_object('RESULT_DESERIALIZATION_ERROR', c_cause, NULL),
+                      'empty text: the error of an empty result is RESULT_DESERIALIZATION_ERROR, of NULL none');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000e01';
+BEGIN
+    -- The workflow error of a completion read from the first FAILED node (horsies_workflow_err_slot).
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
+    UPDATE horsies_workflow_tasks SET status = 'FAILED', result = '' WHERE workflow_id = v_wf AND task_index = 0;
+    PERFORM wft_check(horsies_workflow_failure_error(v_wf, NULL) = horsies_task_error_object(
+                          'RESULT_DESERIALIZATION_ERROR',
+                          'Stored task result is not JSON: JSON parse failed: the text is empty', NULL),
+                      'empty text: the failure error of a FAILED node with an empty result does not read');
+    UPDATE horsies_workflow_tasks SET result = NULL WHERE workflow_id = v_wf AND task_index = 0;
+    PERFORM wft_check(horsies_workflow_failure_error(v_wf, NULL) IS NULL,
+                      'empty text: a FAILED node with no result gives no failure error');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000e02';
+    v_result json;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1},{"idx":2}]');
+    UPDATE horsies_workflow_tasks
+    SET status = 'COMPLETED', result = CASE task_index WHEN 0 THEN '' WHEN 1 THEN wft_ok('1') END
+    WHERE workflow_id = v_wf;
+    v_result := horsies_workflow_outputless_result(v_wf)::json;
+    PERFORM wft_check(json_typeof(v_result -> 'ok' -> 'results_by_id' -> 'n0') = 'null'
+                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n1')::jsonb = (wft_ok('1'))::jsonb
+                      AND json_typeof(v_result -> 'ok' -> 'results_by_id' -> 'n2') = 'null',
+                      'empty text: an empty terminal result is the entry null of a result that is not an envelope');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000e03';
+    v_empty text;
+    v_null text;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]', 0);
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = '' WHERE workflow_id = v_wf AND task_index = 0;
+    v_empty := horsies_workflow_explicit_output(v_wf, 0);
+    UPDATE horsies_workflow_tasks SET result = NULL WHERE workflow_id = v_wf AND task_index = 0;
+    v_null := horsies_workflow_explicit_output(v_wf, 0);
+    PERFORM wft_check(v_empty = horsies_task_error_envelope(
+                          'RESULT_DESERIALIZATION_ERROR',
+                          format('Workflow %s is COMPLETED and its output node ''n0'' is COMPLETED with no stored result',
+                                 v_wf),
+                          horsies_workflow_output_error_data(v_wf, 'n0', 0, 't0'), NULL, NULL)
+                      AND v_empty = v_null,
+                      'empty text: an empty output result fails closed with the entry of a missing result');
+END $$;
+
+DO $$
+BEGIN
+    PERFORM wft_check(horsies_workflow_source_value('COMPLETED', '', 3, 'n3', 't3') = horsies_task_error_envelope(
+                          'RESULT_DESERIALIZATION_ERROR',
+                          'Dependency node n3 (index 3, task t3) is COMPLETED with no stored result',
+                          '{"dependency_index":3}', NULL, NULL)
+                      AND horsies_workflow_source_value('FAILED', '', 3, 'n3', 't3')
+                          = horsies_workflow_source_value('FAILED', NULL, 3, 'n3', 't3'),
+                      'empty text: an empty source result fails closed with the entry of a missing result');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000e04';
+    v_child uuid := '00000000-0000-7000-8000-000000000e05';
+    v_result record;
+BEGIN
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(jsonb_build_object('idx', 0, 'sub', true), jsonb_build_object('wf', v_child, 'idx', 0))
+    );
+    UPDATE horsies_workflows SET status = 'FAILED', error = '', completed_at = now(), updated_at = now()
+    WHERE id = v_child;
+    SELECT * INTO v_result FROM horsies_workflow_child_node_result(v_child);
+    PERFORM wft_check(v_result.node_status = 'FAILED'
+                      AND (v_result.summary::json -> 'error_summary')::text = '""'
+                      AND (v_result.failure_error::json -> 'sub_workflow_summary' -> 'error_summary')::text = '""',
+                      'empty text: an empty child error is summarized as its text, as a text that is not JSON');
+    UPDATE horsies_workflows SET error = NULL WHERE id = v_child;
+    SELECT * INTO v_result FROM horsies_workflow_child_node_result(v_child);
+    PERFORM wft_check((v_result.summary::json -> 'error_summary')::text = 'null',
+                      'empty text: a NULL child error has no summary');
+    UPDATE horsies_workflows SET status = 'COMPLETED', result = '' WHERE id = v_child;
+    SELECT * INTO v_result FROM horsies_workflow_child_node_result(v_child);
+    PERFORM wft_check(v_result.node_status = 'FAILED'
+                      AND v_result.node_result = horsies_task_error_envelope(
+                          'RESULT_DESERIALIZATION_ERROR',
+                          format('Child workflow %s is COMPLETED and its stored result does not parse', v_child),
+                          '{"workflow_id":"' || v_child || '"}', NULL, NULL),
+                      'empty text: a COMPLETED child with an empty result fails the parent node');
+END $$;
+
+DO $$
+BEGIN
+    PERFORM wft_check(horsies_workflow_task_options_refusal(NULL, 4) IS NULL
+                      AND horsies_workflow_task_options_refusal('', 4) = 'Corrupt task_options JSON for task 4',
+                      'empty text: empty node task options do not read; NULL options are no options');
 END $$;

@@ -294,8 +294,8 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
 
 /// The error summary of a FAILED child, from its stored workflow error, as
 /// Python takes it (`python/horsies/core/workflows/engine.py:3030-3038`): the `message` of a
-/// JSON object; the first 200 characters of a text that is not JSON; none for
-/// other JSON, an empty text and no text.
+/// JSON object; the first 200 characters of a text that is not JSON, an empty
+/// text included (no writer stores one); none for other JSON and no text.
 #[tokio::test]
 #[serial]
 async fn the_error_summary_of_a_failed_child_follows_python() {
@@ -309,7 +309,7 @@ async fn the_error_summary_of_a_failed_child_follows_python() {
         (Some(r#"{"error_code": "X"}"#), None),
         (Some("42"), None),
         (Some(long.as_str()), Some("x".repeat(200))),
-        (Some(""), None),
+        (Some(""), Some(String::new())),
         (None, None),
     ];
     for (stored, expected) in cases {
