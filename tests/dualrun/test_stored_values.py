@@ -74,6 +74,7 @@ from tests.dualrun.values import (
     NullValue,
     RunWindow,
     TimeRank,
+    UnparsedDocument,
     json_leaves,
     render_value,
 )
@@ -327,10 +328,45 @@ def test_task_options_rank_their_good_until() -> None:
 
 
 @pytest.mark.parametrize(
+    'doc',
+    [
+        pytest.param('{"owner": ', id='truncated'),
+        pytest.param('{"n": NaN}', id='nan'),
+        pytest.param('', id='empty'),
+        pytest.param('not json', id='a-word'),
+    ],
+)
+def test_a_stored_text_that_is_not_json_compares_as_that_text(doc: str) -> None:
+    reference = _snapshot([_row('a1', RUN_A, doc=doc)], RUN_A)
+    candidate = _snapshot([_row('b1', RUN_B, doc=doc)], RUN_B)
+    other = _snapshot([_row('b1', RUN_B, doc=f'{doc}x')], RUN_B)
+    parsed = _snapshot([_row('b1', RUN_B, doc='{"owner": "b1"}')], RUN_B)
+
+    assert _cell(reference, 'doc') == UnparsedDocument(text=doc)
+    assert compare_snapshots(reference, candidate).entries == ()
+    for differing in (other, parsed):
+        assert [
+            entry.column
+            for entry in compare_snapshots(reference, differing).entries
+            if isinstance(entry, ColumnDifference)
+        ] == ['doc']
+
+
+def test_stored_bytes_that_are_utf8_text_but_not_json_compare_as_that_text() -> None:
+    text = b'{"attempt": '
+    row = _row('a1', RUN_A)
+
+    snapshot = _snapshot(
+        [(*row[:5], _hex(text), _hex(hashlib.sha256(text).digest()), row[7])], RUN_A
+    )
+
+    assert _cell(snapshot, 'archive') == UnparsedDocument(text=text.decode('utf-8'))
+    assert _cell(snapshot, 'archive_digest') == DigestMatches()
+
+
+@pytest.mark.parametrize(
     ('doc', 'cause_part'),
     [
-        pytest.param('{"owner": ', 'JSONDecodeError', id='truncated'),
-        pytest.param('{"n": NaN}', 'NaN is not valid JSON', id='nan'),
         pytest.param('{"owner": 12}', 'not text', id='id-path-holds-a-number'),
         pytest.param(
             '{"due": "tomorrow"}', 'clock path', id='clock-path-holds-other-text'

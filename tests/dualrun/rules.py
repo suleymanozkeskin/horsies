@@ -72,14 +72,30 @@ class RunWindowReference:
     """
 
 
+class AnchorNull(Enum):
+    """What an anchored clock value becomes when its anchor is NULL."""
+
+    REFUSED = 'the capture fails with UnanchoredTime'
+    """No row of the column sets the value without its anchor."""
+
+    RANKED = 'the value is ranked among the values of its column whose anchor is NULL'
+    """A row can hold the value without its anchor: a test seeds a lease
+    (``claim_expires_at``) on a row it never claimed (``claimed_at`` NULL).
+    The row does not carry the time the value came from, so only its order
+    among such values compares, as under ``TimeOrderOnly``."""
+
+
 @dataclass(frozen=True, slots=True)
 class AnchorReference:
     """Clock values compared as an offset from another clock column of the same row.
 
-    Two offsets are equal when they differ by at most the bound.
+    Two offsets are equal when they differ by at most the bound. A value
+    whose anchor is NULL follows ``when_anchor_null``; a ranked value never
+    equals an offset.
     """
 
     column: str
+    when_anchor_null: AnchorNull
 
 
 TimeReference = RunWindowReference | AnchorReference
