@@ -16,16 +16,22 @@ payload thresholds; `horsies.core.models.app.worker_bound_errors`,
 `PayloadPolicy`). `to_worker_manifest` has no failure: a value above its
 manifest bound is a defect and fails an assertion that names the path, the
 value and the bound. Any refusal by the core is a defect of this module.
+
+The child launch has the rules of the Python worker of 0.7.0: each child
+restores the `sys.path` of the worker (`child_sys_path`) and its `sys.argv`
+(`child_argv`) as text that the manifest can carry, and an app locator in
+`__main__` is refused (`python_child_launch`).
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import Final, assert_never
+from typing import Final, assert_never, cast
 
 from horsies._catalog import worker_manifest as wire
 from horsies.core.history.periods import parse_retention_period
@@ -64,7 +70,7 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
     WorkerProfile,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
 
@@ -130,6 +136,173 @@ def profile_request(profile: str | None) -> wire.ProfileRequest:
             return wire.ProfileRequestNamed(name=name)
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class CurrentDirectory:
+    """The current directory of the worker process."""
+
+    path: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CurrentDirectoryUnreadable:
+    """`os.getcwd()` failed: the directory was removed, or a part of its
+    path cannot be read. `cause` names the OS error."""
+
+    cause: str
+
+
+type CurrentDirectoryRead = CurrentDirectory | CurrentDirectoryUnreadable
+"""What a read of the current directory of the worker process gave."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class LeftOutEntry:
+    """An entry of the worker's `sys.path` that no child gets: `entry` is
+    its `repr`, `reason` says why."""
+
+    entry: str
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ChildSysPath:
+    """The `sys.path` that each child restores (`child_sys_path`), and the
+    entries of the worker's `sys.path` that it leaves out."""
+
+    entries: tuple[str, ...]
+    left_out: tuple[LeftOutEntry, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ChildArgv:
+    """The `sys.argv` that each child restores (`child_argv`)."""
+
+    args: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MainModuleLocator:
+    """The app locator names the module `__main__`. A child is a new
+    program with its own `__main__`, so the app is not there."""
+
+    app_locator: str
+
+
+_NOT_A_PATH: Final = 'it is not a str, bytes or os.PathLike path'
+_NOT_UTF8: Final = 'it is not valid UTF-8'
+_SURROGATES: Final = range(0xD800, 0xE000)
+"""The code points that UTF-8 cannot encode. `os.fsdecode` writes each
+byte that the file system encoding cannot decode as one of them."""
+
+
+def child_sys_path(
+    parent_sys_path: Sequence[object],
+    current_directory: CurrentDirectoryRead,
+) -> ChildSysPath:
+    """The `sys.path` of the worker process as each child restores it, in
+    order (Python 0.7.0 `_frame_sys_path`). Pure: the caller reads
+    `sys.path` and the current directory.
+
+    `sys.path` may hold any object; Python's import system skips an entry
+    that it cannot use. Each entry:
+
+    - `str`: kept.
+    - `bytes` or `os.PathLike` (a `pathlib.Path`): decoded with
+      `os.fsdecode`.
+    - `''` (the current directory, also after the decode): the path of
+      `current_directory`; left out when the directory is unreadable.
+    - An object of another type, or an `os.PathLike` whose `__fspath__`
+      gives neither `str` nor `bytes`: left out.
+    - Text that is not valid UTF-8 (a lone surrogate from a byte that the
+      file system encoding could not decode): left out. The manifest is
+      UTF-8 JSON, so the entry could not be restored as it was.
+    """
+    entries: list[str] = []
+    left_out: list[LeftOutEntry] = []
+    for entry in parent_sys_path:
+        match _child_entry(entry, current_directory):
+            case str() as text:
+                entries.append(text)
+            case LeftOutEntry() as left:
+                left_out.append(left)
+            case _ as unreachable:
+                assert_never(unreachable)
+    return ChildSysPath(entries=tuple(entries), left_out=tuple(left_out))
+
+
+def _child_entry(
+    entry: object,
+    current_directory: CurrentDirectoryRead,
+) -> str | LeftOutEntry:
+    """One entry of `child_sys_path`. Pure."""
+    match _path_text(entry):
+        case LeftOutEntry() as left:
+            return left
+        case '':
+            match current_directory:
+                case CurrentDirectory(path=path):
+                    text = path
+                case CurrentDirectoryUnreadable(cause=cause):
+                    return LeftOutEntry(
+                        repr(entry),
+                        f'the current directory cannot be read: {cause}',
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case str() as decoded:
+            text = decoded
+        case _ as unreachable:
+            assert_never(unreachable)
+    if any(ord(char) in _SURROGATES for char in text):
+        return LeftOutEntry(repr(entry), _NOT_UTF8)
+    return text
+
+
+def _path_text(entry: object) -> str | LeftOutEntry:
+    """The text of one `sys.path` entry, as `os.fsdecode` gives it, or why
+    the entry has none. Pure."""
+    match entry:
+        case str():
+            return entry
+        case bytes():
+            return os.fsdecode(entry)
+        case os.PathLike():
+            # The class pattern cannot see the type argument; `os.fsdecode`
+            # checks what `__fspath__` gives.
+            return _path_like_text(cast('os.PathLike[str]', entry))
+        case _:
+            return LeftOutEntry(repr(entry), _NOT_A_PATH)
+
+
+def _path_like_text(path: os.PathLike[str]) -> str | LeftOutEntry:
+    """The text of an `os.PathLike` entry. Pure.
+
+    `LeftOutEntry`: `os.fsdecode` raised `TypeError`, as `__fspath__` gave
+    neither `str` nor `bytes`.
+    """
+    try:
+        return os.fsdecode(path)
+    except TypeError:
+        return LeftOutEntry(repr(path), _NOT_A_PATH)
+
+
+def child_argv(parent_argv: Sequence[object]) -> ChildArgv:
+    """The `sys.argv` of the worker process as each child restores it
+    (Python 0.7.0 `_frame_text`). Pure: the caller reads `sys.argv`.
+
+    Each item becomes `str(item)`. A code point that is not valid UTF-8 (a
+    lone surrogate from a byte that the file system encoding could not
+    decode) is written as its backslash escape, `\\udcff`, so the manifest
+    can carry it. No item is left out, so each keeps its position.
+    """
+    return ChildArgv(
+        args=tuple(
+            str(item).encode('utf-8', 'backslashreplace').decode('utf-8')
+            for item in parent_argv
+        ),
+    )
+
+
 def python_child_launch(
     *,
     executable: str,
@@ -137,38 +310,49 @@ def python_child_launch(
     app_locator: str,
     imports: Sequence[str],
     sys_path_roots: Sequence[str],
-    parent_sys_path: Sequence[str],
-    parent_argv: Sequence[str],
+    parent_sys_path: ChildSysPath,
+    parent_argv: ChildArgv,
     log_level: wire.WorkerLogLevel,
-) -> wire.ChildLaunchManifest:
+) -> Result[wire.ChildLaunchManifest, MainModuleLocator]:
     """How a Python child of this worker and its preload process start:
     `executable <interpreter_flags> -m horsies.core.worker.child_main` and
     `executable <interpreter_flags> -m horsies.core.worker.preload_main`,
     importing the app at `app_locator`.
 
-    Pure: the caller reads `sys.executable`, the flags
-    (`current_interpreter_flags`), `sys.path` and `sys.argv`.
+    Pure: the caller reads `sys.executable` and the flags
+    (`current_interpreter_flags`); `parent_sys_path` and `parent_argv` come
+    from `child_sys_path` and `child_argv`.
+
+    Err: `MainModuleLocator` for a locator in the module `__main__`
+    (`__main__:app`). The Python worker of 0.7.0 refused it at its start.
     """
+    match app_locator.partition(':'):
+        case ('__main__', ':', _):
+            return Err(MainModuleLocator(app_locator))
+        case _:
+            pass
     flags = tuple(interpreter_flags)
-    return wire.ChildLaunchManifest(
-        command=wire.ChildCommandManifest(
-            program=executable,
-            args=(*flags, '-m', CHILD_MAIN_MODULE),
-        ),
-        preload=wire.PreloadLaunchCommand(
+    return Ok(
+        wire.ChildLaunchManifest(
             command=wire.ChildCommandManifest(
                 program=executable,
-                args=(*flags, '-m', PRELOAD_MAIN_MODULE),
+                args=(*flags, '-m', CHILD_MAIN_MODULE),
             ),
+            preload=wire.PreloadLaunchCommand(
+                command=wire.ChildCommandManifest(
+                    program=executable,
+                    args=(*flags, '-m', PRELOAD_MAIN_MODULE),
+                ),
+            ),
+            program=wire.ChildProgramPython(
+                app_locator=app_locator,
+                imports=tuple(imports),
+                sys_path_roots=tuple(sys_path_roots),
+                parent_sys_path=parent_sys_path.entries,
+                parent_argv=parent_argv.args,
+            ),
+            log_level=log_level,
         ),
-        program=wire.ChildProgramPython(
-            app_locator=app_locator,
-            imports=tuple(imports),
-            sys_path_roots=tuple(sys_path_roots),
-            parent_sys_path=tuple(parent_sys_path),
-            parent_argv=tuple(parent_argv),
-        ),
-        log_level=log_level,
     )
 
 

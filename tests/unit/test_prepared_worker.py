@@ -17,7 +17,13 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
-from horsies.core.worker_manifest import python_child_launch, to_worker_manifest
+from horsies.core.worker_manifest import (
+    CurrentDirectory,
+    child_argv,
+    child_sys_path,
+    python_child_launch,
+    to_worker_manifest,
+)
 
 
 class _Host:
@@ -58,10 +64,10 @@ def _manifest_json(profile: str | None) -> str:
         app_locator='app.main:app',
         imports=('app.tasks',),
         sys_path_roots=(),
-        parent_sys_path=(),
-        parent_argv=('horsies', 'worker'),
+        parent_sys_path=child_sys_path((), CurrentDirectory('/srv')),
+        parent_argv=child_argv(('horsies', 'worker')),
         log_level='INFO',
-    )
+    ).unwrap()
     manifest = to_worker_manifest(
         config,
         profile=profile,
