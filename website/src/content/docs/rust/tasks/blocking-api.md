@@ -95,7 +95,7 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 
 `retry_send(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Retry a Failed Send](/horsies/rust/tasks/sending-tasks/#retry-a-failed-send).
 
-`retry_start` refuses a `WorkflowStartErrorCode::AsyncContext` error with `ValidationFailed`. To run the same start from async code, call `start_with_id` with the error's `workflow_id`.
+`retry_start(&error).await` with a `WorkflowStartErrorCode::AsyncContext` error completes the same start from async code, with the error's `workflow_id`.
 
 ## Order of the Checks
 

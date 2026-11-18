@@ -6,9 +6,8 @@ use uuid::Uuid;
 /// Categorized workflow start failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
-/// `EVENT_LOOP_LIMIT` and `ASYNC_CONTEXT` are produced by the Python client
-/// only.
+/// (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`
+/// and `EVENT_LOOP_LIMIT` are produced by the Python client only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
 #[code_catalog(module = "workflow_start", base = "str_enum")]
 pub enum WorkflowStartErrorCode {
@@ -27,8 +26,8 @@ pub enum WorkflowStartErrorCode {
     /// The broker already holds resource sets for its limit of open event loops, and this call ran on a
     /// new one; nothing was written. Python client only; removed before 0.8.0.
     EventLoopLimit,
-    /// A sync start was called on a thread that runs an event loop; its wait would stall that loop, so
-    /// nothing was written. Python client only.
+    /// A sync or blocking start was called on a thread that runs an event loop or a tokio
+    /// runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
     AsyncContext,
 }
 
@@ -88,28 +87,38 @@ pub type WorkflowStartResult<T> = Result<T, WorkflowStartError>;
 
 /// Validate whether a `WorkflowStartError` is eligible for retry_start.
 ///
-/// Only `EnqueueFailed` errors can be retried. The error's workflow_name
-/// must match the spec being retried (prevents cross-workflow retry).
+/// `EnqueueFailed` and `AsyncContext` errors can be retried: each carries the
+/// id of a start that wrote nothing or may have written. The error's
+/// workflow_name must match the spec being retried (prevents cross-workflow
+/// retry).
 ///
 /// Returns `Ok(workflow_id)` if retry is valid, `Err(WorkflowStartError)`
 /// with `ValidationFailed` code otherwise.
 ///
-/// Mirrors Python's `WorkflowSpec._validate_start_retry(error)`.
+/// Mirrors Python's `WorkflowSpec._validate_start_retry(error)`, which also
+/// accepts the Python-only `LOOP_RUNNER_FAILED`.
 pub fn validate_start_retry(
     error: &WorkflowStartError,
     spec_name: &str,
 ) -> Result<Uuid, WorkflowStartError> {
-    if error.code != WorkflowStartErrorCode::EnqueueFailed {
-        return Err(WorkflowStartError {
-            code: WorkflowStartErrorCode::ValidationFailed,
-            message: format!(
-                "retry_start only accepts ENQUEUE_FAILED errors, got {}",
-                error.code,
-            ),
-            retryable: false,
-            workflow_name: spec_name.to_owned(),
-            workflow_id: error.workflow_id.clone(),
-        });
+    match error.code {
+        WorkflowStartErrorCode::EnqueueFailed | WorkflowStartErrorCode::AsyncContext => {}
+        WorkflowStartErrorCode::BrokerNotConfigured
+        | WorkflowStartErrorCode::ValidationFailed
+        | WorkflowStartErrorCode::WorkflowIdConflict
+        | WorkflowStartErrorCode::LoopRunnerFailed
+        | WorkflowStartErrorCode::EventLoopLimit => {
+            return Err(WorkflowStartError {
+                code: WorkflowStartErrorCode::ValidationFailed,
+                message: format!(
+                    "retry_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got {}",
+                    error.code,
+                ),
+                retryable: false,
+                workflow_name: spec_name.to_owned(),
+                workflow_id: error.workflow_id.clone(),
+            });
+        }
     }
 
     if error.workflow_name != spec_name {
@@ -185,6 +194,35 @@ mod tests {
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), workflow_id);
+    }
+
+    #[test]
+    fn validate_retry_accepts_async_context() {
+        let workflow_id = Uuid::new_v4();
+        let error = WorkflowStartError {
+            code: WorkflowStartErrorCode::AsyncContext,
+            message: "a blocking start on a runtime thread".to_owned(),
+            retryable: false,
+            workflow_name: "test-wf".to_owned(),
+            workflow_id: Some(workflow_id),
+        };
+        let result = validate_start_retry(&error, "test-wf");
+        assert_eq!(result.unwrap(), workflow_id);
+    }
+
+    #[test]
+    fn validate_retry_rejects_async_context_of_another_workflow() {
+        let error = WorkflowStartError {
+            code: WorkflowStartErrorCode::AsyncContext,
+            message: "a blocking start on a runtime thread".to_owned(),
+            retryable: false,
+            workflow_name: "other-workflow".to_owned(),
+            workflow_id: Some(Uuid::new_v4()),
+        };
+        let result = validate_start_retry(&error, "my-workflow");
+        let err = result.unwrap_err();
+        assert_eq!(err.code, WorkflowStartErrorCode::ValidationFailed);
+        assert!(err.message.contains("cross-workflow"));
     }
 
     #[test]
