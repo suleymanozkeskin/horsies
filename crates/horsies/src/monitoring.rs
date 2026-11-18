@@ -44,8 +44,8 @@ pub use horsies_core::monitoring::{
     TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused, WorkerClassLoadInfo,
     WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge, WorkflowNodeInfo,
     WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
-    INTERNAL_SERVER_ERROR_TEXT, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
-    MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
+    INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
+    MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
     RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 
@@ -100,7 +100,7 @@ pub async fn get_task_detail(app: &Horsies, task_id: Uuid) -> MonitoringResult<T
     core_monitoring::get_task_detail(&broker, task_id).await
 }
 
-/// The distinct names of the root runs, at most 10,000.
+/// The distinct names of the root runs, at most [`LIST_ROW_BOUND`].
 ///
 /// Errors: `DB_OPERATION_FAILED`.
 pub async fn list_workflow_names(app: &Horsies) -> MonitoringResult<Vec<String>> {
@@ -144,7 +144,8 @@ pub async fn get_workflow_node(
     core_monitoring::get_workflow_node(&broker, workflow_id, task_index).await
 }
 
-/// Every schedule state, soonest next run first, at most 10,000.
+/// Every schedule state, soonest next run first, at most
+/// [`LIST_ROW_BOUND`].
 ///
 /// Errors: `DB_OPERATION_FAILED`.
 pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleStateInfo>> {
