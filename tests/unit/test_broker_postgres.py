@@ -2041,8 +2041,8 @@ class TestEnqueueInputRefusal:
         self, overrides: dict[str, Any], message: str, rule: str,
     ) -> None:
         """Python's ``EnqueueCommandV1`` refuses each value with a
-        ``ValueError`` of its rule (``_command_fingerprint`` of
-        ``tests/dualrun/reference/enqueue_caller.py``, and 0.7.0)."""
+        ``ValueError`` of its rule (the command fingerprint of the Python
+        send of 0.7.0)."""
         values: dict[str, Any] = {
             'task_name': 'my_task',
             'queue_name': 'default',
@@ -2082,8 +2082,8 @@ class TestEnqueueInputRefusal:
     ) -> None:
         """Python's ``ScopedIdempotencyKey`` refuses each key with a
         ``ValueError``; a key that UTF-8 cannot encode, with the
-        ``UnicodeEncodeError`` of the encode (``_enqueue_key`` of
-        ``tests/dualrun/reference/enqueue_caller.py``, and 0.7.0)."""
+        ``UnicodeEncodeError`` of the encode (the key of the Python send of
+        0.7.0)."""
         result = await _refusing_broker().enqueue_async(
             'my_task',
             task_id=SEND_TASK_ID,

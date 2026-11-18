@@ -30,7 +30,7 @@ from tests.lifecycle_matrix import (
     TERMINAL_STATUSES,
     TerminalWriter,
 )
-from tests.unit.test_terminal_writer_inventory import (
+from tests.terminal_writer_scan import (
     FROZEN_TERMINAL_WRITERS,
     history_insert_statuses,
     update_clauses,

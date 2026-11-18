@@ -20,6 +20,7 @@ suite runs against the same database, and parallel collection.
 
 from __future__ import annotations
 
+from typing import Final
 
 import psycopg
 import pytest
@@ -30,11 +31,14 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
 )
-from horsies.core.history.names import (
-    MAX_RETENTION_CLASS_KEY_LENGTH,
-    RETENTION_CLASSES,
-)
 from tests.broker_resources_support import current_resources
+
+RETENTION_CLASSES: Final = 'horsies_retention_classes'
+"""The class table of the baseline."""
+
+MAX_RETENTION_CLASS_KEY_LENGTH: Final = 18
+"""The longest class key whose daily leaves and their indexes have names
+within the 63 bytes of PostgreSQL (the core's ``MAX_RETENTION_CLASS_KEY_LENGTH``)."""
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
