@@ -16,6 +16,8 @@ from typing import Final
 import pytest
 
 from tests.dualrun.operations.plugin import (
+    DRAW_SALT_BYTES,
+    PROCESS_DRAW_SALT,
     _install_paired_draws,  # pyright: ignore[reportPrivateUsage]
     _pair_key,  # pyright: ignore[reportPrivateUsage]
 )
@@ -122,11 +124,14 @@ def _probe_module(name: str, monkeypatch: pytest.MonkeyPatch) -> types.ModuleTyp
     return module
 
 
-def _case_draws(key: PairKey, test_code: types.ModuleType) -> list[uuid.UUID]:
-    """Three draws of ``test_code`` in one case of the pair ``key``: two
-    through the ``uuid`` module it holds, one through the ``uuid4`` it holds."""
+def _case_draws(
+    key: PairKey, test_code: types.ModuleType, salt: bytes = PROCESS_DRAW_SALT
+) -> list[uuid.UUID]:
+    """Three draws of ``test_code`` in one case of the pair ``key``, in the
+    process whose salt is ``salt``: two through the ``uuid`` module it holds,
+    one through the ``uuid4`` it holds."""
     with pytest.MonkeyPatch.context() as case:
-        _install_paired_draws(key, case)
+        _install_paired_draws(key, salt, case)
         held_module: object = vars(test_code)['uuid']
         held_uuid4: object = vars(test_code)['uuid4']
         assert isinstance(held_module, types.ModuleType)
@@ -163,6 +168,26 @@ def test_both_cases_of_a_pair_draw_the_same_uuid4_in_test_code(
     assert vars(test_code)['uuid4'] is system_uuid4
 
 
+def test_two_processes_draw_other_values_for_one_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two dual-runs at once run one test each in their own process, with
+    their own salt: the names that the test draws, for example of its
+    isolated databases, differ."""
+    test_code = _probe_module(_PROBE_TEST_MODULE, monkeypatch)
+    key = PairKey(case_name='tests/integration/test_x.py::test_y')
+    first_process = bytes(DRAW_SALT_BYTES)
+    second_process = bytes([1]) * DRAW_SALT_BYTES
+
+    first = _case_draws(key, test_code, first_process)
+    second = _case_draws(key, test_code, second_process)
+
+    assert len(PROCESS_DRAW_SALT) == DRAW_SALT_BYTES
+    assert first == _case_draws(key, test_code, first_process)
+    assert len(first) == len(second) == 3
+    assert set(first).isdisjoint(second)
+
+
 def test_the_harness_and_the_library_keep_the_system_uuid4(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -172,7 +197,9 @@ def test_the_harness_and_the_library_keep_the_system_uuid4(
     library = _probe_module(_PROBE_LIBRARY_MODULE, monkeypatch)
     with pytest.MonkeyPatch.context() as case:
         _install_paired_draws(
-            PairKey(case_name='tests/integration/test_x.py::test_y'), case
+            PairKey(case_name='tests/integration/test_x.py::test_y'),
+            PROCESS_DRAW_SALT,
+            case,
         )
         for module in (harness, library):
             assert vars(module)['uuid'] is system_uuid, module.__name__

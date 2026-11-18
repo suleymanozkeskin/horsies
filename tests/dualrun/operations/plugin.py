@@ -40,11 +40,21 @@ and is refused.
 
 The two cases of a pair share the key ``_pair_key``: the case's node id
 without the id of ``implementation``. In each case of a pair, the ``uuid4``
-that test code holds draws from a generator seeded by that key
-(``_install_paired_draws``), so a name that a test makes with a random part
-is the same in both cases and compares exactly. Test code is every module of
-the ``tests`` package outside ``tests.dualrun``; the harness, the Python
-reference and the library keep the system ``uuid4``.
+that test code holds draws from a generator seeded by that key and by
+``PROCESS_DRAW_SALT`` (``_install_paired_draws``), so a name that a test makes
+with a random part is the same in both cases and compares exactly. Test code
+is every module of the ``tests`` package outside ``tests.dualrun``; the
+harness, the Python reference and the library keep the system ``uuid4``.
+
+Rule for dual-runs at once on one server: each process draws its own salt
+from the system once, and both cases of a pair run in one process (the
+record of the Python case lives in the process). So two processes that run
+the same test at once draw other names, for example of the isolated
+databases that a test creates (``tests/integration/isolated_database.py``),
+also with one database prefix. Runs that share a server still set
+different prefixes (``HORSIES_TEST_DATABASE_PREFIX``,
+``tests/session_database.py``), so that no run sweeps or drops a database of
+another run.
 
 This plugin imports no ``horsies`` module at import: the tables name their
 functions by path, and the fixture loads them.
@@ -298,6 +308,14 @@ PGBOUNCER_LANE_VARIABLE: Final = 'HORSIES_PGBOUNCER_TEST'
 
 TEST_CODE_PACKAGE: Final = 'tests'
 """The package whose modules are test code for the paired draws."""
+
+DRAW_SALT_BYTES: Final = 16
+"""The length of the salt of the paired draws."""
+
+PROCESS_DRAW_SALT: Final = os.urandom(DRAW_SALT_BYTES)
+"""The salt of the paired draws of this process, drawn once from the system.
+Both cases of a pair run in one process and draw the same values; two
+processes draw other values for one pair."""
 
 HARNESS_PACKAGE: Final = 'tests.dualrun'
 """The harness and the Python reference of each operation: they keep the
@@ -588,11 +606,12 @@ def _pair_key(item: pytest.Item) -> PairKey:
             )
 
 
-def _paired_uuid4(key: PairKey) -> Callable[[], uuid.UUID]:
-    """A ``uuid4`` whose draws come from a generator seeded by ``key``: the
-    n-th draw of a pair's Python case equals the n-th draw of its core case.
-    Each draw is a version 4 UUID."""
-    digest = hashlib.sha256(key.case_name.encode('utf-8')).digest()
+def _paired_uuid4(key: PairKey, salt: bytes) -> Callable[[], uuid.UUID]:
+    """A ``uuid4`` whose draws come from a generator seeded by ``salt`` and
+    ``key``: with one salt, the n-th draw of a pair's Python case equals the
+    n-th draw of its core case; another salt draws other values. Each draw is
+    a version 4 UUID."""
+    digest = hashlib.sha256(salt + key.case_name.encode('utf-8')).digest()
     generator = random.Random(int.from_bytes(digest, 'big'))
 
     def draw() -> uuid.UUID:
@@ -612,8 +631,11 @@ def _is_test_code(module_name: str) -> bool:
     return in_tests and not in_harness
 
 
-def _install_paired_draws(key: PairKey, monkeypatch: pytest.MonkeyPatch) -> None:
-    """For this case, give test code a ``uuid4`` that draws from ``_paired_uuid4(key)``.
+def _install_paired_draws(
+    key: PairKey, salt: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For this case, give test code a ``uuid4`` that draws from
+    ``_paired_uuid4(key, salt)``.
 
     In each loaded module of test code (``_is_test_code``), a global that
     holds the ``uuid`` module gets a copy of it whose ``uuid4`` is the paired
@@ -624,7 +646,7 @@ def _install_paired_draws(key: PairKey, monkeypatch: pytest.MonkeyPatch) -> None
     after this call, keeps the system draw.
     """
     system_uuid4 = uuid.uuid4
-    draw = _paired_uuid4(key)
+    draw = _paired_uuid4(key, salt)
     paired_uuid = types.ModuleType(uuid.__name__, uuid.__doc__)
     vars(paired_uuid).update(vars(uuid))
     vars(paired_uuid)['uuid4'] = draw
@@ -927,7 +949,7 @@ def implementation(
     pair = len(_implementations(switched, _base_node_id(item.nodeid))) == 2
     if pair:
         key = _pair_key(item)
-        _install_paired_draws(key, monkeypatch)
+        _install_paired_draws(key, PROCESS_DRAW_SALT, monkeypatch)
         item.stash[_PAIR_CASE_KEY] = _open_pair_case(
             item, key, switched, implementation_run, counts, url
         )
