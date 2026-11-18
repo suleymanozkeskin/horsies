@@ -18,7 +18,7 @@ from horsies.core.models.workflow.handle_types import (
     HandleDbOperationFailed,
     HandleStoredDataInvalid,
 )
-from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+from horsies.core.types.core_failure import core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 
 
@@ -89,12 +89,12 @@ def handle_failed_error(
 ) -> HandleDbOperationFailed | HandleStoredDataInvalid:
     """The handle error of a ``HandleFailed`` record. Pure.
 
-    ``exception`` holds a ``CoreOperationFailed`` whose subject is the
-    operation, with the record's message and retry rule; the core exception
-    classes replace it (#1363).
+    ``exception`` holds the record's exception: the core's class of the
+    cause, with the core operation as its subject (for example
+    ``workflow_status``).
     """
     message = f'{_label(operation)} failed for workflow {workflow_id}: {record.message}'
-    cause = CoreOperationFailed(operation.value, record.message, record.retryable)
+    cause = record.exception
     match record.code:
         case 'DB_OPERATION_FAILED':
             return HandleDbOperationFailed(
