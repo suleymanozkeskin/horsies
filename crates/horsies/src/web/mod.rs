@@ -42,6 +42,7 @@ use horsies_core::web::{
 use horsies_core::{BrokerError, ChildSpecSource};
 use tokio::sync::OnceCell;
 
+use crate::process_state::refuse_in_a_fork;
 use crate::workflow::WorkflowRegistry;
 use crate::Horsies;
 
@@ -121,7 +122,13 @@ impl<P> Mount<P> {
     /// handle. A failed build is not kept.
     ///
     /// Errors: the [`BrokerError`] of the handle's connect.
+    ///
+    /// # Panics
+    ///
+    /// At every request, in a process that was forked without `exec` after
+    /// the core's process runtime started. Nothing ran.
     async fn handler(&self) -> Result<&MonitoringHandler, BrokerError> {
+        refuse_in_a_fork(format_args!("the monitoring request"));
         self.handler.get_or_try_init(|| self.build_handler()).await
     }
 

@@ -973,6 +973,7 @@ dependencies = [
  "gethostname",
  "horsies-core",
  "horsies-macros",
+ "libc",
  "owo-colors",
  "serde",
  "serde_json",

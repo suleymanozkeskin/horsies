@@ -781,13 +781,19 @@ unless it starts with "Added".
   the start, `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
-- **A send in a fork panics.** A send, a schedule or a retry, async or
-  blocking, in a process that was forked without `exec` after the core's
-  process runtime started in its parent panics with both process ids and
-  the fix; it never returns `EnqueueFailed`. Python's sends raise
-  `ForkedAfterCoreStart` in the same state. A blocking send whose runtime
-  the operating system refused to start is still a retryable
-  `EnqueueFailed`.
+- **Every call that runs on the core panics in a fork.** In a process that
+  was forked without `exec` after the core's process runtime started in its
+  parent, every public call that runs on the core panics with the call,
+  both process ids and the fix, async and blocking forms alike: the sends
+  and retries, the reads, the health reads, `check_live`, the workflow
+  starts, the methods of `WorkflowHandle`, `horsies::monitoring`,
+  `rerun_task`, `run_worker`, `run_scheduler` and the monitoring mount. No
+  call returns the fork as an error value; Python raises
+  `ForkedAfterCoreStart` in the same state. A runtime whose threads the
+  operating system refused to start is still the retryable database failure
+  of the call. `WorkerRunError::RuntimeUnavailable` and
+  `SchedulerRunError::RuntimeUnavailable` hold `RuntimeStartFailed` (new)
+  in place of `ProcessRuntimeRefusal`, which had the fork case too.
 - **`BrokerOperationError` is an enum with one variant per state.** The
   variants are Python's classes that the core produces: `OperationFailed`
   (with a `BrokerOperationFailedCode`, the nine operation codes),
