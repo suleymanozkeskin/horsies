@@ -195,7 +195,10 @@ fn child_pid(pid_file: &Path) -> i32 {
 /// Python `test_runner_heartbeat.py::test_start_slots_launches_the_heartbeat_on_the_pool_registry`:
 /// the worker runs its runner heartbeats on the dispatches that its
 /// children hold. The RUNNING task that the child holds gets a runner beat
-/// of the worker; the stop ends the run with no error.
+/// of the worker; the stop ends the run with no error. Python
+/// `test_finalize_batch.py::test_the_row_is_written_only_after_its_attempt_ended`
+/// (the worker half): while the child holds the run, the worker writes no
+/// end of it: the row stays RUNNING with no history row.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
@@ -233,6 +236,14 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     })
     .await
     .expect("a runner beat of the worker lands for the held task");
+    let held: (Option<String>, i64) = sqlx::query_as(
+        "SELECT (SELECT status::text FROM horsies_tasks WHERE id = $1),
+                (SELECT count(*) FROM horsies_task_history WHERE task_id = $1)",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read the held row");
     cancel.cancel();
     let ended = tokio::time::timeout(STOP_BOUND, run)
         .await
@@ -240,6 +251,7 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
         .expect("the worker task joins");
 
     assert!(beats >= 1, "{beats}");
+    assert_eq!(held, (Some("RUNNING".to_owned()), 0));
     assert!(ended.is_ok(), "the worker stopped with an error: {ended:?}");
     pool.close().await;
     database.drop().await;
