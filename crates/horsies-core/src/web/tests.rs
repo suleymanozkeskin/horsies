@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::{PostgresBroker, SchemaInitializationMode};
-use crate::core::Horsies;
 use crate::monitoring::TaskAbsenceReason;
+use crate::test_support::child_specs::TestChildSpecs;
 use crate::AppConfig;
 
 use super::app::{build_router, WebState};
@@ -172,10 +172,6 @@ fn test_state(
     assets: Arc<dyn super::spa::AssetStore>,
 ) -> WebState {
     let broker = Arc::new(PostgresBroker::from_pool(pool));
-    let app = Horsies::new(AppConfig::for_database_url(
-        "postgresql://postgres:pw@127.0.0.1:1/none",
-    ))
-    .expect("test app");
     WebState {
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
@@ -187,10 +183,7 @@ fn test_state(
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
-        children: crate::monitoring::ResumeChildren::Registry {
-            registry: Arc::new(app.workflow_registry().clone()),
-            retention: app.config().retention.clone(),
-        },
+        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -1200,7 +1193,6 @@ async fn migrated_state() -> WebState {
         pool,
         &database_url,
     ));
-    let app = Horsies::new(AppConfig::for_database_url(database_url)).unwrap();
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
         task_stats_cache: Arc::new(TaskStatsCache::new()),
@@ -1212,10 +1204,7 @@ async fn migrated_state() -> WebState {
         actions_enabled: true,
         ui_config: MonitoringUiConfig::default(),
         assets: MemoryAssets::standard(),
-        children: crate::monitoring::ResumeChildren::Registry {
-            registry: Arc::new(app.workflow_registry().clone()),
-            retention: app.config().retention.clone(),
-        },
+        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -2183,14 +2172,9 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
             .await
             .expect("connect the observe-only broker"),
     );
-    let app =
-        Horsies::new(AppConfig::for_database_url(&url)).expect("the app of the empty database");
     let handler = MonitoringHandler::new(
         Arc::clone(&broker),
-        crate::monitoring::ResumeChildren::Registry {
-            registry: Arc::new(app.workflow_registry().clone()),
-            retention: app.config().retention.clone(),
-        },
+        crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
         MonitoringHandlerConfig {
             actions_enabled: true,
             ui: MonitoringUiConfig::default(),

@@ -16,19 +16,17 @@ use uuid::Uuid;
 
 use super::scripted::{
     answer_of, boot, ended, exit_at_stop, input, isolated_config, isolated_init, reported,
-    result_frame, run_frame, send, serving, shell, start_isolated, submit_isolated, take, task,
-    until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT, WORKER_ID,
+    result_frame, run_frame, send, serving, shell, start_isolated, submit_isolated, take,
+    take_init, task, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT, WORKER_ID,
 };
 use super::seat_runs::{LossSight, RunStopReport, RunWork, SeatRun, SeatRuns};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::executor::protocol::{
-    CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ParentFrame, ProcessId, RssReading,
-    RunRef, SeatEnd, SharedResultFrame, TaskTimeoutMs,
+    CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ProcessId, RssReading, RunRef,
+    SeatEnd, SharedResultFrame, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause, PartialFrame, Spawner};
 
@@ -130,12 +128,9 @@ fn unreachable_writer() -> OutcomeWriter {
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }
@@ -237,12 +232,9 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     let writer = OutcomeWriter::new(
         broker,
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     );
     let claimed = ClaimedTask {
@@ -290,7 +282,7 @@ async fn a_failed_start_hook_of_a_replacement_fails_the_pool_with_no_restart_loo
         take_run = take(&run_frame(&first)),
         result = send(&[result_frame(&first, 1)]),
         stop = exit_at_stop(),
-        take_init = take(&ParentFrame::Init(init.clone())),
+        take_init = take_init(),
     );
     let spawner = Spawner::start().unwrap();
     let config = IsolatedPoolConfig {
@@ -358,7 +350,9 @@ async fn a_task_that_ends_during_the_drain_keeps_its_result() {
 /// Python `test_worker_stop_ordering.py::test_stop_drains_for_the_configured_time`
 /// and `test_slot_pool.py::TestStop::test_drain_deadline_kills_and_reports`:
 /// the stop gives a busy child its drain timeout, then kills it; its task
-/// takes the crash path.
+/// takes the crash path. The kill is the worker's (`KILLED_BY_PARENT`,
+/// Python `_kill_at_deadline`), so the reason is Python's text of a lost
+/// child (`_finalize_child_loss`, `python/horsies/core/worker/finalize.py:1057`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path() {
     let first = task(1, ExecutionClass::Isolated);
@@ -383,12 +377,14 @@ async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path
             killed: vec![first.task_id]
         }
     );
-    match answer_of(receiver).await {
-        AttemptEnd::Crashed { reason } => {
-            assert!(reason.as_str().contains("drain deadline"), "{reason}");
+    assert_eq!(
+        answer_of(receiver).await,
+        AttemptEnd::Crashed {
+            reason: FailureDetail::cut(
+                "Worker child lost: killed by the worker: signal 9 (SIGKILL)"
+            ),
         }
-        other => panic!("expected the crash path, got {other:?}"),
-    }
+    );
     ended(pid.as_pid_t()).await;
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
 }

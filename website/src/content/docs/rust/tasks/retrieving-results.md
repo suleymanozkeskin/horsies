@@ -83,7 +83,7 @@ async fn print_attempts(handle: &TaskHandle<String, std::convert::Infallible>) -
 
 | Field | Reads |
 |-------|-------|
-| `result` | The stored result of a terminal task |
+| `result` | The stored result of a terminal task, as `TaskResult<JsonText>`: the value as its stored text (`decode::<T>()` reads it with the task's type), or the stored error |
 | `failed_reason` | The failed reason of a failed task |
 | `attempts` | Every attempt of the task, newest first |
 

@@ -39,6 +39,7 @@ from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
     Execution,
+    OperationalErrorCode,
     TaskError,
     TaskOptions,
     TaskResult,
@@ -622,6 +623,13 @@ class TestWorkflowPaths:
         options = json.dumps({'execution': 'SHARED_THREAD', 'cancel_grace_ms': None})
         assert root_execution(options, 'root') is Execution.SHARED_THREAD
 
+    def test_a_fast_path_root_with_empty_options_text_raises(self) -> None:
+        from horsies.core.workflows.lifecycle import root_execution
+
+        # The decorator stores None for no options; an empty text is not JSON.
+        with pytest.raises(SerializationError, match='Corrupt task_options for root node root'):
+            root_execution('', 'root')
+
     def test_a_fast_path_root_with_an_invalid_class_raises(self) -> None:
         from horsies.core.workflows.lifecycle import root_execution
 
@@ -686,6 +694,37 @@ class TestWorkflowPaths:
         )
         assert isinstance(outcome, Err)
         assert outcome.err_value.message.startswith('Invalid execution for task 3:')
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('field', 'message'),
+        [
+            ('task_options_str', 'Corrupt task_options JSON for task 3'),
+            ('node_input', 'Corrupt kwargs JSON for task 3'),
+            ('args_from', 'Corrupt args_from JSON for task 3'),
+        ],
+        ids=['task-options', 'input', 'args-from'],
+    )
+    async def test_node_promotion_refuses_an_empty_stored_text(
+        self, field: str, message: str,
+    ) -> None:
+        """The Python engine reads an empty stored text as the baseline
+        promotion does (horsies_workflow_task_node_refusal): corrupt data,
+        not "none"."""
+        from horsies.core.workflows.engine import _build_enqueued_task_params  # pyright: ignore[reportPrivateUsage]
+
+        arguments = self._promotion_arguments(None)
+        arguments[field] = ''
+        outcome = await _build_enqueued_task_params(
+            MagicMock(),
+            'workflow-1',
+            3,
+            **arguments,
+        )
+        assert isinstance(outcome, Err)
+        assert outcome.err_value.message == message
+        assert outcome.err_value.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
 
 
 class TestPerSendOptions:

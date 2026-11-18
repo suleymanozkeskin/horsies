@@ -238,10 +238,19 @@ def _load_definition(
 def _args_from_map(
     node: ChildOfNode,
 ) -> dict[str, int] | ChildBuildFailed:
-    """The validated ``args_from`` map of ``node``; empty when it has none."""
+    """The validated ``args_from`` map of ``node``; empty when it has none
+    (NULL).
+
+    A text that is empty, does not read, or reads as ``null`` fails the node
+    with ``Corrupt args_from JSON``: no writer stores an empty text.
+
+    A value must be an ``int`` that is not a ``bool``: ``bool`` is a subclass
+    of ``int``, and ``true`` and ``false`` are refused, not read as the
+    indexes 1 and 0.
+    """
     raw: object = None
     match node.args_from:
-        case None | '':
+        case None:
             return {}
         case str() as text_value:
             match loads_json(text_value):
@@ -253,22 +262,26 @@ def _args_from_map(
                     )
                 case _ as unreachable:
                     assert_never(unreachable)
-            if raw is None:
-                return _failed(
-                    node,
-                    f'Corrupt args_from JSON for subworkflow task {node.task_index}',
-                    OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
         case mapping:
             if not mapping:
                 return {}
             raw = dict(mapping)
+    if raw is None:
+        return _failed(
+            node,
+            f'Corrupt args_from JSON for subworkflow task {node.task_index}',
+            OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        )
     if not isinstance(raw, dict):
         return {}
     pairs = cast(dict[object, object], raw)
     validated: dict[str, int] = {}
     for key, value in pairs.items():
-        if not isinstance(key, str) or not isinstance(value, int):
+        if (
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+        ):
             return _failed(
                 node,
                 f'args_from has non-int values for subworkflow task {node.task_index}',
@@ -283,7 +296,12 @@ def _input_kwargs(
     workflow_def: type[WorkflowDefinition[Any]],
     dependency_results: Mapping[int, TaskResult[Any, TaskError]],
 ) -> dict[str, Any] | ChildBuildFailed:
-    """The kwargs of ``build_with``: the decoded node input and the args_from members."""
+    """The kwargs of ``build_with``: the decoded node input and the args_from members.
+
+    A node input that is empty, does not read, or reads as ``null`` fails the
+    node with ``Corrupt kwargs JSON``. A node without params stores ``{}``;
+    no writer stores an empty text.
+    """
     raw_kwargs: object = None
     match loads_json(node.node_input):
         case Ok(parsed):
@@ -292,7 +310,7 @@ def _input_kwargs(
             logger.warning(f'JSON parse failed (subworkflow kwargs): {parse_error}')
         case _ as unreachable:
             assert_never(unreachable)
-    if raw_kwargs is None and node.node_input:
+    if raw_kwargs is None:
         return _failed(
             node,
             f'Corrupt kwargs JSON for subworkflow task {node.task_index}',
@@ -555,7 +573,7 @@ def task_options_with_good_until(node: TaskNode[Any], owner: NodeOwner) -> str |
     if node.good_until is None:
         return options_json
     base_options: dict[str, Any] = {}
-    if options_json:
+    if options_json is not None:
         match loads_json(options_json):
             case Ok(dict() as parsed_options):
                 base_options = cast(dict[str, Any], parsed_options)

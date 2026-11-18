@@ -28,10 +28,10 @@ use crate::broker::lifecycle_tests::support::{
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOutcome};
 use crate::core::task::Execution;
-use crate::core::{TaskResult, WorkflowSpecRegistry};
+use crate::core::TaskResult;
+use crate::test_support::child_specs::TestChildSpecs;
 use crate::worker::execution::{
     finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
     PhaseTwoForm,
@@ -80,7 +80,7 @@ async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
     start(
         pool,
         &spec(name, vec![task_node(0, &format!("{name}_task")), dependent]),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await
 }
@@ -201,12 +201,7 @@ async fn finalize_on(
     if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
             broker,
-            ChildBuild::Registry {
-                registry: &WorkflowSpecRegistry::new(
-                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                ),
-                retention: &RetentionConfig::default(),
-            },
+            ChildBuild::Client(&TestChildSpecs::empty()),
             claimed.task_id,
             &claimed.queue_name,
             claimed.kind.is_workflow_task(),
@@ -584,12 +579,7 @@ async fn phase_two(
     let broker = PostgresBroker::from_pool(pool.clone());
     finalize_workflow_phase(
         &broker,
-        ChildBuild::Registry {
-            registry: &WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
-            retention: &RetentionConfig::default(),
-        },
+        ChildBuild::Client(&TestChildSpecs::empty()),
         task_id,
         queue_name,
         is_workflow_task,
@@ -689,9 +679,7 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
                 let workflow_id = start(
                     &pool,
                     &spec("finalize_wake", vec![wake_node]),
-                    &WorkflowSpecRegistry::new(
-                        crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                    ),
+                    &TestChildSpecs::empty(),
                 )
                 .await;
                 let task_id = node(&pool, workflow_id, 0)
@@ -800,12 +788,7 @@ async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_no
     proxy.drop_reply_to_request_carrying(task_id.as_bytes());
     let result = finalize_workflow_phase(
         &proxied_broker,
-        ChildBuild::Registry {
-            registry: &WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
-            retention: &RetentionConfig::default(),
-        },
+        ChildBuild::Client(&TestChildSpecs::empty()),
         task_id,
         SEEDED_NODE_QUEUE,
         true,

@@ -216,6 +216,43 @@ class TestSubworkflowCompletion:
         assert UPDATE_PARENT_NODE_RESULT_SQL not in recorder.executed
 
 
+class TestChildErrorSummary:
+    """The error summary of a FAILED child, read from its stored error as the
+    baseline horsies_workflow_child_node_result reads it: NULL has none, and an
+    empty text is a text that is not JSON, summarized as its text."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('child_error', 'error_summary'),
+        [(None, None), ('', ''), ('not json', 'not json')],
+        ids=['null', 'empty-text', 'text-that-is-not-json'],
+    )
+    async def test_the_summary_follows_the_stored_error(
+        self, child_error: str | None, error_summary: str | None,
+    ) -> None:
+        recorder = _RecordingSession({
+            GET_CHILD_WORKFLOW_INFO_SQL: SimpleNamespace(
+                status='FAILED',
+                result=None,
+                error=child_error,
+                parent_workflow_id='wf-parent',
+                parent_task_index=0,
+                total=1, completed=0, failed=1, skipped=0,
+            ),
+        })
+        written: list[Any] = []
+
+        def _first_write_is_refused(value: Any) -> Any:
+            written.append(value)
+            return REFUSED
+
+        with patch(DUMPS_JSON, side_effect=_first_write_is_refused):
+            with pytest.raises(SerializationError, match='parent node error for child workflow child-1'):
+                await on_subworkflow_complete(recorder.session, 'child-1')
+
+        assert written[0]['err']['sub_workflow_summary']['error_summary'] == error_summary
+
+
 class TestWorkflowFailureError:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

@@ -7,9 +7,8 @@ use uuid::Uuid;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
-use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::{TaskStatus, WorkflowStatus};
 
@@ -465,12 +464,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
     let broker = PostgresBroker::from_pool(pool.clone());
-    let children = ResumeChildren::Registry {
-        registry: std::sync::Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-        )),
-        retention: RetentionConfig::default(),
-    };
+    let children = ResumeChildren::Client(std::sync::Arc::new(TestChildSpecs::empty()));
 
     let running_to_pause = seed_workflow(&pool, WorkflowStatus::Running).await;
     let paused = pause_workflow_action(&broker, running_to_pause).await;

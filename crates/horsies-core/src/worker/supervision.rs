@@ -89,7 +89,6 @@ mod tests {
 
     use crate::core::config::app::AppConfig;
     use crate::core::config::{PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig};
-    use crate::core::registry::workflow::WorkflowSpecRegistry;
     use crate::worker::config::WorkerConfig;
     use crate::worker::heartbeat::spawn_claimer_heartbeat;
     use crate::worker::recovery::{new_reaper_health, spawn_reaper};
@@ -229,12 +228,8 @@ mod tests {
             ..RecoveryConfig::default()
         };
         let handle = spawn_reaper(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
-            pool.clone(),
-            pool,
-            crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            )),
+            Arc::new(crate::broker::PostgresBroker::from_pool(pool)),
+            crate::test_support::child_specs::no_child_specs(),
             config,
             crate::core::RetentionConfig::default(),
             new_reaper_health(),

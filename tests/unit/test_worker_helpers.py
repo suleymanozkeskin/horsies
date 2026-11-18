@@ -54,7 +54,14 @@ from horsies.core.worker.claiming import (
 from tests.dualrun.reference import claim_caller
 from horsies.core.utils.db import PooledStatements
 import horsies._core as core
-from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed, TooManyPendingCalls
+from horsies._core import (
+    ClaimsReleased,
+    CoreConnectionError,
+    NotHeldRow,
+    ReleasedRow,
+    ReleaseFailed,
+    TooManyPendingCalls,
+)
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -6002,7 +6009,6 @@ from horsies.core.lifecycle.outcomes import (
     SuccessApplied,
 )
 from horsies.core.lifecycle.persistence import (
-    COMPLETE_SUCCESSES_SUBJECT,
     BatchCommitUnknown,
     BatchRolledBack,
     BatchWriteError,
@@ -6089,8 +6095,9 @@ def _with_core_handle() -> Any:
     )
 
 
-def _core_failure(message: str, retryable: bool) -> CoreOperationFailed:
-    return CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable)
+def _core_failure(message: str, retryable: bool) -> CoreConnectionError:
+    """The exception of a core batch record that met ``message``."""
+    return CoreConnectionError('complete_successes', message, retryable)
 
 
 @pytest.mark.unit

@@ -285,8 +285,17 @@ impl Horsies {
     /// and the app's queues, and walked into its sub-workflows; a nesting
     /// is reported only when it reaches the depth limit for certain. Empty
     /// when every workflow passes.
+    ///
+    /// The sends of this process are suppressed while the check runs, so a
+    /// check case that sends writes nothing (Python
+    /// `_check_workflow_builders`). The flag is then set back to its value
+    /// before the check; a set [`SUPPRESS_SENDS_ENV`] does not change it.
     pub(crate) fn workflow_check_findings(&self) -> Vec<HorsiesError> {
-        self.workflows.check_findings()
+        let before = self.sends.flag.load(Ordering::Relaxed);
+        self.sends.set(true);
+        let findings = self.workflows.check_findings();
+        self.sends.set(before);
+        findings
     }
 
     /// The suppression of this process's sends, for a send path that lives
@@ -556,9 +565,17 @@ mod tests {
 
     #[test]
     fn only_the_value_1_requests_suppression() {
-        assert!(suppression_requested(Some("1")));
-        assert!(suppression_requested(Some(" 1\n")));
-        for value in [None, Some("0"), Some("true"), Some("")] {
+        for value in ["1", " 1 ", "1\n", " 1\n"] {
+            assert!(suppression_requested(Some(value)), "{value:?}");
+        }
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some("11"),
+        ] {
             assert!(!suppression_requested(value), "{value:?}");
         }
     }

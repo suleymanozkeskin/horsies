@@ -601,6 +601,84 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
     );
 }
 
+/// `url` with one more query parameter: a different URL text that names the
+/// same database.
+fn with_application_name(url: &str, application_name: &str) -> String {
+    let separator = match url.contains('?') {
+        true => '&',
+        false => '?',
+    };
+    format!("{url}{separator}application_name={application_name}")
+}
+
+/// A `session_database_url` that differs from `database_url` adds the
+/// session pool that the core's worker broker opens on it, sized as the
+/// worker pool, to the sum against the server. The worker pool, the
+/// listener, the runner heartbeat and one isolated child fill the usable
+/// slots exactly, so the profile fits with no separate session URL and does
+/// not fit with one. The check reads the limit through `broker` and connects
+/// nothing on the session URL. Python counts no session pool
+/// (`python/horsies/core/worker/profile_fit.py`, `worker_connection_need`).
+#[tokio::test]
+#[serial]
+async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
+    let usable = usable_slots_of_the_test_server().await;
+    let set_parent_pool = usable
+        .checked_sub(3)
+        .filter(|connections| (1..=MAX_CHILD_POOL_CONNECTIONS).contains(connections))
+        .expect("the test server has from 4 to 1003 usable slots");
+    let profile = WorkerProfile {
+        isolated: isolated(1),
+        pool: ParentPool {
+            max_size: set_pool_size(set_parent_pool),
+        },
+        ..WorkerProfile::default()
+    };
+    let parent = u64::from(profile.resolved_parent_pool().get());
+    let without_session_pool = parent + 1 + 1 + 1;
+    let total = without_session_pool + parent;
+    assert_eq!(without_session_pool, u64::from(usable));
+    assert!(total > u64::from(usable));
+    let database_url = migrated_database_url().await;
+    let mut config = AppConfig::for_database_url(database_url.clone());
+    config.broker.session_database_url = Some(with_application_name(
+        &database_url,
+        "horsies_session_pool_check",
+    ));
+    config.worker_profiles = BTreeMap::from([("session".to_owned(), profile)]);
+    let broker = PostgresBroker::from_pool(migrated_pool().await);
+
+    let errors = check_worker_connections(&config, &broker).await;
+
+    let [error] = errors.as_slice() else {
+        panic!("expected one error, got {errors:?}");
+    };
+    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert!(
+        error.message.starts_with(&format!(
+            "worker_profiles['session']: one worker opens up to {total} Postgres connections \
+             itself"
+        )),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        error.notes.first().map(String::as_str),
+        Some(
+            format!(
+                "parent pool max_size {parent} + session pool max_size {parent} + listener 1 \
+                 + runner heartbeat 1 + 1 isolated children x isolated.pool max_size 1 \
+                 = {total}"
+            )
+            .as_str()
+        )
+    );
+
+    config.broker.session_database_url = Some(database_url);
+    let errors = check_worker_connections(&config, &broker).await;
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 // --- the fit at worker boot ---------------------------------------------------
 //
 // Python `tests/unit/test_cli.py::TestBootConnectionFit` and

@@ -15,10 +15,14 @@ Order of work:
 4. Labels are assigned row by row, column by column, in document order
    inside a JSON document.
 5. Rows that still tie (same ``order_by`` values, same references) and
-   bring in new labels are checked: the assignment is arbitrary unless the
-   rows are equal apart from their new labels, and each new value occurs
-   only inside the group, in one row or in every row of it. Otherwise the
-   group is reported as an ``AmbiguousGroup``. A label is never guessed.
+   bring in new labels are checked: their order decides nothing when every
+   order gives the same normalized snapshot. That holds when each new value
+   occurs in one row of the group or in every row of it, the rows are equal
+   apart from their new labels, and the rows elsewhere that hold the new
+   values of one row equal those of each other row, with those values
+   marked, and hold no id without a label and no new value of another row
+   of the group. Otherwise the group is reported as an ``AmbiguousGroup``.
+   A label is never guessed.
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from tests.dualrun.cells import (
     NormalizeError,
     PendingDocument,
     PendingId,
+    PendingLeaf,
+    PendingText,
     RawRow,
     RawSnapshot,
     StableCell,
@@ -56,6 +62,7 @@ from tests.dualrun.values import (
     NullValue,
     IdLabel,
     JsonDocument,
+    LabelledText,
     NormalizedValue,
     OffsetFromAnchor,
     OrderKeyCell,
@@ -65,6 +72,7 @@ from tests.dualrun.values import (
     UnlabelledId,
     map_json,
     render_json,
+    render_text,
     render_value,
     sort_token,
 )
@@ -163,13 +171,11 @@ class _LabelBook:
     def __init__(self, stable: list[list[StableRow]]) -> None:
         self._labels: dict[str, IdLabel] = {}
         self._issued: Counter[IdFamily] = Counter()
-        self._occurrences: Counter[str] = Counter()
         self._holders: dict[str, list[tuple[int, int]]] = {}
         for table_index, rows in enumerate(stable):
             for row_index, row in enumerate(rows):
                 for cell in row:
                     for pending in cell_ids(cell):
-                        self._occurrences[pending.raw] += 1
                         holders = self._holders.setdefault(pending.raw, [])
                         if not holders or holders[-1] != (table_index, row_index):
                             holders.append((table_index, row_index))
@@ -185,10 +191,6 @@ class _LabelBook:
         assert raw not in self._labels, f'id {raw!r} is labelled twice'
         self._issued[family] += 1
         self._labels[raw] = IdLabel(family=family, ordinal=self._issued[family])
-
-    def occurrences(self, raw: str) -> int:
-        """How many id cells of the whole snapshot hold ``raw``."""
-        return self._occurrences[raw]
 
     def holders(self, raw: str) -> list[tuple[int, int]]:
         """Every (table index, row index) whose row holds ``raw`` in an id cell."""
@@ -211,24 +213,42 @@ def _order_value(cell: StableCell, book: _LabelBook) -> OrderKeyValue:
             return cell
 
 
-def _leaf_text(leaf: NormalizedValue | PendingId, book: _LabelBook) -> str:
+def _leaf_text(leaf: PendingLeaf, book: _LabelBook) -> str:
     match leaf:
         case PendingId():
             return render_value(_known(leaf, book))
+        case PendingText(parts=parts):
+            return render_text(
+                parts, lambda pending: render_value(_known(pending, book))
+            )
         case _:
             return render_value(leaf)
 
 
-def _final_leaf(leaf: NormalizedValue | PendingId, book: _LabelBook) -> NormalizedValue:
+def _final_label(pending: PendingId, book: _LabelBook) -> IdLabel:
+    match book.lookup(pending.raw):
+        case IdLabel() as label:
+            return label
+        case UnlabelledId():
+            raise AssertionError(
+                f'id {pending.raw!r} has no label after its table was labelled'
+            )
+
+
+def _final_part(part: str | PendingId, book: _LabelBook) -> str | IdLabel:
+    match part:
+        case str():
+            return part
+        case PendingId():
+            return _final_label(part, book)
+
+
+def _final_leaf(leaf: PendingLeaf, book: _LabelBook) -> NormalizedValue:
     match leaf:
-        case PendingId(raw=raw):
-            match book.lookup(raw):
-                case IdLabel() as label:
-                    return label
-                case UnlabelledId():
-                    raise AssertionError(
-                        f'id {raw!r} has no label after its table was labelled'
-                    )
+        case PendingId():
+            return _final_label(leaf, book)
+        case PendingText(parts=parts):
+            return LabelledText(parts=tuple(_final_part(part, book) for part in parts))
         case _:
             return leaf
 
@@ -248,14 +268,20 @@ def _final_value(cell: StableCell, book: _LabelBook) -> NormalizedValue:
 # ---- Masked tokens (reference order and tie check) ----
 
 
-def _leaf_token(
-    leaf: NormalizedValue | PendingId, marks: dict[str, str], book: _LabelBook
-) -> str:
+def _id_token(pending: PendingId, marks: dict[str, str], book: _LabelBook) -> str:
+    match marks.get(pending.raw):
+        case None:
+            return render_value(_known(pending, book))
+        case mark:
+            return mark
+
+
+def _leaf_token(leaf: PendingLeaf, marks: dict[str, str], book: _LabelBook) -> str:
     match leaf:
-        case PendingId(raw=raw) if raw in marks:
-            return marks[raw]
         case PendingId():
-            return render_value(_known(leaf, book))
+            return _id_token(leaf, marks, book)
+        case PendingText(parts=parts):
+            return render_text(parts, lambda pending: _id_token(pending, marks, book))
         case _:
             return render_value(leaf)
 
@@ -349,19 +375,99 @@ def _assign_labels(
     return introduced
 
 
+_Footprint = tuple[tuple[_Token, ...], tuple[_Context, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class _OrderDependent:
+    """A row elsewhere that holds a private value of a tied row and also the
+    private value of another row of the tie, or an id without a label: its
+    labels or its own order could follow the order of the tie."""
+
+
+def _holds_only_known_ids(
+    cells: StableRow, marks: dict[str, str], private: dict[str, int], book: _LabelBook
+) -> bool:
+    """Whether every id of ``cells`` is marked, or is not a private value of
+    the tie and has a label."""
+    for cell in cells:
+        for pending in cell_ids(cell):
+            match pending.raw:
+                case raw if raw in marks:
+                    pass
+                case raw if raw in private:
+                    return False
+                case raw if isinstance(book.lookup(raw), UnlabelledId):
+                    return False
+                case _:
+                    pass
+    return True
+
+
+def _footprint(
+    table_index: int,
+    row: int,
+    stable: list[list[StableRow]],
+    group_new: set[str],
+    private: dict[str, int],
+    book: _LabelBook,
+) -> _Footprint | _OrderDependent:
+    """A tied row as the rest of the snapshot sees it.
+
+    The row with each new value of the tie replaced by its first position in
+    the row, and the rows elsewhere that hold a private value of the row
+    (``private``: new value to its only row), marked the same way and sorted.
+    """
+    cells = stable[table_index][row]
+    local = [
+        pending.raw
+        for cell in cells
+        for pending in cell_ids(cell)
+        if pending.raw in group_new
+    ]
+    marks = {raw: f'new-{position}' for position, raw in enumerate(dict.fromkeys(local))}
+    holders = dict.fromkeys(
+        holder
+        for raw in marks
+        if private.get(raw) == row
+        for holder in book.holders(raw)
+        if holder != (table_index, row)
+    )
+    if len(holders) > REFERENCE_CONTEXT_LIMIT:
+        return _OrderDependent()
+    contexts: list[_Context] = []
+    for holder_table, holder_row in holders:
+        holder_cells = stable[holder_table][holder_row]
+        if not _holds_only_known_ids(holder_cells, marks, private, book):
+            return _OrderDependent()
+        contexts.append(
+            (
+                (-1, f'{holder_table:06d}'),
+                *(_masked_token(cell, marks, book) for cell in holder_cells),
+            )
+        )
+    masked = tuple(_masked_token(cell, marks, book) for cell in cells)
+    return (masked, tuple(sorted(contexts)))
+
+
 def _interchangeable(
+    table_index: int,
     members: list[int],
-    rows: list[StableRow],
+    stable: list[list[StableRow]],
     introduced: dict[int, tuple[str, ...]],
     book: _LabelBook,
 ) -> bool:
-    """Whether every order of the tied rows gives the same normalized table.
+    """Whether every order of the tied rows gives the same normalized snapshot.
 
     True when the rows bring in no new label. Otherwise each new value must
-    occur only inside the group, in one row or in every row of it, and the
-    rows must be equal once each new value is replaced by its first
-    position in its row.
+    occur in one row of the group (a private value) or in every row of it (a
+    shared value: it gets the same label in every order), and every row must
+    have the same footprint (``_footprint``): the same cells apart from its
+    new labels, and the same rows elsewhere that hold its private values.
+    A row elsewhere that holds the private values of two rows, or an id
+    without a label, makes the group order-dependent.
     """
+    rows = stable[table_index]
     group_new = {raw for row in members for raw in introduced[row]}
     if not group_new:
         return True
@@ -369,24 +475,25 @@ def _interchangeable(
         row: Counter(pending.raw for cell in rows[row] for pending in cell_ids(cell))
         for row in members
     }
+    private: dict[str, int] = {}
     for raw in group_new:
         holders = [row for row in members if in_row[row][raw] > 0]
-        inside = sum(in_row[row][raw] for row in holders)
-        if book.occurrences(raw) != inside or len(holders) not in (1, len(members)):
+        match len(holders):
+            case 1:
+                private[raw] = holders[0]
+            case count if count == len(members):
+                pass
+            case _:
+                return False
+    footprints = [
+        _footprint(table_index, row, stable, group_new, private, book)
+        for row in members
+    ]
+    match footprints[0]:
+        case _OrderDependent():
             return False
-    masked: list[tuple[_Token, ...]] = []
-    for row in members:
-        local = [
-            pending.raw
-            for cell in rows[row]
-            for pending in cell_ids(cell)
-            if pending.raw in group_new
-        ]
-        marks = {
-            raw: f'new-{position}' for position, raw in enumerate(dict.fromkeys(local))
-        }
-        masked.append(tuple(_masked_token(cell, marks, book) for cell in rows[row]))
-    return all(row == masked[0] for row in masked)
+        case first:
+            return all(footprint == first for footprint in footprints)
 
 
 def _label_table(
@@ -418,7 +525,8 @@ def _label_table(
             row_count=len(group),
         )
         for group in groups
-        if len(group) > 1 and not _interchangeable(group, rows, introduced, book)
+        if len(group) > 1
+        and not _interchangeable(table_index, group, stable, introduced, book)
     ]
     normalized = tuple(
         tuple(_final_value(cell, book) for cell in rows[row]) for row in order

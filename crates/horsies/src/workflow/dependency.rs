@@ -16,11 +16,13 @@
 
 use std::collections::BTreeMap;
 
-use horsies_core::{OutcomeCode, TaskResult, UserCode};
+use horsies_core::{JsonText, OutcomeCode, TaskResult, UserCode};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 
 use super::node::engine_member_text;
+use crate::handle::read_stored_result;
 use crate::{TaskError, TaskOutcome, UserErrorCode};
 
 impl<T, E> Serialize for TaskOutcome<T, E>
@@ -38,20 +40,26 @@ where
     }
 }
 
-/// The envelope is read as a JSON value first, then by the core's envelope
-/// reader: the reader takes the envelope as raw text, which a JSON value
-/// gives under any outer deserializer (the field path tracker of an input
-/// decode included).
+/// The envelope is taken as its text and read by `read_stored_result`: the
+/// `ok` slot decodes as `T` from its own text, so an integer outside the
+/// `i64` and `u64` range reads as `T` asks (`u128`, `i128`), as Python reads
+/// any integer. serde_json's reader gives the text, under the field path
+/// tracker of an input decode too, and so does a `serde_json::Value`. A
+/// deserializer that buffers the value (`#[serde(flatten)]`, an untagged or
+/// an internally tagged enum) gives no text, and the read fails, as the
+/// core's `TaskResult` read does.
 impl<'de, T, E> Deserialize<'de> for TaskOutcome<T, E>
 where
     T: DeserializeOwned,
     E: UserErrorCode,
 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let envelope = serde_json::Value::deserialize(deserializer)?;
-        match TaskResult::<T>::deserialize(envelope).map_err(D::Error::custom)? {
+        let envelope = Box::<RawValue>::deserialize(deserializer)?;
+        let stored = read_stored_result::<T>(envelope.get())
+            .map_err(|refused| D::Error::custom(refused.cause))?;
+        match stored {
             TaskResult::Ok(value) => Ok(Self::Succeeded(value)),
-            TaskResult::Err(stored) => TaskError::<E>::from_stored(stored)
+            TaskResult::Err(error) => TaskError::<E>::from_stored(error)
                 .map(Self::Failed)
                 .map_err(D::Error::custom),
         }
@@ -59,21 +67,22 @@ where
 }
 
 /// The result of a workflow with no output node (Python's outputless
-/// result): the outcome of each node by node id, with the value as JSON and
-/// the user codes as text, because the nodes are of many tasks.
+/// result): the outcome of each node by node id, with the value as its
+/// stored text (`JsonText::decode` reads it with the node's type) and the
+/// user codes as text, because the nodes are of many tasks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputlessResults {
-    by_node_id: BTreeMap<String, TaskOutcome<serde_json::Value, UserCode>>,
+    by_node_id: BTreeMap<String, TaskOutcome<JsonText, UserCode>>,
 }
 
 impl OutputlessResults {
     /// The outcome of the node `node_id`, when the result holds it.
-    pub fn get(&self, node_id: &str) -> Option<&TaskOutcome<serde_json::Value, UserCode>> {
+    pub fn get(&self, node_id: &str) -> Option<&TaskOutcome<JsonText, UserCode>> {
         self.by_node_id.get(node_id)
     }
 
     /// Every node id and its outcome, by node id.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &TaskOutcome<serde_json::Value, UserCode>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &TaskOutcome<JsonText, UserCode>)> {
         self.by_node_id
             .iter()
             .map(|(node_id, outcome)| (node_id.as_str(), outcome))
@@ -89,9 +98,7 @@ impl OutputlessResults {
         self.by_node_id.is_empty()
     }
 
-    pub(crate) fn new(
-        by_node_id: BTreeMap<String, TaskOutcome<serde_json::Value, UserCode>>,
-    ) -> Self {
+    pub(crate) fn new(by_node_id: BTreeMap<String, TaskOutcome<JsonText, UserCode>>) -> Self {
         Self { by_node_id }
     }
 }
@@ -103,7 +110,7 @@ impl<'de> Deserialize<'de> for OutputlessResults {
     /// the workflow handle reads the stored result of an outputless workflow
     /// through its own envelope.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeMap::<String, TaskOutcome<serde_json::Value, UserCode>>::deserialize(deserializer)
+        BTreeMap::<String, TaskOutcome<JsonText, UserCode>>::deserialize(deserializer)
             .map(Self::new)
     }
 }
@@ -138,6 +145,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::task::body::decode_input;
     use crate::TaskErrorCode;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -200,6 +208,30 @@ mod tests {
         let stored = json!({"__h_task_result__": true, "ok": 41, "err": null});
         let outcome: TaskOutcome<u32, Infallible> = serde_json::from_value(stored).unwrap();
         assert_eq!(outcome, TaskOutcome::Succeeded(41));
+    }
+
+    /// The value decodes from its own text, in a field of a task input read
+    /// by the input decode (with its field path tracker): an integer outside
+    /// the `i64` and `u64` range reads as `u128` or `i128`, as Python reads
+    /// it. A read through `serde_json::Value` holds it as an `f64`, which
+    /// both refuse.
+    #[test]
+    fn a_stored_integer_outside_i64_and_u64_reads_as_its_type() {
+        #[derive(Deserialize)]
+        struct Input {
+            max: TaskOutcome<u128, Infallible>,
+            below: TaskOutcome<i128, Infallible>,
+        }
+        let text = concat!(
+            r#"{"max":{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null},"#,
+            r#""below":{"__h_task_result__":true,"ok":-9223372036854775809,"err":null}}"#,
+        );
+        let input = decode_input::<Input>(text.as_bytes()).unwrap();
+        assert_eq!(input.max, TaskOutcome::Succeeded(u128::MAX));
+        assert_eq!(
+            input.below,
+            TaskOutcome::Succeeded(i128::from(i64::MIN) - 1)
+        );
     }
 
     #[test]

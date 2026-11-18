@@ -24,6 +24,10 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies._core import (
     BrokerFailure,
+    CoreConnectionError,
+    CoreContractViolation,
+    CorePreconditionFailed,
+    CoreServerError,
     DatabasePingRecord,
     Enqueued,
     SendEnqueueFailed,
@@ -54,7 +58,6 @@ from horsies._core import (
     PendingExpiryDrained,
     PendingExpiryFailed,
 )
-from horsies.core.types.core_failure import CoreLockNotAvailable, CoreOperationFailed
 from horsies.core.worker.reaper import _operation_sqlstate  # pyright: ignore[reportPrivateUsage]
 from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SIGNED_64_BIT_MIN, SyncSendRoute
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
@@ -70,7 +73,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     RawResultRecord,
 )
-from horsies.core.codec.json_io import SerializationError
+from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
     AllSlotsServing,
@@ -182,6 +185,28 @@ def _listener_of(broker: Any) -> Any:
 # through the method, so it is called untyped.
 _python_enqueue_async: Any = enqueue_caller.enqueue_async
 _python_enqueue: Any = enqueue_caller.enqueue
+
+
+_CONNECTION_LOST = CoreConnectionError('task_info', 'connection lost', True)
+"""The exception of a failure record whose connection was lost."""
+
+_DIGEST_MISMATCH = CoreContractViolation('task_info', 'stored result digest mismatch')
+"""The exception of a failure record whose stored data does not read."""
+
+_LOCK_NOT_AVAILABLE = CoreServerError(
+    'audit_orphaned_workflow_tasks', '55P03', 'could not obtain lock', True,
+)
+"""The exception of an orphan page whose cursor another sweep holds."""
+
+_COUNT_DIFFERS = CoreContractViolation(
+    'audit_orphaned_workflow_tasks', 'the cursor candidate count 2 differs',
+)
+"""The exception of an orphan page outside the function's contract."""
+
+_FAMILY_MISMATCH = CorePreconditionFailed(
+    'install_schema', 'the database was installed by the RUST client', False,
+)
+"""The exception of a schema install into a database of the other family."""
 
 
 def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
@@ -909,6 +934,61 @@ class TestEnqueueAsync:
         session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_empty_kwargs_text_is_refused_as_invalid_input(self) -> None:
+        """An empty text is not JSON; no input is None."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await _python_enqueue_async(
+            broker,
+            'my_task',
+            task_id='test-task-id',
+            sent_at=datetime.now(timezone.utc),
+            send_kind=SendKind.FIRST,
+            input_json='',
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert message == (
+                    'kwargs JSON corrupt for my_task: '
+                    'JSON parse failed: the text is empty'
+                )
+                assert isinstance(cause, EmptyJsonTextError)
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_task_options_text_is_refused(self) -> None:
+        """An empty text is not JSON; no options are None."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await _python_enqueue_async(
+            broker,
+            'my_task',
+            task_id='test-task-id',
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            task_options='',
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidTaskOptions(message=message, exception=cause):
+                assert message == (
+                    'task_options JSON corrupt: JSON parse failed: the text is empty'
+                )
+                assert isinstance(cause, EmptyJsonTextError)
+            case other:
+                raise AssertionError(f'expected INVALID_TASK_OPTIONS, got {other!r}')
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_lone_surrogate_in_kwargs_is_refused_as_invalid_input(self) -> None:
         """A lone surrogate never reaches the UTF-8 encode of the input envelope."""
         broker = _make_broker()
@@ -1320,12 +1400,14 @@ class TestEnqueueThroughCore:
     @pytest.mark.asyncio
     @pytest.mark.parametrize('retryable', [True, False])
     async def test_a_failed_enqueue_keeps_the_core_classification(self, retryable: bool) -> None:
+        cause = CoreConnectionError('enqueue', 'connection lost', retryable)
         broker = self._broker_answering(
             MagicMock(
                 spec=SendEnqueueFailed,
                 task_id=SEND_TASK_ID,
                 message='Failed to enqueue task my_task: connection lost',
                 retryable=retryable,
+                exception=cause,
             ),
         )
 
@@ -1335,8 +1417,7 @@ class TestEnqueueThroughCore:
         failed = result.err_value
         assert isinstance(failed, BrokerEnqueueFailed)
         assert failed.retryable is retryable
-        assert isinstance(failed.exception, CoreOperationFailed)
-        assert failed.exception.subject == 'PostgresBroker.enqueue_async'
+        assert failed.exception is cause
 
     @pytest.mark.asyncio
     async def test_a_payload_mismatch_and_a_key_conflict_keep_their_facts(self) -> None:
@@ -1687,6 +1768,20 @@ class TestGetRawResultRecordAsync:
         assert isinstance(result.err_value.exception, NoCause)
 
     @pytest.mark.asyncio
+    async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
+        broker = self._broker_answering(self._record('COMPLETED', ''))
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {RESULT_TASK_ID}: '
+            'JSON parse failed: the text is empty'
+        )
+
+    @pytest.mark.asyncio
     async def test_corrupt_stored_data_found_by_the_core_is_invalid_json_payload(
         self,
     ) -> None:
@@ -1696,6 +1791,7 @@ class TestGetRawResultRecordAsync:
                 code='INVALID_JSON_PAYLOAD',
                 message='Result archive digest mismatch',
                 retryable=False,
+                exception=_DIGEST_MISMATCH,
             ),
         )
 
@@ -1705,7 +1801,7 @@ class TestGetRawResultRecordAsync:
         failed = result.err_value
         assert isinstance(failed, BrokerInvalidJsonPayload)
         assert 'digest mismatch' in failed.message
-        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception is _DIGEST_MISMATCH
 
     @pytest.mark.asyncio
     async def test_a_failed_read_is_task_info_query_failed_and_logged(
@@ -1717,6 +1813,7 @@ class TestGetRawResultRecordAsync:
                 code='TASK_INFO_QUERY_FAILED',
                 message='connection lost',
                 retryable=True,
+                exception=_CONNECTION_LOST,
             ),
         )
 
@@ -1728,7 +1825,7 @@ class TestGetRawResultRecordAsync:
         assert isinstance(failed, BrokerOperationFailed)
         assert failed.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
         assert failed.retryable is True
-        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception is _CONNECTION_LOST
         assert 'connection lost' in caplog.text
 
     @pytest.mark.asyncio
@@ -1836,6 +1933,37 @@ class TestPythonRawResultRead:
         assert record.status == status
         assert record.raw_result is None
         assert session.execute.await_count == 1
+
+    def test_no_stored_result_text_builds_a_record_with_no_result(self) -> None:
+        """NULL is checked before the parse: no stored result, no payload."""
+        broker = _make_broker()
+
+        result = broker._build_raw_result_record(  # pyright: ignore[reportPrivateUsage]
+            RESULT_TASK_ID, 'my_task', TaskStatus.COMPLETED, None,
+        )
+
+        assert result == Ok(RawResultRecord(
+            task_id=RESULT_TASK_ID,
+            task_name='my_task',
+            status=TaskStatus.COMPLETED,
+            raw_result=None,
+        ))
+
+    def test_an_empty_stored_result_text_is_invalid_json_payload(self) -> None:
+        """An empty text is not JSON, and not "no result"."""
+        broker = _make_broker()
+
+        result = broker._build_raw_result_record(  # pyright: ignore[reportPrivateUsage]
+            RESULT_TASK_ID, 'my_task', TaskStatus.COMPLETED, '',
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {RESULT_TASK_ID}: '
+            'JSON parse failed: the text is empty'
+        )
 
     @pytest.mark.asyncio
     async def test_cancelled_row_returns_record_with_none_payload(self) -> None:
@@ -2054,6 +2182,7 @@ class TestPingDatabase:
                 code='DB_PING_FAILED',
                 message='database ping failed: connection refused',
                 retryable=True,
+                exception=_CONNECTION_LOST,
             ),
         )
 
@@ -2064,8 +2193,7 @@ class TestPingDatabase:
         assert failed.code is BrokerErrorCode.DB_PING_FAILED
         assert failed.retryable is True
         assert failed.message == 'ping_database failed: database ping failed: connection refused'
-        assert isinstance(failed.exception, CoreOperationFailed)
-        assert failed.exception.subject == 'PostgresBroker.ping_database_async'
+        assert failed.exception is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_ping_is_db_ping_failed(self) -> None:
@@ -2554,6 +2682,7 @@ class TestMarkStaleTasksAsFailed:
                 spec=StaleRunningScanFailed,
                 message='stale scan: connection lost',
                 retryable=True,
+                exception=_CONNECTION_LOST,
             ),
         )
 
@@ -2564,7 +2693,7 @@ class TestMarkStaleTasksAsFailed:
         assert failed.code is BrokerErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == 'mark_stale_tasks_as_failed failed: stale scan: connection lost'
-        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -2657,6 +2786,7 @@ class TestExpirePendingTasks:
                 expired_before=500,
                 message='pending expiry: connection lost',
                 retryable=True,
+                exception=_CONNECTION_LOST,
             ),
         )
 
@@ -2667,7 +2797,7 @@ class TestExpirePendingTasks:
         assert failed.code is BrokerErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == 'expire_pending_tasks failed: pending expiry: connection lost'
-        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -2750,6 +2880,7 @@ class TestTerminateOrphanedWorkflowTasks:
                 spec=OrphanAuditLockBusy,
                 message='orphan page: lock not available',
                 retryable=True,
+                exception=_LOCK_NOT_AVAILABLE,
             ),
         )
 
@@ -2759,8 +2890,7 @@ class TestTerminateOrphanedWorkflowTasks:
         failed = result.err_value
         assert failed.code is BrokerErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert isinstance(failed.exception, CoreLockNotAvailable)
-        assert failed.exception.sqlstate == '55P03'
+        assert failed.exception is _LOCK_NOT_AVAILABLE
         assert _operation_sqlstate(failed) == '55P03'
 
     @pytest.mark.asyncio
@@ -2771,6 +2901,7 @@ class TestTerminateOrphanedWorkflowTasks:
                 spec=OrphanAuditFailed,
                 message='horsies_cancel_orphaned_tasks: the cursor candidate count 2 differs',
                 retryable=False,
+                exception=_COUNT_DIFFERS,
             ),
         )
 
@@ -2781,8 +2912,7 @@ class TestTerminateOrphanedWorkflowTasks:
         assert failed.code is BrokerErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
         assert failed.message.startswith('audit_orphaned_workflow_tasks failed: ')
-        assert isinstance(failed.exception, CoreOperationFailed)
-        assert not isinstance(failed.exception, CoreLockNotAvailable)
+        assert failed.exception is _COUNT_DIFFERS
         assert _operation_sqlstate(failed) is None
 
     @pytest.mark.asyncio
@@ -2853,6 +2983,7 @@ class TestRequeueStaleClaimed:
                 requeued_before=7,
                 message='requeue batch: connection lost',
                 retryable=True,
+                exception=_CONNECTION_LOST,
             ),
         )
 
@@ -2866,8 +2997,7 @@ class TestRequeueStaleClaimed:
             'requeue_stale_claimed failed after requeueing 7 task(s): '
             'requeue batch: connection lost'
         )
-        assert isinstance(failed.exception, CoreOperationFailed)
-        assert failed.exception.subject == 'PostgresBroker.requeue_stale_claimed'
+        assert failed.exception is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -3172,6 +3302,22 @@ class TestGetTaskInfoAsync:
         assert isinstance(result.err_value.exception, exception_class)
 
     @pytest.mark.asyncio
+    async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
+        broker = self._broker_answering(
+            _task_info_record(status='COMPLETED', result_json=''),
+        )
+
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {TASK_INFO_ID}: '
+            'JSON parse failed: the text is empty'
+        )
+
+    @pytest.mark.asyncio
     async def test_attempts_keep_the_core_order(self) -> None:
         broker = self._broker_answering(
             _task_info_record(
@@ -3203,6 +3349,7 @@ class TestGetTaskInfoAsync:
                 code='TASK_INFO_QUERY_FAILED',
                 message='pool timed out',
                 retryable=True,
+                exception=_CONNECTION_LOST,
             ),
         )
 
@@ -3214,7 +3361,7 @@ class TestGetTaskInfoAsync:
         assert failed.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
         assert failed.retryable is True
         assert failed.message == f'get_task_info failed for {TASK_INFO_ID}: pool timed out'
-        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_corrupt_stored_data_found_by_the_core_is_invalid_json_payload(
@@ -3226,6 +3373,7 @@ class TestGetTaskInfoAsync:
                 code='INVALID_JSON_PAYLOAD',
                 message='stored result digest mismatch',
                 retryable=False,
+                exception=_DIGEST_MISMATCH,
             ),
         )
 
@@ -3233,7 +3381,7 @@ class TestGetTaskInfoAsync:
 
         assert is_err(result)
         assert isinstance(result.err_value, BrokerInvalidJsonPayload)
-        assert isinstance(result.err_value.exception, CoreOperationFailed)
+        assert result.err_value.exception is _DIGEST_MISMATCH
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_read_is_task_info_query_failed(self) -> None:
@@ -3486,6 +3634,7 @@ class TestEnsureSchemaInitialized:
                 code='SCHEMA_INIT_FAILED',
                 message='the database was installed by the RUST client',
                 retryable=False,
+                exception=_FAMILY_MISMATCH,
             ),
         )
 
@@ -3497,8 +3646,7 @@ class TestEnsureSchemaInitialized:
         assert failed.code is BrokerErrorCode.SCHEMA_INIT_FAILED
         assert failed.retryable is False
         assert 'installed by the RUST client' in failed.message
-        assert isinstance(failed.exception, CoreOperationFailed)
-        assert failed.exception.subject == 'PostgresBroker.ensure_schema_initialized'
+        assert failed.exception is _FAMILY_MISMATCH
         assert is_err(second)
         assert broker._core_handle.install_schema_async.await_count == 2
         assert broker._initialized is False

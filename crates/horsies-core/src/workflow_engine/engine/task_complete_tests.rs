@@ -11,9 +11,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::core::{TaskError, TaskResult, WorkflowSpecRegistry};
+use crate::core::{TaskError, TaskResult};
+use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::workflow_engine::engine::{
     on_workflow_task_complete, SourceFailure, WorkflowTaskCompletion, WorkflowTaskCompletionError,
@@ -139,13 +139,7 @@ async fn complete(
     broker: &PostgresBroker,
     task_id: Uuid,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
-    on_workflow_task_complete(
-        broker,
-        task_id,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &RetentionConfig::default(),
-    )
-    .await
+    on_workflow_task_complete(broker, task_id, &TestChildSpecs::empty()).await
 }
 
 /// A live workflow: the node takes COMPLETED with the stored result, the

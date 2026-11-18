@@ -20,7 +20,9 @@
 //! `python/horsies/core/baseline/install.py`, and `_run_fleet_schema_init` in
 //! `python/horsies/core/brokers/postgres.py`):
 //! 1. Read the state of the current schema on a session-work connection, with
-//!    no lock: one statement on an empty database, two otherwise.
+//!    no lock: one statement on an empty database, two otherwise, and a third
+//!    on a database that holds this build's chain (whether its history
+//!    readers exist).
 //! 2. Decide. A database that holds this build's chain and this client's
 //!    family gets no lock and no write. A database that this build does not
 //!    know is refused with a [`SchemaRefusal`], and a database of the other
@@ -31,8 +33,15 @@
 //!    - each pending migration runs in its own READ COMMITTED transaction
 //!      with its bookkeeping row; the transaction of migration 1000 also
 //!      publishes the history readers (`horsies_publish_history_readers`)
-//!      and writes this client's family row;
-//!    - a database with no family row gets this client's row.
+//!      and writes this client's family row. A migration that declares
+//!      index steps first gives its exact indexes their form outside a
+//!      transaction (concurrent builds), and after its transaction commits
+//!      the retired indexes are dropped concurrently ([`apply_chain`]);
+//!    - a database that holds this build's chain with a history reader
+//!      missing or no family row (an install that stopped before them, or a
+//!      reader dropped out of band) gets the readers published in one READ
+//!      COMMITTED transaction, then this client's family row (Python
+//!      `CompleteInstall`).
 //! 4. Release the lock and check the release.
 //!
 //! A deadlock (SQLSTATE 40P01) runs the whole install again, at most
@@ -153,6 +162,14 @@ struct MigrationSource {
     script: SqlScript,
     family_row: FamilyRow,
     readers: ReaderPublication,
+    /// The indexes that the migration gives their declared form outside a
+    /// transaction, before its transaction ([`install_exact_indexes`]). The
+    /// columns they read exist before the migration: a migration that adds
+    /// a column and indexes it is two migrations.
+    exact_indexes: &'static [ExactIndex],
+    /// The indexes that the migration retires, dropped outside a transaction
+    /// after its bookkeeping row commits ([`remove_retired_indexes`]).
+    retired_indexes: &'static [RetiredIndex],
 }
 
 /// The embedded chain, in apply order: the baseline only, the chain that
@@ -163,6 +180,8 @@ const MIGRATION_SOURCES: [MigrationSource; 1] = [MigrationSource {
     script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
     family_row: FamilyRow::WrittenWithMigration,
     readers: ReaderPublication::PublishedWithMigration,
+    exact_indexes: &[],
+    retired_indexes: &[],
 }];
 
 /// The most rows that one state read returns: `horsies_` table names, and
@@ -182,6 +201,8 @@ pub(crate) struct EmbeddedMigration {
     script: SqlScript,
     family_row: FamilyRow,
     readers: ReaderPublication,
+    exact_indexes: &'static [ExactIndex],
+    retired_indexes: &'static [RetiredIndex],
     checksum: [u8; CHECKSUM_BYTES],
 }
 
@@ -195,6 +216,8 @@ impl EmbeddedMigration {
             script: source.script,
             family_row: source.family_row,
             readers: source.readers,
+            exact_indexes: source.exact_indexes,
+            retired_indexes: source.retired_indexes,
             checksum,
         }
     }
@@ -253,8 +276,9 @@ const INSTALL_LOCK_POLL: Duration = Duration::from_millis(25);
 /// each deadlock (Python `_SCHEMA_INIT_MAX_ATTEMPTS`).
 pub const INSTALL_MAX_ATTEMPTS: u32 = 5;
 
-/// The most actions under the lock: apply the pending migrations, then write
-/// the family row. A state read follows each action.
+/// The most actions under the lock: apply the pending migrations, then
+/// complete the install (publish the readers, write the family row). A state
+/// read follows each action.
 const LOCKED_ACTION_BOUND: usize = 2;
 
 /// The session advisory lock key of every installer, Python's and the
@@ -357,6 +381,22 @@ static PUBLISH_HISTORY_READERS: TypedStatement = TypedStatement::new(
     &[],
 );
 
+/// Whether every history reader that `horsies_publish_history_readers`
+/// publishes exists (Python `read_database_state`, the reader column of
+/// `_CATALOG_SQL`). The list is the baseline's own
+/// (`horsies_history_reader_signatures()`, baseline `0008`), so the
+/// statement runs only on a database whose bookkeeping holds this build's
+/// whole chain.
+static READ_READERS_PUBLISHED: TypedStatement = TypedStatement::new(
+    "read_readers_published",
+    "SELECT NOT EXISTS (
+         SELECT 1
+         FROM horsies_history_reader_signatures() AS s
+         WHERE to_regprocedure(s.signature) IS NULL
+     ) AS readers_published",
+    &[],
+);
+
 /// One try of the install lock; it never waits.
 static TRY_INSTALL_LOCK: TypedStatement = TypedStatement::new(
     "try_install_lock",
@@ -417,6 +457,29 @@ enum SchemaFacts {
     Ledger(Bookkeeping),
 }
 
+/// Whether the history readers of a database exist (Python
+/// `ReaderPresence`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReaderPresence {
+    /// Every reader of `horsies_history_reader_signatures()` exists.
+    Published,
+    /// A reader is missing: an install stopped between migration 1000 and
+    /// the publication (Python's install published in a transaction of its
+    /// own), or a reader was dropped out of band.
+    Missing,
+}
+
+/// The classification of the facts of a database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Classification {
+    /// The state needs no other fact.
+    Settled(DatabaseState),
+    /// The bookkeeping holds this build's whole chain, each migration
+    /// recorded as succeeded with this build's checksum. The presence of the
+    /// history readers is read next ([`READ_READERS_PUBLISHED`]).
+    ChainCurrent { family: RecordedFamily },
+}
+
 /// What a database holds, as the install sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DatabaseState {
@@ -431,13 +494,18 @@ pub(crate) enum DatabaseState {
     },
     /// The bookkeeping holds this build's whole chain, each recorded as
     /// succeeded with this build's checksum.
-    Current { family: RecordedFamily },
+    Current {
+        family: RecordedFamily,
+        readers: ReaderPresence,
+    },
     /// A database this build does not install into.
     Unsupported(SchemaRefusal),
 }
 
 /// A database that this build does not install into. The install changes
-/// nothing. Not retryable: the same database is refused again.
+/// nothing, except before `IndexNameHeldElsewhere`: the migrations before
+/// the refused one stay committed. Not retryable: the same database is
+/// refused again.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SchemaRefusal {
     /// `horsies_schema_version` without `horsies_migrations`: a horsies 0.x
@@ -471,6 +539,20 @@ pub enum SchemaRefusal {
     /// A bookkeeping row is recorded as failed.
     #[error("schema migration {version} is recorded as failed")]
     MigrationIncomplete { version: i64 },
+    /// The name of an index that migration `version` declares (exact or
+    /// retired) is held by a relation other than an index of its table, or
+    /// changed holder while the install renamed it. This migration changed
+    /// nothing that its transaction holds; the migrations before it stay
+    /// committed. Not retryable: the name needs an operator.
+    #[error(
+        "index {index} of schema migration {version} is held by a relation other than an index \
+         of {table}"
+    )]
+    IndexNameHeldElsewhere {
+        version: i64,
+        index: &'static str,
+        table: &'static str,
+    },
     /// A bookkeeping row's checksum differs from this build's text.
     #[error(
         "schema migration {version} was applied from another text (stored checksum {}, this \
@@ -512,8 +594,10 @@ enum InstallAction {
     Ready,
     /// Apply the migrations of the chain from this index on.
     ApplyFrom(usize),
-    /// Write this client's family row.
-    RecordFamily,
+    /// Publish the history readers, then write this client's family row
+    /// when the database has none (Python `CompleteInstall`). Both steps are
+    /// idempotent.
+    CompleteInstall,
     /// Change nothing and refuse.
     Refuse(InstallRefusal),
 }
@@ -534,7 +618,8 @@ enum InstallRefusal {
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaInstallError {
     /// The database holds something this build does not install into.
-    /// Nothing was changed. Not retryable.
+    /// Nothing was changed, except before `IndexNameHeldElsewhere` (the
+    /// migrations before the refused one stay committed). Not retryable.
     #[error("schema install refused: {0}")]
     Refused(SchemaRefusal),
     /// The database was installed by the other client family. Nothing was
@@ -628,49 +713,56 @@ impl From<SchemaInstallError> for BrokerError {
 
 /// Classifies the facts of one database against `chain` (Python
 /// `classify_database`, with a chain of migrations in place of one).
-fn classify(facts: SchemaFacts, chain: &[EmbeddedMigration]) -> DatabaseState {
+fn classify(facts: SchemaFacts, chain: &[EmbeddedMigration]) -> Classification {
     match facts {
         SchemaFacts::NoLedger { horsies_tables, .. } if horsies_tables.is_empty() => {
-            DatabaseState::Empty
+            Classification::Settled(DatabaseState::Empty)
         }
         SchemaFacts::NoLedger {
             schema_version_table: true,
             horsies_tables,
-        } => DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
+        } => Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
             tables: horsies_tables,
-        }),
+        })),
         SchemaFacts::NoLedger {
             schema_version_table: false,
             horsies_tables,
-        } => DatabaseState::Unsupported(SchemaRefusal::UnknownHorsiesObjects {
-            tables: horsies_tables,
-        }),
+        } => Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::UnknownHorsiesObjects {
+                tables: horsies_tables,
+            },
+        )),
         SchemaFacts::Ledger(bookkeeping) => classify_bookkeeping(bookkeeping, chain),
     }
 }
 
 /// Classifies the bookkeeping rows: a version above the chain, then rows
 /// that do not start the chain, then a failed or changed row.
-fn classify_bookkeeping(bookkeeping: Bookkeeping, chain: &[EmbeddedMigration]) -> DatabaseState {
+fn classify_bookkeeping(bookkeeping: Bookkeeping, chain: &[EmbeddedMigration]) -> Classification {
     let Bookkeeping { applied, family } = bookkeeping;
     let own = newest_version(chain);
     let versions: Vec<i64> = applied.iter().map(|row| row.version).collect();
     if let Some(&stored) = versions.last().filter(|stored| **stored > own) {
-        return DatabaseState::Unsupported(SchemaRefusal::SchemaNewer { stored, own });
+        return Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored,
+            own,
+        }));
     }
     if !starts_the_chain(&versions, chain) {
-        return DatabaseState::Unsupported(SchemaRefusal::ForeignMigrations { versions });
+        return Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::ForeignMigrations { versions },
+        ));
     }
     match (
         first_broken_row(&applied, chain),
         applied.len() == chain.len(),
     ) {
-        (Some(refusal), _) => DatabaseState::Unsupported(refusal),
-        (None, true) => DatabaseState::Current { family },
-        (None, false) => DatabaseState::Behind {
+        (Some(refusal), _) => Classification::Settled(DatabaseState::Unsupported(refusal)),
+        (None, true) => Classification::ChainCurrent { family },
+        (None, false) => Classification::Settled(DatabaseState::Behind {
             applied: applied.len(),
             family,
-        },
+        }),
     }
 }
 
@@ -720,10 +812,13 @@ fn decide(state: &DatabaseState, own: ClientFamily) -> InstallAction {
                 InstallAction::ApplyFrom(*applied)
             }
         },
-        DatabaseState::Current { family } => match family {
-            RecordedFamily::Recorded(stored) if *stored != own => other_family(*stored, own),
-            RecordedFamily::Recorded(_) => InstallAction::Ready,
-            RecordedFamily::NotRecorded => InstallAction::RecordFamily,
+        DatabaseState::Current { family, readers } => match (family, readers) {
+            (RecordedFamily::Recorded(stored), _) if *stored != own => other_family(*stored, own),
+            (RecordedFamily::Recorded(_), ReaderPresence::Published) => InstallAction::Ready,
+            (RecordedFamily::Recorded(_), ReaderPresence::Missing)
+            | (RecordedFamily::NotRecorded, ReaderPresence::Published | ReaderPresence::Missing) => {
+                InstallAction::CompleteInstall
+            }
         },
         DatabaseState::Unsupported(refusal) => {
             InstallAction::Refuse(InstallRefusal::Schema(refusal.clone()))
@@ -733,6 +828,605 @@ fn decide(state: &DatabaseState, own: ClientFamily) -> InstallAction {
 
 fn other_family(stored: ClientFamily, own: ClientFamily) -> InstallAction {
     InstallAction::Refuse(InstallRefusal::OtherFamily { stored, own })
+}
+
+// ---- Index steps of a migration ----
+
+/// The suffix of the name under which a replacement index is built.
+const BUILD_SUFFIX: &str = "_build";
+
+/// The suffix of the name to which an index on its way out is renamed
+/// before its concurrent drop.
+const CLAIM_SUFFIX: &str = "_claim";
+
+/// The longest declared index name: the build and claim names stay inside
+/// PostgreSQL's 63-byte identifier limit. A test of the chain checks every
+/// declared name against it.
+#[cfg_attr(not(test), allow(dead_code))]
+const MAX_STEP_INDEX_NAME_BYTES: usize = crate::db::MAX_IDENTIFIER_BYTES - BUILD_SUFFIX.len();
+
+const _: () = assert!(BUILD_SUFFIX.len() == CLAIM_SUFFIX.len());
+
+/// One index that a migration gives its declared form outside a transaction
+/// (Python 0.7.0 `RecoveryIndex`, in `core/schemas/recovery.py` of that
+/// release's package). Built
+/// by [`exact_index!`], which writes every statement text at compile time
+/// from the name, the table and the definition, so no text is built at run
+/// time. Each name is an unquoted identifier of at most
+/// [`MAX_STEP_INDEX_NAME_BYTES`] bytes (checked by a test of the chain).
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ExactIndex {
+    name: &'static str,
+    table: &'static str,
+    build_name: &'static str,
+    claim_name: &'static str,
+    /// `CREATE INDEX CONCURRENTLY <name> ON <table> <definition>`.
+    create: SqlScript,
+    /// The same index under the build name.
+    build: SqlScript,
+    /// The declared form on a temporary copy of the table's columns
+    /// (`horsies_expected_index_idx`), dropped with the transaction.
+    expected: SqlScript,
+    /// `ALTER INDEX <name> RENAME TO <claim name>`.
+    claim: SqlScript,
+    /// `ALTER INDEX <build name> RENAME TO <name>`.
+    promote: SqlScript,
+    /// `DROP INDEX CONCURRENTLY <build name>`.
+    drop_build: SqlScript,
+    /// `DROP INDEX CONCURRENTLY <claim name>`.
+    drop_claim: SqlScript,
+}
+
+/// One index that a migration retires (Python 0.7.0 `RetiredIndex`). Built
+/// by [`retired_index!`].
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct RetiredIndex {
+    name: &'static str,
+    table: &'static str,
+    claim_name: &'static str,
+    /// `ALTER INDEX <name> RENAME TO <claim name>`.
+    claim: SqlScript,
+    /// `DROP INDEX CONCURRENTLY <claim name>`.
+    drop_claim: SqlScript,
+}
+
+/// An [`ExactIndex`] from its name, its table and its definition (the text
+/// after `ON <table>`: key, `INCLUDE` columns, predicate).
+#[cfg_attr(not(test), allow(unused_macros))]
+macro_rules! exact_index {
+    ($name:literal, $table:literal, $definition:literal) => {
+        ExactIndex {
+            name: $name,
+            table: $table,
+            build_name: concat!($name, "_build"),
+            claim_name: concat!($name, "_claim"),
+            create: SqlScript::new(
+                concat!("create_index_", $name),
+                concat!(
+                    "CREATE INDEX CONCURRENTLY ",
+                    $name,
+                    " ON ",
+                    $table,
+                    " ",
+                    $definition
+                ),
+            ),
+            build: SqlScript::new(
+                concat!("build_index_", $name),
+                concat!(
+                    "CREATE INDEX CONCURRENTLY ",
+                    $name,
+                    "_build ON ",
+                    $table,
+                    " ",
+                    $definition
+                ),
+            ),
+            expected: SqlScript::new(
+                concat!("expected_index_", $name),
+                concat!(
+                    "CREATE TEMP TABLE horsies_expected_index (LIKE ",
+                    $table,
+                    ") ON COMMIT DROP; ",
+                    "CREATE INDEX horsies_expected_index_idx ON horsies_expected_index ",
+                    $definition
+                ),
+            ),
+            claim: SqlScript::new(
+                concat!("claim_index_", $name),
+                concat!("ALTER INDEX ", $name, " RENAME TO ", $name, "_claim"),
+            ),
+            promote: SqlScript::new(
+                concat!("promote_index_", $name),
+                concat!("ALTER INDEX ", $name, "_build RENAME TO ", $name),
+            ),
+            drop_build: SqlScript::new(
+                concat!("drop_build_", $name),
+                concat!("DROP INDEX CONCURRENTLY ", $name, "_build"),
+            ),
+            drop_claim: SqlScript::new(
+                concat!("drop_claim_", $name),
+                concat!("DROP INDEX CONCURRENTLY ", $name, "_claim"),
+            ),
+        }
+    };
+}
+
+/// A [`RetiredIndex`] from its name and its table.
+#[cfg_attr(not(test), allow(unused_macros))]
+macro_rules! retired_index {
+    ($name:literal, $table:literal) => {
+        RetiredIndex {
+            name: $name,
+            table: $table,
+            claim_name: concat!($name, "_claim"),
+            claim: SqlScript::new(
+                concat!("claim_retired_index_", $name),
+                concat!("ALTER INDEX ", $name, " RENAME TO ", $name, "_claim"),
+            ),
+            drop_claim: SqlScript::new(
+                concat!("drop_retired_index_", $name),
+                concat!("DROP INDEX CONCURRENTLY ", $name, "_claim"),
+            ),
+        }
+    };
+}
+
+/// Who holds the relation name `$1`: `ABSENT` (no relation), `TABLE` (an
+/// index of the table `$2`), `OTHER` (another relation, or an index of
+/// another table). Python 0.7.0 `_relation_owner`.
+static READ_INDEX_HOLDER: TypedStatement = TypedStatement::new(
+    "read_index_holder",
+    "SELECT CASE
+         WHEN to_regclass($1) IS NULL THEN 'ABSENT'
+         WHEN EXISTS (
+             SELECT 1 FROM pg_index AS i
+             WHERE i.indexrelid = to_regclass($1) AND i.indrelid = to_regclass($2)
+         ) THEN 'TABLE'
+         ELSE 'OTHER'
+     END AS holder",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
+/// Whether the index `$1` of the table `$2` has the form of
+/// `horsies_expected_index_idx`, which the same transaction built from the
+/// declared definition (Python 0.7.0 `_INDEX_FORMS_MATCH_SQL`): access
+/// method, validity, readiness, liveness, uniqueness, exclusion, the key and
+/// INCLUDE columns as `pg_get_indexdef` writes each, operator classes,
+/// collations, options and predicate. An invalid index (an interrupted
+/// concurrent build) does not match.
+static READ_INDEX_FORM_MATCHES: TypedStatement = TypedStatement::new(
+    "read_index_form_matches",
+    "WITH shape AS (
+         SELECT ic.oid AS index_oid,
+                jsonb_build_object(
+                    'method', am.amname, 'valid', i.indisvalid,
+                    'ready', i.indisready, 'live', i.indislive,
+                    'unique', i.indisunique, 'exclusion', i.indisexclusion,
+                    'immediate', i.indimmediate, 'key_count', i.indnkeyatts,
+                    'attribute_count', i.indnatts,
+                    'has_expressions', i.indexprs IS NOT NULL,
+                    'columns', (
+                        SELECT jsonb_agg(pg_get_indexdef(i.indexrelid, n, FALSE) ORDER BY n)
+                        FROM generate_series(1, i.indnatts) AS n
+                    ),
+                    'operator_classes', to_jsonb(i.indclass::oid[]),
+                    'collations', to_jsonb(i.indcollation::oid[]),
+                    'options', to_jsonb(i.indoption::smallint[]),
+                    'predicate', pg_get_expr(i.indpred, i.indrelid)
+                ) AS form
+         FROM pg_index AS i
+         JOIN pg_class AS ic ON ic.oid = i.indexrelid
+         JOIN pg_am AS am ON am.oid = ic.relam
+     )
+     SELECT (
+         SELECT s.form FROM shape AS s
+         WHERE s.index_oid = to_regclass('horsies_expected_index_idx')
+     ) IS NOT DISTINCT FROM (
+         SELECT s.form FROM shape AS s
+         JOIN pg_index AS i ON i.indexrelid = s.index_oid
+         WHERE s.index_oid = to_regclass($1) AND i.indrelid = to_regclass($2)
+     ) AS matches",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
+/// Who holds the name of an index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexHolder {
+    /// No relation has the name.
+    Absent,
+    /// An index of the declared table has the name.
+    Table,
+    /// Another relation has the name.
+    Other,
+}
+
+/// The state of an exact index under its name (Python 0.7.0 `IndexState`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExactIndexState {
+    /// No relation has the name.
+    Absent,
+    /// The table holds an index of the name, valid and of the declared form.
+    Matches,
+    /// The table holds an index of the name of another form, or an invalid
+    /// one.
+    Differs,
+}
+
+/// Reads who holds `name`, against `table` ([`READ_INDEX_HOLDER`]).
+async fn index_holder_on(
+    connection: &mut PooledConnection,
+    name: &'static str,
+    table: &'static str,
+    log: StatementLog,
+) -> Result<IndexHolder, SchemaInstallError> {
+    let statement = &READ_INDEX_HOLDER;
+    let rows = query_on(
+        connection,
+        log,
+        &statement.bind().value(&name).value(&table).finish(),
+    )
+    .await?;
+    index_holder_of(&one_row(rows, statement)?)
+}
+
+/// [`index_holder_on`] inside `transaction`.
+async fn index_holder_in(
+    transaction: &mut Transaction<'_>,
+    name: &'static str,
+    table: &'static str,
+    log: StatementLog,
+) -> Result<IndexHolder, SchemaInstallError> {
+    let statement = &READ_INDEX_HOLDER;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement.bind().value(&name).value(&table).finish(),
+    )
+    .await?;
+    index_holder_of(&one_row(rows, statement)?)
+}
+
+fn index_holder_of(row: &Row) -> Result<IndexHolder, SchemaInstallError> {
+    let statement = &READ_INDEX_HOLDER;
+    let holder: String = column(row, statement, "holder")?;
+    match holder.as_str() {
+        "ABSENT" => Ok(IndexHolder::Absent),
+        "TABLE" => Ok(IndexHolder::Table),
+        "OTHER" => Ok(IndexHolder::Other),
+        other => Err(SchemaInstallError::RowDecode(RowDecodeError::Shape {
+            statement: statement.name(),
+            reason: format!("unknown index holder {other:?}"),
+        })),
+    }
+}
+
+/// The refusal for a name of migration `version` that another relation
+/// holds.
+fn name_held_elsewhere(
+    version: i64,
+    index: &'static str,
+    table: &'static str,
+) -> SchemaInstallError {
+    SchemaInstallError::Refused(SchemaRefusal::IndexNameHeldElsewhere {
+        version,
+        index,
+        table,
+    })
+}
+
+/// Gives each exact index of `migration` its declared form under its name,
+/// outside a transaction (Python 0.7.0 `_install_exact_indexes`):
+/// 1. the build and claim indexes of the name that an interrupted install
+///    left on the table are dropped concurrently;
+/// 2. an index of the declared form is kept; an absent one is built
+///    concurrently under its name; one of another form, or an invalid one,
+///    is replaced ([`replace_exact_index`]), so the table keeps an index of
+///    the name throughout.
+///
+/// Errors: `Refused(IndexNameHeldElsewhere)` when a relation other than an
+/// index of the table holds the name, the build name or the claim name;
+/// `Statement` or `RowDecode` when a step fails. A concurrent build that
+/// fails leaves an invalid index, which the next install replaces or drops.
+async fn install_exact_indexes(
+    connection: &mut PooledConnection,
+    migration: &EmbeddedMigration,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    for index in migration.exact_indexes {
+        drop_leftover(
+            connection,
+            migration.version,
+            index.build_name,
+            index.table,
+            &index.drop_build,
+            log,
+        )
+        .await?;
+        drop_leftover(
+            connection,
+            migration.version,
+            index.claim_name,
+            index.table,
+            &index.drop_claim,
+            log,
+        )
+        .await?;
+        match inspect_exact_index(connection, migration.version, index, log).await? {
+            ExactIndexState::Matches => {}
+            ExactIndexState::Absent => {
+                tracing::info!(
+                    index = index.name,
+                    "building an index of a schema migration"
+                );
+                connection
+                    .run_script(&index.create, StatementBound::ConnectionTimeouts)
+                    .await?;
+            }
+            ExactIndexState::Differs => {
+                tracing::info!(
+                    index = index.name,
+                    "replacing an index of a schema migration"
+                );
+                replace_exact_index(connection, migration.version, index, log).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drops the index `name` with `drop` when an index of `table` holds the
+/// name (a build or claim index that an interrupted install left).
+///
+/// Errors: `Refused(IndexNameHeldElsewhere)` when another relation holds the
+/// name; `Statement` or `RowDecode` when a step fails.
+async fn drop_leftover(
+    connection: &mut PooledConnection,
+    version: i64,
+    name: &'static str,
+    table: &'static str,
+    drop: &SqlScript,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    match index_holder_on(connection, name, table, log).await? {
+        IndexHolder::Absent => Ok(()),
+        IndexHolder::Other => Err(name_held_elsewhere(version, name, table)),
+        IndexHolder::Table => {
+            tracing::info!(
+                index = name,
+                "dropping an index that an interrupted install left"
+            );
+            Ok(connection
+                .run_script(drop, StatementBound::ConnectionTimeouts)
+                .await?)
+        }
+    }
+}
+
+/// Reads the state of `index` in a transaction that is rolled back: the
+/// declared form is built on a temporary table and compared
+/// ([`READ_INDEX_FORM_MATCHES`]). Changes nothing.
+///
+/// Errors: `Refused(IndexNameHeldElsewhere)` when another relation holds the
+/// name; `Statement` or `RowDecode` when a step fails.
+async fn inspect_exact_index(
+    connection: &mut PooledConnection,
+    version: i64,
+    index: &ExactIndex,
+    log: StatementLog,
+) -> Result<ExactIndexState, SchemaInstallError> {
+    let mut transaction = connection.begin(IsolationLevel::ReadCommitted).await?;
+    let state = inspect_in(&mut transaction, version, index, log).await;
+    // The transaction read the catalog and built the temporary form only.
+    let _rolled_back: RollbackOutcome = transaction.rollback().await;
+    state
+}
+
+async fn inspect_in(
+    transaction: &mut Transaction<'_>,
+    version: i64,
+    index: &ExactIndex,
+    log: StatementLog,
+) -> Result<ExactIndexState, SchemaInstallError> {
+    match index_holder_in(transaction, index.name, index.table, log).await? {
+        IndexHolder::Absent => return Ok(ExactIndexState::Absent),
+        IndexHolder::Other => return Err(name_held_elsewhere(version, index.name, index.table)),
+        IndexHolder::Table => {}
+    }
+    transaction
+        .run_script(&index.expected, StatementBound::ConnectionTimeouts)
+        .await?;
+    let statement = &READ_INDEX_FORM_MATCHES;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement
+            .bind()
+            .value(&index.name)
+            .value(&index.table)
+            .finish(),
+    )
+    .await?;
+    let matches: bool = column(&one_row(rows, statement)?, statement, "matches")?;
+    Ok(match matches {
+        true => ExactIndexState::Matches,
+        false => ExactIndexState::Differs,
+    })
+}
+
+/// Replaces the index of the name by the declared form (Python 0.7.0
+/// `_replace_index`): builds it concurrently under the build name, then in
+/// one transaction renames the old index to the claim name and the built
+/// one to the name ([`swap_in_built_index`]), then drops the claim index
+/// concurrently. Readers of the table see the old index or the new one under
+/// the name, never neither.
+///
+/// Errors: those of the steps. A failure leaves the old index under the
+/// name, or under the claim name next to the new one; the next install
+/// drops the leftover.
+async fn replace_exact_index(
+    connection: &mut PooledConnection,
+    version: i64,
+    index: &ExactIndex,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    connection
+        .run_script(&index.build, StatementBound::ConnectionTimeouts)
+        .await?;
+    swap_in_built_index(connection, version, index, log).await?;
+    Ok(connection
+        .run_script(&index.drop_claim, StatementBound::ConnectionTimeouts)
+        .await?)
+}
+
+/// The rename pair of [`replace_exact_index`], in one READ COMMITTED
+/// transaction (Python 0.7.0 `_swap_in_built_index`): the name must still
+/// be an index of the table, and after the rename the claim name must be
+/// that index.
+///
+/// Errors: `Refused(IndexNameHeldElsewhere)` when the name is no longer an
+/// index of the table, or the claim name is another relation after the
+/// rename; nothing is renamed then. `Statement` or `RowDecode` when a step
+/// fails; the transaction is rolled back.
+async fn swap_in_built_index(
+    connection: &mut PooledConnection,
+    version: i64,
+    index: &ExactIndex,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    let mut transaction = connection.begin(IsolationLevel::ReadCommitted).await?;
+    match swap_in(&mut transaction, version, index, log).await {
+        Ok(()) => Ok(transaction.commit().await?),
+        Err(failure) => {
+            let _rolled_back: RollbackOutcome = transaction.rollback().await;
+            Err(failure)
+        }
+    }
+}
+
+async fn swap_in(
+    transaction: &mut Transaction<'_>,
+    version: i64,
+    index: &ExactIndex,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    match index_holder_in(transaction, index.name, index.table, log).await? {
+        IndexHolder::Table => {}
+        IndexHolder::Absent | IndexHolder::Other => {
+            return Err(name_held_elsewhere(version, index.name, index.table))
+        }
+    }
+    transaction
+        .run_script(&index.claim, StatementBound::ConnectionTimeouts)
+        .await?;
+    match index_holder_in(transaction, index.claim_name, index.table, log).await? {
+        IndexHolder::Table => {}
+        IndexHolder::Absent | IndexHolder::Other => {
+            return Err(name_held_elsewhere(version, index.name, index.table))
+        }
+    }
+    Ok(transaction
+        .run_script(&index.promote, StatementBound::ConnectionTimeouts)
+        .await?)
+}
+
+/// Drops each retired index of `migrations` concurrently, outside a
+/// transaction, after the bookkeeping row of the last of them committed
+/// (Python 0.7.0 `remove_retired_indexes`): the claim index that an
+/// interrupted removal left is dropped; an index of the name on its table is
+/// renamed to the claim name (in a transaction that checks the holder before
+/// and after) and dropped. An absent name is skipped.
+///
+/// Errors: `Refused(IndexNameHeldElsewhere)` when another relation holds the
+/// name or the claim name; `Statement` or `RowDecode` when a step fails. A
+/// failed removal leaves the index, or its claim index, for the next
+/// migration that an install applies.
+async fn remove_retired_indexes(
+    connection: &mut PooledConnection,
+    migrations: &[EmbeddedMigration],
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    for migration in migrations {
+        for index in migration.retired_indexes {
+            drop_leftover(
+                connection,
+                migration.version,
+                index.claim_name,
+                index.table,
+                &index.drop_claim,
+                log,
+            )
+            .await?;
+            match claim_retired_index(connection, migration.version, index, log).await? {
+                RetiredClaim::Claimed => {
+                    tracing::info!(index = index.name, "dropping a retired index");
+                    connection
+                        .run_script(&index.drop_claim, StatementBound::ConnectionTimeouts)
+                        .await?;
+                }
+                RetiredClaim::Absent => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What [`claim_retired_index`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetiredClaim {
+    /// No relation has the name: nothing to remove.
+    Absent,
+    /// The index was renamed to its claim name.
+    Claimed,
+}
+
+/// Renames the retired index to its claim name in one READ COMMITTED
+/// transaction when an index of its table holds the name (Python 0.7.0
+/// `_claim_retired_index`).
+///
+/// Errors: `Refused(IndexNameHeldElsewhere)` when another relation holds the
+/// name, or the claim name after the rename; the transaction is rolled back.
+async fn claim_retired_index(
+    connection: &mut PooledConnection,
+    version: i64,
+    index: &RetiredIndex,
+    log: StatementLog,
+) -> Result<RetiredClaim, SchemaInstallError> {
+    let mut transaction = connection.begin(IsolationLevel::ReadCommitted).await?;
+    match claim_in(&mut transaction, version, index, log).await {
+        Ok(claim) => {
+            transaction.commit().await?;
+            Ok(claim)
+        }
+        Err(failure) => {
+            let _rolled_back: RollbackOutcome = transaction.rollback().await;
+            Err(failure)
+        }
+    }
+}
+
+async fn claim_in(
+    transaction: &mut Transaction<'_>,
+    version: i64,
+    index: &RetiredIndex,
+    log: StatementLog,
+) -> Result<RetiredClaim, SchemaInstallError> {
+    match index_holder_in(transaction, index.name, index.table, log).await? {
+        IndexHolder::Absent => return Ok(RetiredClaim::Absent),
+        IndexHolder::Other => return Err(name_held_elsewhere(version, index.name, index.table)),
+        IndexHolder::Table => {}
+    }
+    transaction
+        .run_script(&index.claim, StatementBound::ConnectionTimeouts)
+        .await?;
+    match index_holder_in(transaction, index.claim_name, index.table, log).await? {
+        IndexHolder::Table => Ok(RetiredClaim::Claimed),
+        IndexHolder::Absent | IndexHolder::Other => {
+            Err(name_held_elsewhere(version, index.name, index.table))
+        }
+    }
 }
 
 // ---- The install ----
@@ -798,7 +1492,7 @@ async fn install_once(
     match decide(&state, own) {
         InstallAction::Ready => return Ok(()),
         InstallAction::Refuse(refusal) => return Err(refusal.into()),
-        InstallAction::ApplyFrom(_) | InstallAction::RecordFamily => {}
+        InstallAction::ApplyFrom(_) | InstallAction::CompleteInstall => {}
     }
     let mut session = LockSession::acquire(pool, lock, log).await?;
     let installed = install_under_lock(&mut session.connection, own, log).await;
@@ -859,14 +1553,14 @@ async fn install_under_lock(
             InstallAction::Ready => return Ok(()),
             InstallAction::Refuse(refusal) => return Err(refusal.into()),
             InstallAction::ApplyFrom(first) => apply_pending(connection, first, own, log).await?,
-            InstallAction::RecordFamily => record_family(connection, own, log).await?,
+            InstallAction::CompleteInstall => complete_install(connection, own, log).await?,
         }
         state = read_state(connection, log).await?;
     }
     match decide(&state, own) {
         InstallAction::Ready => Ok(()),
         InstallAction::Refuse(refusal) => Err(refusal.into()),
-        action @ (InstallAction::ApplyFrom(_) | InstallAction::RecordFamily) => panic!(
+        action @ (InstallAction::ApplyFrom(_) | InstallAction::CompleteInstall) => panic!(
             "the schema install still decides {action:?} for {state:?} after \
              {LOCKED_ACTION_BOUND} actions under the install lock"
         ),
@@ -875,7 +1569,8 @@ async fn install_under_lock(
 
 /// Reads and classifies the horsies objects of the current schema (Python
 /// `read_database_state`). One statement on an empty database, two
-/// otherwise. Changes nothing.
+/// otherwise, three on a database that holds this build's chain. Changes
+/// nothing.
 async fn read_state(
     connection: &mut PooledConnection,
     log: StatementLog,
@@ -900,7 +1595,28 @@ async fn read_state(
             SchemaFacts::Ledger(read_bookkeeping(connection, log, &READ_BOOKKEEPING).await?)
         }
     };
-    Ok(classify(facts, embedded_migrations()))
+    match classify(facts, embedded_migrations()) {
+        Classification::Settled(state) => Ok(state),
+        Classification::ChainCurrent { family } => Ok(DatabaseState::Current {
+            family,
+            readers: read_reader_presence(connection, log).await?,
+        }),
+    }
+}
+
+/// Reads whether every history reader exists ([`READ_READERS_PUBLISHED`]).
+/// Changes nothing.
+async fn read_reader_presence(
+    connection: &mut PooledConnection,
+    log: StatementLog,
+) -> Result<ReaderPresence, SchemaInstallError> {
+    let statement = &READ_READERS_PUBLISHED;
+    let rows = query_on(connection, log, &statement.bind().finish()).await?;
+    let published: bool = column(&one_row(rows, statement)?, statement, "readers_published")?;
+    Ok(match published {
+        true => ReaderPresence::Published,
+        false => ReaderPresence::Missing,
+    })
 }
 
 fn catalog_row(row: &Row) -> Result<CatalogRow, RowDecodeError> {
@@ -951,21 +1667,47 @@ fn applied_migration(
     })
 }
 
-/// Applies the migrations of the chain from index `first` on, each in its
-/// own transaction.
+/// Applies the migrations of the embedded chain from index `first` on
+/// ([`apply_chain`]).
 async fn apply_pending(
     connection: &mut PooledConnection,
     first: usize,
     own: ClientFamily,
     log: StatementLog,
 ) -> Result<(), SchemaInstallError> {
-    for migration in embedded_migrations().iter().skip(first) {
+    apply_chain(connection, embedded_migrations(), first, own, log).await
+}
+
+/// Applies the migrations of `chain` from index `first` on, in order
+/// (Python 0.7.0 `_run_schema_upgrade`). For each migration:
+/// 1. its exact indexes, outside a transaction ([`install_exact_indexes`]);
+/// 2. its transaction with its bookkeeping row ([`apply_migration`]);
+/// 3. after that commit, the retired indexes of every migration of `chain`
+///    up to it, outside a transaction ([`remove_retired_indexes`]). A
+///    removal that a failure stopped runs again with the next migration that
+///    an install applies.
+///
+/// Errors: the first error of a step; the migrations before it stay
+/// committed. A failure in step 1 or 2 leaves the bookkeeping row of the
+/// migration unwritten, so the next install applies it again: an exact
+/// index that matches is kept, and the build and claim indexes that the
+/// failure left are dropped.
+async fn apply_chain(
+    connection: &mut PooledConnection,
+    chain: &[EmbeddedMigration],
+    first: usize,
+    own: ClientFamily,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    for (position, migration) in chain.iter().enumerate().skip(first) {
         tracing::info!(
             version = migration.version,
             description = migration.description,
             "installing schema migration",
         );
+        install_exact_indexes(connection, migration, log).await?;
         apply_migration(connection, migration, own, log).await?;
+        remove_retired_indexes(connection, &chain[..=position], log).await?;
     }
     Ok(())
 }
@@ -1084,6 +1826,40 @@ async fn publish_history_readers(
             reason: format!("unknown publication outcome {other:?}"),
         })),
     }
+}
+
+/// Completes the install of a database that holds this build's chain
+/// (Python `CompleteInstall`): publishes the history readers in one READ
+/// COMMITTED transaction (`horsies_publish_history_readers` writes the
+/// lookup manifest and the four readers, or answers `ALREADY_CURRENT` and
+/// changes nothing), then writes this client's family row when the database
+/// has none ([`record_family`]).
+///
+/// Errors: `Statement` or `RowDecode` from the publication (its transaction
+/// is rolled back, so nothing changed) or from the family write (the
+/// publication stays committed; the next install writes the row).
+async fn complete_install(
+    connection: &mut PooledConnection,
+    own: ClientFamily,
+    log: StatementLog,
+) -> Result<(), SchemaInstallError> {
+    let mut transaction = connection.begin(IsolationLevel::ReadCommitted).await?;
+    match publish_history_readers(&mut transaction, log).await {
+        Ok(published) => {
+            transaction.commit().await?;
+            tracing::info!(
+                outcome = published.as_str(),
+                "history readers published by the install of a current schema",
+            );
+        }
+        Err(failure) => {
+            // The failure is the answer, as in `apply_migration`.
+            let _rolled_back: RollbackOutcome = transaction.rollback().await;
+            return Err(failure);
+        }
+    }
+    record_family(connection, own, log).await?;
+    Ok(())
 }
 
 /// Writes this client's family row when the database has none (Python

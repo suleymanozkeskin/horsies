@@ -6,6 +6,7 @@ value becomes a normalized value, and how two normalized values compare.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
@@ -49,6 +50,19 @@ class TimeOrderOnly:
 
 
 @dataclass(frozen=True, slots=True)
+class TimeOrderBeforeRun:
+    """A clock value that the run can write, in a snapshot whose rows before
+    the run start were written in an order the scenario sets.
+
+    A finite value at or after the run start becomes the token ``DuringRun``:
+    the order of two values that the run writes follows run events (which
+    child ended first), which no code sets. Any other value is replaced by
+    its dense rank among the values of its column in its table that are not
+    ``DuringRun``.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class RunWindowReference:
     """Clock values compared against the run window.
 
@@ -58,14 +72,30 @@ class RunWindowReference:
     """
 
 
+class AnchorNull(Enum):
+    """What an anchored clock value becomes when its anchor is NULL."""
+
+    REFUSED = 'the capture fails with UnanchoredTime'
+    """No row of the column sets the value without its anchor."""
+
+    RANKED = 'the value is ranked among the values of its column whose anchor is NULL'
+    """A row can hold the value without its anchor: a test seeds a lease
+    (``claim_expires_at``) on a row it never claimed (``claimed_at`` NULL).
+    The row does not carry the time the value came from, so only its order
+    among such values compares, as under ``TimeOrderOnly``."""
+
+
 @dataclass(frozen=True, slots=True)
 class AnchorReference:
     """Clock values compared as an offset from another clock column of the same row.
 
-    Two offsets are equal when they differ by at most the bound.
+    Two offsets are equal when they differ by at most the bound. A value
+    whose anchor is NULL follows ``when_anchor_null``; a ranked value never
+    equals an offset.
     """
 
     column: str
+    when_anchor_null: AnchorNull
 
 
 TimeReference = RunWindowReference | AnchorReference
@@ -108,7 +138,13 @@ class EachItem:
     """A path step into every element of an array."""
 
 
-PathStep = Key | Index | EachItem
+@dataclass(frozen=True, slots=True)
+class EachMember:
+    """A path step into every member of an object, whatever its key: a map
+    whose keys are data (node ids), not names of the format."""
+
+
+PathStep = Key | Index | EachItem | EachMember
 
 
 class TimeEncoding(Enum):
@@ -131,7 +167,44 @@ class JsonTime:
     rule: TimeOrderOnly | TimeWithin
 
 
-JsonLeafRule = NormalisedId | JsonTime | Ignored
+@dataclass(frozen=True, slots=True)
+class IdsInText:
+    """A text that names ids of ``family`` in their canonical UUID form.
+
+    Each lower-case canonical UUID inside the text (``8-4-4-4-12`` hex
+    digits, with no letter, digit or hyphen next to it) is an id of
+    ``family``: it takes its label from the label book of the snapshot, as
+    an id in a column does. The text around the ids compares exactly.
+    """
+
+    family: IdFamily
+
+
+@dataclass(frozen=True, slots=True)
+class RunMeasure:
+    """A number inside a stored text that the run measures or that the
+    operating system assigns (a duration, a process id), not a decision of
+    the code.
+
+    ``pattern`` is a regular expression with exactly one group, which matches
+    the decimal digits of the number; the text around the group names the
+    message that holds it. Each match's group becomes the token ``<name>``.
+    """
+
+    name: str
+    pattern: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunMeasuresInText:
+    """A text in which each match of ``measures`` becomes its token; the text
+    around the tokens compares exactly. A text with no match compares
+    exactly."""
+
+    measures: tuple[RunMeasure, ...]
+
+
+JsonLeafRule = NormalisedId | IdsInText | JsonTime | Ignored | RunMeasuresInText
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +275,7 @@ ColumnRule = (
     Exact
     | NormalisedId
     | TimeOrderOnly
+    | TimeOrderBeforeRun
     | TimeWithin
     | Ignored
     | StoredJson
@@ -339,6 +413,15 @@ class NegativeBound:
     column: str
 
 
+@dataclass(frozen=True, slots=True)
+class InvalidMeasurePattern:
+    """A run measure has no name, or a pattern that does not compile with exactly one group."""
+
+    table: str
+    column: str
+    measure: str
+
+
 CatalogDefect = (
     DuplicateTable
     | DuplicateColumn
@@ -350,6 +433,7 @@ CatalogDefect = (
     | NegativeBound
     | EmptyJsonPath
     | AnchoredJsonTime
+    | InvalidMeasurePattern
 )
 
 
@@ -360,6 +444,7 @@ def is_key_comparable(rule: ColumnRule) -> bool:
             Exact()
             | NormalisedId()
             | TimeOrderOnly()
+            | TimeOrderBeforeRun()
             | StoredJson()
             | GeneratedName()
             | DigestOf()
@@ -413,11 +498,27 @@ def _time_defects(
     return defects
 
 
+def _measure_fits(measure: RunMeasure) -> bool:
+    """Whether ``measure`` has a name and a pattern that compiles with exactly one group."""
+    if not measure.name.strip():
+        return False
+    try:
+        return re.compile(measure.pattern).groups == 1
+    except re.error:
+        return False
+
+
 def _path_defects(table: str, column: str, path: JsonPath) -> list[CatalogDefect]:
     defects: list[CatalogDefect] = []
     if not path.steps:
         defects.append(EmptyJsonPath(table=table, column=column))
     match path.rule:
+        case RunMeasuresInText(measures=measures):
+            defects.extend(
+                InvalidMeasurePattern(table=table, column=column, measure=measure.name)
+                for measure in measures
+                if not _measure_fits(measure)
+            )
         case Ignored(reason=reason) if not reason.strip():
             defects.append(EmptyIgnoreReason(table=table, column=column))
         case JsonTime(rule=TimeWithin() as rule):
@@ -428,7 +529,7 @@ def _path_defects(table: str, column: str, path: JsonPath) -> list[CatalogDefect
                     pass
             if rule.bound < timedelta(0):
                 defects.append(NegativeBound(table=table, column=column))
-        case Ignored() | JsonTime() | NormalisedId():
+        case Ignored() | JsonTime() | NormalisedId() | IdsInText():
             pass
     return defects
 
@@ -469,7 +570,14 @@ def _column_defects(
                     table=table.name, column=spec.name, referenced=source
                 )
             ]
-        case Exact() | NormalisedId() | TimeOrderOnly() | GeneratedName() | DigestOf():
+        case (
+            Exact()
+            | NormalisedId()
+            | TimeOrderOnly()
+            | TimeOrderBeforeRun()
+            | GeneratedName()
+            | DigestOf()
+        ):
             return []
 
 

@@ -71,9 +71,9 @@ The bounded builders return `Result<_, PaginationRefused>`:
 
 | Builder | Accepts |
 |---------|---------|
-| `TaskBreakdownQuery::with_limit` | 1 to 500 |
-| `TaskListQuery::with_pagination` | `offset` 0 or more; `limit` 1 to 200; `offset + limit` at most `MAX_TASK_PAGE_REACH` (500) |
-| `WorkflowRunsQuery::with_limit` | 1 to 200 |
+| `TaskBreakdownQuery::with_limit` | 1 to `MAX_BREAKDOWN_LIMIT` (500) |
+| `TaskListQuery::with_pagination` | `offset` 0 or more; `limit` 1 to `MAX_TASK_PAGE_LIMIT` (200); `offset + limit` at most `MAX_TASK_PAGE_REACH` (500) |
+| `WorkflowRunsQuery::with_limit` | 1 to `MAX_WORKFLOW_RUNS_LIMIT` (200) |
 
 | Type | Values |
 |------|--------|

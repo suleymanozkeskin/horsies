@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    broker, execute, registry_of, run_node_task, spec, start, task_node, worker_phase_one,
+    broker, child_specs_of, execute, run_node_task, spec, start, task_node, worker_phase_one,
     worker_phase_two, workflow_status, CountedBroker, IsolatedDatabase, NodeReport,
 };
 use crate::broker::PostgresBroker;
@@ -67,9 +67,9 @@ fn chain_of_two() -> WorkflowSpec {
     )
 }
 
-/// Starts `workflow_spec` with an empty registry and returns its id.
+/// Starts `workflow_spec` with no child specs and returns its id.
 async fn start_plain(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(pool, workflow_spec, &registry_of(&[])).await
+    start(pool, workflow_spec, &child_specs_of(&[])).await
 }
 
 /// The worker's finalize of node `task_index` with a success on `broker`.
@@ -82,7 +82,7 @@ async fn finalize_success(
 ) -> PhaseTwoForm {
     let task = run_node_task(pool, workflow_id, task_index).await;
     let done = worker_phase_one(broker, &task, NodeReport::Success).await;
-    worker_phase_two(broker, &registry_of(&[]), &task, done).await;
+    worker_phase_two(broker, &child_specs_of(&[]), &task, done).await;
     done.phase_two
 }
 
@@ -173,7 +173,7 @@ async fn phase_two_of_a_leaf_reads_no_dependents() {
         let (phase_two_of_b, ()) = counted
             .count(worker_phase_two(
                 &counted.broker,
-                &registry_of(&[]),
+                &child_specs_of(&[]),
                 &task_b,
                 done_b,
             ))
