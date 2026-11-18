@@ -11,6 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
+from typing import Final
 
 
 class IdFamily(Enum):
@@ -165,6 +166,16 @@ class JsonTime:
 
     encoding: TimeEncoding
     rule: TimeOrderOnly | TimeWithin
+
+
+CANONICAL_UUID: Final = re.compile(
+    r'(?<![0-9A-Za-z-])'
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    r'(?![0-9A-Za-z-])',
+)
+"""An id inside a text: the text form of a uuid column. ``IdsInText`` finds
+the ids of a text with it, and ``catalog.notification_row`` the task id of a
+retry wake."""
 
 
 @dataclass(frozen=True, slots=True)
