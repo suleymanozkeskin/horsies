@@ -36,10 +36,8 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.failed_attempt import (
-    FAILED_ATTEMPT_SUBJECT,
     AttemptFailure,
     AttemptFailureKind,
     FinishFailedAttempt,
@@ -235,13 +233,19 @@ class TestTheOutcome:
 
     @pytest.mark.asyncio
     async def test_a_failed_statement_raises_with_its_classification(self) -> None:
-        with pytest.raises(CoreOperationFailed) as raised:
+        cause = core.CoreConnectionError('finish_failed_attempt', 'connection lost', True)
+
+        with pytest.raises(core.CoreConnectionError) as raised:
             _ = await _failed(
-                _record(core.AttemptWriteFailed, message='connection lost', retryable=True),
+                _record(
+                    core.AttemptWriteFailed,
+                    message='connection lost',
+                    retryable=True,
+                    exception=cause,
+                ),
             )
 
-        assert raised.value.subject == FAILED_ATTEMPT_SUBJECT
-        assert raised.value.retryable is True
+        assert raised.value is cause
 
     @pytest.mark.parametrize(
         'record',

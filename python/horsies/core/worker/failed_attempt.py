@@ -68,7 +68,6 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import RetryPolicy
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskAttemptOutcome
 from horsies.core.utils.retry import (
     admitted_retry_policy,
@@ -425,9 +424,6 @@ def _log_retry_refusal(task_id: str, refusal: RetryRefusal) -> None:
 # The same statement through the core
 # ---------------------------------------------------------------------------
 
-FAILED_ATTEMPT_SUBJECT: Final = 'finish_failed_attempt'
-"""The subject of a ``CoreOperationFailed`` of a failed-attempt write."""
-
 type _FailedAttemptRecord = (
     core.AttemptFailureApplied
     | core.AttemptRetryScheduled
@@ -514,7 +510,8 @@ def _failed_attempt_outcome_of(record: _FailedAttemptRecord) -> FailedAttemptOut
     """The outcome of a failed-attempt record. Pure.
 
     Raises:
-        CoreOperationFailed: an ``AttemptWriteFailed`` record: the statement
+        CoreFailure: an ``AttemptWriteFailed`` record raises its
+            ``exception`` (the core's class of the cause): the statement
             wrote nothing, or it committed and its reply was lost.
         OutcomeDecodeError: a text of the record outside the Python catalogs.
     """
@@ -551,8 +548,8 @@ def _failed_attempt_outcome_of(record: _FailedAttemptRecord) -> FailedAttemptOut
             return source_state_conflict_of(record)
         case core.AttemptTaskAbsent():
             return task_absent_of(record)
-        case core.AttemptWriteFailed(message=message, retryable=retryable):
-            raise CoreOperationFailed(FAILED_ATTEMPT_SUBJECT, message, retryable)
+        case core.AttemptWriteFailed(exception=exception):
+            raise exception
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -565,9 +562,9 @@ async def finish_failed_attempt_in_core(
     statement that commits alone, the same outcomes and the same log.
 
     Raises:
-        CoreOperationFailed: the statement failed (``retryable`` is the
-            core's classification). A lost reply is an unknown outcome, as
-            for ``finish_failed_attempt``.
+        CoreFailure: the statement failed (``retryable`` is the core's
+            classification). A lost reply is an unknown outcome, as for
+            ``finish_failed_attempt``.
         CoreError: the core of this process cannot run the call.
         OutcomeDecodeError: a record outside the Python catalogs.
     """
@@ -585,8 +582,8 @@ async def finish_ended_attempt_in_core(
     statement that commits alone, the same outcomes and the same log.
 
     Raises:
-        CoreOperationFailed: the statement failed (``retryable`` is the
-            core's classification).
+        CoreFailure: the statement failed (``retryable`` is the core's
+            classification).
         CoreError: the core of this process cannot run the call.
         OutcomeDecodeError: a record outside the Python catalogs.
     """

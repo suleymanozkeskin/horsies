@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import horsies._core as core
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.reaper import ReaperMixin
 from horsies.core.workflows.lifecycle import PAUSED_EXPIRY_BATCH_SIZE
 
@@ -56,17 +55,21 @@ async def test_the_paused_expiry_sends_the_age_in_microseconds_and_counts() -> N
 
 @pytest.mark.asyncio
 async def test_a_failed_paused_expiry_raises_with_its_cause() -> None:
+    cause = core.CoreConnectionError('expire_paused_workflows', 'connection refused', True)
     broker = _broker(
         'expire_paused_workflows_async',
-        _record(core.PausedExpiryFailed, message='connection refused', retryable=True),
+        _record(
+            core.PausedExpiryFailed,
+            message='connection refused',
+            retryable=True,
+            exception=cause,
+        ),
     )
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with pytest.raises(core.CoreConnectionError) as raised:
         await _Reaper()._expire_paused_workflows(broker, older_than=timedelta(hours=1))
 
-    assert raised.value.subject == 'expire_paused_workflows'
-    assert raised.value.message == 'connection refused'
-    assert raised.value.retryable is True
+    assert raised.value is cause
 
 
 @pytest.mark.asyncio
@@ -103,18 +106,24 @@ async def test_a_passed_deadline_sends_a_budget_of_zero() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_retention_delete_raises_with_the_count_before_it() -> None:
+async def test_a_failed_retention_delete_raises_its_cause_and_logs_the_count_before_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cause = core.CoreServerError(
+        'delete_expired_workflows', '57014', 'canceling statement due to statement timeout', True,
+    )
     broker = _broker(
         'delete_expired_workflows_async',
         _record(
             core.WorkflowDeleteFailed,
             deleted_before=4,
             message='statement timeout',
-            retryable=False,
+            retryable=True,
+            exception=cause,
         ),
     )
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with caplog.at_level('WARNING'), pytest.raises(core.CoreServerError) as raised:
         await _Reaper()._delete_expired_workflows(
             broker,
             retention_hours=48,
@@ -122,10 +131,8 @@ async def test_a_failed_retention_delete_raises_with_the_count_before_it() -> No
             deadline_monotonic=time.monotonic() + 30.0,
         )
 
-    assert raised.value.subject == 'delete_expired_workflows'
-    assert 'statement timeout' in raised.value.message
-    assert '4 workflow(s)' in raised.value.message
-    assert raised.value.retryable is False
+    assert raised.value is cause
+    assert 'deleted 4 workflow(s) before the failure' in caplog.text
 
 
 @pytest.mark.asyncio
@@ -168,18 +175,23 @@ async def test_the_phase2_recovery_maps_the_pass_and_folds_pending_absent() -> N
 
 @pytest.mark.asyncio
 async def test_a_failed_phase2_recovery_raises_with_its_cause() -> None:
+    cause = core.CoreConnectionError('recover_workflow_phase2', 'discovery failed', True)
     broker = _broker(
         'recover_workflow_phase2_async',
-        _record(core.Phase2RecoveryFailed, message='discovery failed', retryable=True),
+        _record(
+            core.Phase2RecoveryFailed,
+            message='discovery failed',
+            retryable=True,
+            exception=cause,
+        ),
     )
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with pytest.raises(core.CoreConnectionError) as raised:
         await _Reaper()._recover_phase2(
             broker, grace_ms=0, max_rows=100, quarantine_after_attempts=3,
         )
 
-    assert raised.value.subject == 'recover_workflow_phase2'
-    assert raised.value.retryable is True
+    assert raised.value is cause
 
 
 def _case(**fields: int) -> MagicMock:
@@ -241,7 +253,13 @@ async def test_a_failed_recovery_pass_raises_with_its_partial_report() -> None:
     report = _pass_record(core.RecoveryPassRecord, pass_errors=1)
     broker = _broker(
         'recover_workflows_async',
-        _record(core.RecoveryPassFailed, report=report, message='count failed', retryable=True),
+        _record(
+            core.RecoveryPassFailed,
+            report=report,
+            message='count failed',
+            retryable=True,
+            exception=core.CoreConnectionError('recover_workflows', 'count failed', True),
+        ),
     )
 
     with pytest.raises(RecoveryPassFailure) as raised:

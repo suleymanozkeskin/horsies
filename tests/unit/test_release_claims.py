@@ -12,12 +12,16 @@ from uuid import UUID
 import pytest
 
 from horsies._catalog.release_bounds import MAX_RELEASED_CLAIMS
-from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed
+from horsies._core import (
+    ClaimsReleased,
+    CoreConnectionError,
+    NotHeldRow,
+    ReleasedRow,
+    ReleaseFailed,
+)
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.release import (
     RELEASE_CLAIMS_SQL,
-    RELEASE_SUBJECT,
     ClaimRelease,
     HeldClaim,
     ReleaseOutcome,
@@ -233,13 +237,19 @@ class TestReleaseClaimsInCore:
 
     @pytest.mark.asyncio
     async def test_a_failure_record_raises_with_its_retryable_flag(self) -> None:
+        cause = CoreConnectionError('release_claims', 'connection lost', True)
         handle = _core_handle(
-            MagicMock(spec=ReleaseFailed, message='release: connection lost', retryable=True),
+            MagicMock(
+                spec=ReleaseFailed,
+                message='release: connection lost',
+                retryable=True,
+                exception=cause,
+            ),
         )
 
         with (
             patch('horsies.core.worker.release.ReleaseClaimsRequest'),
-            pytest.raises(CoreOperationFailed) as raised,
+            pytest.raises(CoreConnectionError) as raised,
         ):
             _ = await release_claims_in_core(
                 handle,
@@ -248,9 +258,7 @@ class TestReleaseClaimsInCore:
                 placement=ReleasePlacement.SAME_CLASS,
             )
 
-        assert raised.value.subject == RELEASE_SUBJECT
-        assert raised.value.message == 'release: connection lost'
-        assert raised.value.retryable is True
+        assert raised.value is cause
 
     @pytest.mark.asyncio
     async def test_a_record_of_another_task_is_refused(self) -> None:

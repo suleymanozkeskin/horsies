@@ -35,7 +35,6 @@ from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.utils.db import StatementRunner
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
@@ -429,11 +428,12 @@ class ClaimMixin:
         ``_claim_request``. A cancel of the caller does not stop the pass.
 
         Raises:
-            CoreOperationFailed: the pass failed (``ClaimPassFailed``): it
-                wrote nothing, or it committed and its reply was lost, and
-                the claimed rows return to their queue when their lease
-                expires. ``retryable`` is the core's classification; the
-                worker loop retries a retryable one as a connection error.
+            CoreFailure: the pass failed (``ClaimPassFailed`` raises its
+                ``exception``): it wrote nothing, or it committed and its
+                reply was lost, and the claimed rows return to their queue
+                when their lease expires. ``retryable`` is the core's
+                classification; the worker loop retries a retryable one as a
+                connection error.
             CoreError: the core of this process cannot run the call.
         """
         match await self.core_handle.claim_pass_async(self._claim_request()):
@@ -442,8 +442,8 @@ class ClaimMixin:
                     tasks=[claimed_row_of(record) for record in claimed],
                     short_of_plan=short_of_plan,
                 )
-            case ClaimPassFailed(message=message, retryable=retryable):
-                raise CoreOperationFailed('ClaimMixin._claim_rows', message, retryable)
+            case ClaimPassFailed(exception=exception):
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -459,9 +459,9 @@ class ClaimMixin:
         Reads only, one statement; ``queues`` is not empty.
 
         Raises:
-            CoreOperationFailed: the count failed (``QueueStartsFailed``);
-                the held rows stay held. ``retryable`` is the core's
-                classification.
+            CoreFailure: the count failed (``QueueStartsFailed`` raises its
+                ``exception``); the held rows stay held. ``retryable`` is
+                the core's classification.
             CoreError: the core of this process cannot run the call.
         """
         request = QueueStartsRequest(
@@ -472,10 +472,8 @@ class ClaimMixin:
         match await self.core_handle.count_queue_starts_async(request):
             case QueueStartsRecord(starts=starts):
                 return dict(starts)
-            case QueueStartsFailed(message=message, retryable=retryable):
-                raise CoreOperationFailed(
-                    'ClaimMixin._count_queue_starts', message, retryable,
-                )
+            case QueueStartsFailed(exception=exception):
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -714,8 +712,8 @@ class ClaimMixin:
         Runs in the core (``release_claims_in_core``).
 
         Raises:
-            CoreOperationFailed: the release failed; the worker loop retries
-                a retryable one as a connection error.
+            CoreFailure: the release failed; the worker loop retries a
+                retryable one as a connection error.
             CoreError: the core of this process stopped or did not start.
         """
         if not mismatched:
@@ -769,8 +767,9 @@ class ClaimMixin:
         nothing.
 
         Raises:
-            CoreOperationFailed: the settle failed; it propagates to the main
-                loop, which retries a retryable one as a connection error.
+            CoreFailure: the settle failed (``SettleFailed`` raises its
+                ``exception``); it propagates to the main loop, which retries
+                a retryable one as a connection error.
                 The statements before a failed one stay committed; the claims
                 of the failed one are recovered by lease expiry (a lost reply
                 may have committed its moves).
@@ -799,8 +798,8 @@ class ClaimMixin:
         match await self.core_handle.settle_claimed_workflow_tasks_async(request):
             case ClaimsSettled(blocked_task_ids=blocked):
                 blocked_task_ids = {str(task_id) for task_id in blocked}
-            case SettleFailed(message=message, retryable=retryable):
-                raise CoreOperationFailed('settle_claimed_workflow_tasks', message, retryable)
+            case SettleFailed(exception=exception):
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
 

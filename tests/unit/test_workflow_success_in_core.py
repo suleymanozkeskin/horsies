@@ -25,10 +25,8 @@ from horsies.core.lifecycle.outcomes import (
     SuccessApplied,
     TaskAbsent,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.workflow_success import (
-    WORKFLOW_SUCCESS_SUBJECT,
     FinishWorkflowSuccess,
     finish_workflow_success_in_core,
 )
@@ -111,10 +109,14 @@ async def test_a_replay_and_an_absent_task_are_the_shared_outcomes() -> None:
 
 @pytest.mark.asyncio
 async def test_a_failed_statement_raises_with_its_classification() -> None:
-    handle = _handle(_record(core.AttemptWriteFailed, message='connection lost', retryable=True))
+    cause = core.CoreConnectionError('finish_workflow_success', 'connection lost', True)
+    handle = _handle(
+        _record(
+            core.AttemptWriteFailed, message='connection lost', retryable=True, exception=cause,
+        ),
+    )
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with pytest.raises(core.CoreConnectionError) as raised:
         _ = await finish_workflow_success_in_core(handle, COMMAND)
 
-    assert raised.value.subject == WORKFLOW_SUCCESS_SUBJECT
-    assert raised.value.retryable is True
+    assert raised.value is cause
