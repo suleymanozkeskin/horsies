@@ -216,14 +216,27 @@ pub fn core_for_call(py: Python<'_>) -> Result<&'static Core, CallRefusal> {
 /// the fork rule and the stop rule, as for every core call. Starts nothing.
 pub fn pure_call_refusal() -> Option<CallRefusal> {
     let core = CORE.get()?;
+    match (fork_refusal(), core.stopped_report()) {
+        (Some(forked), _) => Some(forked),
+        (None, Some(report)) => Some(CallRefusal::Stopped(report.clone())),
+        (None, None) => None,
+    }
+}
+
+/// The refusal of the fork rule alone: this process is a fork of the
+/// process where the core started. A stopped core is not refused. The
+/// parent-child frame codec uses it, so that a worker child whose core
+/// stopped still reports its last frames to the worker before it ends
+/// itself. Starts nothing.
+pub fn fork_refusal() -> Option<CallRefusal> {
+    let core = CORE.get()?;
     let this_pid = std::process::id();
-    match (core.pid == this_pid, core.stopped_report()) {
-        (false, _) => Some(CallRefusal::ForkedAfterStart {
+    match core.pid == this_pid {
+        false => Some(CallRefusal::ForkedAfterStart {
             core_pid: core.pid,
             this_pid,
         }),
-        (true, Some(report)) => Some(CallRefusal::Stopped(report.clone())),
-        (true, None) => None,
+        true => None,
     }
 }
 
@@ -573,6 +586,22 @@ logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='LOG %(name)s 
             }
             other => panic!("a stopped core refuses every call, got {other:?}"),
         }
+        // The frame codec checks only the fork rule: a worker child whose
+        // core stopped still reports to the worker.
+        assert_eq!(fork_refusal(), None);
+        Python::attach(|py| -> PyResult<()> {
+            let module = pyo3::types::PyModule::new(py, "frames_after_stop")?;
+            crate::frames::add_frames(&module)?;
+            let globals = pyo3::types::PyDict::new(py);
+            globals.set_item("core", &module)?;
+            py.run(
+                c"encoded = core.encode_child_frame(core.ReadyFrame(pid=4321, rss_mb=25.0))
+assert isinstance(encoded, bytes), encoded",
+                Some(&globals),
+                None,
+            )
+        })
+        .expect("a child frame encodes after the core stopped");
     }
 
     #[test]
