@@ -157,11 +157,24 @@ history.
 Setting a retention field on `RecoveryConfig` fails at construction and
 names its new home; there is no alias.
 
+## Automatic and Manual Passes
+
+The reaper of each worker runs the recovery passes below. Each pass has a method that runs it once, on demand. Three of the passes also have a setting that turns the automatic pass on or off. The method runs the pass also when that setting is off.
+
+| Pass | Setting (default `True`) | Automatic interval | Method of `PostgresBroker` (Python) |
+|------|--------------------------|--------------------|-------------------------------------|
+| Stale CLAIMED tasks go back to PENDING | `auto_requeue_stale_claimed` | `check_interval_ms` | `requeue_stale_claimed()` |
+| Stale RUNNING tasks are retried or failed | `auto_fail_stale_running` | `check_interval_ms` | `mark_stale_tasks_as_failed()` |
+| One page of orphan workflow tasks is cancelled | `auto_terminate_orphaned_workflow_tasks` | `orphan_task_audit_interval_ms` (default 60,000) | `terminate_orphaned_workflow_tasks()` |
+| PENDING tasks past their `good_until` expire | None; the reaper always runs this pass | `check_interval_ms` | `expire_pending_tasks()` |
+
+[Broker Methods](/horsies/monitoring/broker-methods/#methods) documents `requeue_stale_claimed`, `mark_stale_tasks_as_failed` and `terminate_orphaned_workflow_tasks`. The Rust client has no method for these passes.
+
 ## Disabling Recovery
 
 To disable automatic recovery (not recommended), set `auto_requeue_stale_claimed` and `auto_fail_stale_running` to false. See [Disable Recovery](/horsies/configuration/app-config/#disable-recovery) (Python).
 
-Tasks will remain stuck until manually resolved.
+Tasks will remain stuck until manually resolved, for example with the methods of [Automatic and Manual Passes](#automatic-and-manual-passes).
 
 ## Manual Recovery
 

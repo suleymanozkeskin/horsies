@@ -260,6 +260,35 @@ async def test_orphan_cursor_lock_refuses_without_waiting(
         await transaction.rollback()
 
 
+async def test_terminate_cancels_the_orphans_of_one_page_on_demand(
+    bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
+) -> None:
+    """No worker runs here, so no reaper runs the orphan pass, as with
+    ``auto_terminate_orphaned_workflow_tasks=False``: the call runs one page
+    on demand. Of three PENDING workflow tasks, the one that no node links
+    moves to history as CANCELLED; the two linked tasks stay live."""
+    broker, engine = bounded_recovery_database
+    await _seed_orphan_task_plan_fixture(engine, rows=3)
+
+    result = await broker.terminate_orphaned_workflow_tasks()
+
+    assert result.is_ok(), result
+    assert result.unwrap() == 1
+    async with engine.connect() as connection:
+        live = int((await connection.execute(text('''
+            SELECT count(*) FROM horsies_tasks
+            WHERE task_name = 'orphan_plan_task' AND status = 'PENDING'
+        '''))).scalar_one())
+        archived = (await connection.execute(text('''
+            SELECT status, terminalization_kind FROM horsies_task_history
+            WHERE task_id = md5('orphan-plan-task-3')::uuid
+        '''))).one()
+    assert live == 2
+    assert (archived.status, archived.terminalization_kind) == (
+        'CANCELLED', 'CANCEL_ORPHAN_SWEEP',
+    )
+
+
 async def test_orphan_task_scan_has_a_strict_plan_and_reaches_cycle_end(
     bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
 ) -> None:
