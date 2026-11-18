@@ -218,7 +218,7 @@ def send_command_returns_only_the_input_refusals(broker: PostgresBroker) -> None
             task_name='report',
             queue_name='default',
             priority=100,
-            kwargs_json=None,
+            input_json=None,
             task_options=None,
         )
     )

@@ -145,7 +145,7 @@ def _send_manifest(
         task_name=schedule.task_name,
         queue_name=queue_name,
         priority=effective_priority(app, queue_name),
-        input_json=_input_json(prepared_schedule.kwargs_json),
+        input_json=_input_json(prepared_schedule.input_json),
         task_options=_task_options(prepared_schedule.task_options_json),
         retention_class_key=resolve_retention_class_key(
             resolve_queue_retention_class(app.config.retention, queue_name),
@@ -154,10 +154,10 @@ def _send_manifest(
     )
 
 
-def _input_json(kwargs_json: str | None) -> str:
+def _input_json(input_json: str | None) -> str:
     """The input text that a send stores: the kwargs text, or
     `EMPTY_TASK_INPUT` for a schedule without kwargs."""
-    match kwargs_json:
+    match input_json:
         case None:
             return EMPTY_TASK_INPUT
         case text:
