@@ -1730,6 +1730,40 @@ fn each_absence_reason_has_the_not_found_text_of_python() {
     }
 }
 
+/// Python `tests/unit/test_monitoring_task_detail_absence.py`,
+/// `TestWebRoute::test_a_query_failure_is_not_a_not_found`: a task detail
+/// read that fails is never answered as an absent task. A history contract
+/// violation is a server error (500); a database failure (the router's pool
+/// is lazy and unreachable) is unavailable (503).
+#[tokio::test]
+async fn a_task_detail_read_that_fails_is_not_a_not_found() {
+    let contract = super::common::query_failed(
+        "Task detail",
+        crate::monitoring::MonitoringQueryError::HistoryContractViolation {
+            message: "task detail history read failed: bad row".to_owned(),
+            source: crate::monitoring::MonitoringQueryErrorSource::History(
+                crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
+            ),
+        },
+    );
+    let contract = axum::response::IntoResponse::into_response(contract);
+    assert_eq!(contract.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let read = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/api/tasks/{}", Uuid::new_v4()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 /// A UUIDv7 whose embedded birth is `birth`, with random tail bits.
 fn uuid7_born_at(birth: chrono::DateTime<chrono::Utc>) -> Uuid {
     let milliseconds =
