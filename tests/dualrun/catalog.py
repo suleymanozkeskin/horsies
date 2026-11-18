@@ -34,6 +34,7 @@ from enum import Enum
 from typing import Final
 
 from tests.dualrun.rules import (
+    CANONICAL_UUID,
     AnchorNull,
     AnchorReference,
     ColumnRule,
@@ -836,7 +837,7 @@ class NotificationPayload(Enum):
 
     TASK_ID = 'a task id'
     WORKFLOW_ID = 'a workflow id'
-    TEXT = 'a fixed text'
+    QUEUE_WAKE = 'a fixed text, or the retry prefix and the id of the retried task'
 
 
 TASK_CHANNELS: Final = ('task_new', 'task_done', 'horsies_task_status')
@@ -847,7 +848,12 @@ WORKFLOW_CHANNELS: Final = ('workflow_done', 'horsies_workflow_status')
 
 QUEUE_CHANNEL_PREFIX: Final = 'task_queue_'
 """The wake channel of a queue, ``task_queue_<queue>``; its payload is
-``new``, ``capacity`` or ``class``."""
+``new``, ``capacity``, ``class`` or ``retry:<task id>``."""
+
+RETRY_WAKE_PREFIX: Final = 'retry:'
+"""The prefix of the wake that a retry sends on the queue of its task:
+``retry:<task id>`` (the worker's retry, ``python/horsies/core/worker/retrying.py``;
+the stale recovery's retry, ``crates/horsies-core/src/broker/stale_recovery.rs``)."""
 
 
 def notification_payload(channel: str) -> NotificationPayload:
@@ -859,7 +865,7 @@ def notification_payload(channel: str) -> NotificationPayload:
         case _ if channel in WORKFLOW_CHANNELS:
             return NotificationPayload.WORKFLOW_ID
         case _ if channel.startswith(QUEUE_CHANNEL_PREFIX):
-            return NotificationPayload.TEXT
+            return NotificationPayload.QUEUE_WAKE
         case _:
             raise AssertionError(
                 f'no payload rule for the notification channel {channel!r}'
@@ -878,14 +884,28 @@ NOTIFICATIONS: Final = TableRules(
     identity=('channel', 'task_id', 'workflow_id', 'payload'),
 )
 """The notifications of a run, one row each: the channel, and the payload in
-the column of its kind (``notification_row``). Rows with one identity
-compare as a multiset, so the section compares as a multiset per channel."""
+the column of its kind (``notification_row``). A retry wake puts the id of
+its task into ``task_id`` and keeps ``RETRY_WAKE_PREFIX`` as its payload.
+Rows with one identity compare as a multiset, so the section compares as a
+multiset per channel."""
 
 NOTIFIED_CATALOG: Final = SnapshotCatalog(
     tables=(*BASELINE_CATALOG.tables, NOTIFICATIONS),
 )
 """The baseline tables, then the notifications: a payload id takes the label
 that its row in a table gave it."""
+
+
+def _queue_wake_row(channel: str, payload: str) -> tuple[str | None, ...]:
+    """A queue wake. ``retry:<task id>``, with the id in its canonical form
+    (``CANONICAL_UUID``), puts the id into ``task_id`` and keeps the prefix
+    as the payload. Any other payload stays as its text and compares exactly."""
+    task_id = payload.removeprefix(RETRY_WAKE_PREFIX)
+    match task_id != payload and CANONICAL_UUID.fullmatch(task_id) is not None:
+        case True:
+            return (channel, task_id, None, RETRY_WAKE_PREFIX)
+        case False:
+            return (channel, None, None, payload)
 
 
 def notification_row(channel: str, payload: str) -> tuple[str | None, ...]:
@@ -895,5 +915,5 @@ def notification_row(channel: str, payload: str) -> tuple[str | None, ...]:
             return (channel, payload, None, None)
         case NotificationPayload.WORKFLOW_ID:
             return (channel, None, payload, None)
-        case NotificationPayload.TEXT:
-            return (channel, None, None, payload)
+        case NotificationPayload.QUEUE_WAKE:
+            return _queue_wake_row(channel, payload)

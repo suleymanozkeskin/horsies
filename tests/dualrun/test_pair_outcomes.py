@@ -12,6 +12,7 @@ import pytest
 from horsies.core.types.result import Err, Ok
 from tests.dualrun.catalog import (
     NOTIFICATIONS,
+    RETRY_WAKE_PREFIX,
     TASK_ID,
     NotificationPayload,
     notification_payload,
@@ -133,7 +134,7 @@ def _run(
             NotificationPayload.WORKFLOW_ID,
             id='workflow-status',
         ),
-        pytest.param('task_queue_default', NotificationPayload.TEXT, id='queue'),
+        pytest.param('task_queue_default', NotificationPayload.QUEUE_WAKE, id='queue'),
     ],
 )
 def test_each_channel_has_its_payload_kind(
@@ -156,6 +157,90 @@ def test_a_payload_goes_into_the_column_of_its_kind() -> None:
         None,
         'new',
     )
+
+
+RETRIED_A: Final = '01a1eced-c0c0-7000-8804-a4eff891f806'
+RETRIED_B: Final = '01a1eced-cb0e-7000-a133-d366bdd10d31'
+OTHER_B: Final = '01a1eced-cb0e-7000-a133-d366bdd10d32'
+"""Task ids in their canonical text form, as a uuid column gives them."""
+
+
+def test_a_retry_wake_puts_its_task_id_into_the_task_column() -> None:
+    assert notification_row('task_queue_q', f'retry:{RETRIED_A}') == (
+        'task_queue_q',
+        RETRIED_A,
+        None,
+        RETRY_WAKE_PREFIX,
+    )
+
+
+@pytest.mark.parametrize(
+    'payload',
+    [
+        pytest.param('retry:', id='no-id'),
+        pytest.param('retry:not-a-task', id='not-an-id'),
+        pytest.param(f'retry:{RETRIED_A.upper()}', id='upper-case-id'),
+        pytest.param(f'retry: {RETRIED_A}', id='space-before-the-id'),
+        pytest.param(f'retry:{RETRIED_A}x', id='text-after-the-id'),
+        pytest.param(f'retried:{RETRIED_A}', id='other-prefix'),
+    ],
+)
+def test_a_queue_wake_that_is_not_a_retry_of_a_task_id_stays_its_text(
+    payload: str,
+) -> None:
+    assert notification_row('task_queue_q', payload) == (
+        'task_queue_q',
+        None,
+        None,
+        payload,
+    )
+
+
+def test_retry_wakes_of_two_runs_with_other_task_ids_compare_equal() -> None:
+    reference = _run(
+        [(RETRIED_A, 'retried'), ('a2', 'other')],
+        [
+            ('task_queue_default', f'retry:{RETRIED_A}'),
+            ('task_queue_default', f'retry:{RETRIED_A}'),
+            ('task_new', 'a2'),
+        ],
+    )
+    candidate = _run(
+        [('b2', 'other'), (RETRIED_B, 'retried')],
+        [
+            ('task_new', 'b2'),
+            ('task_queue_default', f'retry:{RETRIED_B}'),
+            ('task_queue_default', f'retry:{RETRIED_B}'),
+        ],
+    )
+
+    assert compare_snapshots(reference, candidate).entries == ()
+
+
+def test_a_retry_wake_for_another_task_or_one_more_is_a_difference() -> None:
+    reference = _run(
+        [(RETRIED_A, 'retried'), ('a2', 'other')],
+        [('task_queue_default', f'retry:{RETRIED_A}')],
+    )
+    other_task = _run(
+        [(RETRIED_B, 'retried'), (OTHER_B, 'other')],
+        [('task_queue_default', f'retry:{OTHER_B}')],
+    )
+    one_more = _run(
+        [(RETRIED_B, 'retried'), (OTHER_B, 'other')],
+        [
+            ('task_queue_default', f'retry:{RETRIED_B}'),
+            ('task_queue_default', f'retry:{RETRIED_B}'),
+        ],
+    )
+
+    assert sorted(
+        type(entry).__name__
+        for entry in compare_snapshots(reference, other_task).entries
+    ) == ['ExtraRow', 'MissingRow']
+    assert [
+        type(entry).__name__ for entry in compare_snapshots(reference, one_more).entries
+    ] == ['ExtraRow']
 
 
 def test_a_channel_without_a_payload_rule_is_a_defect() -> None:
