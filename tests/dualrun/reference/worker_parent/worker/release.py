@@ -28,6 +28,7 @@ from typing import Any, Final, Literal, assert_never
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies._catalog.release_bounds import MAX_RELEASED_CLAIMS
 from horsies._core import (
     ClaimsReleased,
     CoreHandle,
@@ -37,11 +38,6 @@ from horsies._core import (
     ReleaseFailed,
 )
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
-from horsies.core.types.core_failure import CoreOperationFailed
-
-MAX_RELEASE_ROWS: Final = 1000
-"""Most rows of one ``horsies_release_claims`` call; the function refuses more
-(22023). ``release_claims`` splits a longer list into calls of this size."""
 
 RELEASE_CLAIMS_SQL = text("""
     SELECT ordinality, task_id, outcome
@@ -161,7 +157,8 @@ async def release_claims(
     """Release ``claims`` of ``worker_id``; one outcome per claim, in order.
 
     ``connection`` must be in autocommit: each call of the function commits
-    when it returns. A list longer than ``MAX_RELEASE_ROWS`` is sent as
+    when it returns. A list longer than ``MAX_RELEASED_CLAIMS`` (the core's
+    bound, generated into ``horsies._catalog.release_bounds``) is sent as
     several calls, each complete alone. No claims sends nothing. The task
     ids must be distinct: the function refuses a repeated id (22023).
 
@@ -172,18 +169,14 @@ async def release_claims(
         OutcomeDecodeError: a returned row outside the function's contract.
     """
     released: list[ClaimRelease] = []
-    for start in range(0, len(claims), MAX_RELEASE_ROWS):
-        chunk = claims[start : start + MAX_RELEASE_ROWS]
+    for start in range(0, len(claims), MAX_RELEASED_CLAIMS):
+        chunk = claims[start : start + MAX_RELEASED_CLAIMS]
         result = await connection.execute(
             RELEASE_CLAIMS_SQL,
             _release_parameters(chunk, worker_id, placement),
         )
         released.extend(decode_release_rows(chunk, result.fetchall()))
     return tuple(released)
-
-
-RELEASE_SUBJECT: Final = 'release_claims'
-"""The subject of a ``CoreOperationFailed`` of the release."""
 
 
 def _core_placement(placement: ReleasePlacement) -> Literal['SAME_CLASS', 'ISOLATED']:
@@ -243,22 +236,23 @@ async def release_claims_in_core(
     """Release ``claims`` of ``worker_id`` through the core; one outcome per
     claim, in order.
 
-    Each call of at most ``MAX_RELEASE_ROWS`` claims is one
+    Each call of at most ``MAX_RELEASED_CLAIMS`` claims is one
     ``horsies_release_claims`` statement that commits alone. No claims sends
     nothing. The task ids must be distinct (the request refuses a repeated
     id with ``ValueError``).
 
     Raises:
-        CoreOperationFailed: a ``ReleaseFailed`` record, with its message and
-            retryable flag. The calls sent before it committed; the failed
-            call wrote nothing, or committed and its reply was lost.
+        CoreFailure: a ``ReleaseFailed`` record raises its ``exception``
+            (the core's class of the cause, with its retry rule). The calls
+            sent before it committed; the failed call wrote nothing, or
+            committed and its reply was lost.
         CoreError: the core of this process stopped or did not start.
         OutcomeDecodeError: a record count or task id outside the
             operation's contract.
     """
     released: list[ClaimRelease] = []
-    for start in range(0, len(claims), MAX_RELEASE_ROWS):
-        chunk = claims[start : start + MAX_RELEASE_ROWS]
+    for start in range(0, len(claims), MAX_RELEASED_CLAIMS):
+        chunk = claims[start : start + MAX_RELEASED_CLAIMS]
         request = _release_request(chunk, worker_id, placement)
         match await handle.release_claims_async(request):
             case ClaimsReleased(rows=rows):
@@ -271,8 +265,8 @@ async def release_claims_in_core(
                     _released_row_outcome(claim, row)
                     for claim, row in zip(chunk, rows, strict=True)
                 )
-            case ReleaseFailed(message=message, retryable=retryable):
-                raise CoreOperationFailed(RELEASE_SUBJECT, message, retryable)
+            case ReleaseFailed(exception=exception):
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
     return tuple(released)

@@ -401,7 +401,7 @@ class Worker(
         instant after the pass. ``resources`` is not read: the pass runs on
         the core pools, not on ``partition_maintenance``.
 
-        Raises ``CoreOperationFailed`` when the pass has no outcome and
+        Raises the record's ``CoreFailure`` when the pass has no outcome and
         ``CoreError`` when the core of this process cannot run it; the boot
         stops on either, as it stopped on a database error.
         """

@@ -174,7 +174,6 @@ from tests.dualrun.reference.worker_parent.worker.workflow_success import (
     success_for,
 )
 from horsies.core.lifecycle.outcomes import PhaseTwoStep
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.workflows.node_finish import (
     FactsUnknown,
     NodeFinishFacts,
@@ -1357,8 +1356,8 @@ class FinalizeMixin:
         its node facts; ``AlreadyApplied`` (a replay of a committed success)
         reloads the routing facts of the task for the phase-2 replay; a
         refusal wrote nothing and owes nothing. A failed write
-        (``CoreOperationFailed``, or a ``CoreError`` of the core boundary)
-        becomes a phase-1 error, retryable when the cause may clear; its
+        (the record's ``CoreFailure``, or a ``CoreError`` of the core
+        boundary) becomes a phase-1 error, retryable when the cause may clear; its
         data keeps the child's report for the replay.
         """
         try:
@@ -1500,8 +1499,9 @@ class FinalizeMixin:
         core commits. The result routes phase 2: a workflow task's failure
         and a replay of a committed failure return the phase 2 it owes; a
         plain task's failure (its capacity wake is sent), a retry and a
-        refusal return ``Ok(None)``. A failed write (``CoreOperationFailed``,
-        or a ``CoreError`` of the core boundary) and a failed replay read
+        refusal return ``Ok(None)``. A failed write (the record's
+        ``CoreFailure``, or a ``CoreError`` of the core boundary) and a
+        failed replay read
         become a phase-1 error, retryable when the cause may clear; its data
         keeps the child's report for the replay.
         """
@@ -1639,12 +1639,8 @@ class FinalizeMixin:
         except CoreError as exc:
             return Err(self._phase2_error(task_id, owed.queue_name, exc=exc))
         match record:
-            case NodeFinishFailed(message=message, retryable=retryable):
-                return Err(self._phase2_error(
-                    task_id,
-                    owed.queue_name,
-                    exc=CoreOperationFailed('finish_workflow_node', message, retryable),
-                ))
+            case NodeFinishFailed(exception=exception):
+                return Err(self._phase2_error(task_id, owed.queue_name, exc=exception))
             case NodeFinished():
                 pass
             case _ as unreachable:
@@ -2202,11 +2198,11 @@ class FinalizeMixin:
             case ParentsAdvanced():
                 for child_id in child_workflow_ids:
                     self._clear_finalize_retry_attempts(child_id, _FINALIZE_STAGE_PARENT)
-            case ParentAdvanceStopped(still_owed=still_owed, message=message, retryable=retryable):
+            case ParentAdvanceStopped(still_owed=still_owed, exception=exception):
                 await self._handle_finalize_error(
                     self._parent_error(
                         [str(child_workflow_id) for child_workflow_id in still_owed],
-                        CoreOperationFailed('advance_workflow_parents', message, retryable),
+                        exception,
                     )
                 )
             case _ as unreachable:

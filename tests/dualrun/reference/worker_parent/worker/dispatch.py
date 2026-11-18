@@ -45,8 +45,7 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Result, is_err
-from horsies._core import CoreError
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies._core import CoreError, CoreFailure
 from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     RunFrame,
     SeatRefusal,
@@ -266,7 +265,7 @@ class DispatchMixin:
         One ``horsies_release_claims`` statement through the core
         (``release_claims_in_core``), fenced on this worker and the
         dispatch's claim generation; the row keeps its execution class.
-        ``DB_ERROR``: the release failed (``CoreOperationFailed``) or the
+        ``DB_ERROR``: the release failed (``CoreFailure``) or the
         core of this process could not run it (``CoreError``), logged here;
         the row is unchanged, or the release committed and its reply was
         lost.
@@ -279,7 +278,7 @@ class DispatchMixin:
                 claims=(held,),
                 placement=ReleasePlacement.SAME_CLASS,
             )
-        except (CoreOperationFailed, CoreError) as exc:
+        except (CoreFailure, CoreError) as exc:
             logger.error(
                 'DB error while requeueing task %s (%s): %s',
                 task_id,
@@ -379,8 +378,8 @@ class DispatchMixin:
         ``retry``), or the failure; a row that this claim does not hold is
         classified with no write. The attempt row records the error message
         as its message and its reason; the task's summary reason is not
-        written. A failed write raises ``CoreOperationFailed``; the core
-        boundary raises ``CoreError``.
+        written. A failed write raises the record's ``CoreFailure``; the
+        core boundary raises ``CoreError``.
         """
         failure = FailLockedTask(
             task_id=task_id,

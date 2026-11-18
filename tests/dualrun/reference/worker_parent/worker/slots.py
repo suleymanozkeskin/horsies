@@ -214,14 +214,17 @@ SLOT_DEFECT_LIMIT: Final = 3
 CHANNEL_LOST_GRACE_S: Final = 0.2
 DRAIN_QUIET_PASSES: Final = 3
 DRAIN_DEADLINE_S: Final = 5.0
+# The time past the block limit that the parent leaves for the report of a
+# blocked loop to reach it (the core's LOOP_BLOCK_REPORT_WAIT).
+LOOP_BLOCK_REPORT_WAIT_S: Final = 5.0
 # A shared child reports the end of the cancel grace of a run at once
 # (SecondCancelFrame), and its watchdog reports a loop blocked for the block
 # limit. The parent checks a run that has not ended this long after its
 # deadline and its cancel grace: a child that has reported neither the end of
 # the grace nor the end of the run by then has a frozen process, and the parent
-# kills it. The margin is past the block limit, so a block that the watchdog
-# can report is reported first, with its culprit.
-SHARED_BACKSTOP_MARGIN_S: Final = LOOP_BLOCK_LIMIT_MS / 1000 + 5.0
+# kills it. The margin is past the block limit and the wait for its report, so
+# a block that the watchdog can report is reported first, with its culprit.
+SHARED_BACKSTOP_MARGIN_S: Final = LOOP_BLOCK_LIMIT_MS / 1000 + LOOP_BLOCK_REPORT_WAIT_S
 # After a shared async child reports the second cancel of a run, or the cancel
 # of the work that a run left after its return, it sends EXTRA_CANCEL_ROUNDS
 # more cancel rounds CANCEL_ROUND_INTERVAL_S apart, and reports the run stuck

@@ -73,9 +73,13 @@ def _stored_cancel_grace_ms(
     task_options: object,
 ) -> int | OptionsUnreadable | CancelGraceInvalid:
     """The ``cancel_grace_ms`` of stored task options, checked against the
-    enqueue rule of a ``SHARED_ASYNC`` row (``shared_async_grace_error``)."""
+    enqueue rule of a ``SHARED_ASYNC`` row (``shared_async_grace_error``).
+
+    None (no options) has no grace. An empty text is ``OptionsUnreadable``:
+    no writer stores it, so ``loads_json`` refuses it as corrupt data.
+    """
     match task_options:
-        case None | '':
+        case None:
             return CancelGraceInvalid(
                 reason='stored cancel_grace_ms is absent for execution SHARED_ASYNC',
             )
