@@ -47,7 +47,7 @@ async fn delete_snapshots(pool: &PgPool, worker_id: &str) {
 #[serial]
 async fn an_unreadable_slot_health_fails_the_read() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let worker_id = format!("itest-{}", Uuid::new_v4().simple());
     seed_snapshot(&pool, &worker_id, r#"{"slot": 1}"#, "{}").await;
 
@@ -70,7 +70,7 @@ async fn an_unreadable_slot_health_fails_the_read() {
 #[serial]
 async fn an_unreadable_class_capacity_fails_the_read() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let worker_id = format!("itest-{}", Uuid::new_v4().simple());
     seed_snapshot(
         &pool,

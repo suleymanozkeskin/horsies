@@ -1811,7 +1811,7 @@ mod cap_tests {
 
     /// A broker on the database of `pool`: the recovery statements run on its core pools.
     fn broker_of(pool: &PgPool) -> PostgresBroker {
-        PostgresBroker::from_pool(pool.clone())
+        PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
     }
 
     /// A broker whose database refuses every connection (no server listens on port 1): each statement fails
@@ -1823,6 +1823,7 @@ mod cap_tests {
                 .acquire_timeout(std::time::Duration::from_millis(100))
                 .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
                 .expect("a lazy pool opens no connection"),
+            crate::ClientFamily::Rust,
         )
     }
 
@@ -2152,8 +2153,10 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn case0_advances_the_selected_root_without_touching_unready_siblings() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.unwrap();
         let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4();
@@ -2231,8 +2234,10 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn recovery_cap_limits_rows_then_uncapped_processes_rest() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         let pool = broker.pool().clone();
 
         // Isolate: remove any pre-existing orphaned workflows.

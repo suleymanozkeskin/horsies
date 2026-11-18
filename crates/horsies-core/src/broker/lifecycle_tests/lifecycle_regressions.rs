@@ -421,9 +421,12 @@ async fn pause_resets_retry_window_claimed_workflow_task() {
     .expect("open the retry window");
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "RUNNING").await;
 
-    let paused = pause_workflow(&PostgresBroker::from_pool(pool.clone()), workflow_id)
-        .await
-        .expect("pause");
+    let paused = pause_workflow(
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        workflow_id,
+    )
+    .await
+    .expect("pause");
 
     assert!(paused);
     let workflow_status: String =

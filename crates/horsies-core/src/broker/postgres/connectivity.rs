@@ -274,7 +274,7 @@ mod tests {
     }
 
     async fn connect(config: &PostgresConfig) -> PostgresBroker {
-        PostgresBroker::connect_with(config)
+        PostgresBroker::connect_with(config, crate::ClientFamily::Rust)
             .await
             .expect("building a broker opens no connection")
     }

@@ -782,7 +782,10 @@ mod queue_tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
-        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(pool)));
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(
+            pool,
+            crate::ClientFamily::Rust,
+        )));
         let subscription = broadcaster.subscribe().await;
         assert!(broadcaster.degraded());
 
@@ -923,7 +926,10 @@ mod queue_tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
-        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(pool)));
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(
+            pool,
+            crate::ClientFamily::Rust,
+        )));
         let kept = Arc::new(SubscriberQueue::default());
         let dropped = Arc::new(SubscriberQueue::default());
         broadcaster

@@ -82,8 +82,10 @@ async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() 
     use crate::broker::BrokerError;
 
     let pool = test_pool().await;
-    let broker =
-        Arc::new(PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        ClientFamily::Python,
+    ));
     let name = format!("scheduler_family_{}", uuid::Uuid::new_v4().simple());
     let manifest = manifest_for(&[interval_schedule_secs(&name, 60)]);
 

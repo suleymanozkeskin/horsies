@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use horsies_core::{
     run_child_host, ChildApp, ChildHookFailure, ChildLogSetup, ChildStartFuture, ChildStartHook,
-    NamedChildStartHook,
+    ClientFamily, NamedChildStartHook,
 };
 
 pub use horsies_core::{
@@ -95,6 +95,7 @@ impl Horsies {
             start_hook: start_hook_of(parts.start_hooks),
             producer_manifest: parts.producer_manifest,
             log_setup,
+            family: ClientFamily::Rust,
         };
         ExitCode::from(exit_byte(run_child_host(app, args).code()))
     }

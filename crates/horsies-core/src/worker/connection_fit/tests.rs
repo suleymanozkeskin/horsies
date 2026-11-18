@@ -127,7 +127,7 @@ fn unreachable_broker() -> PostgresBroker {
         .acquire_timeout(Duration::from_millis(250))
         .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
         .expect("a lazy pool of an unreachable server");
-    PostgresBroker::from_pool(pool)
+    PostgresBroker::from_pool(pool, ClientFamily::Rust)
 }
 
 /// The usable slots of the test server, read here and not through the code
@@ -515,7 +515,7 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
         ("big".to_owned(), big),
         ("small".to_owned(), isolated_only(1)),
     ]);
-    let broker = PostgresBroker::from_pool(migrated_pool().await);
+    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 
@@ -583,7 +583,7 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
     config.broker.pool_size = 1;
     config.broker.max_overflow = 0;
     config.worker_profiles = BTreeMap::from([("parent".to_owned(), profile)]);
-    let broker = PostgresBroker::from_pool(migrated_pool().await);
+    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 
@@ -650,7 +650,7 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
         "horsies_session_pool_check",
     ));
     config.worker_profiles = BTreeMap::from([("session".to_owned(), profile)]);
-    let broker = PostgresBroker::from_pool(migrated_pool().await);
+    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 
@@ -823,7 +823,7 @@ async fn the_read_returns_max_connections_and_both_reserved_settings() {
     .fetch_one(&pool)
     .await
     .expect("read the settings of the test server");
-    let broker = PostgresBroker::from_pool(pool);
+    let broker = PostgresBroker::from_pool(pool, ClientFamily::Rust);
 
     let read = read_server_connection_limit(&broker)
         .await
@@ -856,7 +856,7 @@ async fn a_server_error_makes_the_limit_unreadable() {
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(10))
         .connect_lazy_with(missing);
-    let broker = PostgresBroker::from_pool(pool);
+    let broker = PostgresBroker::from_pool(pool, ClientFamily::Rust);
 
     let read = read_server_connection_limit(&broker).await;
 
@@ -1241,7 +1241,7 @@ async fn profiles_that_fit_have_no_error() {
         need <= u64::from(usable),
         "the test server has {usable} usable slots, fewer than the {need} of one small worker"
     );
-    let broker = PostgresBroker::from_pool(migrated_pool().await);
+    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 

@@ -139,9 +139,7 @@ async fn worker_broker(
     config: &PostgresConfig,
     family: ClientFamily,
 ) -> Result<PostgresBroker, BrokerError> {
-    Ok(PostgresBroker::connect_worker_with(config)
-        .await?
-        .with_client_family(family))
+    PostgresBroker::connect_worker_with(config, family).await
 }
 
 /// The app config of the worker: the queue mode and the claim settings of

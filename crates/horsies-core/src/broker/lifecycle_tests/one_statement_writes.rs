@@ -47,7 +47,7 @@ impl Counted {
         let upstream = database_options(pool);
         let proxy = WireProxy::start(&upstream).await;
         let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-        let broker = PostgresBroker::from_pool(proxied.clone());
+        let broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
         Self {
             proxy,
             proxied,

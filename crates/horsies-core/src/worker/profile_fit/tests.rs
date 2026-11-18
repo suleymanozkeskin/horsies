@@ -162,7 +162,7 @@ async fn the_boot_logs_the_memory_fit_then_the_connection_fit_and_the_worker_sta
     );
     let app_config = AppConfig::for_database_url(migrated_database_url().await);
     let broker = Arc::new(
-        PostgresBroker::connect_worker_with(&app_config.broker)
+        PostgresBroker::connect_worker_with(&app_config.broker, crate::ClientFamily::Rust)
             .await
             .expect("connect the worker broker to the test server"),
     );
