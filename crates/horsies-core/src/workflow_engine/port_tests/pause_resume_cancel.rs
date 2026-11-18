@@ -302,8 +302,8 @@ async fn cancel_of_an_unknown_id_is_workflow_not_found() {
         .await
         .expect_err("an unknown id cannot be cancelled");
 
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
-    assert!(!error.retryable);
+    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert!(!error.retryable());
 }
 
 /// `TestWorkflowHandlePauseResume.test_pause_non_running_returns_false`
@@ -345,8 +345,8 @@ async fn pause_and_resume_of_an_unknown_id_are_workflow_not_found() {
         .await
         .expect_err("resume of an unknown id");
 
-    assert_eq!(paused.code, HandleErrorCode::WorkflowNotFound);
-    assert_eq!(resumed.code, HandleErrorCode::WorkflowNotFound);
+    assert_eq!(paused.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(resumed.code(), HandleErrorCode::WorkflowNotFound);
 }
 
 /// `TestResumeCommitSplit.test_db_error_before_the_commit_returns_db_operation_failed`:
@@ -395,8 +395,8 @@ async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
         .await
         .expect_err("the resume meets the refused node write");
 
-    assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
-    assert!(error.retryable);
+    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert!(error.retryable());
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "PENDING");
     db.drop().await;
@@ -457,9 +457,9 @@ async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
         .await
         .expect_err("the recovery pass after the commit meets the lost search path");
 
-    assert_eq!(error.code, HandleErrorCode::ResumeRecoveryFailed);
-    assert!(!error.retryable);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(error.code(), HandleErrorCode::ResumeRecoveryFailed);
+    assert!(!error.retryable());
+    assert_eq!(error.workflow_id(), workflow_id);
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "RUNNING");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "ENQUEUED");
     db.drop().await;

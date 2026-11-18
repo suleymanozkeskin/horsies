@@ -302,27 +302,45 @@ fn each_read_failure_has_python_s_code() {
 
 #[test]
 fn a_handle_error_maps_to_its_read_failure() {
-    let error = |code| HandleOperationError {
-        code,
-        message: "m".to_owned(),
-        retryable: false,
-        workflow_id: workflow(),
-        cause: horsies_core::FailureCause::PreconditionFailed,
-    };
+    let message = || "m".to_owned();
+    let cause = || horsies_core::FailureCause::PreconditionFailed;
     assert!(matches!(
-        WorkflowReadError::of_handle_error(error(HandleErrorCode::WorkflowNotFound)),
+        WorkflowReadError::of_handle_error(HandleOperationError::WorkflowNotFound {
+            message: message(),
+            workflow_id: workflow(),
+        }),
         WorkflowReadError::WorkflowNotFound { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(error(HandleErrorCode::StoredDataInvalid)),
+        WorkflowReadError::of_handle_error(HandleOperationError::StoredDataInvalid {
+            message: message(),
+            workflow_id: workflow(),
+            cause: cause(),
+        }),
         WorkflowReadError::StoredResultUnreadable { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(error(HandleErrorCode::DbOperationFailed)),
+        WorkflowReadError::of_handle_error(HandleOperationError::DbOperationFailed {
+            message: message(),
+            retryable: false,
+            workflow_id: workflow(),
+            cause: cause(),
+        }),
         WorkflowReadError::Database { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(error(HandleErrorCode::AsyncContext)),
+        WorkflowReadError::of_handle_error(HandleOperationError::ResumeRecoveryFailed {
+            message: message(),
+            workflow_id: workflow(),
+            cause: cause(),
+        }),
+        WorkflowReadError::Database { .. }
+    ));
+    assert!(matches!(
+        WorkflowReadError::of_handle_error(HandleOperationError::AsyncContext {
+            message: message(),
+            workflow_id: workflow(),
+        }),
         WorkflowReadError::AsyncContext { .. }
     ));
 }
@@ -539,11 +557,19 @@ fn a_stored_summary_output_keeps_its_stored_text() {
 #[test]
 fn a_node_status_outside_the_enum_is_stored_data_invalid() {
     let refused = node_info(workflow(), stored_node("BOGUS", None)).unwrap_err();
-    assert_eq!(refused.code, HandleErrorCode::StoredDataInvalid);
-    assert!(!refused.retryable);
-    assert_eq!(refused.workflow_id, workflow());
-    assert!(refused.message.contains("node 0"), "{}", refused.message);
-    assert!(refused.message.contains("\"BOGUS\""), "{}", refused.message);
+    assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+    assert!(!refused.retryable());
+    assert_eq!(refused.workflow_id(), workflow());
+    assert!(
+        refused.message().contains("node 0"),
+        "{}",
+        refused.message()
+    );
+    assert!(
+        refused.message().contains("\"BOGUS\""),
+        "{}",
+        refused.message()
+    );
 }
 
 /// A stored NULL is no summary.
@@ -561,15 +587,15 @@ fn a_stored_null_is_no_summary() {
 fn an_empty_stored_summary_is_stored_data_invalid() {
     let refused = node_info(workflow(), stored_node("COMPLETED", Some("")))
         .expect_err("an empty summary does not read");
-    assert_eq!(refused.code, HandleErrorCode::StoredDataInvalid);
-    assert!(!refused.retryable);
-    assert_eq!(refused.workflow_id, workflow());
+    assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+    assert!(!refused.retryable());
+    assert_eq!(refused.workflow_id(), workflow());
     assert!(
         refused
             .message
             .starts_with("node 0 has a stored sub-workflow summary that does not read"),
         "{}",
-        refused.message
+        refused.message()
     );
 }
 
@@ -585,12 +611,12 @@ fn a_summary_that_does_not_read_is_stored_data_invalid() {
         deep.as_str(),
     ] {
         let refused = node_info(workflow(), stored_node("COMPLETED", Some(summary))).unwrap_err();
-        assert_eq!(refused.code, HandleErrorCode::StoredDataInvalid);
-        assert!(!refused.retryable);
+        assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+        assert!(!refused.retryable());
         assert!(
-            refused.message.contains("sub-workflow summary"),
+            refused.message().contains("sub-workflow summary"),
             "{}",
-            refused.message
+            refused.message()
         );
     }
 }

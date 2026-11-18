@@ -84,9 +84,9 @@ impl HandleFailed {
     ) -> Self {
         Self {
             workflow_id,
-            code: error.code.wire_value().to_owned(),
-            message: error.message.clone(),
-            retryable: error.retryable,
+            code: error.code().wire_value().to_owned(),
+            message: error.message().to_owned(),
+            retryable: error.retryable(),
             exception: FailureException::of_handle_error(subject, error),
         }
     }
@@ -155,30 +155,26 @@ impl<'py> IntoPyObject<'py> for WorkflowTransitionOutcome {
 /// The record of a handle error of a pause or a cancel. Pure.
 ///
 /// Panics: a code that the core gives only for another operation
-/// (`RESUME_RECOVERY_FAILED`) or only in Python (`LOOP_RUNNER_FAILED`,
-/// `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`): a defect of the core.
+/// (`RESUME_RECOVERY_FAILED`) or only to a sync or blocking form
+/// (`ASYNC_CONTEXT`): a defect of the core.
 fn failed_record(
     transition: Transition,
     workflow_id: Uuid,
     error: &HandleOperationError,
 ) -> WorkflowTransitionOutcome {
-    match error.code {
-        HandleErrorCode::WorkflowNotFound => {
+    match error {
+        HandleOperationError::WorkflowNotFound { .. } => {
             WorkflowTransitionOutcome::Absent(WorkflowAbsent { workflow_id })
         }
-        HandleErrorCode::DbOperationFailed | HandleErrorCode::StoredDataInvalid => {
-            WorkflowTransitionOutcome::Failed(HandleFailed::of_handle_error(
-                transition.subject(),
-                workflow_id,
-                error,
-            ))
-        }
-        HandleErrorCode::ResumeRecoveryFailed
-        | HandleErrorCode::LoopRunnerFailed
-        | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::AsyncContext => panic!(
+        HandleOperationError::DbOperationFailed { .. }
+        | HandleOperationError::StoredDataInvalid { .. } => WorkflowTransitionOutcome::Failed(
+            HandleFailed::of_handle_error(transition.subject(), workflow_id, error),
+        ),
+        HandleOperationError::ResumeRecoveryFailed { .. }
+        | HandleOperationError::AsyncContext { .. } => panic!(
             "a pause or cancel of workflow {workflow_id} answered {} (a defect): {}",
-            error.code, error.message
+            error.code(),
+            error.message()
         ),
     }
 }
@@ -262,12 +258,37 @@ mod tests {
     }
 
     fn handle_error(code: HandleErrorCode, retryable: bool) -> HandleOperationError {
-        HandleOperationError {
-            code,
-            message: format!("planned {code}"),
-            retryable,
-            workflow_id: workflow(),
-            cause: horsies_core::FailureCause::Connection,
+        let message = format!("planned {code}");
+        let workflow_id = workflow();
+        let cause = horsies_core::FailureCause::Connection;
+        match code {
+            HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
+                message,
+                workflow_id,
+            },
+            HandleErrorCode::DbOperationFailed => HandleOperationError::DbOperationFailed {
+                message,
+                retryable,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
+                message,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::ResumeRecoveryFailed => HandleOperationError::ResumeRecoveryFailed {
+                message,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
+                message,
+                workflow_id,
+            },
+            HandleErrorCode::LoopRunnerFailed | HandleErrorCode::EventLoopLimit => {
+                unreachable!("{code} is a code of the Python client only")
+            }
         }
     }
 

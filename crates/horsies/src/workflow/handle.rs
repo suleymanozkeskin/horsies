@@ -104,24 +104,24 @@ impl WorkflowReadError {
     }
 
     fn of_handle_error(error: HandleOperationError) -> Self {
-        match error.code {
-            HandleErrorCode::WorkflowNotFound => Self::WorkflowNotFound {
-                workflow_id: error.workflow_id,
+        match error {
+            HandleOperationError::WorkflowNotFound { workflow_id, .. } => {
+                Self::WorkflowNotFound { workflow_id }
+            }
+            HandleOperationError::StoredDataInvalid {
+                workflow_id,
+                message,
+                ..
+            } => Self::StoredResultUnreadable {
+                workflow_id,
+                cause: message,
             },
-            HandleErrorCode::StoredDataInvalid => Self::StoredResultUnreadable {
-                workflow_id: error.workflow_id,
-                cause: error.message,
-            },
-            HandleErrorCode::AsyncContext => Self::AsyncContext {
-                message: error.message,
-            },
-            code @ (HandleErrorCode::DbOperationFailed
-            | HandleErrorCode::ResumeRecoveryFailed
-            | HandleErrorCode::LoopRunnerFailed
-            | HandleErrorCode::EventLoopLimit) => Self::Database {
-                code,
-                message: error.message,
-                retryable: error.retryable,
+            HandleOperationError::AsyncContext { message, .. } => Self::AsyncContext { message },
+            failed @ (HandleOperationError::DbOperationFailed { .. }
+            | HandleOperationError::ResumeRecoveryFailed { .. }) => Self::Database {
+                code: failed.code(),
+                message: failed.message().to_owned(),
+                retryable: failed.retryable(),
             },
         }
     }
@@ -210,16 +210,14 @@ impl<T> WorkflowHandle<T> {
 
     /// The connected broker of the handle, or `DB_OPERATION_FAILED`.
     async fn broker(&self) -> HandleResult<Arc<PostgresBroker>> {
-        self.reads
-            .initialized_broker()
-            .await
-            .map_err(|error| HandleOperationError {
-                code: HandleErrorCode::DbOperationFailed,
+        self.reads.initialized_broker().await.map_err(|error| {
+            HandleOperationError::DbOperationFailed {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
                 workflow_id: self.workflow_id,
                 cause: error.failure_cause(),
-            })
+            }
+        })
     }
 
     /// The status of the workflow (Python `status`).
@@ -336,22 +334,17 @@ impl<T> WorkflowHandle<T> {
     }
 
     fn not_found(&self) -> HandleOperationError {
-        HandleOperationError {
-            code: HandleErrorCode::WorkflowNotFound,
+        HandleOperationError::WorkflowNotFound {
             message: format!("workflow {} not found", self.workflow_id),
-            retryable: false,
             workflow_id: self.workflow_id,
-            cause: horsies_core::FailureCause::PreconditionFailed,
         }
     }
 }
 
 /// `STORED_DATA_INVALID` of `workflow_id`, not retryable.
 fn stored_data_invalid(workflow_id: Uuid, message: String) -> HandleOperationError {
-    HandleOperationError {
-        code: HandleErrorCode::StoredDataInvalid,
+    HandleOperationError::StoredDataInvalid {
         message,
-        retryable: false,
         workflow_id,
         cause: horsies_core::FailureCause::ContractViolation,
     }
