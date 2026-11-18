@@ -220,11 +220,18 @@ nothing.
 `AppConfig.schedule` is an `Option<ScheduleConfig>`.
 
 ```rust
+use std::convert::Infallible;
+
 use chrono::NaiveTime;
 use horsies::{
-    AppConfig, DailySchedule, IntervalSchedule, ScheduleConfig, SchedulePattern, TaskSchedule,
+    task, AppConfig, DailySchedule, IntervalSchedule, ScheduleConfig, SchedulePattern, TaskError,
+    TaskSchedule,
 };
-use serde_json::json;
+
+#[task("build_report")]
+async fn build_report(region: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("report of {region}"))
+}
 
 fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let three_am = NaiveTime::from_hms_opt(3, 0, 0).ok_or("03:00:00 is a time of day")?;
@@ -233,7 +240,7 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
         "build_report",
         SchedulePattern::Daily(DailySchedule { time: three_am }),
     )
-    .input(json!({ "region": "eu" }))
+    .input(&build_report::Input { region: "eu".to_owned() })?
     .timezone("Europe/Berlin");
     let cache_cleanup = TaskSchedule::new(
         "cache-cleanup",
@@ -247,17 +254,23 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
 }
 ```
 
-`build_report` is a task `fn build_report(region: String)`; `clean_cache`
-has no parameters.
+`clean_cache` is a task with no parameters: its schedule takes no `input`.
 
 | Item | Fields and builders |
 |---|---|
 | `ScheduleConfig` | `enabled` (default `true`), `schedules`, `check_interval_seconds` (1 to 60). `ScheduleConfig::new(schedules)`, `.enabled(bool)`, `.check_interval_seconds(n)` |
-| `TaskSchedule::new(name, task_name, pattern)` | `.input(serde_json::Value)`, `.queue(name)`, `.enabled(bool)`, `.timezone(name)` (default `UTC`), `.catch_up_missed(bool)`, `.max_catch_up_runs(n)` (default 100) |
+| `TaskSchedule::new(name, task_name, pattern)` | `.input(&value)` (`Result<TaskSchedule, JsonTextRefused>`), `.queue(name)`, `.enabled(bool)`, `.timezone(name)` (default `UTC`), `.catch_up_missed(bool)`, `.max_catch_up_runs(n)` (default 100) |
 | `SchedulePattern` | `Interval(IntervalSchedule { seconds, minutes, hours, days })`, `Hourly(HourlySchedule { minute, second })`, `Daily(DailySchedule { time })`, `Weekly(WeeklySchedule { days, time })`, `Monthly(MonthlySchedule { day, time })`, `Cron(CronSchedule)` |
 
 - `input` is the task input in the stored form: one member per task
   parameter, by name. A schedule without input stores `{}`.
+- `.input(&value)` takes the task's `Input`, such as
+  `build_report::Input { region }`, and stores its JSON text
+  (`Option<JsonText>`), written by the strict writer: an integer keeps
+  every digit (`u128::MAX`). `JsonTextRefused` is a value that does not
+  write as strict JSON (a non-finite float, deeper than 300 levels).
+- A JSON config text keeps the text of its `input` member. A TOML config
+  text refuses an `input` member.
 - A time of day is a chrono `NaiveTime` in whole seconds, in the
   schedule's time zone. `Weekday` and `Month` are enums of the crate.
 - The scheduler checks each enabled schedule before it connects: its task

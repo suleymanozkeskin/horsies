@@ -163,23 +163,19 @@ fn pattern_json(schedule: &TaskSchedule) -> String {
 /// Python's scheduler stores it (`EMPTY_TASK_INPUT`).
 const NO_INPUT_TEXT: &str = "{}";
 
-/// The input of each slot as one JSON text: the schedule's `input` value,
-/// or `{}` for a schedule without input (`null`), as Python stores a
-/// schedule without kwargs. Pure.
+/// The input of each slot as one JSON text: the schedule's input text as
+/// it is, with every digit of an integer, or `{}` for a schedule without
+/// input, as Python stores a schedule without kwargs. Pure.
 pub(crate) fn schedule_input_text(schedule: &TaskSchedule) -> String {
     match &schedule.input {
-        Value::Null => NO_INPUT_TEXT.to_owned(),
-        given => serde_json::to_string(given).unwrap_or_else(|error| {
-            panic!(
-                "the input of schedule '{}' is a JSON value and encodes: {error}",
-                schedule.name
-            )
-        }),
+        None => NO_INPUT_TEXT.to_owned(),
+        Some(input) => input.get().to_owned(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
@@ -253,10 +249,9 @@ mod tests {
     }
 
     fn nightly() -> TaskSchedule {
-        TaskSchedule {
-            input: json!({"day": "monday", "limit": 5}),
-            ..TaskSchedule::new("nightly", "reports.nightly", every_minute())
-        }
+        TaskSchedule::new("nightly", "reports.nightly", every_minute())
+            .input(&json!({"day": "monday", "limit": 5}))
+            .unwrap()
     }
 
     fn send_of(manifest: &SchedulerManifest, position: usize) -> &ScheduleSendManifest {
@@ -285,15 +280,28 @@ mod tests {
         assert_eq!(send.task_name, "reports.nightly");
         assert_eq!(send.queue_name, "default");
         assert_eq!(send.priority.0.get(), 100);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&send.input_json).unwrap(),
-            json!({"day": "monday", "limit": 5})
-        );
+        assert_eq!(send.input_json, r#"{"day":"monday","limit":5}"#);
         assert!(matches!(
             send.task_options,
             ScheduleTaskOptions::Encoded { .. }
         ));
         assert!(!send.retain_rerun_input);
+    }
+
+    /// #1892: a schedule input of `u128::MAX` is the manifest's input text
+    /// with every digit, as the builder wrote it.
+    #[test]
+    fn an_input_outside_i64_and_u64_keeps_every_digit_in_the_manifest() {
+        let config = config();
+        let wide = TaskSchedule::new("wide", "reports.nightly", every_minute())
+            .input(&BTreeMap::from([("n", u128::MAX)]))
+            .unwrap();
+        let schedule = ScheduleConfig::new(vec![wide]);
+        let manifest = scheduler_manifest(&config, &schedule, &registry(&config, None)).unwrap();
+        assert_eq!(
+            send_of(&manifest, 0).input_json,
+            r#"{"n":340282366920938463463374607431768211455}"#
+        );
     }
 
     /// A task registered with no `TaskOptions` (`blocking_task_fn!` without
