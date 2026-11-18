@@ -44,6 +44,7 @@ from typing import Final, Literal
 
 from pydantic import TypeAdapter
 
+from horsies._catalog import monitoring_bounds
 from horsies._core import (
     CoreError,
     MonitoringFailed,
@@ -89,9 +90,9 @@ from horsies.monitoring.models import (
 )
 
 # The most rows that ``list_workflow_names`` and ``list_schedules`` return: the
-# list bound of their functions. A longer list is cut, and the cut is logged
-# as a warning.
-LIST_ROW_BOUND: Final = 10_000
+# core's ``LIST_ROW_BOUND``, the list bound of their functions. A longer list
+# is cut, and the cut is logged as a warning.
+LIST_ROW_BOUND: Final = monitoring_bounds.LIST_ROW_BOUND
 
 # --------------------------------------------------------------------------- #
 # Allowlists and vocabularies

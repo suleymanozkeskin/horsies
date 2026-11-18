@@ -87,11 +87,11 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `task_breakdown(&app, &TaskBreakdownQuery)` | `Breakdown`: counts per `TaskGroupBy` (`Worker`, `TaskName`, `Queue`) |
 | `list_tasks(&app, &TaskListQuery)` | `TaskListPage` (`rows: Vec<TaskSummary>`, `total`) |
 | `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(TaskDetail)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
-| `list_workflow_names(&app)` | `Vec<String>`, at most 10,000 |
+| `list_workflow_names(&app)` | `Vec<String>`, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`, newest first |
 | `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes and edges; `None` when no run has the id |
 | `get_workflow_node(&app, workflow_id, task_index)` | `Option<WorkflowTaskDetail>` |
-| `list_schedules(&app)` | `Vec<ScheduleStateInfo>`, soonest next run first, at most 10,000 |
+| `list_schedules(&app)` | `Vec<ScheduleStateInfo>`, soonest next run first, at most `LIST_ROW_BOUND` (10,000) |
 
 Query builders:
 
