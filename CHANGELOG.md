@@ -660,10 +660,15 @@ before you upgrade a 0.7 deployment.
   (`horsies.core.lifecycle.classify`, `commands`, `fences`, `persistence`,
   `horsies.core.history.terminalization`, `horsies.core.brokers.stale_running`,
   `horsies.core.utils.retry`), `horsies.monitoring.execution_classes`, the
-  ORM models of `horsies.core.models.task_pg` (`TaskModel`,
+  ORM models (`horsies.core.models.task_pg` with `Base`, `TaskModel`,
   `TaskAttemptModel`, `TaskHeartbeatModel`, `WorkerStateModel`,
-  `ScheduleStateModel`) and the statement helpers of
-  `horsies.core.utils.db`. The re-exports `recover_stuck_workflow_tree` and
+  `ScheduleStateModel`; `horsies.core.models.workflow_pg` with
+  `WorkflowModel`, `WorkflowTaskModel`), the schema install
+  (`horsies.core.baseline`, `baseline.install`, `baseline.migration`), the
+  history reads (`horsies.core.history.reads.detail`, `reads.result`,
+  `reads.publisher`, `horsies.core.history.names`,
+  `horsies.core.history.partitions`), `horsies.core.utils.time` and the
+  statement helpers of `horsies.core.utils.db`. The re-exports `recover_stuck_workflow_tree` and
   `recover_stuck_workflows_global` of `horsies.core.workflows` go with
   them. Removed methods: `PostgresListener.listen_payload`,
   `unsubscribe_payload`, `listen_many`, `unlisten` and `unsubscribe`;

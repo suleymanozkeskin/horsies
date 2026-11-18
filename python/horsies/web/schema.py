@@ -32,10 +32,9 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import assert_never
+from typing import Final, assert_never
 
 from horsies._core import CoreError, SchemaStatusRecord
-from horsies.core.baseline.migration import BASELINE_VERSION
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import get_logger
 from horsies.core.types.core_failure import call_refusal_or_raise
@@ -47,8 +46,15 @@ SCHEMA_TTL_SECONDS = 60.0
 SCHEMA_INCOMPATIBLE = 'SCHEMA_INCOMPATIBLE'
 SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 
+BASELINE_VERSION: Final = 1000
+"""The version of the baseline migration in ``horsies_migrations``: the
+first version of this schema line (``BASELINE_MIGRATION_VERSION``,
+``crates/horsies-core/src/broker/migrations.rs``)."""
+
 EXPECTED_SCHEMA_VERSION = BASELINE_VERSION
-"""The schema version this build writes through."""
+"""The schema version this build writes through. The core answers an
+observed status with its own expected version (``SchemaStatusRecord``);
+this value fills the status of a probe that has never read one."""
 
 class SchemaState(str, Enum):
     """How the database's schema relates to the one this build expects."""

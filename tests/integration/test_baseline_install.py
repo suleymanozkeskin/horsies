@@ -24,13 +24,9 @@ from horsies._core import (
     IdMintRefused,
     mint_task_id as core_mint_task_id,
 )
-from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.periods import RetentionDays, period_class_key
-from horsies.core.history.reads.publisher import (
-    PUBLISHED_READER_SIGNATURES,
-)
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.retention import RetentionConfig
@@ -39,6 +35,7 @@ from horsies.core.types.status import TaskStatus
 from horsies.monitoring import cancel_task
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.utils.url import sqlalchemy_url
+from tests.baseline_sql import baseline_checksum
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 
@@ -53,10 +50,6 @@ _OBJECT_COUNT_SQL: Final[LiteralString] = """
         (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
          WHERE n.nspname = current_schema() AND p.proname LIKE 'horsies%%')
 """
-
-
-def _migration() -> BaselineMigration:
-    return load_baseline_migration()
 
 
 def mint_task_id() -> uuid.UUID:
@@ -108,6 +101,15 @@ async def _installed(url: str) -> None:
     assert await _initialize(url) == Ok(None)
 
 
+PUBLISHED_READER_SIGNATURES: Final = (
+    'horsies_task_history_duplicate_staged(uuid)',
+    'horsies_task_provenance_staged(uuid)',
+    'horsies_task_detail_staged(uuid)',
+    'horsies_task_result_staged(uuid)',
+)
+"""The readers that ``horsies_publish_history_readers`` publishes, as
+``to_regprocedure`` names them."""
+
 _MISSING_READERS_SQL: Final[LiteralString] = """
     SELECT array_agg(reader.signature ORDER BY reader.signature)
     FROM unnest(CAST(%(readers)s AS text[])) AS reader(signature)
@@ -142,14 +144,13 @@ async def _publication_is_current(url: str) -> bool:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_fresh_database_reaches_version_1000(database_url: str) -> None:
     await _installed(database_url)
-    migration = _migration()
     connection = await _connect(database_url)
     try:
         cursor = await connection.execute(
             'SELECT version, description, success, checksum FROM horsies_migrations'
         )
         assert await cursor.fetchall() == [
-            (1000, 'baseline', True, migration.checksum),
+            (1000, 'baseline', True, baseline_checksum()),
         ]
         assert await _fetch_one(connection, 'SELECT only_row, family FROM horsies_client_family') == (
             True,
