@@ -429,8 +429,8 @@ impl CoreHandle {
         )
     }
 
-    /// Enqueue one task: `Enqueued` or one of the send failure classes.
-    /// Writes.
+    /// Enqueue one task: `Enqueued`, or the generated broker error class of
+    /// the failure (`BrokerCoreEnqueueError`). Writes.
     fn enqueue(&self, py: Python<'_>, request: &Bound<'_, EnqueueRequest>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(

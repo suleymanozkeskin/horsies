@@ -229,16 +229,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::rerun::RerunKeyConflictRecord>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
-    module.add_class::<operations::enqueue::SendSuppressed>()?;
-    module.add_class::<operations::enqueue::SendAsyncContext>()?;
-    module.add_class::<operations::enqueue::SendValidationFailed>()?;
-    module.add_class::<operations::enqueue::SendRefusalUnreadableJson>()?;
-    module.add_class::<operations::enqueue::SendRefusalByRule>()?;
-    module.add_class::<operations::enqueue::SendRefusalByValueRule>()?;
-    module.add_class::<operations::enqueue::SendEnqueueFailed>()?;
-    module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
-    module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
-    module.add_class::<operations::enqueue::SendKeyConflict>()?;
     module.add_class::<operations::expiry_and_orphans::PendingExpiryDrained>()?;
     module.add_class::<operations::expiry_and_orphans::PendingExpiryBoundReached>()?;
     module.add_class::<operations::expiry_and_orphans::PendingExpiryFailed>()?;

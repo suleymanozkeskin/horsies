@@ -30,16 +30,6 @@ from horsies._core import (
     DatabasePingRecord,
     Enqueued,
     EnqueueRequest,
-    SendEnqueueFailed,
-    SendKeyConflict,
-    SendPayloadMismatch,
-    SendAsyncContext,
-    SendPayloadTooLarge,
-    SendRefusalByRule,
-    SendRefusalByValueRule,
-    SendRefusalUnreadableJson,
-    SendSuppressed,
-    SendValidationFailed,
     StartAfterDelay as CoreStartAfterDelay,
     StartAt as CoreStartAt,
     StartNow as CoreStartNow,
@@ -109,7 +99,7 @@ from horsies.core.types.status import (
     TaskStatus,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.codec.json_io import Json, SerializationError, loads_json
+from horsies.core.codec.json_io import Json, loads_json
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.models.class_coverage import ClassCoverage, ClassReport
 from horsies.core.models.health import (
@@ -645,19 +635,7 @@ SIGNED_32_BIT_MAX: Final = 2**31 - 1
 
 
 type CoreEnqueueStart = CoreStartNow | CoreStartAfterDelay | CoreStartAt
-type CoreSendOutcome = (
-    Enqueued
-    | SendSuppressed
-    | SendAsyncContext
-    | SendValidationFailed
-    | SendEnqueueFailed
-    | SendPayloadMismatch
-    | SendPayloadTooLarge
-    | SendKeyConflict
-)
-type CoreRefusalCause = (
-    SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule
-)
+type CoreSendOutcome = Enqueued | BrokerEnqueueError
 type RerunInputPolicy = Literal['APP_DEFAULT', 'KEEP', 'DROP']
 
 
@@ -669,8 +647,7 @@ def _command_rule_refused(task_name: str, rule: str) -> Err[BrokerInvalidInput]:
     """A rule of the version-1 command refused a value that the core's
     request cannot hold: ``INVALID_INPUT`` with the rule as a ``ValueError``,
     the refusal of Python's ``EnqueueCommandV1``. The core answers a value
-    that its request holds with the same message and cause
-    (``SendRefusalByValueRule``). Pure."""
+    that its request holds with the same message and cause. Pure."""
     return Err(BrokerInvalidInput(
         message=f'enqueue input refused for {task_name}: {rule}',
         exception=ValueError(rule),
@@ -839,74 +816,31 @@ def _enqueue_core_error(
     ))
 
 
-def _refusal_cause(cause: CoreRefusalCause) -> SerializationError | ValueError | NoCause:
-    """The exception of a core refusal, as Python's broker gave it: the JSON
-    reader's error as a ``SerializationError``, the rule of the version-1
-    command or of the scoped idempotency key as a ``ValueError``, and
-    ``NoCause()`` when another rule refused a value that reads. Pure."""
-    match cause:
-        case SendRefusalUnreadableJson(reader_error=reader_error):
-            return SerializationError(reader_error)
-        case SendRefusalByValueRule(rule=rule):
-            return ValueError(rule)
-        case SendRefusalByRule():
-            return NoCause()
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def _enqueue_result(outcome: CoreSendOutcome) -> Result[UUID, BrokerEnqueueError]:
     """The result of one core send. Pure.
 
     - ``Enqueued``: ``Ok`` with the sent id, or the id that holds the key
       for a key replay.
-    - ``SendValidationFailed``: ``INVALID_INPUT`` or
-      ``INVALID_TASK_OPTIONS``, with the cause of ``_refusal_cause``.
-    - ``SendEnqueueFailed``: ``ENQUEUE_FAILED`` with the core's exception of
-      the cause.
-    - ``SendPayloadMismatch``: ``PAYLOAD_MISMATCH``.
-    - ``SendKeyConflict``: ``IDEMPOTENCY_KEY_CONFLICT`` with the owner.
-
-    The core's send never answers ``SendSuppressed``, ``SendAsyncContext``
-    or ``SendPayloadTooLarge`` (the client checks each before the send):
-    ``AssertionError``.
+    - The class that the core built, as it is: ``BrokerInvalidInput`` or
+      ``BrokerInvalidTaskOptions`` (refused before any statement; the
+      ``exception`` is the ``ValueError`` of a rule, the
+      ``SerializationError`` of a JSON text that does not read, or
+      ``NoCause()``), ``BrokerEnqueueFailed`` (the core's exception of the
+      cause, or ``NoCause()`` for a conflicting row that was gone),
+      ``BrokerPayloadMismatch``, or ``BrokerIdempotencyKeyConflict`` with
+      the owner. The core decides the code, the message and the cause.
     """
     match outcome:
         case Enqueued(task_id=task_id):
             return Ok(task_id)
-        case SendValidationFailed(
-            code='INVALID_INPUT', message=message, cause=cause,
+        case (
+            BrokerInvalidInput()
+            | BrokerInvalidTaskOptions()
+            | BrokerEnqueueFailed()
+            | BrokerPayloadMismatch()
+            | BrokerIdempotencyKeyConflict()
         ):
-            return Err(BrokerInvalidInput(
-                message=message, exception=_refusal_cause(cause),
-            ))
-        case SendValidationFailed(
-            code='INVALID_TASK_OPTIONS', message=message, cause=cause,
-        ):
-            return Err(BrokerInvalidTaskOptions(
-                message=message, exception=_refusal_cause(cause),
-            ))
-        case SendValidationFailed(code=code):
-            raise AssertionError(f'the core send refused with the code {code}')
-        case SendEnqueueFailed(
-            message=message, retryable=retryable, exception=exception,
-        ):
-            return Err(BrokerEnqueueFailed(
-                message=message,
-                retryable=retryable,
-                exception=exception,
-            ))
-        case SendPayloadMismatch(message=message):
-            return Err(BrokerPayloadMismatch(message=message))
-        case SendKeyConflict(message=message, owner_task_id=owner_task_id):
-            return Err(BrokerIdempotencyKeyConflict(
-                message=message, owner_task_id=owner_task_id,
-            ))
-        case SendSuppressed() | SendAsyncContext() | SendPayloadTooLarge():
-            raise AssertionError(
-                f'the core send answered {type(outcome).__name__}, which the '
-                'client checks before the send',
-            )
+            return Err(outcome)
         case _ as unreachable:
             assert_never(unreachable)
 
