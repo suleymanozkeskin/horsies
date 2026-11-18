@@ -611,8 +611,9 @@ class TestTheMarkerOnTheSeatLoop:
         run returned in time, so its end is what it returned, and no
         deadline report goes out; the end report follows the marker."""
 
-        async def waits_on_the_pool(*_args: object) -> None:
+        async def waits_on_the_pool(*_args: object) -> MarkerEnd:
             await asyncio.sleep(1.5)
+            return MarkerDone()
 
         steps.mark.side_effect = waits_on_the_pool
         took_s: list[float] = []
@@ -645,9 +646,10 @@ class TestTheMarkerOnTheSeatLoop:
         run needs a second cancel."""
         one_connection = asyncio.Semaphore(1)
 
-        async def one_pooled_connection(*_args: object) -> None:
+        async def one_pooled_connection(*_args: object) -> MarkerEnd:
             async with one_connection:
                 await asyncio.sleep(0.2)
+            return MarkerDone()
 
         steps.mark.side_effect = one_pooled_connection
         seats = 8
@@ -686,8 +688,9 @@ class TestTheMarkerOnTheSeatLoop:
         results_at_marker: list[int] = []
         writers: list[_RecordingWriter] = []
 
-        async def record(*_args: object) -> None:
+        async def record(*_args: object) -> MarkerEnd:
             results_at_marker.append(len(writers[0].results()))
+            return MarkerDone()
 
         steps.mark.side_effect = record
 
