@@ -483,9 +483,16 @@ async fn a_connection_loss_counts_no_candidate_of_the_pass() {
 #[serial]
 async fn the_real_raise_after_a_connection_loss_is_transient() {
     let db = IsolatedDatabase::create().await;
-    let mut connection = db.pool.acquire().await.expect("acquire a connection");
-    let pid: i32 = sql::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *connection)
+    // `WorkflowError::Database` holds a sqlx error: the lost session is a
+    // sqlx connection, so the classifier sees the error that sqlx gives.
+    let mut connection = {
+        use sqlx::Connection;
+        sqlx::PgConnection::connect(db.pool.url())
+            .await
+            .expect("connect a sqlx session")
+    };
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut connection)
         .await
         .expect("read the backend pid");
     let terminated: bool = sql::query_scalar("SELECT pg_terminate_backend($1)")
@@ -495,8 +502,8 @@ async fn the_real_raise_after_a_connection_loss_is_transient() {
         .expect("terminate the backend");
     assert!(terminated);
 
-    let error = sql::query("SELECT 1")
-        .execute(&mut *connection)
+    let error = sqlx::query("SELECT 1")
+        .execute(&mut connection)
         .await
         .expect_err("a statement on a terminated backend fails");
     drop(connection);
