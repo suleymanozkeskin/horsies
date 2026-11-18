@@ -89,13 +89,13 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 | `get`, `info`, `get_result`, `get_raw_result`, `get_task_info` | `ReadError::AsyncContext { message }` |
 | A health read | `BrokerOperationError::AsyncContext`, not retryable |
 | `check_live` | `CheckReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
-| A workflow start or `retry_start` | `WorkflowStartError` with `WorkflowStartErrorCode::AsyncContext`, the `workflow_id` of the start, not retryable, and nothing written |
+| A workflow start or `retry_start` | `WorkflowStartError::AsyncContext` with the `workflow_id` of the start, not retryable, and nothing written |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `HandleErrorCode::AsyncContext`, not retryable |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::AsyncContext { message }` |
 
 `retry_send(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Retry a Failed Send](/horsies/rust/tasks/sending-tasks/#retry-a-failed-send).
 
-`retry_start(&error).await` with a `WorkflowStartErrorCode::AsyncContext` error completes the same start from async code, with the error's `workflow_id`.
+`retry_start(&error).await` with a `WorkflowStartError::AsyncContext` error completes the same start from async code, with the error's `workflow_id`.
 
 ## Order of the Checks
 
@@ -116,7 +116,7 @@ When the process runtime of the core cannot run the call, the call returns the d
 | A read | `ReadError::Database` |
 | A health read | `BrokerOperationError::OperationFailed` with the code of the read |
 | `check_live` | `CheckReport` with the connectivity refusal |
-| A workflow start | `WorkflowStartError` with `EnqueueFailed` and the `workflow_id` of the start |
+| A workflow start | `WorkflowStartError::EnqueueFailed` with the `workflow_id` of the start |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `DbOperationFailed` |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DbOperationFailed` |
 

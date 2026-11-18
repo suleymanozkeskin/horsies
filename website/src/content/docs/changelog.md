@@ -776,7 +776,7 @@ unless it starts with "Added".
   `TaskSendError::AsyncContext` with the prepared task id and payload (an
   async retry sends them), `ReadError::AsyncContext` (added; not kept by
   the handle), `BrokerOperationError::AsyncContext`, `HRS-217` in the check
-  report, `WorkflowStartErrorCode::AsyncContext` with the workflow id of
+  report, `WorkflowStartError::AsyncContext` with the workflow id of
   the start, `HandleErrorCode::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
@@ -797,6 +797,14 @@ unless it starts with "Added".
   `OperationFailed` and `EnqueueFailed` only. The fields `code`, `message`,
   `retryable` and `cause` become the methods `code()`, `message()`,
   `retryable()` and `failure_cause()`.
+- **`WorkflowStartError` is an enum with one variant per state.**
+  `ValidationFailed` (with `workflow_id: Option<Uuid>`), `IdConflict` (with
+  `workflow_id` and `existing_workflow_name`, the name that holds the id),
+  `EnqueueFailed` (with `workflow_id` and `retryable`) and `AsyncContext`
+  (with `workflow_id`); each has `message` and `workflow_name`. The fields
+  become the methods `code()`, `message()`, `retryable()`,
+  `workflow_name()` and `workflow_id()`. Only `ValidationFailed` can lack
+  a workflow id, so `retry_start` no longer refuses an error without one.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

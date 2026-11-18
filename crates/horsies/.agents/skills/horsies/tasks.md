@@ -524,7 +524,7 @@ The process-wide starts have the blocking functions
   `retry_send(&error).await` completes the same send),
   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
   `CheckReport` with `HRS-217`,
-  `WorkflowStartErrorCode::AsyncContext` (with the `workflow_id` of the
+  `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
   start; `retry_start(&error).await` completes the same start from async
   code), `HandleErrorCode::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
