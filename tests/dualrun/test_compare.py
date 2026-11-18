@@ -32,6 +32,7 @@ from tests.dualrun.compare import (
 )
 from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
 from tests.dualrun.rules import (
+    AnchorNull,
     AnchorReference,
     ColumnSpec,
     Exact,
@@ -78,7 +79,10 @@ CATALOG: Final = SnapshotCatalog(
                 ColumnSpec(
                     name='lease_end',
                     rule=TimeWithin(
-                        reference=AnchorReference(column='made_at'), bound=BOUND
+                        reference=AnchorReference(
+                            column='made_at', when_anchor_null=AnchorNull.REFUSED
+                        ),
+                        bound=BOUND,
                     ),
                 ),
                 ColumnSpec(name='sample', rule=Ignored(reason='process sample')),
@@ -457,6 +461,94 @@ def test_anchored_value_with_a_null_anchor_is_an_error() -> None:
     )
 
 
+LEASES: Final = SnapshotCatalog(
+    tables=(
+        TableRules(
+            name='leases',
+            columns=(
+                ColumnSpec(name='id', rule=NormalisedId(family=IdFamily.TASK)),
+                ColumnSpec(name='name', rule=Exact()),
+                ColumnSpec(
+                    name='claimed_at',
+                    rule=TimeWithin(reference=RunWindowReference(), bound=BOUND),
+                ),
+                ColumnSpec(
+                    name='claim_expires_at',
+                    rule=TimeWithin(
+                        reference=AnchorReference(
+                            column='claimed_at', when_anchor_null=AnchorNull.RANKED
+                        ),
+                        bound=BOUND,
+                    ),
+                ),
+            ),
+            order_by=('name',),
+            identity=('id',),
+        ),
+    ),
+)
+"""Leases whose anchor can be NULL: a test seeds a lease on a row it never claimed."""
+
+
+def _leases(run: datetime, rows: Sequence[tuple[str, str, float | None, float | None]]) -> NormalizedSnapshot:
+    """``rows``: id, name, claim time and lease end as seconds from ``run`` (None: NULL)."""
+
+    def at(seconds: float | None) -> str | None:
+        return None if seconds is None else _text(run + timedelta(seconds=seconds))
+
+    raw = RawSnapshot(
+        tables=(
+            RawTable(
+                name='leases',
+                rows=tuple(
+                    (raw_id, name, at(claimed), at(expires))
+                    for raw_id, name, claimed, expires in rows
+                ),
+            ),
+        ),
+    )
+    return _unwrap(normalize_snapshot(raw, LEASES, _window(run)))
+
+
+def test_a_lease_without_its_anchor_is_ranked_among_such_leases() -> None:
+    snapshot = _leases(
+        RUN_A,
+        [
+            ('a1', 'expired', None, -3600),
+            ('a2', 'live', None, 3600),
+            ('a3', 'claimed', 1, 31),
+            ('a4', 'unleased', None, None),
+        ],
+    )
+
+    column = snapshot.table('leases').rules.position('claim_expires_at')
+    assert [row[column] for row in snapshot.table('leases').rows] == [
+        OffsetFromAnchor(offset=timedelta(seconds=30)),
+        TimeRank(rank=1),
+        TimeRank(rank=2),
+        NullValue(),
+    ]
+
+
+def test_leases_without_anchor_compare_by_their_order_and_an_offset_never_equals_a_rank() -> None:
+    reference = _leases(RUN_A, [('a1', 'expired', None, -3600), ('a2', 'live', None, 3600)])
+    candidate = _leases(RUN_B, [('b1', 'expired', None, -60), ('b2', 'live', None, 7200)])
+    swapped = _leases(RUN_B, [('b1', 'expired', None, 3600), ('b2', 'live', None, -3600)])
+    anchored = _leases(RUN_B, [('b1', 'expired', 1, -3600), ('b2', 'live', None, 3600)])
+
+    assert compare_snapshots(reference, candidate).entries == ()
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, swapped).entries
+        if isinstance(entry, ColumnDifference)
+    ] == ['claim_expires_at', 'claim_expires_at']
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, anchored).entries
+        if isinstance(entry, ColumnDifference)
+    ] == ['claimed_at', 'claim_expires_at', 'claim_expires_at']
+
+
 def test_anchored_infinite_value_is_an_error() -> None:
     row = ('a1', 'alpha', _text(RUN_A), _text(RUN_A), 'infinity', '1')
 
@@ -816,6 +908,27 @@ def test_seeded_workflows_that_differ_only_in_status_are_ordered_by_it() -> None
 
     assert reference.ambiguities == ()
     assert compare_snapshots(reference, candidate).entries == ()
+
+
+def test_a_seeded_lease_on_a_row_never_claimed_is_ranked_in_the_baseline() -> None:
+    """A claim test seeds CLAIMED rows with a lease and no claim time."""
+    seeded = [
+        {
+            **_seeded_task(f'a{n}', RUN_A, 'ISOLATED', 'CLAIMED'),
+            'claimed_by_worker_id': 'worker-a',
+            'claim_expires_at': _text(RUN_A + timedelta(hours=hours)),
+        }
+        for n, hours in enumerate((1, -1))
+    ]
+
+    snapshot = _baseline(_baseline_raw('horsies_tasks', seeded), RUN_A)
+
+    table = snapshot.table('horsies_tasks')
+    column = table.rules.position('claim_expires_at')
+    assert sorted(str(row[column]) for row in table.rows) == [
+        str(TimeRank(rank=1)),
+        str(TimeRank(rank=2)),
+    ]
 
 
 def test_tied_rows_that_assign_no_new_label_are_not_ambiguous() -> None:
