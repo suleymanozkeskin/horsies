@@ -139,6 +139,7 @@ mod sent_input_tests {
 #[cfg(test)]
 mod checked_send_tests {
     use super::*;
+    use crate::broker::error::EnqueueRefusalCause;
 
     const TASK_ID: Uuid = Uuid::from_u128(7);
 
@@ -155,6 +156,24 @@ mod checked_send_tests {
             Some(TASK_ID),
             None,
             idempotency_key,
+            EnqueueRetention::Forever,
+            false,
+        )
+    }
+
+    fn checked_with_priority(priority: i32) -> Result<CheckedSend<'static>, BrokerError> {
+        CheckedSend::check(
+            "send.task",
+            "{}",
+            "default",
+            priority,
+            Some(Utc::now()),
+            None,
+            None,
+            None,
+            Some(TASK_ID),
+            None,
+            None,
             EnqueueRetention::Forever,
             false,
         )
@@ -177,6 +196,58 @@ mod checked_send_tests {
             Err(other) => panic!("an empty key gave {other}"),
             Ok(send) => panic!("an empty key passed the check: {send:?}"),
         }
+    }
+
+    /// A rule of the scoped key and a rule of the version-1 command keep the
+    /// text of the rule as the cause: Python's `ScopedIdempotencyKey` and
+    /// `EnqueueCommandV1` raise that text as a `ValueError`.
+    #[test]
+    fn a_key_rule_and_a_command_rule_keep_the_rule_text() {
+        let over = "k".repeat(256);
+        for (case, outcome, expected) in [
+            (
+                "empty key",
+                checked(Some("")).map(|_send| ()),
+                EnqueueRefusalCause::KeyRuleRefused("idempotency key must be non-empty".to_owned()),
+            ),
+            (
+                "key over the bound",
+                checked(Some(&over)).map(|_send| ()),
+                EnqueueRefusalCause::KeyRuleRefused(
+                    "idempotency key must be at most 255 UTF-8 bytes".to_owned(),
+                ),
+            ),
+            (
+                "priority 0",
+                checked_with_priority(0).map(|_send| ()),
+                EnqueueRefusalCause::CommandRuleRefused(
+                    "priority must be between 1 and 100".to_owned(),
+                ),
+            ),
+        ] {
+            match outcome {
+                Err(BrokerError::EnqueueContract(refusal)) => {
+                    assert_eq!(refusal.part, SendPart::Input, "{case}");
+                    assert_eq!(refusal.cause, expected, "{case}");
+                }
+                Err(other) => panic!("{case} gave {other}"),
+                Ok(()) => panic!("{case} passed the check"),
+            }
+        }
+    }
+
+    /// An empty retention class key is the command's rule, with the
+    /// command's text (Python `EnqueueCommandV1`).
+    #[test]
+    fn an_empty_retention_class_key_is_the_command_rule() {
+        let refusal = EnqueueRefusal::empty_retention_class_key();
+        assert_eq!(refusal.part, SendPart::Input);
+        assert_eq!(
+            refusal.cause,
+            EnqueueRefusalCause::CommandRuleRefused(
+                "retention_class_key must be non-empty".to_owned()
+            )
+        );
     }
 
     #[test]
