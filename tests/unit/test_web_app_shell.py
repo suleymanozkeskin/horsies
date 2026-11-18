@@ -1,17 +1,22 @@
 # pyright: reportPrivateUsage=false
 # These tests deliberately exercise module-private rules and seams.
-"""Unit tests for the shell of the Python monitoring app before it mounted the
-core's handler (``tests/dualrun/reference/web_app.py``, the reference of the
-web dual-run): hardening, gating, and serving.
+"""Unit tests for the shell of the monitoring app (``create_monitoring_app``
+on the core's monitoring handler): hardening, gating, and serving.
 
 These exercise the app over httpx's ASGI transport without a database. The
 few paths that do reach the broker are pointed at a port nothing listens on,
-which is how the 503 mapping is proven.
+which is how the 503 mapping is proven. The page and its assets are the web
+UI build that the core embeds.
 
-Covered: the §7.4b hardening switches, the authorization gate on every API
-route, the intent-header gate on actions, unknown-API 404s, static asset
-serving with per-request config injection, mount-anywhere base paths, and the
-missing-build response.
+Covered: the authorization gate on every API route, the intent-header gate
+on actions, unknown-API 404s, page serving with per-request config
+injection, and mount-anywhere base paths.
+
+The tests that call ``web_app_module.create_monitoring_app`` run the Python
+app before it mounted the core's handler (``tests/dualrun/reference/web_app.py``):
+they replace its build tree or its schema probe, which the core's handler
+does not read. The core's tests of the same rules are in
+``crates/horsies-core/src/web/tests.rs``.
 """
 
 from __future__ import annotations
@@ -41,9 +46,9 @@ from horsies.web import (
     MonitoringUIConfig,
     TrustedHeader,
     ViewOnly,
+    create_monitoring_app,
 )
 from tests.dualrun.reference import web_app as web_app_module
-from tests.dualrun.reference.web_app import create_monitoring_app
 from horsies.web.schema import SchemaProbe, SchemaState, SchemaStatus
 
 pytestmark = [pytest.mark.unit]
@@ -101,14 +106,18 @@ class TestHardening:
     """The SPA is the only client; nothing else is exposed."""
 
     def test_no_schema_browser_is_mounted(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         assert app.docs_url is None
         assert app.redoc_url is None
         assert app.openapi_url is None
 
     def test_no_cors_middleware_is_installed(self) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         assert all(
             middleware.cls is not CORSMiddleware for middleware in app.user_middleware
@@ -117,7 +126,9 @@ class TestHardening:
     def test_auth_policy_has_no_default(self) -> None:
         """An adopter must choose a policy consciously."""
         with pytest.raises(TypeError):
-            create_monitoring_app(make_horsies_app())  # type: ignore[call-arg]
+            web_app_module.create_monitoring_app(  # type: ignore[call-arg]
+                make_horsies_app(),
+            )
 
 
 class TestMeta:
@@ -162,7 +173,9 @@ class TestMeta:
                 )
 
         monkeypatch.setattr(web_app_module, 'SchemaProbe', FixedProbe)
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         async with client_for(app) as client:
             body = (await client.get('/api/meta')).json()
@@ -278,10 +291,7 @@ class TestAuthorizationGate:
 
         assert response.status_code == 403
 
-    async def test_static_assets_are_not_gated(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_static_assets_are_not_gated(self) -> None:
         """An unauthorized viewer gets the shell, then meta's 403 inside it."""
         app = create_monitoring_app(
             make_horsies_app(),
@@ -409,7 +419,9 @@ class TestRequestValidation:
                 )
 
         monkeypatch.setattr(web_app_module, 'SchemaProbe', MatchingProbe)
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         async with client_for(app) as client:
             response = await client.request(method, path, headers=ACT_HEADERS)
@@ -473,10 +485,7 @@ class TestStaticServing:
 
     pytestmark = [asyncio_tests]
 
-    async def test_index_is_served_with_the_runtime_config(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_index_is_served_with_the_runtime_config(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
 
         async with client_for(app) as client:
@@ -486,10 +495,7 @@ class TestStaticServing:
         assert 'window.__HORSIES_UI__' in response.text
         assert json.dumps({'basePath': '/', 'apiBase': '/api'}) in response.text
 
-    async def test_a_base_href_is_injected(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_a_base_href_is_injected(self) -> None:
         """Relative asset URLs need a directory to resolve against."""
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
 
@@ -500,7 +506,6 @@ class TestStaticServing:
 
     async def test_a_deep_link_without_a_trailing_slash_still_gets_the_base(
         self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
     ) -> None:
         """The case the tag exists for: assets must not resolve against /workflows."""
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
@@ -510,10 +515,7 @@ class TestStaticServing:
 
         assert '<base href="/">' in body
 
-    async def test_the_base_href_precedes_any_asset_reference(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_the_base_href_precedes_any_asset_reference(self) -> None:
         """A base tag only governs URLs that appear after it."""
         app = create_monitoring_app(
             make_horsies_app(),
@@ -526,10 +528,7 @@ class TestStaticServing:
 
         assert body.index('<base href=') < body.index('override.css')
 
-    async def test_config_is_injected_inside_head(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_config_is_injected_inside_head(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
 
         async with client_for(app) as client:
@@ -541,7 +540,9 @@ class TestStaticServing:
         self,
         built_static: Path,  # noqa: ARG002 - installs the asset tree
     ) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         async with client_for(app) as client:
             response = await client.get('/assets/app.js')
@@ -549,10 +550,7 @@ class TestStaticServing:
         assert response.status_code == 200
         assert 'console.log' in response.text
 
-    async def test_client_side_routes_fall_back_to_the_page(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_client_side_routes_fall_back_to_the_page(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
 
         async with client_for(app) as client:
@@ -561,10 +559,7 @@ class TestStaticServing:
         assert response.status_code == 200
         assert 'window.__HORSIES_UI__' in response.text
 
-    async def test_unknown_api_paths_are_not_swallowed_by_the_spa(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_unknown_api_paths_are_not_swallowed_by_the_spa(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
 
         async with client_for(app) as client:
@@ -573,10 +568,7 @@ class TestStaticServing:
         assert response.status_code == 404
         assert 'window.__HORSIES_UI__' not in response.text
 
-    async def test_paths_cannot_escape_the_static_tree(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_paths_cannot_escape_the_static_tree(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
 
         async with client_for(app) as client:
@@ -586,10 +578,7 @@ class TestStaticServing:
         assert 'window.__HORSIES_UI__' in response.text
         assert '[build-system]' not in response.text
 
-    async def test_custom_css_is_injected_after_the_config(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_custom_css_is_injected_after_the_config(self) -> None:
         """Adopter CSS lands last so it overrides any shipped token."""
         app = create_monitoring_app(
             make_horsies_app(),
@@ -608,7 +597,9 @@ class TestStaticServing:
         self,
         built_static: Path,  # noqa: ARG002 - installs the asset tree
     ) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         async with client_for(app) as client:
             body = (await client.get('/')).text
@@ -621,10 +612,7 @@ class TestMountedAnywhere:
 
     pytestmark = [asyncio_tests]
 
-    async def test_mounted_app_reports_its_mount_path(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_mounted_app_reports_its_mount_path(self) -> None:
         host = FastAPI()
         host.mount(
             '/monitoring',
@@ -641,10 +629,7 @@ class TestMountedAnywhere:
         )
         assert meta.json()['base_path'] == '/monitoring'
 
-    async def test_mounted_api_routes_answer_under_the_mount(
-        self,
-        built_static: Path,  # noqa: ARG002 - installs the asset tree
-    ) -> None:
+    async def test_mounted_api_routes_answer_under_the_mount(self) -> None:
         host = FastAPI()
         host.mount(
             '/monitoring',
@@ -666,7 +651,9 @@ class TestMissingBuild:
         self,
         missing_static: None,  # noqa: ARG002 - removes the asset tree
     ) -> None:
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         async with client_for(app) as client:
             response = await client.get('/')
@@ -681,7 +668,9 @@ class TestMissingBuild:
         missing_static: None,  # noqa: ARG002 - removes the asset tree
     ) -> None:
         """The API is usable while the frontend is being developed."""
-        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+        app = web_app_module.create_monitoring_app(
+            make_horsies_app(), auth_policy=AllowAll(),
+        )
 
         async with client_for(app) as client:
             response = await client.get('/api/meta')
