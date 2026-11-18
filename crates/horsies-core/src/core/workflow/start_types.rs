@@ -712,13 +712,13 @@ mod tests {
             workflow_id: Uuid::from_u128(8),
             cause,
         };
-        let exception_of = |error: &WorkflowStartError| {
+        fn exception_of(error: &WorkflowStartError) -> Option<SlotData<'_>> {
             error
                 .slot_values()
                 .into_iter()
                 .find(|slot| slot.name == "exception")
                 .map(|slot| slot.value)
-        };
+        }
         let by_check = refused(StartRefusalCause::Check);
         assert_eq!(
             exception_of(&by_check),
