@@ -10,7 +10,8 @@
 //!   plus a margin), and no read of this reaper between them found its lock
 //!   held. A live worker takes its lock again within its regain bound, or it
 //!   fails closed before the margin ends, so the two reads cannot fall in one
-//!   loss of a live worker.
+//!   loss of a live worker. Two losses with a regain between two consecutive
+//!   reads of this reaper are not told apart from one loss (#1923).
 //! - With stale running recovery on, each RUNNING row of a gone owner goes
 //!   through `horsies_finish_stale_attempt` with the evidence `OWNER_GONE`;
 //!   with the stale claim requeue on, its CLAIMED rows go through
