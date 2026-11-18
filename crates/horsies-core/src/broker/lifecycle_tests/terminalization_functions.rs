@@ -847,6 +847,39 @@ mod expire_owned_claim {
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
+    /// Python `TestExpireOwnedClaim::test_another_workers_claim_is_lost`: the
+    /// deadline has passed, but another worker holds the claim, so the
+    /// expiry is a lost claim that names that worker, and the row stays
+    /// CLAIMED.
+    #[tokio::test]
+    #[serial]
+    async fn another_workers_claim_is_lost() {
+        let pool = pool().await;
+        let task_id = seed_task(
+            &pool,
+            &TaskSeed {
+                holder: Holder::other_worker(),
+                ..TaskSeed::claimed()
+            },
+        )
+        .await;
+        set_deadline(&pool, task_id, Deadline::PassedSecondsAgo(60.0)).await;
+
+        let outcomes = terminalize(&pool, &expire_claim(task_id))
+            .await
+            .expect("expire claim");
+
+        let [TerminalizationOutcome::LostClaim { observed, .. }] = outcomes.as_slice() else {
+            panic!("expected a lost claim, got {outcomes:?}");
+        };
+        assert_eq!(observed.worker_id.as_deref(), Some(OTHER_WORKER));
+        assert_eq!(
+            live_row(&pool, task_id).await.expect("live row")["status"],
+            "CLAIMED"
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
     /// Python `TestExpireOwnedClaim::test_the_pending_expiry_counts_as_the_same_work`.
     #[tokio::test]
     #[serial]
