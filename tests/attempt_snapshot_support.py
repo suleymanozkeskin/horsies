@@ -2,7 +2,6 @@
 
 `horsies_encode_task_attempts` (`terminalization/move.py`) writes the stored
 bytes. Tests use this mirror to seed history rows and to build decoder input.
-`tests/unit/test_task_history_archive_codecs.py` pins its exact bytes.
 """
 
 from __future__ import annotations

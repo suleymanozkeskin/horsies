@@ -136,9 +136,8 @@ class TestOutcomeDecodeError:
 
 
 class TestHistoryContractError:
-    """The class of ``MonitoringQueryHistoryContractViolation.exception``
-    and the base of the history errors: a plain ``Exception`` subclass whose
-    one argument is its message."""
+    """The class of ``MonitoringQueryHistoryContractViolation.exception``:
+    a plain ``Exception`` subclass whose one argument is its message."""
 
     def test_the_public_name_is_the_generated_class(self) -> None:
         assert history_error_module.HistoryContractError is history_errors.HistoryContractError
@@ -158,12 +157,6 @@ class TestHistoryContractError:
     def test_it_keeps_python_s_doc(self) -> None:
         assert history_errors.HistoryContractError.__doc__ == (
             'The database state violates an invariant this subsystem relies on.'
-        )
-
-    def test_the_history_errors_of_python_are_its_subclasses(self) -> None:
-        assert issubclass(history_error_module.LeafLockNotHeld, history_errors.HistoryContractError)
-        assert issubclass(
-            history_error_module.HistoryParentAbsent, history_errors.HistoryContractError,
         )
 
 

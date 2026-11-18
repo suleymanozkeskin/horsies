@@ -18,6 +18,7 @@ applies migrations). Coverage:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -72,7 +73,6 @@ from horsies._core import CoreConnectionError
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
-from horsies.core.history.reads.aggregates import plan_rows_from_explain
 from horsies._catalog.monitoring_bounds import LIST_ROW_BOUND
 from horsies.monitoring import (
     Breakdown,
@@ -3141,6 +3141,19 @@ async def _unfiltered_list(
     )
 
 
+def _plan_rows(payload: object) -> int:
+    """The row estimate of the top plan node of EXPLAIN (FORMAT JSON) output,
+    as text or as parsed JSON."""
+    loaded: object = json.loads(payload) if isinstance(payload, str) else payload
+    match loaded:
+        case [{'Plan': {'Plan Rows': bool()}}, *_]:
+            raise AssertionError(f'a boolean row estimate: {payload!r}')
+        case [{'Plan': {'Plan Rows': int() | float() as rows}}, *_]:
+            return int(rows)
+        case _:
+            raise AssertionError(f'not EXPLAIN (FORMAT JSON) output: {payload!r}')
+
+
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestUnfilteredHistoryTotalContract:
     """The documented total contract holds on the history side.
@@ -3195,7 +3208,7 @@ class TestUnfilteredHistoryTotalContract:
         assert totals.total_kind == 'ESTIMATE_HISTORY_PLAN'
         assert totals.live_total == 2
         assert str(totals.history_estimate_plan).startswith('[')
-        assert result.ok_value.total == 2 + plan_rows_from_explain(totals.history_estimate_plan)
+        assert result.ok_value.total == 2 + _plan_rows(totals.history_estimate_plan)
 
     async def test_filtered_total_counts_history_exactly(
         self,

@@ -17,7 +17,7 @@ from sqlalchemy import text
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
-from horsies.core.history.identity.uuid7 import mint_task_id
+from tests.task_ids import mint_task_id
 from horsies.core.types.result import Err, Ok
 from tests.broker_resources_support import current_resources
 

@@ -37,8 +37,8 @@ use crate::core::history::maintenance::coverage::{
     StartupCoverageOutcome,
 };
 use crate::core::history::maintenance::pruning::{
-    prune_expired_partitions, sweep_counts_toward_bound, sweep_expired_history_leaves, LeafSweep,
-    PruneReach,
+    prune_expired_partitions, prune_expired_partitions_within, sweep_counts_toward_bound,
+    sweep_expired_history_leaves, LeafSweep, PruneReach,
 };
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
@@ -2847,6 +2847,156 @@ async fn a_refused_leaf_does_not_count_toward_the_leaf_bound() {
     .expect("release the oldest leaf's lock");
     assert!(released);
     drop(holder);
+    database.drop().await;
+}
+
+/// Whether the relation `name` exists.
+async fn relation_exists(pool: &PgPool, name: &str) -> bool {
+    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("read the relation")
+}
+
+/// Registers the heartbeat class and creates the expired hourly heartbeat
+/// leaves `hours_ago` hours before the current hour, in order; returns their
+/// refs.
+async fn expired_heartbeat_leaves(pool: &PgPool, hours_ago: &[i64]) -> Vec<LeafRef> {
+    let mut transaction = pool.begin().await.expect("begin heartbeat setup");
+    let _registration = register_heartbeat_class(&mut transaction, hours(2))
+        .await
+        .expect("register heartbeat class");
+    let now = database_now(&mut transaction).await.expect("database now");
+    let current_hour = now
+        .with_minute(0)
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate hour");
+    let mut leaves = Vec::new();
+    for &hours_back in hours_ago {
+        let leaf = hourly_leaf_ref(current_hour - Duration::hours(hours_back))
+            .expect("expired heartbeat ref");
+        assert!(matches!(
+            create_hourly_heartbeat_leaf(
+                &mut transaction,
+                &CreateHourlyHeartbeatLeaf::new(leaf.clone()).expect("hourly command"),
+            )
+            .await
+            .expect("create expired heartbeat leaf"),
+            LeafCreation::Created { .. }
+        ));
+        leaves.push(leaf);
+    }
+    transaction.commit().await.expect("commit heartbeat setup");
+    leaves
+}
+
+/// A pass acts on its leaf bound with heartbeat leaves first: with a bound
+/// of 1, the expired heartbeat leaf is swept, the expired period leaf is
+/// left for the next pass, and the pass is `Truncated`.
+#[tokio::test]
+#[serial]
+async fn heartbeat_leaves_take_the_leaf_bound_first() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let heartbeat_leaves = expired_heartbeat_leaves(&database.pool, &[6]).await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let base =
+        utc_day_start(database_now(&mut clock).await.expect("database now") - Duration::days(8));
+    drop(clock);
+    let history_leaf = leaf_ref(&parent, class_key, base);
+    assert!(matches!(
+        create_leaf(&database.pool, &history_leaf).await,
+        LeafCreation::Created { .. }
+    ));
+
+    let pass = prune_expired_partitions_within(
+        &core_pool_for_test_pool(&database.pool),
+        StatementLog::Off,
+        1,
+    )
+    .await
+    .expect("a pruning pass");
+
+    let heartbeat_swept: Vec<&str> = pass
+        .heartbeat_swept
+        .iter()
+        .map(|entry| entry.leaf_name.as_str())
+        .collect();
+    assert_eq!(heartbeat_swept, vec![heartbeat_leaves[0].leaf_name()]);
+    assert!(pass.history_swept.is_empty(), "{:?}", pass.history_swept);
+    assert_eq!(pass.reach, PruneReach::Truncated);
+    assert!(relation_exists(&database.pool, history_leaf.leaf_name()).await);
+    database.drop().await;
+}
+
+/// A leaf whose sweep fails counts toward the leaf bound, since its effects
+/// are unknown: with a bound of 1, the failed older heartbeat leaf is the
+/// only one reported, the newer expired leaf is left for the next pass, and
+/// the sweep is `Truncated`.
+#[tokio::test]
+#[serial]
+async fn a_failed_leaf_counts_toward_the_leaf_bound() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let leaves = expired_heartbeat_leaves(&database.pool, &[7, 6]).await;
+    let (failing, expired) = (&leaves[0], &leaves[1]);
+
+    let holder = hold_catalog_row(&database.pool, failing.leaf_name()).await;
+    let LeafSweep {
+        swept,
+        errors,
+        reach,
+        ..
+    } = sweep_expired_heartbeat_leaves(
+        &core_pool_for_test_pool(&database.pool),
+        StatementLog::Off,
+        1,
+    )
+    .await
+    .expect("discover expired heartbeats");
+    holder.rollback().await.expect("release the catalog row");
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].starts_with(failing.leaf_name()), "{errors:?}");
+    assert!(swept.is_empty(), "{swept:?}");
+    assert_eq!(reach, PruneReach::Truncated);
+    assert!(relation_exists(&database.pool, expired.leaf_name()).await);
+    database.drop().await;
+}
+
+/// A leaf bound of 0 is a budget that acts on nothing: the expired leaf
+/// stays, and the sweep is `Truncated`.
+#[tokio::test]
+#[serial]
+async fn a_zero_leaf_bound_acts_on_no_leaf() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let base =
+        utc_day_start(database_now(&mut clock).await.expect("database now") - Duration::days(8));
+    drop(clock);
+    let leaf = leaf_ref(&parent, class_key, base);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+
+    let sweep = sweep_expired_history_leaves(
+        &core_pool_for_test_pool(&database.pool),
+        StatementLog::Off,
+        0,
+    )
+    .await
+    .expect("a history sweep");
+
+    assert!(sweep.swept.is_empty(), "{:?}", sweep.swept);
+    assert!(sweep.errors.is_empty(), "{:?}", sweep.errors);
+    assert_eq!(sweep.acted, 0);
+    assert_eq!(sweep.reach, PruneReach::Truncated);
+    assert!(relation_exists(&database.pool, leaf.leaf_name()).await);
     database.drop().await;
 }
 

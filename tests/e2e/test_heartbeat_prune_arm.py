@@ -14,23 +14,12 @@ genuinely expired by the same arithmetic production uses.
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from horsies.core.history.heartbeats.partitioning import (
-    CreateHourlyHeartbeatLeaf,
-    create_hourly_heartbeat_leaf,
-    hourly_leaf_name,
-    hourly_leaf_ref,
-)
-from horsies.core.history.partitions.manager import (
-    LeafAlreadyConformant,
-    LeafCreated,
-)
 from tests.e2e.helpers.worker import run_worker
 
 pytestmark = [pytest.mark.e2e]
@@ -68,9 +57,10 @@ def _unremembered_hour() -> datetime:
                         text(
                             'SELECT 1 FROM '
                             'horsies_task_history_leaf_catalog '
-                            'WHERE leaf_name = :name'
+                            'WHERE leaf_name = horsies_heartbeat_leaf_name('
+                            'CAST(:lower AS timestamptz))'
                         ),
-                        {'name': hourly_leaf_name(candidate)},
+                        {'lower': candidate},
                     )
                 ).scalar_one_or_none()
                 if remembered is None:
@@ -101,7 +91,8 @@ def _leaf_exists(leaf_name: str) -> bool:
 def _plant_overdue_leaf(lower: datetime) -> str:
     """Create one heartbeat leaf whose bounds are already past.
 
-    Through the shipped creation path, not a hand-written INSERT: the
+    Through the shipped creation path (``horsies_create_heartbeat_leaf``,
+    which the core's coverage pass calls), not a hand-written INSERT: the
     catalog carries columns a test has no business inventing values for,
     and a leaf assembled by hand would be testing the drop against a row
     the real machinery would never have written.
@@ -111,15 +102,22 @@ def _plant_overdue_leaf(lower: datetime) -> str:
         engine = create_async_engine(sqlalchemy_url(DB_URL))
         try:
             async with engine.begin() as connection:
-                outcome = await create_hourly_heartbeat_leaf(
-                    connection,
-                    CreateHourlyHeartbeatLeaf(leaf=hourly_leaf_ref(lower)),
-                )
-            match outcome:
-                case LeafCreated() | LeafAlreadyConformant():
-                    return hourly_leaf_name(lower)
+                leaf = (
+                    await connection.execute(
+                        text(
+                            'SELECT outcome, leaf_name, conflict_kind FROM '
+                            'horsies_create_heartbeat_leaf(CAST(:lower AS timestamptz))'
+                        ),
+                        {'lower': lower},
+                    )
+                ).one()
+            match leaf.outcome:
+                case 'CREATED' | 'ALREADY_CONFORMANT':
+                    return str(leaf.leaf_name)
                 case refusal:
-                    raise RuntimeError(f'could not plant the leaf: {refusal!r}')
+                    raise RuntimeError(
+                        f'could not plant the leaf: {refusal} {leaf.conflict_kind}'
+                    )
         finally:
             await engine.dispose()
 

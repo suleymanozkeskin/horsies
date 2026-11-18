@@ -28,7 +28,7 @@ from horsies.core.brokers.result_types import (
     BrokerIdempotencyKeyConflict,
     BrokerResult,
 )
-from horsies.core.history.identity.uuid7 import mint_task_id
+from tests.task_ids import mint_task_id
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok, is_ok
 from tests.broker_resources_support import current_resources
