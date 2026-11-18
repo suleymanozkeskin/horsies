@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.cli import execution_settings
 from horsies.core.models.boot_failure import SpawnFailed
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
@@ -43,6 +42,7 @@ from horsies.core.worker.cpu_placement import (
 from tests.dualrun.reference.worker_parent.worker.runtime import ChildStartFailedError
 from tests.dualrun.reference.worker_parent.worker.slots import BootFailure, Child, SlotPool, SlotPoolConfig
 from tests.dualrun.reference.worker_parent.worker.worker import Worker
+from horsies.core.worker_manifest import worker_profile_manifest
 
 pytestmark = [pytest.mark.unit]
 
@@ -264,9 +264,11 @@ def test_shared_cpus_place_no_worker_thread(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_the_profile_setting_reaches_the_worker_settings() -> None:
+    """The setting reaches the profile of the worker manifest, which the core
+    worker runs (``worker_profile_manifest``)."""
     profile = WorkerProfile(isolated=IsolatedChildren(count=2), parent_cpu=ParentCpu.OWN_CORE)
 
-    assert execution_settings(profile).parent_cpu is ParentCpu.OWN_CORE
+    assert worker_profile_manifest(profile).parent_cpu == 'OWN_CORE'
     assert 'parent_cpu=OWN_CORE' in describe_worker_profile(profile)
     assert WorkerProfile(isolated=IsolatedChildren(count=2)).parent_cpu is ParentCpu.SHARED
 
