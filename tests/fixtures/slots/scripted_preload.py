@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import scripted_child  # type: ignore[import-not-found]  # noqa: E402
 
-from horsies.core.worker import preload_main  # noqa: E402
-from horsies.core.worker.child_main import BootFn, serve as real_serve  # noqa: E402
-from horsies.core.worker.child_protocol import InitFrame  # noqa: E402
+from tests.dualrun.reference.worker_parent.worker import preload_main  # noqa: E402
+from tests.dualrun.reference.worker_parent.worker.child_main import BootFn, serve as real_serve  # noqa: E402
+from tests.dualrun.reference.worker_parent.worker.child_protocol import InitFrame  # noqa: E402
 
 
 def _serve_with_socket(sock: socket.socket, *args: object) -> NoReturn:

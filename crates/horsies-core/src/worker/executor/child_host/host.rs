@@ -50,10 +50,10 @@ const CHILD_MAX_BLOCKING_THREADS: NonZeroUsize = match NonZeroUsize::new(512) {
 };
 /// The checkout wait of the child's pool, in seconds (Python
 /// `CHILD_POOL_CONNECTION_WAIT_S`).
-const CHILD_POOL_CHECKOUT_WAIT_SECONDS: u32 = 30;
+pub(super) const CHILD_POOL_CHECKOUT_WAIT_SECONDS: u32 = 30;
 /// The age at which the child's pool replaces a connection (Python
 /// `CHILD_POOL_MAX_LIFETIME_S`).
-const CHILD_POOL_MAX_AGE: PoolRecycle = PoolRecycle::after_seconds(300);
+pub(super) const CHILD_POOL_MAX_AGE: PoolRecycle = PoolRecycle::after_seconds(300);
 /// The longest run of each start hook (Python `CHILD_HOOK_TIMEOUT_SECONDS`).
 pub const CHILD_START_HOOK_BOUND: Duration = Duration::from_secs(10);
 
@@ -354,7 +354,7 @@ fn boot_failed(
     }
 }
 
-fn pool_of(kind: ChildKind) -> ChildPool {
+pub(super) fn pool_of(kind: ChildKind) -> ChildPool {
     match kind {
         ChildKind::Isolated(child) => child.pool,
         ChildKind::SharedAsync(child) => child.pool,
@@ -423,7 +423,7 @@ fn child_broker_config(
 /// The connections that a child pool keeps open: its `min_size` (Python
 /// `ConnectionPool(min_size=...)`, `python/horsies/core/worker/child_pool.py:123-132`
 /// and `:169-178`, opened at `:136` and `:179`). Pure.
-fn kept_open_of(pool: ChildPool) -> KeptOpen {
+pub(super) fn kept_open_of(pool: ChildPool) -> KeptOpen {
     let min_size = u32::try_from(pool.min_size.get())
         .expect("a child pool min_size is from 0 to MAX_CHILD_POOL_CONNECTIONS");
     match NonZeroU32::new(min_size) {

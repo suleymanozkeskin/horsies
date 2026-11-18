@@ -50,24 +50,26 @@ use crate::worker::executor::supervisor::{
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
-/// The longest wait of the finalizing marker of a Python isolated child
-/// after a body returned with work left, for a pooled connection (Python
-/// `LEFT_WORK_MARKER_CONNECTION_WAIT_S`).
+/// The longest wait of the finalizing marker of a version-1 Python isolated
+/// child (the reference copy of the whole-run pairs) after a body returned
+/// with work left, for a pooled connection (Python
+/// `LEFT_WORK_MARKER_CONNECTION_WAIT_S` of that copy).
 pub const LEFT_WORK_MARKER_CONNECTION_WAIT: Duration = Duration::from_secs(5);
 
 /// The longest time of the statement of that marker once it holds its
-/// connection (Python `LEFT_WORK_MARKER_STATEMENTS_S`).
+/// connection (Python `LEFT_WORK_MARKER_STATEMENTS_S` of that copy).
 pub const LEFT_WORK_MARKER_STATEMENTS: Duration = Duration::from_secs(5);
 
 /// The longest time of that marker: the wait for a connection, the
 /// statement, and the cancel request of a statement past its bound (Python
-/// `LEFT_WORK_MARKER_BOUND_S`, with `CANCEL_REQUEST_TIMEOUT_S`).
+/// `LEFT_WORK_MARKER_BOUND_S` of that copy, with `CANCEL_REQUEST_TIMEOUT_S`).
 pub const LEFT_WORK_MARKER_END: Duration = LEFT_WORK_MARKER_CONNECTION_WAIT
     .saturating_add(LEFT_WORK_MARKER_STATEMENTS)
     .saturating_add(CANCEL_REQUEST_BOUND);
 
 /// After a body returned with work left on its loop, the longest time until
-/// a Python isolated child reports how that work ended: the grace
+/// a version-1 Python isolated child (the reference copy of the whole-run
+/// pairs) reports how that work ended: the grace
 /// ([`ISOLATED_LEFTOVER_GRACE`], 1 s), the cancel rounds
 /// ([`STUCK_REPORT_DELAY`], 0.3 s) and its marker
 /// ([`LEFT_WORK_MARKER_END`], 15 s): 16.3 s.
@@ -76,8 +78,9 @@ pub const PYTHON_CHILD_LEFTOVER_END: Duration = ISOLATED_LEFTOVER_GRACE
     .saturating_add(LEFT_WORK_MARKER_END);
 
 /// After a body returned with work left on its loop, the longest time until
-/// a core child reports how that work ended: the grace, the cancel rounds
-/// and its finalizing marker ([`FINALIZING_MARKER_END`], 20 s): 21.3 s.
+/// a core child or a version-2 Python child reports how that work ended: the
+/// grace, the cancel rounds and its finalizing marker, which goes through the
+/// core ([`FINALIZING_MARKER_END`], 20 s): 21.3 s.
 pub const CORE_CHILD_LEFTOVER_END: Duration = ISOLATED_LEFTOVER_GRACE
     .saturating_add(STUCK_REPORT_DELAY)
     .saturating_add(FINALIZING_MARKER_END);
@@ -93,8 +96,9 @@ pub const LONGEST_LEFTOVER_END: Duration =
 /// child of any kind ([`LONGEST_LEFTOVER_END`], 21.3 s) and the margin
 /// ([`SHARED_BACKSTOP_MARGIN`], 10 s): 31.3 s. The backstop never fires
 /// before a child's own report, as the refusal backstop never fires before
-/// a child's own refusal. Python `ISOLATED_LEFTOVER_BACKSTOP_S` (26.3 s)
-/// counts only the Python child, the one kind that a Python parent runs.
+/// a child's own refusal. Python `ISOLATED_LEFTOVER_BACKSTOP_S` of the
+/// reference copy (26.3 s) counts only the version-1 Python child, the one
+/// kind that its Python parent runs.
 pub const ISOLATED_LEFTOVER_BACKSTOP: Duration =
     LONGEST_LEFTOVER_END.saturating_add(SHARED_BACKSTOP_MARGIN);
 

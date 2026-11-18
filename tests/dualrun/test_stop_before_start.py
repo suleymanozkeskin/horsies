@@ -4,12 +4,12 @@ child and the orphan cancel of the worker's finalize against
 ``horsies_workflow_task_stop_before_start``.
 
 Reference: ``tests/dualrun/reference/stop_before_start_caller.py``, the start
-and its miss path before the switch (on the sync pool of the child), with
-the cancel of the finalize folded in. Candidate: the isolated child's
+and its miss path before the switch (on a psycopg pool of its own), with the
+cancel of the finalize folded in. Candidate: the isolated child's
 ``_confirm_until_not_resumed`` on its core handle, which sends the stop for
 each workflow miss. The seed holds one claimed workflow task per case, with
 the orphan self-heal of its run; both sides must stop, expire, cancel or
-leave the same rows, and report the same wire reason.
+leave the same rows, and report the same stop reason.
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ import pytest
 
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_pool import _cleanup_worker_pool, _initialize_worker_pool
+from horsies.core.worker.child_runner import DeadlineBeforeStart
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -124,44 +125,40 @@ def _seed(connection: Connection) -> _Seed:
     return _Seed(worker_id=worker_id, dispatches=tuple(dispatches))
 
 
-def _wire_reason(result: object) -> str:
+def _stop_reason(result: StoppedBeforeRunning | DeadlineBeforeStart | None) -> str:
     match result:
         case None:
             return 'STARTED'
-        case (False, str(), str() as reason):
+        case StoppedBeforeRunning(reason=reason):
             return reason
-        case _:
-            raise AssertionError(f'the start returned {result!r}')
+        case DeadlineBeforeStart():
+            raise AssertionError('a start with no deadline ended at its deadline')
 
 
 def _reference_stop(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
-    _cleanup_worker_pool()
-    _initialize_worker_pool(database.url)
-    try:
+    """The reference runs on a pool of its own on the database of the core
+    handle in place (``child_core_handle_for``)."""
+    with child_core_handle_for(database.url):
         return {
-            each.name: _wire_reason(
+            each.name: _stop_reason(
                 reference._confirm_until_not_resumed(
                     each.task_id,
                     seed.worker_id,
-                    True,
                     each.claimed_at,
                     orphan_self_heal=each.orphan_self_heal,
                 ),
             )
             for each in seed.dispatches
         }
-    finally:
-        _cleanup_worker_pool()
 
 
 def _candidate_stop(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
     with child_core_handle_for(database.url):
         return {
-            each.name: _wire_reason(
+            each.name: _stop_reason(
                 child_runner._confirm_until_not_resumed(
                     each.task_id,
                     seed.worker_id,
-                    True,
                     each.claimed_at,
                     orphan_self_heal=each.orphan_self_heal,
                 ),
@@ -204,8 +201,8 @@ def test_the_stop_before_start_writes_and_answers_what_the_miss_path_and_finaliz
         'stop.deadline_passed': 'TASK_EXPIRED',
         'stop.orphan_unlinked': 'ORPHAN_CANCELLED',
         'stop.orphan_done_node': 'ORPHAN_CANCELLED',
-        'stop.orphan_self_heal_off': 'WORKFLOW_CHECK_FAILED',
-        'stop.orphan_unlinked_self_heal_off': 'WORKFLOW_CHECK_FAILED',
+        'stop.orphan_self_heal_off': 'NODE_NOT_LINKED',
+        'stop.orphan_unlinked_self_heal_off': 'NODE_NOT_LINKED',
     }
     assert run.candidate.report == run.reference.report
 

@@ -29,10 +29,10 @@ from horsies.core.lifecycle.outcomes import PhaseTwoStep
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.finalize import _NodeFinishOwed
-from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.finalize import _NodeFinishOwed
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
 from horsies.core.workflows.node_finish import FactsUnknown
-from tests.dispatch_claim_support import claim_at, row_claim
+from tests.fixtures.reference_worker_support import claim_at, row_claim
 from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import (

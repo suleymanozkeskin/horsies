@@ -9,6 +9,7 @@ import pytest
 
 from horsies.core.worker.child_main import (
     BOOT_FAILED_EXIT_CODE,
+    PROTOCOL_MISMATCH_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 )
 from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
@@ -81,3 +82,15 @@ def test_each_cli_page_lists_the_runner_heartbeat_exit(page: Path) -> None:
 
     assert RUNNER_HEARTBEAT_LOST_EXIT_CODE in rows
     assert 'runner heartbeats' in rows[RUNNER_HEARTBEAT_LOST_EXIT_CODE][1]
+
+
+@pytest.mark.parametrize(
+    'page',
+    CLI_PAGES,
+    ids=lambda page: str(page.relative_to(REPO)),
+)
+def test_each_cli_page_lists_the_protocol_mismatch_exit_of_a_child(page: Path) -> None:
+    rows = _table_rows(_section(page.read_text(), '## Exit Codes'))
+
+    assert PROTOCOL_MISMATCH_EXIT_CODE in rows
+    assert 'protocol version' in rows[PROTOCOL_MISMATCH_EXIT_CODE][1]

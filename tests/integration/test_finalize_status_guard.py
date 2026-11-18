@@ -38,7 +38,10 @@ from horsies.core.lifecycle.outcomes import (
     decode_workflow_success_row,
 )
 from horsies.core.lifecycle.persistence import apply_async, call_for
-from horsies.core.worker.child_runner import MARK_FINALIZING_SQL, _mark_task_finalizing
+from horsies.core.worker.child_runner import (
+    _confirm_ownership_and_set_running,
+    mark_run_finalizing,
+)
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
@@ -54,10 +57,7 @@ from horsies.core.worker.workflow_success import (
     FinishWorkflowSuccess,
     success_statement,
 )
-from horsies.core.worker.worker import (
-    _confirm_ownership_and_set_running,
-    _initialize_worker_pool,
-)
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal
 from tests.broker_resources_support import listener_of
@@ -798,17 +798,16 @@ async def test_confirm_ownership_rejects_stale_claim_generation(
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
     await _set_task_status(session, task_id, 'CLAIMED')
     await session.commit()  # the child confirm runs on its own connection
-
-    _initialize_worker_pool(listener_of(broker).database_url)
+    _ = broker
 
     stale_result = _confirm_ownership_and_set_running(
-        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_STALE, orphan_self_heal=True,
+        task_id, OWNER_WORKER_ID, claimed_at=GEN_STALE, orphan_self_heal=True,
     )
-    assert stale_result == (False, '', 'CLAIM_LOST')
+    assert stale_result == StoppedBeforeRunning('CLAIM_LOST')
     assert await _get_task_status(session, task_id) == 'CLAIMED'
 
     live_result = _confirm_ownership_and_set_running(
-        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_CURRENT, orphan_self_heal=True,
+        task_id, OWNER_WORKER_ID, claimed_at=GEN_CURRENT, orphan_self_heal=True,
     )
     assert live_result is None
     assert await _get_task_status(session, task_id) == 'RUNNING'
@@ -834,16 +833,16 @@ async def test_finalizing_marker_rejects_stale_claim_generation(
     broker: 'PostgresBroker',
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A stale attempt cannot mark a later claim of the same task finalizing."""
+    """A stale attempt cannot mark a later claim of the same task finalizing.
+    The marker goes through the core handle of the child."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
     await session.commit()  # the child marker runs on its own connection
+    _ = broker
 
-    _initialize_worker_pool(listener_of(broker).database_url)
-
-    _mark_task_finalizing(task_id, OWNER_WORKER_ID, GEN_STALE)
+    mark_run_finalizing(uuid.UUID(task_id), OWNER_WORKER_ID, GEN_STALE)
     assert await _get_finalizing_worker(session, task_id) is None
 
-    _mark_task_finalizing(task_id, OWNER_WORKER_ID, GEN_CURRENT)
+    mark_run_finalizing(uuid.UUID(task_id), OWNER_WORKER_ID, GEN_CURRENT)
     assert await _get_finalizing_worker(session, task_id) == OWNER_WORKER_ID
 
 
@@ -861,6 +860,10 @@ async def test_the_finalizing_marker_refuses_a_null_claim_generation(
 
     with psycopg.connect(listener_of(broker).database_url, autocommit=True) as conn:
         with pytest.raises(psycopg.errors.InvalidParameterValue):
-            conn.execute(MARK_FINALIZING_SQL, (task_id, OWNER_WORKER_ID, None))
+            conn.execute(
+                'SELECT outcome FROM horsies_mark_finalizing('
+                '%s::uuid, %s, %s::timestamptz)',
+                (task_id, OWNER_WORKER_ID, None),
+            )
 
     assert await _get_finalizing_worker(session, task_id) is None

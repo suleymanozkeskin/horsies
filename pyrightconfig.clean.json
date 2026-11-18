@@ -90,5 +90,8 @@
     "tests/unit/test_public_api_runner.py",
     "tests/unit/test_public_api_snapshot.py"
   ],
+  "exclude": [
+    "tests/dualrun/reference/worker_parent"
+  ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

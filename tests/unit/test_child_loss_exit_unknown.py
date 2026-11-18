@@ -26,12 +26,12 @@ import pytest_asyncio
 
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import Ok
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker import slots
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker import slots
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
-from horsies.core.worker.runtime import _RequeueOutcome
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
+from tests.dualrun.reference.worker_parent.worker.runtime import _RequeueOutcome
+from tests.dualrun.reference.worker_parent.worker.slots import (
     Child,
     ChildLost,
     ExitUnknown,
@@ -41,8 +41,8 @@ from horsies.core.worker.slots import (
     SlotPool,
     SlotPoolConfig,
 )
-from horsies.core.worker.stored_timeout import NoTimeout
-from horsies.core.worker.worker import Worker, WorkerConfig
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import NoTimeout
+from tests.dualrun.reference.worker_parent.worker.worker import Worker, WorkerConfig
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 CLAIM = DispatchClaim(

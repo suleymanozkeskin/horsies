@@ -40,7 +40,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any
+
+# The child runs as a script: its path holds this folder, not the repository
+# root, and the reference copy below is the package `tests.dualrun.reference`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from horsies.core.models.boot_failure import (
     AppLoadFailed,
@@ -49,13 +54,13 @@ from horsies.core.models.boot_failure import (
     ShortageErrno,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.child_main import (
+from tests.dualrun.reference.worker_parent.worker.child_main import (
     TaskRunners,
     WireResult,
     _send_child_frame,
     serve,
 )
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     FRAME_HEADER,
     BootFailedFrame,
     InitFrame,
@@ -69,24 +74,24 @@ from horsies.core.worker.child_protocol import (
     boot_failed_frame,
     encode_parent_frame,
 )
-from horsies.core.worker.thread_child import ThreadSeatReturn
+from tests.dualrun.reference.worker_parent.worker.thread_child import ThreadSeatReturn
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.shared_child import (
+from tests.dualrun.reference.worker_parent.worker.shared_child import (
     MarkerWindow,
     SeatReturn,
     SetRunning,
     StartedSeats,
 )
-from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE, StartCheck
-from horsies.core.worker.run_return import (
+from tests.dualrun.reference.worker_parent.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE, StartCheck
+from tests.dualrun.reference.worker_parent.worker.run_return import (
     IsolatedMarkerWindow,
     RunReturn,
     StoppedBeforeRunning,
 )
 from horsies.core.utils.loop_runner import in_running_event_loop
-from horsies.core.worker import loop_watchdog as loop_watchdog_module
-from horsies.core.worker import task_loop as task_loop_module
-from horsies.core.worker.task_loop import AsyncTaskPresence, TaskLoop
+from tests.dualrun.reference.worker_parent.worker import loop_watchdog as loop_watchdog_module
+from tests.dualrun.reference.worker_parent.worker import task_loop as task_loop_module
+from tests.dualrun.reference.worker_parent.worker.task_loop import AsyncTaskPresence, TaskLoop
 
 _sock: socket.socket
 # The loop holds only weak references to its tasks.

@@ -1,12 +1,12 @@
 """The lifecycle writes of a shared thread child against a real database.
 
 A shared thread child runs each task on a seat thread. The thread sets its
-row RUNNING with the first runner heartbeat through the core handle of the
-child, and marks it finalizing through the one sync pool of the child; both
-have fewer connections than seats: threads wait for each other there. These
-tests run the real seat threads (``ThreadSeats``, ``ThreadRunTable``,
-``PostgresThreadSeats``) with the real functions; a recording writer stands
-in for the frame writer.
+row RUNNING with the first runner heartbeat, and marks it finalizing,
+through the core handle of the child, whose pool has fewer connections than
+seats: threads wait for each other there. These tests run the real seat
+threads (``ThreadSeats``, ``ThreadRunTable``, ``PostgresThreadSeats``) with
+the real functions, on version-2 frames as the core decodes them; a
+recording writer stands in for the frame writer.
 """
 
 # pyright: reportPrivateUsage=false
@@ -14,8 +14,6 @@ in for the frame writer.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
-import json
 import os
 import threading
 import time
@@ -33,30 +31,27 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.tasks import (
+    MIN_TASK_TIMEOUT_MS,
     Execution,
     OperationalErrorCode,
     TaskError,
     TaskResult,
 )
+from horsies import _core as core
 from horsies.core.worker import shared_lifecycle
-from horsies.core.worker.child_pool import _get_worker_pool, _initialize_worker_pool
-from horsies.core.worker.child_protocol import (
+from horsies.core.worker.child_frames import (
     ChildFrame,
     RssMb,
-    SeatFinished,
-    SeatRefusal,
+    SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
-    SharedRunFrame,
-    ThreadSeatTask,
     ThreadSeatWork,
-    WireResult,
 )
 from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_runner import StartAllowed
 from horsies.core.worker.current import set_current_app
+from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import StoppedBeforeRunning
-from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
 from horsies.core.worker.thread_runner import PostgresThreadSeats, run_thread_seat_task
 from tests.broker_resources_support import listener_of
@@ -65,6 +60,7 @@ from tests.fixtures.child_core import (
     child_core_handle_for,
     wait_for_start_statements_to_end,
 )
+from tests.fixtures.core_frames import refusal, shared_run_frame, thread_work
 from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
@@ -82,10 +78,9 @@ CANCEL_END_S = shared_lifecycle.CANCELLED_WRITE_END_S
 """The longest end of a start after its cancel request."""
 ATTEMPT_END_S = shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S + CANCEL_END_S
 """The longest time of one start attempt in the core."""
-REFUSAL = SeatRefusal(
-    refusal=TimeoutValueInvalid(
-        reason='stored timeout_ms is absent for execution SHARED_THREAD',
-    ),
+REFUSAL = refusal(
+    'value_invalid',
+    'stored timeout_ms is absent for execution SHARED_THREAD',
 )
 """The work of a run whose stored timeout the worker cannot use."""
 
@@ -145,19 +140,35 @@ async def _runner_beats(session: AsyncSession, task_id: str) -> list[str]:
     return [str(row.sender_id) for row in rows]
 
 
-def _frame(task_id: str, claimed_at: datetime, work: ThreadSeatWork) -> SharedRunFrame:
-    return SharedRunFrame(
-        dispatch=1,  # _run_on_seats numbers the runs
-        task_id=task_id,
+def _frame(
+    task_id: str,
+    claimed_at: datetime,
+    work: dict[str, object],
+    dispatch: int = 1,
+) -> core.SharedRunFrame:
+    return shared_run_frame(
+        dispatch=dispatch,
+        task_id=uuid.UUID(task_id),
         task_name=TASK_NAME,
-        args_json='[]',
-        kwargs_json=json.dumps({}),
-        worker_id=WORKER_ID,
-        is_workflow_task=False,
-        claimed_at=claimed_at,
         work=work,
+        worker_id=WORKER_ID,
+        claimed_at=claimed_at,
         orphan_self_heal=True,
+        input_json='{}',
     )
+
+
+def _seat_work(frame: core.SharedRunFrame) -> ThreadSeatWork:
+    """The work of the frame of a thread seat."""
+    match frame.work:
+        case core.ThreadTaskWork() | core.StoredOptionsRefused() as work:
+            return work
+        case core.AsyncTaskWork():
+            raise AssertionError(f'run {frame.dispatch} is not a thread seat run')
+
+
+type _Run = tuple[str, datetime, dict[str, object]]
+"""A run of ``_run_on_seats``: the task, the claim time and the work."""
 
 
 def _task_result(payload: str) -> TaskResult[str, TaskError]:
@@ -185,40 +196,42 @@ class _RecordingWriter:
             return [item for item in self.frames if isinstance(item, SharedResultFrame)]
 
 
-def _run_on_seats(frames: list[SharedRunFrame]) -> list[WireResult]:
-    """Run each frame on its own seat thread at once, through the run table
-    and the seat program of the child; return the wire of each end in frame
-    order. Run ``n`` gets dispatch number ``n + 1``."""
+def _run_on_seats(runs: list[_Run]) -> list[SeatEnd]:
+    """Run each run on its own seat thread at once, through the run table
+    and the seat program of the child; return the end of each in run order.
+    Run ``n`` gets dispatch number ``n + 1``."""
+    frames = [
+        _frame(task_id, claimed_at, work, dispatch=index + 1)
+        for index, (task_id, claimed_at, work) in enumerate(runs)
+    ]
     writer = _RecordingWriter()
     table = ThreadRunTable(len(frames), writer)
     seats = ThreadSeats(len(frames), table, PostgresThreadSeats(), lambda: RssMb(1.0))
     assert seats.start().is_ok()
-    for index, frame in enumerate(frames):
-        numbered = dataclasses.replace(frame, dispatch=index + 1)
-        match numbered.work:
-            case ThreadSeatTask() | SeatRefusal() as work:
-                table.add(numbered, work)
-                seats.give(numbered, work)
-            case _:
-                raise AssertionError(numbered.work)
+    for frame in frames:
+        work = _seat_work(frame)
+        table.add(frame, work)
+        seats.give(frame, work)
     deadline = time.monotonic() + JOIN_S
     while len(writer.results()) < len(frames):
         assert time.monotonic() < deadline, 'a seat did not end its run'
         time.sleep(0.01)
     seats.stop(JOIN_S)
     ends = {frame.dispatch: frame.end for frame in writer.results()}
-    wires: list[WireResult] = []
-    for dispatch in range(1, len(frames) + 1):
-        end = ends[dispatch]
-        assert isinstance(end, SeatFinished), end
-        wires.append((end.ok, end.result_json, end.failed_reason))
-    return wires
+    return [ends[dispatch] for dispatch in range(1, len(frames) + 1)]
+
+
+def _envelope(end: SeatEnd) -> ResultEnvelope:
+    """The result envelope of an end; another end fails the test."""
+    assert isinstance(end, ResultEnvelope), end
+    return end
 
 
 @pytest_asyncio.fixture(loop_scope='function')
 async def thread_app(app: Horsies, broker: PostgresBroker) -> Horsies:
-    """The app of the child, with one SHARED_THREAD task, and the sync pool
-    of the child open with fewer connections than ``SEATS``."""
+    """The app of the child, with one SHARED_THREAD task. The core handle
+    of the suite has fewer connections than ``SEATS``
+    (``TEST_CHILD_POOL``)."""
 
     @app.task(task_name=TASK_NAME, execution=Execution.SHARED_THREAD, timeout_ms=30_000)
     def thread_lifecycle_sleep() -> TaskResult[str, TaskError]:
@@ -226,7 +239,7 @@ async def thread_app(app: Horsies, broker: PostgresBroker) -> Horsies:
         time.sleep(BODY_S)
         return TaskResult(ok=f'{started}:{time.time()}')
 
-    _initialize_worker_pool(listener_of(broker).database_url, max_size=2)
+    _ = broker
     set_current_app(app)
     _ = thread_lifecycle_sleep
     return app
@@ -238,24 +251,18 @@ async def test_seat_threads_share_a_pool_smaller_than_the_seats(
     thread_app: Horsies,  # noqa: ARG001
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    assert _get_worker_pool().max_size < SEATS
     assert TEST_CHILD_POOL.max_size < SEATS
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_ids = [
         await _seed_claimed_task(session, claimed_at=claimed_at) for _ in range(SEATS)
     ]
-    frames = [
-        _frame(task_id, claimed_at, ThreadSeatTask(timeout_ms=30_000))
-        for task_id in task_ids
-    ]
+    runs: list[_Run] = [(task_id, claimed_at, thread_work(30_000)) for task_id in task_ids]
 
-    wires = _run_on_seats(frames)
+    ends = _run_on_seats(runs)
 
     spans: list[tuple[float, float]] = []
-    for wire in wires:
-        ok, payload, reason = wire
-        assert (ok, reason) == (True, None)
-        started, ended = _task_result(payload).unwrap().split(':')
+    for end in ends:
+        started, ended = _task_result(_envelope(end).text).unwrap().split(':')
         spans.append((float(started), float(ended)))
     assert max(start for start, _end in spans) < min(end for _start, end in spans)
     for task_id in task_ids:
@@ -275,13 +282,9 @@ async def test_a_claim_of_another_generation_is_lost_on_a_seat_thread(
 ) -> None:
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
-    stale = _frame(
-        task_id,
-        claimed_at - timedelta(seconds=30),
-        ThreadSeatTask(timeout_ms=30_000),
-    )
+    stale: _Run = (task_id, claimed_at - timedelta(seconds=30), thread_work(30_000))
 
-    assert _run_on_seats([stale]) == [(False, '', 'CLAIM_LOST')]
+    assert _run_on_seats([stale]) == [StoppedBeforeRunning('CLAIM_LOST')]
     assert (await _row(session, task_id)).status == 'CLAIMED'
     assert await _runner_beats(session, task_id) == []
 
@@ -294,17 +297,9 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
 ) -> None:
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
-    refusal = SeatRefusal(
-        refusal=TimeoutValueInvalid(
-            reason='stored timeout_ms is absent for execution SHARED_THREAD',
-        ),
-    )
+    [end] = _run_on_seats([(task_id, claimed_at, REFUSAL)])
 
-    [wire] = _run_on_seats([_frame(task_id, claimed_at, refusal)])
-
-    ok, payload, _reason = wire
-    assert ok is True
-    error = _task_result(payload).unwrap_err()
+    error = _task_result(_envelope(end).text).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     row = await _row(session, task_id)
     assert row.status == 'RUNNING'
@@ -338,15 +333,15 @@ async def test_a_refusal_whose_update_waits_on_a_row_lock_ends_at_its_bound(
     started = time.monotonic()
 
     try:
-        [wire] = await asyncio.wait_for(
-            asyncio.to_thread(_run_on_seats, [_frame(task_id, claimed_at, REFUSAL)]),
+        [end] = await asyncio.wait_for(
+            asyncio.to_thread(_run_on_seats, [(task_id, claimed_at, REFUSAL)]),
             ATTEMPT_END_S,
         )
         elapsed_s = time.monotonic() - started
     finally:
         await session.rollback()
 
-    assert wire == (False, '', 'OWNERSHIP_UNCONFIRMED')
+    assert end == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
     assert STATEMENTS_S <= elapsed_s < STATEMENTS_S + CANCEL_END_S
     assert await wait_for_start_statements_to_end(session) == 0
     assert (await _row(session, task_id)).status == 'CLAIMED'
@@ -374,7 +369,7 @@ async def test_the_running_update_of_a_refusal_ends_at_the_bound_of_the_core(
             asyncio.to_thread(
                 run_thread_seat_task,
                 frame,
-                REFUSAL,
+                _seat_work(frame),
                 lambda: StartAllowed(),
             ),
             ATTEMPT_END_S,
@@ -383,7 +378,7 @@ async def test_the_running_update_of_a_refusal_ends_at_the_bound_of_the_core(
     finally:
         await session.rollback()
 
-    assert returned == StoppedBeforeRunning((False, '', 'OWNERSHIP_UNCONFIRMED'))
+    assert returned == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
     assert STATEMENTS_S <= elapsed_s < STATEMENTS_S + CANCEL_END_S
     assert await wait_for_start_statements_to_end(session) == 0
     assert (await _row(session, task_id)).status == 'CLAIMED'
@@ -405,10 +400,10 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     blocker_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
-    blocker_work = ThreadSeatTask(timeout_ms=30_000)
-    blocker = dataclasses.replace(_frame(blocker_id, claimed_at, blocker_work), dispatch=1)
-    work = ThreadSeatTask(timeout_ms=300)
-    frame = dataclasses.replace(_frame(task_id, claimed_at, work), dispatch=2)
+    blocker = _frame(blocker_id, claimed_at, thread_work(30_000), dispatch=1)
+    blocker_work = _seat_work(blocker)
+    frame = _frame(task_id, claimed_at, thread_work(MIN_TASK_TIMEOUT_MS), dispatch=2)
+    work = _seat_work(frame)
     await session.execute(
         text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
         {'id': blocker_id},
@@ -427,7 +422,9 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
             await asyncio.sleep(LOCK_HELD_S)
             table.add(frame, work)
             seats.give(frame, work)
-            await asyncio.sleep(0.8)
+            # Past the deadline of the run (the smallest timeout_ms of a run
+            # frame), while the seat still waits for the connection.
+            await asyncio.sleep(MIN_TASK_TIMEOUT_MS / 1000 + 0.5)
             assert writer.results() == []
         finally:
             await session.rollback()

@@ -41,18 +41,19 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import NodeKey, WorkflowContext
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.process_role import ProcessRole
-from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_protocol import LoopHoldsNoTask
+from horsies.core.worker.child_frames import LoopHoldsNoTask
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
     LoopNotCreated,
     LoopOpen,
     TaskLoop,
 )
+from horsies.core.worker.child_runner import RunTheTask
+from tests.fixtures.core_frames import init_frame
 from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.unit]
@@ -116,9 +117,6 @@ def _runner(
                 ),
             )
             stack.enter_context(
-                patch.object(child_runner, '_mark_task_finalizing', MagicMock()),
-            )
-            stack.enter_context(
                 patch.object(
                     child_runner, 'get_current_app', MagicMock(return_value=app)
                 ),
@@ -126,11 +124,10 @@ def _runner(
             return wire_of(
                 child_runner._run_task_entry(
                     task_name=task_name,
-                    args_json='[]',
-                    kwargs_json=json.dumps(kwargs or {}),
+                    input_json=json.dumps(kwargs or {}),
                     task_id='task-id',
                     master_worker_id='worker',
-                    is_workflow_task=False,
+                    work=RunTheTask(),
                     claimed_at=CLAIMED_AT,
                     task_loop=task_loop,
                     orphan_self_heal=True,
@@ -374,8 +371,7 @@ class TestEntriesTheChildCannotRun:
         ok, payload, reason = run('not_a_task_function')
 
         set_running.assert_called_once()
-        assert ok is True
-        assert reason is not None
+        assert (ok, reason) == (True, None)
         error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
         assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
 
@@ -395,10 +391,10 @@ class TestEntriesTheChildCannotRun:
 
         ok, payload, reason = _runner(app, no_task_loop)(registered_late.task_name)
 
-        assert ok is True
-        assert reason is not None and 'no task loop' in reason
+        assert (ok, reason) == (True, None)
         error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
         assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        assert 'no task loop' in (error.message or '')
         assert ran == []
         assert isinstance(no_task_loop.state, LoopNotCreated)
 
@@ -425,10 +421,10 @@ class TestEntriesTheChildCannotRun:
         ok, payload, reason = _runner(_app(), task_loop, set_running)('not_registered')
 
         set_running.assert_called_once()
-        assert ok is True
-        assert reason is not None and 'not registered' in reason
+        assert (ok, reason) == (True, None)
         error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
         assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        assert 'not_registered' in (error.message or '')
 
 
 UNREACHABLE_URL = 'postgresql://u:p@127.0.0.1:1/db'
@@ -497,12 +493,9 @@ class TestResultWaitsInsideAnAsyncTask:
         try:
             with (
                 patch.object(child_runner, '_run_child_start_hooks'),
-                patch.object(child_runner, '_initialize_worker_pool'),
                 patch.object(child_runner, '_initialize_child_core_handle'),
             ):
-                child_runner.finish_child_start(
-                    app, UNREACHABLE_URL, None, ResolvedPool(0, 2, True)
-                )
+                child_runner.finish_child_start(app, init_frame())
             with patch.object(broker, 'enqueue_async', enqueue_async):
                 wire = _runner(app, task_loop)(waits_inside_task.task_name)
         finally:

@@ -17,7 +17,8 @@ statement ended:
 - ``WORKFLOW_CANCELLED``: ``BEGIN``, ``horsies_cancel_owned_node`` and, when
   the cancel applied, the node skip, then ``COMMIT``;
 - ``NODE_NOT_LINKED``: no statement in the child, which reported
-  ``WORKFLOW_CHECK_FAILED``. The worker's finalize then cancelled the owned
+  ``WORKFLOW_CHECK_FAILED`` (``NODE_NOT_LINKED`` in the version-2 run end).
+  The worker's finalize then cancelled the owned
   orphan with ``horsies_cancel_owned_orphan`` in autocommit when the app's
   ``auto_terminate_orphaned_workflow_tasks`` was on
   (``FinalizeMixin._cancel_owned_orphan``).
@@ -25,12 +26,15 @@ statement ended:
 The functions below are those bodies, with the cancel of the finalize folded
 in: with ``orphan_self_heal`` the reference sends it right after the miss and
 reports ``ORPHAN_CANCELLED``, so a run of the reference ends in the same rows
-as the child of the switch. Their signatures are those of the production
-functions, so the dual-run rebinding puts them in place of
-``child_runner._confirm_ownership_and_set_running`` and
-``shared_lifecycle.confirm_until_not_resumed``. The reference of the shared
-async child runs the same statements on the sync pool of the child, in a
-thread.
+as the child of the switch. Their signatures and their returns are those
+of the production functions of the version-2 child (``StoppedBeforeRunning``
+with its reason, or None to start), so the dual-run rebinding puts them in
+place of ``child_runner._confirm_ownership_and_set_running`` and
+``shared_lifecycle.confirm_until_not_resumed``. The statements run on a
+psycopg pool in autocommit on the database of the core handle of the child
+that the test process holds (``tests.fixtures.child_core``), opened at the
+first use; the reference of the shared async child runs the same statements
+in a thread.
 """
 
 # pyright: reportPrivateUsage=false
@@ -38,6 +42,7 @@ thread.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import socket
 from collections.abc import Callable, Sequence
@@ -46,6 +51,7 @@ from datetime import datetime
 from typing import Any, Final, LiteralString, assert_never
 
 from psycopg.rows import namedtuple_row
+from psycopg_pool import ConnectionPool
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.lifecycle.commands import (
@@ -65,8 +71,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import apply_sync
 from horsies.core.models.tasks import OutcomeCode, TaskError, TaskResult
-from horsies.core.worker.child_pool import _get_worker_pool
-from horsies.core.worker.child_protocol import WireResult
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from horsies.core.worker.child_runner import (
     _PRE_START_CONFIRM_ATTEMPTS,
     DeadlineBeforeStart,
@@ -76,6 +81,35 @@ from horsies.core.worker.child_runner import (
     _WorkflowResumedBeforeStart,
     start_always_allowed,
 )
+from tests.fixtures.child_core import child_database_url
+
+REFERENCE_POOL_MAX_SIZE: Final = 2
+"""The connections of the reference pool on one database: the pool of an
+isolated child."""
+
+_REFERENCE_POOLS: dict[str, ConnectionPool] = {}
+"""The reference pool of each database, opened at its first use and closed
+at the exit of the process."""
+
+
+def _reference_pool() -> ConnectionPool:
+    """The autocommit pool of the reference on the database of the core
+    handle of the child that the test process holds."""
+    url = child_database_url()
+    match _REFERENCE_POOLS.get(url):
+        case ConnectionPool() as pool:
+            return pool
+        case None:
+            pool: ConnectionPool = ConnectionPool(
+                url,
+                min_size=0,
+                max_size=REFERENCE_POOL_MAX_SIZE,
+                open=True,
+                kwargs={'autocommit': True},
+            )
+            _REFERENCE_POOLS[url] = pool
+            atexit.register(pool.close)
+            return pool
 
 START_ATTEMPT_SQL: Final[LiteralString] = """
                 SELECT outcome, miss_reason
@@ -154,8 +188,8 @@ def _read_start_outcome(row: Sequence[object] | None, task_id: str) -> _Started 
             raise AssertionError(f'horsies_start_attempt returned {row!r} for task {task_id}')
 
 
-def _claim_lost() -> WireResult:
-    return (False, '', 'CLAIM_LOST')
+def _claim_lost() -> StoppedBeforeRunning:
+    return StoppedBeforeRunning('CLAIM_LOST')
 
 
 def _expire_claimed_task_before_start(
@@ -163,7 +197,7 @@ def _expire_claimed_task_before_start(
     conn: Any,
     task_id: str,
     worker_id: str,
-) -> WireResult | None:
+) -> StoppedBeforeRunning | None:
     task_result: TaskResult[None, TaskError] = TaskResult(
         err=TaskError(
             error_code=OutcomeCode.TASK_EXPIRED,
@@ -183,7 +217,7 @@ def _expire_claimed_task_before_start(
     match outcome:
         case Applied() | AlreadyApplied():
             conn.commit()
-            return (False, '', OutcomeCode.TASK_EXPIRED.value)
+            return StoppedBeforeRunning('TASK_EXPIRED')
         case LostClaim() | SourceStateConflict() | TaskAbsent():
             return None
         case _ as unreachable:
@@ -197,7 +231,7 @@ def _handle_workflow_stop_before_start(
     workflow_status: str,
     worker_id: str,
     claimed_at: datetime,
-) -> WireResult | _WorkflowResumedBeforeStart:
+) -> StoppedBeforeRunning | _WorkflowResumedBeforeStart:
     fence = OwnedClaim(worker_id=worker_id, claimed_at=claimed_at)
     match workflow_status:
         case 'PAUSED':
@@ -213,7 +247,7 @@ def _handle_workflow_stop_before_start(
                 case _ as unreachable:
                     assert_never(unreachable)
             conn.commit()
-            return (False, '', 'WORKFLOW_STOPPED')
+            return StoppedBeforeRunning('WORKFLOW_STOPPED')
         case 'CANCELLED':
             outcome = apply_sync(
                 cursor,
@@ -227,9 +261,9 @@ def _handle_workflow_stop_before_start(
                 case _ as unreachable:
                     assert_never(unreachable)
             conn.commit()
-            return (False, '', 'WORKFLOW_STOPPED')
+            return StoppedBeforeRunning('WORKFLOW_STOPPED')
         case _:
-            return (False, '', 'WORKFLOW_CHECK_FAILED')
+            return StoppedBeforeRunning('NODE_NOT_LINKED')
 
 
 def _node_not_linked(
@@ -239,13 +273,13 @@ def _node_not_linked(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult:
-    """The child's WORKFLOW_CHECK_FAILED, then the cancel of the worker's
-    finalize when the self-heal was on: ``horsies_cancel_owned_orphan`` in
+) -> StoppedBeforeRunning:
+    """The child's NODE_NOT_LINKED, then the cancel of the worker's finalize
+    when the self-heal was on: ``horsies_cancel_owned_orphan`` in
     autocommit, fenced to this claim."""
     match orphan_self_heal:
         case False:
-            return (False, '', 'WORKFLOW_CHECK_FAILED')
+            return StoppedBeforeRunning('NODE_NOT_LINKED')
         case True:
             _ = apply_sync(
                 cursor,
@@ -254,7 +288,7 @@ def _node_not_linked(
                     fence=OwnedClaim(worker_id=worker_id, claimed_at=claimed_at),
                 ),
             )
-            return (False, '', 'ORPHAN_CANCELLED')
+            return StoppedBeforeRunning('ORPHAN_CANCELLED')
 
 
 def _after_missed_start(
@@ -266,7 +300,7 @@ def _after_missed_start(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | _WorkflowResumedBeforeStart:
+) -> StoppedBeforeRunning | _WorkflowResumedBeforeStart:
     match reason:
         case 'DEADLINE_PASSED':
             expired = _expire_claimed_task_before_start(cursor, conn, task_id, worker_id)
@@ -296,18 +330,16 @@ def _after_missed_start(
 def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool = True,
     *,
     claimed_at: datetime,
     orphan_self_heal: bool,
     start_check: Callable[[], StartCheck] = start_always_allowed,
-) -> WireResult | None | _WorkflowResumedBeforeStart | DeadlineBeforeStart:
-    """One ``horsies_start_attempt`` in autocommit on the sync pool of the
-    child, then the miss path. ``start_check`` runs once the pool gave the
+) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart | DeadlineBeforeStart:
+    """One ``horsies_start_attempt`` in autocommit on the reference pool,
+    then the miss path. ``start_check`` runs once the pool gave the
     connection; a database error is OWNERSHIP_UNCONFIRMED."""
-    _ = is_workflow_task
     try:
-        with _get_worker_pool().connection() as conn:
+        with _reference_pool().connection() as conn:
             match start_check():
                 case StartAllowed() | StartWithin():
                     pass
@@ -333,52 +365,48 @@ def _confirm_ownership_and_set_running(
                 case _ as unreachable:
                     assert_never(unreachable)
     except Exception:
-        return (False, '', 'OWNERSHIP_UNCONFIRMED')
+        return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 def _confirm_until_not_resumed(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | None:
+) -> StoppedBeforeRunning | None:
     for _ in range(_PRE_START_CONFIRM_ATTEMPTS):
         result = _confirm_ownership_and_set_running(
             task_id,
             worker_id,
-            is_workflow_task,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
         )
         match result:
             case _WorkflowResumedBeforeStart():
                 continue
-            case None | tuple():
+            case None | StoppedBeforeRunning():
                 return result
             case DeadlineBeforeStart():
                 raise AssertionError('a start with no deadline ended at its deadline')
             case _ as unreachable:
                 assert_never(unreachable)
-    return (False, '', 'OWNERSHIP_UNCONFIRMED')
+    return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 async def confirm_until_not_resumed(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | None:
+) -> StoppedBeforeRunning | None:
     """The start of a shared async child before the switch: the same
-    statements, here on the sync pool of the child in a thread."""
+    statements, here on the reference pool in a thread."""
     return await asyncio.to_thread(
         _confirm_until_not_resumed,
         task_id,
         worker_id,
-        is_workflow_task,
         claimed_at,
         orphan_self_heal=orphan_self_heal,
     )

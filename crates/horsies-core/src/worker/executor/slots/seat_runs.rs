@@ -57,8 +57,8 @@ pub const SHARED_STUCK_BACKSTOP: Duration =
     STUCK_REPORT_DELAY.saturating_add(SHARED_BACKSTOP_MARGIN);
 /// A refusal runs only the RUNNING transition and the finalizing marker; a
 /// refusal in flight longer than the longest bound of these writes in a
-/// child of any kind ([`LONGEST_REFUSAL_WRITES_BOUND`], 145 s: a Python
-/// shared thread child) and the margin means a frozen child (Python
+/// child of any kind ([`LONGEST_REFUSAL_WRITES_BOUND`], 145 s: a version-1
+/// Python shared thread child) and the margin means a frozen child (Python
 /// `SHARED_REFUSAL_BACKSTOP_S`). A refusal whose writes end within their
 /// bound, in a child of any kind, never meets it.
 pub const SHARED_REFUSAL_BACKSTOP: Duration =

@@ -27,9 +27,9 @@ from horsies.core.models.worker_profile import (
     describe_worker_profile,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker import slots as slots_module
-from horsies.core.worker import worker as worker_module
-from horsies.core.worker.child_protocol import InitFrame, IsolatedChild
+from tests.dualrun.reference.worker_parent.worker import slots as slots_module
+from tests.dualrun.reference.worker_parent.worker import worker as worker_module
+from tests.dualrun.reference.worker_parent.worker.child_protocol import InitFrame, IsolatedChild
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.cpu_placement import (
     NotLinux,
@@ -40,9 +40,9 @@ from horsies.core.worker.cpu_placement import (
     parse_cpu_list,
     plan_cpu_placement,
 )
-from horsies.core.worker.runtime import ChildStartFailedError
-from horsies.core.worker.slots import BootFailure, Child, SlotPool, SlotPoolConfig
-from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.runtime import ChildStartFailedError
+from tests.dualrun.reference.worker_parent.worker.slots import BootFailure, Child, SlotPool, SlotPoolConfig
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
 
 pytestmark = [pytest.mark.unit]
 

@@ -6,8 +6,9 @@
 //! - [`WorkerPlan::of_manifest`]: pure; picks and checks the profile and
 //!   builds every config value. No I/O and no runtime.
 //! - [`Worker::from_plan`]: builds the broker of the worker process (its
-//!   pools are lazy, so nothing connects) and the worker, whose workflow
-//!   steps build sub-workflow children with the client's child spec source.
+//!   pools are lazy, so nothing connects) for the client family of the
+//!   caller, and the worker, whose workflow steps build sub-workflow children
+//!   with the client's child spec source.
 //!
 //! The manifest holds values only, each inside its bounds, so every mapping
 //! here is total except the profile choice and the broker config check.
@@ -17,7 +18,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::broker::PostgresBroker;
+use crate::broker::client_family::ClientFamily;
+use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::config::queue::{CustomQueueConfig, QueueMode};
 use crate::core::config::worker_profile::{ProfileSelectionRefused, SelectedProfile};
@@ -98,13 +100,15 @@ impl WorkerPlan {
 }
 
 impl Worker {
-    /// The worker of `plan`. The broker of the worker process is built with
-    /// lazy pools, so nothing connects here; the run's start steps connect,
-    /// with the resilience retry. The workflow steps of the worker (the
-    /// parent advances of phase 2, workflow recovery, phase-2 recovery)
-    /// build each sub-workflow child with `child_specs`: the child spec
-    /// source of the client, which builds each child in its own language
-    /// (the `build_with` of the Python client, the registry of the Rust
+    /// The worker of `plan` for a client of `family`. The broker of the
+    /// worker process is built with lazy pools, so nothing connects here; the
+    /// run's start steps connect, with the resilience retry. The schema step
+    /// of the start records `family` in a new database, and the family step
+    /// refuses a database of the other family. The workflow steps of the
+    /// worker (the parent advances of phase 2, workflow recovery, phase-2
+    /// recovery) build each sub-workflow child with `child_specs`: the child
+    /// spec source of the client, which builds each child in its own
+    /// language (the `build_with` of the Python client, the registry of the Rust
     /// client).
     ///
     /// Errors: [`WorkerError::Broker`] when the broker config or the core
@@ -112,9 +116,10 @@ impl Worker {
     pub async fn from_plan(
         plan: WorkerPlan,
         child_specs: impl Into<ChildSpecs>,
+        family: ClientFamily,
     ) -> Result<Self, WorkerError> {
         let child_specs = child_specs.into();
-        let broker = PostgresBroker::connect_worker_with(&plan.broker_config).await?;
+        let broker = worker_broker(&plan.broker_config, family).await?;
         Worker::of_child_specs(
             Arc::new(broker),
             child_specs,
@@ -125,6 +130,19 @@ impl Worker {
             plan.registered,
         )
     }
+}
+
+/// The broker of the worker process for a client of `family`, with lazy
+/// pools: nothing connects.
+///
+/// Errors: [`BrokerError`] when the broker config is refused.
+async fn worker_broker(
+    config: &PostgresConfig,
+    family: ClientFamily,
+) -> Result<PostgresBroker, BrokerError> {
+    Ok(PostgresBroker::connect_worker_with(config)
+        .await?
+        .with_client_family(family))
 }
 
 /// The app config of the worker: the queue mode and the claim settings of

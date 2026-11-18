@@ -33,7 +33,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.types.status import TaskStatus
-from horsies.core.worker.child_protocol import WireResult
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from horsies.core.worker.child_runner import (
     _WorkflowResumedBeforeStart,  # pyright: ignore[reportPrivateUsage]
     stopped_before_start_of,
@@ -123,28 +123,28 @@ def test_a_kind_outside_the_catalog_is_a_decode_error() -> None:
 
 
 @pytest.mark.parametrize(
-    ('outcome', 'move_outcome', 'wire'),
+    ('outcome', 'move_outcome', 'stop'),
     [
-        ('EXPIRED', 'APPLIED', (False, '', 'TASK_EXPIRED')),
-        ('EXPIRED', 'ALREADY_APPLIED', (False, '', 'TASK_EXPIRED')),
-        ('ABANDONED', 'APPLIED', (False, '', 'WORKFLOW_STOPPED')),
-        ('ABANDONED', 'LOST_CLAIM', (False, '', 'WORKFLOW_STOPPED')),
-        ('CANCELLED', 'APPLIED', (False, '', 'WORKFLOW_STOPPED')),
-        ('CANCELLED', 'TASK_ABSENT', (False, '', 'WORKFLOW_STOPPED')),
-        ('ORPHAN_CANCELLED', 'APPLIED', (False, '', 'ORPHAN_CANCELLED')),
-        ('ORPHAN_CANCELLED', 'SOURCE_STATE_CONFLICT', (False, '', 'ORPHAN_CANCELLED')),
-        ('NODE_NOT_LINKED', None, (False, '', 'WORKFLOW_CHECK_FAILED')),
-        ('NOT_HELD', 'LOST_CLAIM', (False, '', 'CLAIM_LOST')),
+        ('EXPIRED', 'APPLIED', StoppedBeforeRunning('TASK_EXPIRED')),
+        ('EXPIRED', 'ALREADY_APPLIED', StoppedBeforeRunning('TASK_EXPIRED')),
+        ('ABANDONED', 'APPLIED', StoppedBeforeRunning('WORKFLOW_STOPPED')),
+        ('ABANDONED', 'LOST_CLAIM', StoppedBeforeRunning('WORKFLOW_STOPPED')),
+        ('CANCELLED', 'APPLIED', StoppedBeforeRunning('WORKFLOW_STOPPED')),
+        ('CANCELLED', 'TASK_ABSENT', StoppedBeforeRunning('WORKFLOW_STOPPED')),
+        ('ORPHAN_CANCELLED', 'APPLIED', StoppedBeforeRunning('ORPHAN_CANCELLED')),
+        ('ORPHAN_CANCELLED', 'SOURCE_STATE_CONFLICT', StoppedBeforeRunning('ORPHAN_CANCELLED')),
+        ('NODE_NOT_LINKED', None, StoppedBeforeRunning('NODE_NOT_LINKED')),
+        ('NOT_HELD', 'LOST_CLAIM', StoppedBeforeRunning('CLAIM_LOST')),
     ],
 )
-def test_each_step_of_the_stop_gives_its_wire_reason(
+def test_each_step_of_the_stop_gives_its_stop_reason(
     outcome: str,
     move_outcome: str | None,
-    wire: WireResult,
+    stop: StoppedBeforeRunning,
 ) -> None:
     record = _record(core.StoppedBeforeStart, outcome=outcome, move_outcome=move_outcome)
 
-    assert stopped_before_start_of(TASK_ID, record) == wire
+    assert stopped_before_start_of(TASK_ID, record) == stop
 
 
 def test_a_resume_that_came_first_runs_the_start_again() -> None:
@@ -157,4 +157,6 @@ def test_a_resume_that_came_first_runs_the_start_again() -> None:
 def test_a_failed_stop_is_an_unconfirmed_start() -> None:
     record = _record(core.StopBeforeStartFailed, message='connection lost', retryable=True)
 
-    assert stopped_before_start_of(TASK_ID, record) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+    assert stopped_before_start_of(TASK_ID, record) == StoppedBeforeRunning(
+        'OWNERSHIP_UNCONFIRMED',
+    )

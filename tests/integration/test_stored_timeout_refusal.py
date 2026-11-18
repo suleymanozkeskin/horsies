@@ -32,18 +32,18 @@ from horsies.core.models.tasks import (
 from horsies.core.history.archive.attempts import AttemptRecord
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import is_ok
-from horsies.core.worker.claiming import ClaimPass
+from tests.dualrun.reference.worker_parent.worker.claiming import ClaimPass
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.current import set_current_app
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker.stored_timeout import (
+from tests.dualrun.reference.worker_parent.worker.current import set_current_app
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import (
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.worker import Worker, _initialize_worker_pool, _run_task_entry
-from horsies.core.worker.task_loop import TaskLoop
+from tests.dualrun.reference.worker_parent.worker.worker import Worker, _initialize_worker_pool, _run_task_entry
+from tests.dualrun.reference.worker_parent.worker.task_loop import TaskLoop
 from tests.integration.autocommit_support import use_pooled_runners
 from tests.broker_resources_support import current_resources, listener_of
 from tests.fixtures.slots.handles import task_finished_handle
@@ -55,7 +55,7 @@ from tests.integration.conftest import (
     make_workflow_spec,
     start_ok,
 )
-from tests.fixtures.run_return import wire_of
+from tests.fixtures.reference_worker_support import wire_of
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 

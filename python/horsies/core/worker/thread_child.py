@@ -22,9 +22,10 @@ time left, and the core checks that time again once the pool gave a
 connection. The row stays CLAIMED for the worker to return to the queue.
 
 After the return, a run that set its row RUNNING and returned before its
-deadline writes its finalizing marker, at most until that deadline; the seat
-reports the end after it. A run that timed out writes none: the runner
-heartbeats of the worker cover the row until the worker reads the end.
+deadline writes its finalizing marker, with the bound of the core handle of
+the child; the seat reports the end after it. A run that timed out writes
+none: the runner heartbeats of the worker cover the row until the worker
+reads the end.
 
 Frames leave through the writer thread of ``FrameWriter``. A seat and the
 deadline thread queue the frames of a run while they hold the lock of the
@@ -62,34 +63,26 @@ from horsies.core.worker.child_main import (
     exit_after_stop,
     fail_boot,
 )
-from horsies.core.worker.child_protocol import (
+from horsies import _core as core
+from horsies.core.worker.child_frames import (
     BootFailedFrame,
     ChildFrame,
     DeadlineFiredFrame,
-    InitFrame,
     ReadyFrame,
     RssReading,
-    RunFrame,
     SeatEnd,
-    SeatFinished,
-    SeatRefusal,
-    SeatTask,
     SeatTimedOut,
     SharedResultFrame,
-    SharedRunFrame,
-    StopFrame,
-    ThreadSeatTask,
     ThreadSeatWork,
     boot_failed_frame,
 )
+from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import (
     CHILD_DEFECT_EXIT_CODE,
     FRAMES_PER_SEAT,
     WRITER_CLOSE_TIMEOUT_S,
     FrameWriter,
-    MarkerBeforeDeadline,
-    MarkerWindow,
-    MarkerWithoutDeadline,
+    MarkerDue,
     NoMarker,
     SetRunning,
     StoppedBeforeRunning,
@@ -132,7 +125,7 @@ class ThreadSeatProgram(Protocol):
 
     def run(
         self,
-        frame: SharedRunFrame,
+        frame: core.SharedRunFrame,
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
     ) -> ThreadSeatReturn:
@@ -143,10 +136,10 @@ class ThreadSeatProgram(Protocol):
         ``CHILD_DEFECT_EXIT_CODE``."""
         ...
 
-    def mark_finalizing(self, frame: SharedRunFrame, window: MarkerWindow) -> None:
+    def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
         """Write the finalizing marker of the run of ``frame``, whose task
-        returned, within ``window``. A failed or skipped write is logged
-        only; an exception that escapes is a defect, as for ``run``."""
+        returned. A failed or skipped write is logged only; an exception
+        that escapes is a defect, as for ``run``."""
         ...
 
 
@@ -182,7 +175,7 @@ class _ThreadRun:
     """One run in flight. ``state`` turns ``FIRED`` once, and only for a run
     with a deadline, then ``_Returned`` once, when its task returns."""
 
-    frame: SharedRunFrame
+    frame: core.SharedRunFrame
     deadline_at: _DeadlineAt | _NoDeadline
     state: _Deadline | _Returned
 
@@ -197,9 +190,9 @@ class _TableState(Enum):
 def _deadline_at(work: ThreadSeatWork, now: float) -> _DeadlineAt | _NoDeadline:
     """The time on the table clock at which the deadline of ``work`` fires."""
     match work:
-        case ThreadSeatTask(timeout_ms=timeout_ms):
+        case core.ThreadTaskWork(timeout_ms=timeout_ms):
             return _DeadlineAt(now + timeout_ms / 1000.0)
-        case SeatRefusal():
+        case core.StoredOptionsRefused():
             return _NoDeadline()
         case _ as unreachable:
             assert_never(unreachable)
@@ -226,44 +219,49 @@ def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
                 f'run {run.frame.dispatch} did not start before a deadline '
                 'that has not fired',
             )
-        case _Deadline.PENDING, SetRunning(wire=wire) | StoppedBeforeRunning(wire=wire):
-            ok, result_json, failed_reason = wire
-            return SeatFinished(
-                ok=ok,
-                result_json=result_json,
-                failed_reason=failed_reason,
-            )
+        case _Deadline.PENDING, SetRunning(result=result):
+            return result
+        case _Deadline.PENDING, StoppedBeforeRunning() as stopped:
+            return stopped
         case _Returned(), _:
             raise AssertionError(f'run {run.frame.dispatch} returned twice')
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def _marker_window(
+def _marker_at_return(
     run: _ThreadRun,
     returned: ThreadSeatReturn,
     end: SeatEnd,
     now: float,
-) -> MarkerWindow | NoMarker:
+) -> MarkerDue | NoMarker:
     """Whether the seat writes the finalizing marker of a run whose task
-    returned, and within what time. ``now`` is on the clock of the table.
+    returned. ``now`` is on the clock of the table.
 
     Only a run that set its row RUNNING and returned before its deadline
-    writes it, at most until that deadline: the end report of the run then
-    comes before the backstop of the worker. A run that timed out writes
-    none: the worker writes its outcome after the read, as at a kill, and
-    its beats cover the row until then.
+    writes it, with the bound of the core handle
+    (``FINALIZING_MARKER_TIMEOUT_S``). A run that timed out writes none: the
+    worker writes its outcome after the read, as at a kill, and its beats
+    cover the row until then.
     """
     match end, returned, run.deadline_at:
         case SeatTimedOut(), _, _:
             return NoMarker()
-        case SeatFinished(), StoppedBeforeRunning() | DeadlineBeforeStart(), _:
+        case (
+            ResultEnvelope() | StoppedBeforeRunning(),
+            StoppedBeforeRunning() | DeadlineBeforeStart(),
+            _,
+        ):
             return NoMarker()
-        case SeatFinished(), SetRunning(), _NoDeadline():
-            return MarkerWithoutDeadline()
-        case SeatFinished(), SetRunning(), _DeadlineAt(seconds=at) if at > now:
-            return MarkerBeforeDeadline(seconds=at - now)
-        case SeatFinished(), SetRunning(), _DeadlineAt():
+        case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _NoDeadline():
+            return MarkerDue()
+        case (
+            ResultEnvelope() | StoppedBeforeRunning(),
+            SetRunning(),
+            _DeadlineAt(seconds=at),
+        ) if at > now:
+            return MarkerDue()
+        case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _DeadlineAt():
             return NoMarker()
         case _ as unreachable:
             assert_never(unreachable)
@@ -294,7 +292,7 @@ class ThreadRunTable:
         self._runs: dict[int, _ThreadRun] = {}
         self._state = _TableState.SERVING
 
-    def add(self, frame: SharedRunFrame, work: ThreadSeatWork) -> None:
+    def add(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
         """Hold a new run and start its deadline. ``work`` is ``frame.work``.
 
         A run when every seat is taken, or a dispatch number in use, is a
@@ -353,11 +351,11 @@ class ThreadRunTable:
         self,
         dispatch: int,
         returned: ThreadSeatReturn,
-    ) -> MarkerWindow | NoMarker:
+    ) -> MarkerDue | NoMarker:
         """Fix the end of run ``dispatch``, whose task returned ``returned``
         (``_end_at_return``): the run has no deadline left. Returns whether
-        its seat writes the finalizing marker, and within what time
-        (``_marker_window``). Called once per run, by its seat thread.
+        its seat writes the finalizing marker (``_marker_at_return``).
+        Called once per run, by its seat thread.
 
         A task that returned (``SetRunning``, ``StoppedBeforeRunning``)
         fires no deadline: a return at or past a deadline that the deadline
@@ -377,7 +375,7 @@ class ThreadRunTable:
             end = _end_at_return(run, returned)
             run.state = _Returned(end)
             self._changed.notify_all()
-            return _marker_window(run, returned, end, self._clock())
+            return _marker_at_return(run, returned, end, self._clock())
 
     def finish(self, dispatch: int, rss: RssReading) -> None:
         """End run ``dispatch``, whose task returned, and queue its result
@@ -464,7 +462,7 @@ class ThreadRunTable:
 class _SeatJob:
     """A run for a seat, with its work narrowed to the thread kind."""
 
-    frame: SharedRunFrame
+    frame: core.SharedRunFrame
     work: ThreadSeatWork
 
 
@@ -523,7 +521,7 @@ class ThreadSeats:
                     return refused
         return Ok(None)
 
-    def give(self, frame: SharedRunFrame, work: ThreadSeatWork) -> None:
+    def give(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
         """Hand a run to the next free seat thread. Never blocks."""
         self._jobs.put(_SeatJob(frame, work))
 
@@ -544,22 +542,22 @@ class ThreadSeats:
                 case _ as unreachable:
                     assert_never(unreachable)
 
-    def _run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> None:
+    def _run(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
         """Run one task, fix its end at its return, write its finalizing
         marker when one is due, then end the run."""
         returned = self._run_or_exit(frame, work)
         match self._table.returned(frame.dispatch, returned):
             case NoMarker():
                 pass
-            case MarkerBeforeDeadline() | MarkerWithoutDeadline() as window:
-                self._mark_or_exit(frame, window)
+            case MarkerDue():
+                self._mark_or_exit(frame)
             case _ as unreachable:
                 assert_never(unreachable)
         self._table.finish(frame.dispatch, self._read_rss())
 
     def _run_or_exit(
         self,
-        frame: SharedRunFrame,
+        frame: core.SharedRunFrame,
         work: ThreadSeatWork,
     ) -> ThreadSeatReturn:
         try:
@@ -575,9 +573,9 @@ class ThreadSeats:
                 CHILD_DEFECT_EXIT_CODE,
             )
 
-    def _mark_or_exit(self, frame: SharedRunFrame, window: MarkerWindow) -> None:
+    def _mark_or_exit(self, frame: core.SharedRunFrame) -> None:
         try:
-            self._program.mark_finalizing(frame, window)
+            self._program.mark_finalizing(frame)
         except BaseException as exc:
             _exit_for_defect(
                 f'the finalizing marker of task {frame.task_id} escaped the '
@@ -586,14 +584,14 @@ class ThreadSeats:
             )
 
 
-def _seat_work_of(frame: SharedRunFrame) -> ThreadSeatWork:
+def _seat_work_of(frame: core.SharedRunFrame) -> ThreadSeatWork:
     """The work of a run for a thread seat. The task work of a shared async
     child is a parent defect: the process ends with
     ``BAD_PARENT_FRAME_EXIT_CODE``."""
     match frame.work:
-        case ThreadSeatTask() | SeatRefusal() as work:
+        case core.ThreadTaskWork() | core.StoredOptionsRefused() as work:
             return work
-        case SeatTask():
+        case core.AsyncTaskWork():
             _exit_for_defect(
                 f'parent sent run {frame.dispatch} of a shared async child to '
                 'a shared thread child',
@@ -606,7 +604,7 @@ def _seat_work_of(frame: SharedRunFrame) -> ThreadSeatWork:
 class RunTaker(Protocol):
     """Where ``serve_runs`` hands each run: ``ThreadSeats``. Never blocks."""
 
-    def give(self, frame: SharedRunFrame, work: ThreadSeatWork) -> None: ...
+    def give(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None: ...
 
 
 def serve_runs(
@@ -623,11 +621,11 @@ def serve_runs(
     """
     while True:
         match inbox.get():
-            case SharedRunFrame() as frame:
+            case core.SharedRunFrame() as frame:
                 work = _seat_work_of(frame)
                 table.add(frame, work)
                 seats.give(frame, work)
-            case StopFrame():
+            case core.StopFrame():
                 in_flight = table.count()
                 if in_flight:
                     _exit_for_defect(
@@ -636,7 +634,7 @@ def serve_runs(
                         BAD_PARENT_FRAME_EXIT_CODE,
                     )
                 return
-            case RunFrame():
+            case core.RunFrame():
                 _exit_for_defect(
                     'parent sent an isolated run frame to a shared thread child',
                     BAD_PARENT_FRAME_EXIT_CODE,
@@ -658,7 +656,7 @@ def _start_or_fail_boot(
 
 def serve_thread(
     sock: socket.socket,
-    init: InitFrame,
+    init: core.InitFrame,
     work: ParentFrameInbox,
     task_loop: TaskLoop,
     seats: int,
@@ -667,7 +665,7 @@ def serve_thread(
     """Run a shared thread child from its threads to its exit.
 
     The sync boot ran (``child_main.boot_app``): the app is imported, the
-    start hooks ran, and the sync pool of the child is open. ``task_loop``
+    start hooks ran, and the core handle of the child is built. ``task_loop``
     is not created: a thread child runs no ``async def`` task. The writer
     thread, the deadline thread and the ``seats`` seat threads start first;
     a refused thread fails the boot (``ThreadStartRefused``). After the stop

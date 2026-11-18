@@ -2,23 +2,23 @@
 """Dual-run of the finalizing marker: the fenced update against ``horsies_mark_finalizing``.
 
 Reference: ``tests/dualrun/reference/finalizing.py``. Candidate: the
-isolated child's ``_mark_task_finalizing`` on its sync pool. The seed holds
+child's ``mark_run_finalizing`` through the core handle of the child
+(``CoreChildHandle.mark_finalizing``). The seed holds
 one row per marker case; both sides must mark the same rows, leave the
 others as they were, and report the same outcome. The candidate's outcome is
 what its log records say: the debug record of a changed claim is
 ``NOT_HELD``, no record is ``MARKED``, and a warning fails the test.
 
-The candidate runs on a pool of its own database in place of the pool of the
-process (``_worker_pool_for``): integration tests leave a pool of the suite
-database in place, and ``_initialize_worker_pool`` keeps a pool that exists.
+The candidate runs on a core handle of its own database in place of the
+handle of the process (``child_core_handle_for``): integration tests leave a
+handle of the suite database in place.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Final
@@ -28,7 +28,6 @@ import pytest
 
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_pool, child_runner
-from horsies.core.worker.child_pool import _cleanup_worker_pool, _initialize_worker_pool
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -36,6 +35,7 @@ from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import finalizing as reference
 from tests.dualrun.seeds import SeedStatus, TaskSeed, insert_task
 from tests.dualrun.selfcheck import SelfCheckStepFailed
+from tests.fixtures.child_core import child_core_handle_for
 
 pytestmark = [pytest.mark.integration]
 
@@ -133,31 +133,16 @@ def _logged_outcome(records: list[logging.LogRecord], task_id: str) -> str:
             raise AssertionError(f'the marker of task {task_id} failed: {failures}')
 
 
-@contextmanager
-def _worker_pool_for(database_url: str) -> Generator[None]:
-    """A pool of the process for ``database_url`` in place of the pool in
-    place, until the block ends; then this pool closes and the pool of before
-    comes back."""
-    previous = child_pool._worker_pool
-    child_pool._worker_pool = None
-    _initialize_worker_pool(database_url)
-    try:
-        yield
-    finally:
-        _cleanup_worker_pool()
-        child_pool._worker_pool = previous
-
-
 def _candidate_mark(
     caplog: pytest.LogCaptureFixture,
 ) -> Callable[[DualRunDatabase, tuple[_Mark, ...]], dict[str, str]]:
     def act(database: DualRunDatabase, marks: tuple[_Mark, ...]) -> dict[str, str]:
-        with _worker_pool_for(database.url):
+        with child_core_handle_for(database.url):
             report: dict[str, str] = {}
             for each in marks:
                 caplog.clear()
-                child_runner._mark_task_finalizing(
-                    each.task_id, each.worker_id, each.claimed_at
+                child_runner.mark_run_finalizing(
+                    uuid.UUID(each.task_id), each.worker_id, each.claimed_at
                 )
                 report[each.name] = _logged_outcome(caplog.records, each.task_id)
             return report
@@ -204,17 +189,17 @@ def test_the_marker_writes_and_answers_what_the_fenced_update_did(
     assert run.candidate.report == run.reference.report
 
 
-def test_the_candidate_marks_on_its_own_database_while_another_pool_is_in_place(
+def test_the_candidate_marks_on_its_own_database_while_another_handle_is_in_place(
     empty_database: MakeDatabase,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The process state that integration tests leave (a pool of another
-    database) does not move the candidate's statements to that database."""
+    """The process state that integration tests leave (a child core handle
+    of another database) does not move the candidate's statements to that
+    database: ``child_core_handle_for`` puts its own handle in place."""
     caplog.set_level(logging.DEBUG, logger='horsies.worker')
     other = empty_database()
 
-    with _worker_pool_for(other.url):
-        in_place = child_pool._worker_pool
+    with child_core_handle_for(other.url) as in_place:
         run = _ok(
             dual_run(
                 empty_database,
@@ -225,8 +210,8 @@ def test_the_candidate_marks_on_its_own_database_while_another_pool_is_in_place(
                 ),
             )
         )
-        after = child_pool._worker_pool
+        after = child_pool._get_child_core_handle()
 
     assert run.diff.entries == (), render_diff(run.diff)
     assert run.candidate.report == run.reference.report
-    assert after is in_place, 'the pool in place before the pair is back'
+    assert after is in_place, 'the handle in place before the pair is back'

@@ -375,9 +375,9 @@ class CoreHandle:
 
 @final
 class CoreChildHandle:
-    """The core handle of one worker's child process: the producer manifest of its child pool,
-    the connections the pool keeps open, and the ping at checkout. Built in the child after
-    its start; building it starts nothing.
+    """The core handle of one worker's child process, built from its init frame (from_init), or
+    from the producer manifest of its child pool, the connections the pool keeps open, and the
+    ping at checkout. Built in the child after its start; building it starts nothing.
     """
     def __init__(self, manifest_json: str, *, kept_open: int, check_at_checkout: bool) -> None: ...
     def start_attempt(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed:
@@ -410,6 +410,11 @@ class CoreChildHandle:
         """
     def mark_finalizing_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed]:
         """The awaitable form of the method above."""
+    @staticmethod
+    def from_init(init: InitFrame) -> CoreChildHandle:
+        """The child handle of the child that init boots: the database URL, the connection settings
+        and the pool of the child kind come from the frame and stay in the core. Starts nothing.
+        """
 
 
 @final
@@ -2782,8 +2787,23 @@ class PythonProgram:
 
 
 @final
+class ChildPool:
+    """The connection pool of a child: min_size connections kept open, at most max_size; check
+    pings each pooled connection at checkout.
+    """
+    @property
+    def min_size(self) -> int: ...
+    @property
+    def max_size(self) -> int: ...
+    @property
+    def check(self) -> bool: ...
+
+
+@final
 class IsolatedChildKind:
     """An isolated child: one task at a time."""
+    @property
+    def pool(self) -> ChildPool: ...
     @property
     def task_send_pool(self) -> int: ...
 
@@ -2793,6 +2813,8 @@ class SharedAsyncChildKind:
     """A shared async child: up to seats async tasks on one event loop."""
     @property
     def seats(self) -> int: ...
+    @property
+    def pool(self) -> ChildPool: ...
     @property
     def executor_threads(self) -> int: ...
     @property
@@ -2804,6 +2826,8 @@ class SharedThreadChildKind:
     """A shared thread child: up to seats blocking tasks, each on a thread."""
     @property
     def seats(self) -> int: ...
+    @property
+    def pool(self) -> ChildPool: ...
     @property
     def task_send_pool(self) -> int: ...
 
@@ -2939,7 +2963,10 @@ class FrameTooLarge:
 
 @final
 class ProtocolNumbers:
-    """The protocol version, the exit codes of a child and the spawn request byte."""
+    """The protocol version, the exit codes of a child, the spawn request byte, and the bounds
+    that a child applies before it builds a frame: the names of a report of left work, and the
+    bytes of a body.
+    """
     @property
     def protocol_version(self) -> int: ...
     @property
@@ -2960,6 +2987,10 @@ class ProtocolNumbers:
     def child_hook_failed_exit_code(self) -> int: ...
     @property
     def spawn_request_byte(self) -> int: ...
+    @property
+    def max_leftover_task_names(self) -> int: ...
+    @property
+    def max_body_bytes(self) -> int: ...
 
 
 @final

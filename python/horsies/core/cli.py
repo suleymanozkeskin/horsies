@@ -17,18 +17,14 @@ import os
 import random
 import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn, assert_never
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
-from horsies._core import set_panic_rule
-from horsies.core.brokers.postgres import PostgresBroker, WorkerProcessBroker
-from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
 from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import (
@@ -38,7 +34,6 @@ from horsies.core.errors import (
     ValidationReport,
 )
 from horsies.core.logging import get_logger
-from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.child_sizing import DEFAULT_TASK_SEND_POOL_CONNECTIONS
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.worker_profile import (
@@ -60,35 +55,12 @@ from horsies.core.models.worker_profile import (
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
-from horsies.core.worker.profile_fit import (
-    CONNECTIONS_HELP,
-    CgroupLimit,
-    CgroupUnreadable,
-    ConnectionsExceedServer,
-    ConnectionsFit,
-    MemoryLimitsExceedMachine,
-    MemoryLimitsFit,
-    MemoryLimitsNotSet,
-    NoCgroupLimit,
-    ServerConnectionLimit,
-    ServerConnectionLimitUnreadable,
-    UsableMemory,
-    UsableMemoryUnreadable,
-    compare_connections,
-    compare_memory_limits,
-    read_cgroup_memory_limit,
-    read_machine_memory,
-    read_server_connection_limit,
-    usable_memory,
-)
-from horsies.core.worker.worker import Worker, WorkerConfig
+from horsies.core.worker.core_run import EXIT_STOPPED, WorkerLaunch, run_core_worker
 from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.utils.imports import (
     import_file_path,
     setup_sys_path_from_cwd,
 )
-from horsies.core.utils.db import held_recycle
-from horsies.core.utils.url import to_psycopg_url
 
 
 def _raise_schema_error(err: BrokerOperationError) -> NoReturn:
@@ -210,23 +182,6 @@ def _parse_locator(locator: str) -> tuple[str, str | None]:
 def _is_file_path(path: str) -> bool:
     """Check if path looks like a file path (vs dotted module path)."""
     return path.endswith('.py') or os.path.sep in path or '/' in path
-
-
-def _build_queue_settings(app: Horsies) -> tuple[dict[str, int], dict[str, int]]:
-    """Build (queue_priorities, queue_max_concurrency) for CUSTOM mode.
-
-    Uncapped queues (``max_concurrency=None``) are omitted from the
-    concurrency map: the worker's claim pass only counts and limits
-    queues present in it.
-    """
-    queue_priorities: dict[str, int] = {}
-    queue_max_concurrency: dict[str, int] = {}
-    if app.config.queue_mode.name == 'CUSTOM' and app.config.custom_queues:
-        for q in app.config.custom_queues:
-            queue_priorities[q.name] = q.priority
-            if q.max_concurrency is not None:
-                queue_max_concurrency[q.name] = q.max_concurrency
-    return queue_priorities, queue_max_concurrency
 
 
 def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
@@ -615,139 +570,6 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
     )
 
 
-def _read_usable_memory(
-    selected: SelectedProfile,
-    logger: logging.Logger,
-) -> UsableMemory | UsableMemoryUnreadable:
-    """Read the host RAM and the cgroup limit, and keep the smaller.
-
-    Warns when a cgroup limit file exists but cannot be read: the host RAM
-    is then the only bound, and inside a container it can be far too high.
-    """
-    cgroup = read_cgroup_memory_limit()
-    match cgroup:
-        case CgroupUnreadable(reason=reason):
-            logger.warning(
-                'Worker profile %r: the container memory limit could not be '
-                'read (%s); the per-child memory limits are compared with the '
-                'host RAM',
-                selected.name,
-                reason,
-            )
-        case CgroupLimit() | NoCgroupLimit():
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
-    return usable_memory(read_machine_memory(), cgroup)
-
-
-def _log_memory_fit(selected: SelectedProfile, logger: logging.Logger) -> None:
-    """Warn when the per-child memory limits add up to more than the memory
-    that the worker can use: the container limit, or the host RAM.
-
-    A warning, not a refusal: a deployment can move between machine sizes.
-    The worker starts in every outcome.
-    """
-    match _read_usable_memory(selected, logger):
-        case UsableMemoryUnreadable(reason=reason):
-            logger.warning(
-                'Worker profile %r: the memory of the machine could not be read '
-                '(%s); the per-child memory limits were not compared with it',
-                selected.name,
-                reason,
-            )
-        case UsableMemory(source=source) as usable:
-            match compare_memory_limits(selected.profile, usable):
-                case MemoryLimitsExceedMachine(total_mb=total_mb, machine_mb=usable_mb):
-                    logger.warning(
-                        'Worker profile %r: the per-child memory limits add up '
-                        'to %s MB, above the %s MB %s. Children can use more '
-                        'memory than the worker has before they are recycled.',
-                        selected.name,
-                        total_mb,
-                        usable_mb,
-                        source.value,
-                    )
-                case MemoryLimitsFit(total_mb=total_mb, machine_mb=usable_mb):
-                    logger.info(
-                        'Worker profile %r: per-child memory limits add up to '
-                        '%s MB of the %s MB %s',
-                        selected.name,
-                        total_mb,
-                        usable_mb,
-                        source.value,
-                    )
-                case MemoryLimitsNotSet():
-                    logger.info(
-                        'Worker profile %r: no per-child memory limit, so '
-                        'there is no sum to compare with the memory',
-                        selected.name,
-                    )
-                case _ as unreachable:
-                    assert_never(unreachable)
-        case _ as unreachable_memory:
-            assert_never(unreachable_memory)
-
-
-def _log_connection_limit(
-    selected: SelectedProfile,
-    limit: ServerConnectionLimit,
-    logger: logging.Logger,
-) -> None:
-    match compare_connections(selected.profile, limit):
-        case ConnectionsExceedServer() as exceed:
-            logger.warning(
-                'Worker profile %r: %s. %s; %s. To fix: %s',
-                selected.name,
-                exceed.describe(),
-                exceed.need.formula(),
-                exceed.need.task_sends_note(),
-                CONNECTIONS_HELP,
-            )
-        case ConnectionsFit() as fit:
-            logger.info('Worker profile %r: %s', selected.name, fit.describe())
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-async def _log_connection_fit(
-    selected: SelectedProfile,
-    broker: PostgresConfig,
-    session_factory: Callable[[], AsyncSession],
-    logger: logging.Logger,
-) -> None:
-    """Warn when one worker can open more connections than the server allows.
-
-    Runs at boot, before any child starts or any row is claimed. A warning,
-    not a refusal; ``horsies check --live`` reports the same fact as an
-    error. Through a transaction pooler the pooled connections do not map to
-    server connections, so nothing is compared.
-    """
-    match broker.pgbouncer_transaction_mode:
-        case True:
-            logger.info(
-                'Worker profile %r: connections go through a transaction '
-                'pooler; the server connection limit is not compared',
-                selected.name,
-            )
-            return
-        case False:
-            pass
-    match await read_server_connection_limit(session_factory):
-        case ServerConnectionLimitUnreadable(reason=reason):
-            logger.warning(
-                'Worker profile %r: the server connection limit could not be '
-                'read (%s); the connections of this worker were not compared '
-                'with it',
-                selected.name,
-                reason,
-            )
-        case ServerConnectionLimit() as limit:
-            _log_connection_limit(selected, limit, logger)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def worker_command(args: argparse.Namespace) -> None:
     """Handle worker command.
 
@@ -778,16 +600,14 @@ def worker_command(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # The profile is chosen before anything starts. AppConfig validation
-    # already checked every profile when the app module built the config.
+    # already checked every profile when the app module built the config;
+    # the core checks the same choice again.
     match select_worker_profile(app.config.worker_profiles, args.profile):
         case Err(selection_error):
-            report = ValidationReport('worker-startup')
-            report.add(_profile_selection_error(selection_error))
-            print(report.format_rust_style(), file=sys.stderr)
+            _print_worker_startup_report((_profile_selection_error(selection_error),))
             sys.exit(1)
         case Ok(selected):
             pass
-    settings = execution_settings(selected.profile)
     logger.info(
         f'Worker profile {selected.name!r}: '
         f'{describe_worker_profile(selected.profile)}'
@@ -796,202 +616,48 @@ def worker_command(args: argparse.Namespace) -> None:
     # Strict startup validation before worker accepts tasks.
     startup_errors = app.check(live=False)
     if startup_errors:
-        report = ValidationReport('worker-startup')
-        for error in startup_errors:
-            report.add(error)
-        print(report.format_rust_style(), file=sys.stderr)
+        _print_worker_startup_report(startup_errors)
         sys.exit(1)
 
-    # Build the worker broker config directly from the app config. Avoid
-    # app.get_broker() here: user apps may also use a larger producer/web broker
-    # pool, and any broker opened before child forking must not be inherited by
-    # child workers. The pool of the worker process is the resolved
-    # WorkerProfile.pool, with no overflow and the worker pre-ping.
-    postgres_config = app.config.broker
-    worker_postgres_config = postgres_config.worker_process_config(settings.parent_pool)
-
-    # Get queues from app config
-    queues: list[str] = app.get_valid_queue_names()
-    logger.info(f'Worker will process queues: {queues}')
-
-    # Build per-queue settings for CUSTOM mode
-    try:
-        queue_priorities, queue_max_concurrency = _build_queue_settings(app)
-    except Exception as exc:
-        logger.error(f'Failed to parse custom queue config: {exc}')
-        queue_priorities, queue_max_concurrency = {}, {}
-
-    # Get discovered task modules
-    discovered_modules = app.get_discovered_task_modules()
-    if discovered_modules:
-        logger.info('Using discovered task modules')
-    else:
-        logger.warning('No task modules discovered.')
-
-    # Create worker config
-    log_level_int = getattr(logging, loglevel.upper(), logging.INFO)
-
-    # Build sys_path_roots
-    sys_path_roots: list[str] = []
-    if sys_path_root:
-        sys_path_roots.append(sys_path_root)
+    logger.info(f'Worker will process queues: {app.get_valid_queue_names()}')
 
     # Build app_locator - prefer module path format
     if _is_file_path(module_locator.split(':')[0]):
-        # File path - use absolute path
         file_path = module_locator.split(':')[0]
         if not file_path.endswith('.py'):
             file_path += '.py'
         app_locator = f'{os.path.realpath(file_path)}:{var_name}'
     else:
-        # Module path - use as-is
         app_locator = f'{module_name}:{var_name}'
 
-    worker_config = WorkerConfig(
-        dsn=postgres_config.database_url.get_secret_value(),
-        session_dsn=postgres_config.effective_session_database_url,
-        psycopg_dsn=to_psycopg_url(postgres_config.effective_session_database_url),
-        pgbouncer_transaction_mode=postgres_config.pgbouncer_transaction_mode,
-        parent_pool_size=settings.parent_pool,
-        parent_pool_recycle=held_recycle(postgres_config.pool_recycle),
-        isolated_pool=settings.isolated_pool,
-        isolated_task_send_pool=settings.isolated_task_send_pool,
-        child_connect_kwargs=postgres_config.pooled_connect_args,
-        queues=queues,
-        processes=settings.processes,
-        app_locator=app_locator,
-        sys_path_roots=sys_path_roots,
-        imports=discovered_modules,
-        queue_priorities=queue_priorities,
-        queue_max_concurrency=queue_max_concurrency,
-        cluster_wide_cap=app.config.cluster_wide_cap,
-        prefetch_buffer=app.config.prefetch_buffer,
-        claim_lease_ms=app.config.claim_lease_ms,
-        max_claim_renew_age_ms=app.config.max_claim_renew_age_ms,
-        max_claim_batch=settings.max_claim_batch,
-        max_claim_per_worker=settings.max_claim_per_worker,
-        max_tasks_per_child=settings.max_tasks_per_child,
-        max_memory_per_child_mb=settings.max_memory_per_child_mb,
-        drain_timeout_s=settings.drain_timeout_s,
-        child_preload=settings.child_preload,
-        parent_cpu=settings.parent_cpu,
-        shared_async=settings.shared_async,
-        shared_thread=settings.shared_thread,
-        recovery_config=app.config.recovery,
-        retention_config=app.config.retention,
-        resilience_config=app.config.resilience,
-        loglevel=log_level_int,
-    )
-
-    # Machine facts: a warning, never a refusal.
-    _log_memory_fit(selected, logger)
-
-    # Print startup banner
-    app.import_task_modules()  # Import tasks so they show in banner
+    discovered_modules = app.get_discovered_task_modules()
+    if discovered_modules:
+        logger.info('Using discovered task modules')
+    else:
+        logger.warning('No task modules discovered.')
+    # The registered classes of the manifest and the banner come from the
+    # task modules.
+    app.import_task_modules()
     print_banner(app, role='worker', show_tasks=True)
 
-    # Start worker
-    logger.info('Starting worker...')
-    try:
+    launch = WorkerLaunch(
+        app_locator=app_locator,
+        imports=tuple(discovered_modules),
+        sys_path_roots=(sys_path_root,) if sys_path_root else (),
+        profile=selected.name,
+        loglevel=loglevel,
+    )
+    exit_code = run_core_worker(app, launch, logger, _print_worker_startup_report)
+    if exit_code != EXIT_STOPPED:
+        sys.exit(exit_code)
 
-        async def run_worker() -> None:
-            loop = asyncio.get_running_loop()
-            run_task = asyncio.current_task()
-            worker: Worker | None = None
 
-            def signal_handler() -> None:
-                logger.info('Received interrupt signal, stopping worker...')
-                if worker is None:
-                    if run_task is not None:
-                        run_task.cancel()
-                    return
-                worker.request_stop()
-
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                try:
-                    loop.add_signal_handler(sig, signal_handler)
-                except NotImplementedError:
-                    pass
-
-            broker: PostgresBroker | None = None
-            try:
-                # A panic in a core background task aborts the worker
-                # process, and its supervisor restarts it. Set before the
-                # first core call of the process: the schema install of the
-                # schema broker runs through its core handle.
-                set_panic_rule('ABORT_PROCESS')
-                schema_broker = PostgresBroker(worker_postgres_config)
-                schema_broker.app = app
-                try:
-                    logger.info(
-                        'Ensuring Postgres schema and triggers are initialized...'
-                    )
-                    await _ensure_schema_with_retry(
-                        schema_broker,
-                        app.config.resilience,
-                        logger,
-                    )
-                except asyncio.CancelledError:
-                    logger.info('Worker startup interrupted')
-                    return
-                except Exception as e:
-                    logger.error(f'Failed to initialize database schema: {e}')
-                    raise
-                finally:
-                    await _close_broker(schema_broker, logger)
-
-                broker = WorkerProcessBroker(worker_postgres_config)
-                broker.app = app
-                # A fresh broker on this loop: reaching the loop limit is a programmer error.
-                match await broker.select_resources():
-                    case Err(loop_limit):
-                        raise AssertionError(
-                            f'worker broker resources: {loop_limit.describe()}',
-                        )
-                    case Ok(resources):
-                        pass
-                match resources.listener:
-                    case ListenerEnabled(listener=listener):
-                        pass
-                    case ListenerDisabled():
-                        raise AssertionError(
-                            'worker broker has no listener; a broker built '
-                            'without assume_initialized always owns one',
-                        )
-                await _log_connection_fit(
-                    selected,
-                    postgres_config,
-                    resources.session_factory,
-                    logger,
-                )
-                worker = Worker(
-                    resources.session_factory,
-                    listener,
-                    worker_config,
-                    broker=broker,
-                )
-                await worker.run_forever()
-            finally:
-                if broker is not None:
-                    await _close_broker(broker, logger)
-
-        try:
-            asyncio.run(run_worker())
-        except KeyboardInterrupt:
-            logger.info('Worker interrupted by user')
-            return
-        except asyncio.TimeoutError:
-            # Retry-exhausted startup timeout: the worker never came up.
-            # Exit non-zero — a clean exit here told the supervisor nothing
-            # went wrong, so nothing restarted the worker.
-            logger.error('Worker startup timed out')
-            sys.exit(1)
-    except KeyboardInterrupt:
-        logger.info('Worker interrupted by user')
-        return
-    except Exception as e:
-        logger.error(f'Worker failed: {e}')
-        sys.exit(1)
+def _print_worker_startup_report(errors: Sequence[HorsiesError]) -> None:
+    """Print the ``worker-startup`` report of ``errors`` to stderr."""
+    report = ValidationReport('worker-startup')
+    for error in errors:
+        report.add(error)
+    print(report.format_rust_style(), file=sys.stderr)
 
 
 def scheduler_command(args: argparse.Namespace) -> None:

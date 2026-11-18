@@ -39,7 +39,7 @@ from typing import Any, Final, assert_never
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ThreadStartRefused
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.child_protocol import (
+from horsies.core.worker.child_frames import (
     MAX_BLOCKED_WHERE_CHARS,
     BlockingRun,
     BootFailedFrame,

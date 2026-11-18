@@ -1,22 +1,24 @@
 //! `CoreChildHandle`: the handle of a worker's child process, for the
 //! writes of the child.
 //!
-//! A Python child builds it once, in the child, after its start: from the
-//! producer manifest of its child pool (the database URL and the pool size of
-//! its child kind) and the two settings that only a child pool has, the
-//! connections it keeps open and the ping at checkout (Python
-//! `_initialize_worker_pool` and `open_shared_async_pool`, `min_size` and
-//! `check_on_checkout`). Building it starts nothing: the first call starts
-//! the core of the child process and connects. A process forked without
-//! `exec` after the core started refuses every call (`ForkedAfterCoreStart`),
-//! so the handle is never built before the fork.
+//! A Python child builds it once, in the child, after its start, from its
+//! init frame (`CoreChildHandle.from_init`): the core reads the database URL,
+//! the connection settings and the pool of the child kind from the frame
+//! (`horsies_core::child_handle_setup`), so the URL never becomes a Python
+//! value of the child. The constructor from a producer manifest and the two
+//! settings that only a child pool has (the connections it keeps open and
+//! the ping at checkout) serves a caller that holds a manifest. Building it
+//! starts nothing: the first call starts the core of the child process and
+//! connects. A process forked without `exec` after the core started refuses
+//! every call (`ForkedAfterCoreStart`), so the handle is never built before
+//! the fork.
 
 use std::num::NonZeroU32;
 
 use chrono::{DateTime, Utc};
 use horsies_core::db::KeptOpen;
 use horsies_core::manifest::parse_producer_manifest;
-use horsies_core::{PoolProfile, WriteDeadline};
+use horsies_core::{child_handle_setup, PoolProfile, WriteDeadline};
 use pyo3::prelude::*;
 use uuid::Uuid;
 
@@ -24,6 +26,7 @@ use crate::bridge::blocking::call_blocking;
 use crate::bridge::completion_queue::call_async;
 use crate::bridge::CallKind;
 use crate::errors::ManifestRefused;
+use crate::frames::InitFrameRecord;
 use crate::handle::{checked_core, BrokerConnection};
 use crate::operations::arguments::utc_instant;
 use crate::operations::expiry_and_orphans::expire_owned_claim_operation;
@@ -72,6 +75,19 @@ impl CoreChildHandle {
                 child_profile(kept_open, check_at_checkout),
             ),
         })
+    }
+
+    /// Build the child handle of the child that `init` boots: the database
+    /// URL, the connection settings and the pool of the child kind come from
+    /// the frame (`min_size` kept open, `max_size` connections with no
+    /// overflow, `check` as the ping at checkout). Starts nothing; the URL
+    /// stays in the core.
+    #[staticmethod]
+    fn from_init(init: &Bound<'_, InitFrameRecord>) -> Self {
+        let setup = child_handle_setup(init.get().frame());
+        Self {
+            connection: BrokerConnection::new(setup.manifest, setup.profile),
+        }
     }
 
     /// Start one claimed task (`horsies_start_attempt`): `AttemptStarted`,

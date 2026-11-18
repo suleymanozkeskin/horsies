@@ -130,3 +130,18 @@ fn transaction_mode_with_no_session_url_is_a_refused_connection_setting() {
         Err(WorkerPlanRefused::ConnectionSettings { .. })
     ));
 }
+
+/// The broker of the worker process belongs to the client family of its
+/// caller: the Python CLI's worker records and checks `PYTHON`, the Rust
+/// client's `RUST`. Nothing connects.
+#[tokio::test]
+async fn the_worker_broker_is_of_the_family_of_its_caller() {
+    let plan = batch_plan();
+    for family in [ClientFamily::Python, ClientFamily::Rust] {
+        let broker = match worker_broker(&plan.broker_config, family).await {
+            Ok(broker) => broker,
+            Err(refused) => panic!("the batch plan's broker config is valid: {refused}"),
+        };
+        assert_eq!(broker.client_family(), family);
+    }
+}

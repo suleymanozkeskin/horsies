@@ -23,6 +23,8 @@ import pytest
 
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_pool, child_runner
+from horsies.core.worker.child_runner import DeadlineBeforeStart
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -38,6 +40,7 @@ from tests.dualrun.seeds import (
 )
 from tests.dualrun.selfcheck import SelfCheckStepFailed
 from tests.fixtures.child_core import child_core_handle_for
+from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -112,24 +115,30 @@ def _reference_start(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
         }
 
 
-def _wire_reason(result: object) -> str:
+def _reference_spelling(result: StoppedBeforeRunning | DeadlineBeforeStart | None) -> str:
+    """The end of a start of the version-2 child as the reference names it:
+    ``STARTED``, or the version-1 spelling of its stop reason
+    (``NODE_NOT_LINKED`` is ``WORKFLOW_CHECK_FAILED``)."""
     match result:
         case None:
             return 'STARTED'
-        case (False, str(), str() as reason):
-            return reason
-        case _:
-            raise AssertionError(f'the start returned {result!r}')
+        case StoppedBeforeRunning():
+            match wire_of(result):
+                case (False, '', str() as reason):
+                    return reason
+                case wire:
+                    raise AssertionError(f'the stop of a start gave {wire!r}')
+        case DeadlineBeforeStart():
+            raise AssertionError('a start with no deadline ended at its deadline')
 
 
 def _candidate_start(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
     with child_core_handle_for(database.url):
         return {
-            each.name: _wire_reason(
+            each.name: _reference_spelling(
                 child_runner._confirm_until_not_resumed(
                     each.task_id,
                     seed.worker_id,
-                    each.is_workflow_task,
                     each.claimed_at,
                     orphan_self_heal=False,
                 )

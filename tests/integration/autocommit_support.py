@@ -2,7 +2,9 @@
 
 A worker built as the CLI builds it (``PostgresConfig.worker_process_config``)
 whose engine connects through a ``RoundTripProxy``, and seeded task rows that
-the worker owns.
+the worker owns. ``open_proxied_reference_worker`` builds the ``Worker`` of
+the reference copy of the Python worker parent the same way, for the
+parent-rule tests on that copy.
 """
 
 # pyright: reportPrivateUsage=false
@@ -35,6 +37,9 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.worker import (
+    Worker as ReferenceWorker,
+)
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.round_trip_proxy import RoundTripProxy, Turn
 
@@ -98,7 +103,7 @@ def upstream_of(database_url: str) -> tuple[str, int]:
     return url.host or '127.0.0.1', url.port or 5432
 
 
-def use_pooled_runners(worker: Worker) -> None:
+def use_pooled_runners(worker: Worker | ReferenceWorker) -> None:
     """Give ``worker`` one checkout per statement for its claim pass, in
     place of its held connection. For a test that calls the worker's steps
     and never stops the worker: no connection stays held after the test.
@@ -121,14 +126,32 @@ class ProxiedWorker:
         _ = await self.broker.close_async()
 
 
-async def open_proxied_worker(
-    database_url: str,
-    *,
-    pre_ping: bool = False,
-) -> ProxiedWorker:
-    """A worker whose engine is the one the CLI builds for ``database_url``
-    and a profile of one isolated child, with ``worker_pool_pre_ping=pre_ping``.
-    No listener, no schema check."""
+@dataclass(frozen=True, slots=True)
+class ProxiedReferenceWorker:
+    """A ``Worker`` of the reference copy on a broker of its own. The caller
+    closes it (``close``)."""
+
+    worker: ReferenceWorker
+    broker: PostgresBroker
+
+    async def close(self) -> None:
+        """Give the worker's held connections back, then close the broker."""
+        await self.worker._release_held_connections()  # pyright: ignore[reportPrivateUsage]
+        _ = await self.broker.close_async()
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerParts:
+    """What a worker of ``open_proxied_worker`` is built from."""
+
+    broker: PostgresBroker
+    session_factory: Any
+    cfg: WorkerConfig
+
+
+async def _worker_parts(database_url: str, *, pre_ping: bool) -> _WorkerParts:
+    """The broker with the engine that the CLI builds for ``database_url``,
+    its session factory, and a worker config of one isolated child."""
     config = PostgresConfig(
         database_url=SecretStr(database_url),
         worker_pool_pre_ping=pre_ping,
@@ -146,15 +169,45 @@ async def open_proxied_worker(
         processes=1,
         recovery_config=RecoveryConfig(),
     )
+    return _WorkerParts(broker=broker, session_factory=resources.session_factory, cfg=cfg)
+
+
+async def open_proxied_worker(
+    database_url: str,
+    *,
+    pre_ping: bool = False,
+) -> ProxiedWorker:
+    """A worker whose engine is the one the CLI builds for ``database_url``
+    and a profile of one isolated child, with ``worker_pool_pre_ping=pre_ping``.
+    No listener, no schema check."""
+    parts = await _worker_parts(database_url, pre_ping=pre_ping)
     worker = Worker(
-        session_factory=resources.session_factory,
+        session_factory=parts.session_factory,
         listener=MagicMock(),
-        cfg=cfg,
-        broker=broker,
+        cfg=parts.cfg,
+        broker=parts.broker,
     )
     worker._app = decode_app()
     worker.worker_instance_id = WORKER_ID
-    return ProxiedWorker(worker=worker, broker=broker)
+    return ProxiedWorker(worker=worker, broker=parts.broker)
+
+
+async def open_proxied_reference_worker(
+    database_url: str,
+    *,
+    pre_ping: bool = False,
+) -> ProxiedReferenceWorker:
+    """``open_proxied_worker`` with the ``Worker`` of the reference copy."""
+    parts = await _worker_parts(database_url, pre_ping=pre_ping)
+    worker = ReferenceWorker(
+        session_factory=parts.session_factory,
+        listener=MagicMock(),
+        cfg=parts.cfg,
+        broker=parts.broker,
+    )
+    worker._app = decode_app()
+    worker.worker_instance_id = WORKER_ID
+    return ProxiedReferenceWorker(worker=worker, broker=parts.broker)
 
 
 # The largest threshold that the core's stale CLAIMED requeue takes: no
@@ -162,7 +215,7 @@ async def open_proxied_worker(
 _WARM_UP_REQUEUE_THRESHOLD_MS: Final = 2_147_483_647
 
 
-async def warm_core_handle(opened: ProxiedWorker) -> None:
+async def warm_core_handle(opened: ProxiedWorker | ProxiedReferenceWorker) -> None:
     """Run one core write that changes nothing: a stale CLAIMED requeue
     pass that finds no claim. The worker's core handle has then read its
     client family and holds an open pooled connection, so a drop that the

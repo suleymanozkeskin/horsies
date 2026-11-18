@@ -28,9 +28,9 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefusedError,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker import child_main
-from horsies.core.worker.child_main import _bounded_result
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker import child_main
+from tests.dualrun.reference.worker_parent.worker.child_main import _bounded_result
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     MAX_BLOCKED_WHERE_CHARS,
     BlockingRun,
     BodyReturnedFrame,
@@ -104,8 +104,8 @@ from horsies.core.models.worker_profile import (
     MAX_SEATS_PER_SHARED_THREAD_CHILD,
     ResolvedPool,
 )
-from horsies.core.worker.task_loop import AsyncTaskPresence
-from horsies.core.worker.stored_timeout import (
+from tests.dualrun.reference.worker_parent.worker.task_loop import AsyncTaskPresence
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import (
     CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,

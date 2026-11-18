@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import threading
+import uuid
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, assert_never
@@ -32,8 +33,8 @@ EXECUTOR_THREADS = 4
 pytestmark = [pytest.mark.unit]
 
 WAIT_S = 5.0
-MARK = RunMark(dispatch=1, task_id='task-1')
-OTHER = RunMark(dispatch=2, task_id='task-2')
+MARK = RunMark(dispatch=1, task_id=uuid.UUID(int=1))
+OTHER = RunMark(dispatch=2, task_id=uuid.UUID(int=2))
 
 
 def _marked(mark: RunMark) -> contextvars.Context:
@@ -422,12 +423,12 @@ class TestTheScanOfATurn:
             marked.install()
             gate = asyncio.Event()
             others = [
-                loop.create_task(gate.wait(), context=_marked(RunMark(1000 + n, 'x')))
+                loop.create_task(gate.wait(), context=_marked(RunMark(1000 + n, uuid.UUID(int=1000 + n))))
                 for n in range(200)
             ]
             runs: list[tuple[RunMark, asyncio.Task[Any], asyncio.Task[Any]]] = []
             for dispatch in range(1, 51):
-                mark = RunMark(dispatch=dispatch, task_id=f'task-{dispatch}')
+                mark = RunMark(dispatch=dispatch, task_id=uuid.UUID(int=dispatch))
                 marked.open(mark)
 
                 async def run_body() -> asyncio.Task[Any]:

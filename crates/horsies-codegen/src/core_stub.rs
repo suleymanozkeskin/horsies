@@ -3,7 +3,7 @@
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 use crate::surface::{
     Constructor, ExceptionBody, ModuleSurface, ParameterKind, StubClass, StubException,
-    StubFunction, StubParameter, StubProperty, TypeText,
+    StubFunction, StubParameter, StubProperty, StubStaticMethod, TypeText,
 };
 
 /// The file name of the stubs, inside the package folder.
@@ -22,7 +22,7 @@ pub fn render_core_stub(surface: &ModuleSurface) -> String {
     }
     for class in surface.classes {
         text.push_str("\n\n");
-        text.push_str(&render_class(class));
+        text.push_str(&render_class(class, surface.static_methods));
     }
     for function in surface.functions {
         text.push_str("\n\n");
@@ -80,7 +80,7 @@ fn render_members(constructor: Constructor, properties: &[StubProperty]) -> Stri
     text
 }
 
-fn render_class(class: &StubClass) -> String {
+fn render_class(class: &StubClass, static_methods: &[StubStaticMethod]) -> String {
     let mut text = format!("@final\nclass {}:\n", class.name);
     if let Some(doc) = docstring(class.doc, "    ") {
         text.push_str(&doc);
@@ -89,10 +89,18 @@ fn render_class(class: &StubClass) -> String {
     for method in class.methods {
         text.push_str(&render_function(method, "    "));
     }
+    let own_static_methods: Vec<&StubStaticMethod> = static_methods
+        .iter()
+        .filter(|method| method.class_name == class.name)
+        .collect();
+    for method in &own_static_methods {
+        text.push_str(&render_static_method(&method.function));
+    }
     let empty_body = class.doc.trim().is_empty()
         && matches!(class.constructor, Constructor::NoConstructor)
         && class.properties.is_empty()
-        && class.methods.is_empty();
+        && class.methods.is_empty()
+        && own_static_methods.is_empty();
     if empty_body {
         text.push_str("    ...\n");
     }
@@ -120,6 +128,20 @@ fn render_function(function: &StubFunction, indent: &str) -> String {
         Some(doc) => format!("{signature}\n{doc}"),
         None => format!("{signature} ...\n"),
     }
+}
+
+/// A static method in its class: `@staticmethod`, then the function with no
+/// `self`.
+fn render_static_method(function: &StubFunction) -> String {
+    let free = render_function(function, "");
+    let indented: Vec<String> = free
+        .lines()
+        .map(|line| match line.is_empty() {
+            true => String::new(),
+            false => format!("    {line}"),
+        })
+        .collect();
+    format!("    @staticmethod\n{}\n", indented.join("\n"))
 }
 
 /// `, name: type` for each parameter, with `, *` before the first
@@ -225,6 +247,22 @@ mod tests {
         for member in catalog.members {
             assert!(rendered.contains(&string_literal(member.value)));
         }
+    }
+
+    #[test]
+    fn a_static_method_has_no_self_and_sits_in_its_class() {
+        let stub = render_core_stub(&CORE_MODULE);
+        let class_at = stub
+            .find("@final\nclass CoreChildHandle:\n")
+            .expect("the class is in the stub");
+        let method_at = stub
+            .find("    @staticmethod\n    def from_init(init: InitFrame) -> CoreChildHandle:\n")
+            .expect("the static method is in the stub");
+        let next_class_at = stub[class_at + 1..]
+            .find("@final\nclass ")
+            .map(|offset| class_at + 1 + offset)
+            .expect("another class follows");
+        assert!(class_at < method_at && method_at < next_class_at);
     }
 
     #[test]

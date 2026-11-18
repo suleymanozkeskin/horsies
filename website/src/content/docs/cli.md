@@ -320,6 +320,20 @@ Workers wait up to the `drain_timeout` of their profile for running tasks. See [
 | 2 | Invalid `horsies web` arguments, a removed worker flag, or an argparse error |
 | 77 | `horsies worker`: the worker could not write runner heartbeats, and it had not stopped 120 seconds after it started to stop. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
 
+A worker child exits with one of these codes; the worker reads it to name how the child ended.
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | The worker sent its stop frame |
+| 71 | The worker is gone |
+| 72 | The worker sent a malformed frame, or a frame over the bounds |
+| 73 | The child arguments cannot be used |
+| 74 | The child stopped while threads of its task loop executor still ran |
+| 75 | The child start failed, after a report that names the cause |
+| 76 | A child that the preload process forked did not reparent to the worker |
+| 78 | The worker speaks another protocol version: the worker and its children come from different builds |
+| 173 | A child start hook failed or ran past its bound |
+
 ## Environment Variables
 
 ```bash

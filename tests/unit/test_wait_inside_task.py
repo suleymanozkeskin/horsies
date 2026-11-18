@@ -29,7 +29,6 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.process_role import (
     ProcessRole,
     mark_process_runs_task_bodies,
@@ -38,6 +37,7 @@ from horsies.core.process_role import (
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_runner
+from tests.fixtures.core_frames import init_frame
 
 pytestmark = [pytest.mark.unit]
 
@@ -292,15 +292,9 @@ def test_a_child_start_marks_its_process_before_the_start_hooks(
 
     with (
         patch.object(child_runner, '_run_child_start_hooks', side_effect=hooks),
-        patch.object(
-            child_runner,
-            '_initialize_worker_pool',
-        ),
         patch.object(child_runner, '_initialize_child_core_handle'),
     ):
-        child_runner.finish_child_start(
-            app, UNREACHABLE_URL, None, ResolvedPool(0, 2, True)
-        )
+        child_runner.finish_child_start(app, init_frame())
 
     assert roles_seen_by_hooks == [ProcessRole.RUNS_TASK_BODIES]
     assert process_role() is ProcessRole.RUNS_TASK_BODIES

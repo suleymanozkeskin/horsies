@@ -1,13 +1,14 @@
 """The seat program of a shared async child: its start, and one task run.
 
 ``PostgresSeatProgram.start`` runs on the task loop of the child, after the
-sync boot (the app import and the ``on_child_process_start`` hooks): it opens
-the async connection pool of the child, then runs the
-``on_shared_async_child_start`` hooks, each bounded. ``PostgresSeats.run``
-runs one task as a coroutine on that loop: the RUNNING transition and the
-task body. ``PostgresSeats.mark_finalizing`` writes the finalizing marker,
-which the seat loop asks for at the end of the run. Every write goes through
-the async pool (``shared_lifecycle``), so no write blocks the loop.
+sync boot (the app import, the ``on_child_process_start`` hooks and the core
+handle of the child): it runs the ``on_shared_async_child_start`` hooks,
+each bounded. ``PostgresSeats.run`` runs one task as a coroutine on that
+loop: the RUNNING transition and the task body.
+``PostgresSeats.mark_finalizing`` writes the finalizing marker, which the
+seat loop asks for at the end of the run. Every write goes through the
+awaitable methods of the core handle (``shared_lifecycle``), so no write
+blocks the loop.
 """
 
 # pyright: reportPrivateUsage=false
@@ -17,34 +18,22 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Coroutine
-from typing import Any, Final, assert_never
+from typing import Any, assert_never
 
-from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
-
+from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import (
     ChildPoolSetupFailed,
     ThreadStartRefusedError,
 )
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
     boot_failure_from_exception,
     flush_output,
 )
-from horsies.core.worker.child_pool import open_shared_async_pool
-from horsies.core.worker.child_protocol import (
-    BootFailedFrame,
-    InitFrame,
-    SeatRefusal,
-    SeatTask,
-    SharedRunFrame,
-    ThreadSeatTask,
-    WireResult,
-)
+from horsies.core.worker.child_frames import BootFailedFrame, stored_refusal_of
 from horsies.core.worker import child_runner
 from horsies.core.worker.child_runner import (
     CHILD_HOOK_FAILURE_EXIT_CODE,
@@ -57,14 +46,12 @@ from horsies.core.worker.child_runner import (
 )
 from horsies.core.worker.current import get_current_app
 from horsies.core.worker.shared_child import (
-    MarkerBeforeDeadline,
-    MarkerWindow,
-    MarkerWithoutDeadline,
     SeatReturn,
     SetRunning,
     StartedSeats,
     StoppedBeforeRunning,
 )
+from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -72,71 +59,37 @@ from horsies.core.worker.shared_lifecycle import (
 
 logger = get_logger('worker')
 
-SHARED_POOL_CLOSE_TIMEOUT_S: Final = 1.0
-"""The longest wait for the async pool to close at the stop. With the loop
-close and the writer drain it stays under the 10 s that the parent gives a
-child after its stop frame."""
-
 
 class PostgresSeats:
-    """The seats of a started shared async child, with its async pool."""
+    """The seats of a started shared async child."""
 
-    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
-        self._pool = pool
-
-    async def run(self, frame: SharedRunFrame) -> SeatReturn:
+    async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
         """Run the task of ``frame``. The same steps and outcomes as
         ``child_runner._run_task_entry`` but the marker, through the core
         handle of the child."""
         return await run_seat_task(frame)
 
-    async def mark_finalizing(
-        self, frame: SharedRunFrame, window: MarkerWindow
-    ) -> None:
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
         """Write the finalizing marker of the run of ``frame``
         (``mark_seat_finalizing``)."""
-        await mark_seat_finalizing(self._pool, frame, window)
-
-    async def stop(self) -> None:
-        """Close the async pool, bounded by ``SHARED_POOL_CLOSE_TIMEOUT_S``.
-        A failed close is logged: the process exits next."""
-        try:
-            await self._pool.close(timeout=SHARED_POOL_CLOSE_TIMEOUT_S)
-        except Exception as exc:
-            logger.warning('Closing the async pool of the child failed: %s', exc)
+        await mark_seat_finalizing(frame)
 
 
 class PostgresSeatProgram:
     """The seat program of a worker's shared async child."""
 
-    async def start(
-        self,
-        init: InitFrame,
-        pool: ResolvedPool,
-    ) -> Result[StartedSeats, BootFailedFrame]:
-        """Open the async pool with the bounds of ``pool``, then run the async
-        start hooks.
+    async def start(self) -> Result[StartedSeats, BootFailedFrame]:
+        """Run the async start hooks of the app.
 
-        ``Err``: the pool could not be set up (``ChildPoolSetupFailed``, or a
-        ``ResourceShortage`` for an errno that can clear), or the OS refused
-        the watchdog of a hook (``ThreadStartRefused``). A hook that fails or
-        hangs ends the process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
+        ``Err``: the OS refused the watchdog of a hook
+        (``ThreadStartRefused``). A hook that fails or hangs ends the
+        process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
         """
-        try:
-            async_pool = await open_shared_async_pool(
-                init.database_url,
-                connect_kwargs=init.connect_kwargs,
-                min_size=pool.min_size,
-                max_size=pool.max_size,
-                check_on_checkout=pool.check,
-            )
-        except Exception as exc:
-            return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
         try:
             await run_shared_async_start_hooks()
         except ThreadStartRefusedError as exc:
             return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
-        return Ok(PostgresSeats(async_pool))
+        return Ok(PostgresSeats())
 
 
 async def run_shared_async_start_hooks() -> None:
@@ -243,8 +196,8 @@ def _without_left_cancel(
     return map_exception(asyncio.CancelledError())
 
 
-async def run_seat_task(frame: SharedRunFrame) -> SeatReturn:
-    """Run one task on a seat, up to its wire tuple.
+async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
+    """Run one task on a seat, up to its result.
 
     The steps of ``_run_task_entry`` but the finalizing marker: the RUNNING
     transition with the first runner heartbeat through the core handle of
@@ -257,34 +210,39 @@ async def run_seat_task(frame: SharedRunFrame) -> SeatReturn:
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
     ownership_result = await confirm_until_not_resumed(
-        frame.task_id,
+        str(frame.task_id),
         frame.worker_id,
-        frame.is_workflow_task,
         frame.claimed_at,
         orphan_self_heal=frame.orphan_self_heal,
     )
-    if ownership_result is not None:
-        return StoppedBeforeRunning(ownership_result)
-    return SetRunning(await _run_after_running(frame))
+    match ownership_result:
+        case None:
+            return SetRunning(await _run_after_running(frame))
+        case StoppedBeforeRunning():
+            return ownership_result
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
-async def _run_after_running(frame: SharedRunFrame) -> WireResult:
+async def _run_after_running(frame: core.SharedRunFrame) -> ResultEnvelope:
     """The steps of a run after its RUNNING update, as in
     ``_run_task_entry``.
 
-    A ``SeatRefusal`` returns ``WORKER_SERIALIZATION_ERROR`` before it
-    resolves the task, as ``_run_task_entry`` does for a refused stored
-    timeout. The body runs through ``_seat_call_result``, which maps a
+    Refused stored options (``core.StoredOptionsRefused``) return
+    ``WORKER_SERIALIZATION_ERROR`` before the task is resolved, as
+    ``_run_task_entry`` does. The body runs through ``_seat_call_result``, which maps a
     cancel of the body; the seat loop reports a cancel of its deadline as
     the timeout. Any other exception becomes ``TASK_EXCEPTION``.
     """
     try:
         match frame.work:
-            case SeatRefusal(refusal=refusal):
-                return _stored_timeout_refusal_response(frame.task_name, refusal)
-            case SeatTask():
+            case core.StoredOptionsRefused() as refused:
+                return _stored_timeout_refusal_response(
+                    frame.task_name, stored_refusal_of(refused),
+                )
+            case core.AsyncTaskWork():
                 pass
-            case ThreadSeatTask():
+            case core.ThreadTaskWork():
                 # The seat loop ends the child before such a run starts.
                 raise AssertionError(
                     f'run {frame.dispatch} of a shared thread child reached a '
@@ -292,16 +250,11 @@ async def _run_after_running(frame: SharedRunFrame) -> WireResult:
                 )
             case _ as unreachable:
                 assert_never(unreachable)
-        prepared = _prepare_task_call(
-            frame.task_name,
-            frame.args_json,
-            frame.kwargs_json,
-            OnSharedSeat(),
-        )
+        prepared = _prepare_task_call(frame.task_name, frame.input, OnSharedSeat())
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass
-            case tuple():
+            case ResultEnvelope():
                 return prepared
         out = await _seat_call_result(
             frame.task_name,
@@ -314,42 +267,11 @@ async def _run_after_running(frame: SharedRunFrame) -> WireResult:
         return _task_exception_response(frame.task_name, e)
 
 
-async def mark_seat_finalizing(
-    pool: AsyncConnectionPool[AsyncConnection[Any]],
-    frame: SharedRunFrame,
-    window: MarkerWindow,
-) -> None:
-    """Write the finalizing marker of a run that ended, within ``window``.
-
-    ``mark_task_finalizing`` bounds the write by
-    ``FINALIZING_MARKER_TIMEOUT_S``; ``MarkerBeforeDeadline`` bounds it as
-    well by the time left before the deadline of the run. A write cut at
-    that bound is logged and skipped: the marker is best effort, and the
-    end of the run follows at once. Nothing escapes but a cancel of the
-    calling task.
+async def mark_seat_finalizing(frame: core.SharedRunFrame) -> None:
+    """Write the finalizing marker of a run that ended
+    (``shared_lifecycle.mark_task_finalizing``): within the bound of the
+    core, ``FINALIZING_MARKER_TIMEOUT_S``. A failed or late write is logged
+    only: the marker is best effort, and the end of the run follows at
+    once. Nothing escapes but a cancel of the calling task.
     """
-    match window:
-        case MarkerWithoutDeadline():
-            await mark_task_finalizing(
-                pool,
-                frame.task_id,
-                frame.worker_id,
-                frame.claimed_at,
-            )
-        case MarkerBeforeDeadline(seconds=seconds):
-            try:
-                async with asyncio.timeout(seconds):
-                    await mark_task_finalizing(
-                        pool,
-                        frame.task_id,
-                        frame.worker_id,
-                        frame.claimed_at,
-                    )
-            except TimeoutError:
-                logger.warning(
-                    'Finalizing marker of task %s skipped: it did not end '
-                    'before the deadline of the task',
-                    frame.task_id,
-                )
-        case _ as unreachable:
-            assert_never(unreachable)
+    await mark_task_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)

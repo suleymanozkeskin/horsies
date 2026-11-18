@@ -8,7 +8,7 @@ import os
 import signal
 import tempfile
 from pathlib import Path
-from typing import Protocol, Any
+from typing import Final, Protocol, Any
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
@@ -21,6 +21,7 @@ from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 from horsies.core.types.status import TaskStatus
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 from tests.e2e.helpers.db import (
     poll_max_during,
@@ -34,6 +35,7 @@ from tests.integration.history_seeding import (
     read_attempt_workers,
 )
 from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.env import TASK_MODULE_URL_ENV_NAME
 from tests.e2e.helpers.worker import run_worker, run_workers, worker_env
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import retry as retry_tasks
@@ -47,6 +49,7 @@ from tests.e2e.tasks import instance_requeue_guard
 import subprocess
 import time
 from tests.broker_resources_support import current_resources
+from tests.integration.round_trip_proxy import RoundTripProxy
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
@@ -1373,49 +1376,70 @@ async def test_softcap_owner_transition_after_worker_crash(
 # ---------------------------------------------------------------------------
 
 
-def _start_fault_injected_worker() -> subprocess.Popen[str]:
-    """Start a worker subprocess with INJECT_REQUEUE_DB_ERROR=1.
+REFUSED_FOR_WORKER_A: Final = ('horsies_start_attempt(', 'horsies_release_claims(')
+"""The statements that the connections of worker A and of its child cannot
+run: the start of a claimed task (``horsies_start_attempt``, sent by the
+child) and the release of that claim (``horsies_release_claims``, sent by
+the worker)."""
 
-    Every task claimed by this worker will fail dispatch and then fail
-    requeue, leaving the task orphaned in CLAIMED status.  The heartbeat
-    loop stays alive so the claim lease keeps getting renewed — until
-    the SQL age guard (max_claim_renew_age_ms) kicks in and stops renewal.
-    """
+REFUSED_ONCE_A_HOLDS_THE_TASK: Final = (*REFUSED_FOR_WORKER_A, 'horsies_claim(')
+"""Worker A's refusals once it holds the task: also its claims. Its claim
+loop would take the task again each time the lease ends, before worker B
+does; a refused claim is retried with backoff, so worker A stays alive and
+keeps renewing the claims it holds, as the old test's worker A did with the
+task counted against its capacity."""
+
+REFUSAL_EVIDENCE_TIMEOUT_S: Final = 60.0
+"""The longest wait for the proxy to refuse both statements of worker A."""
+
+
+def _start_requeue_guard_worker(database_url: str, output: Path) -> subprocess.Popen[str]:
+    """Start a worker of the requeue-guard app whose app, and so whose
+    children, connect to ``database_url``. Its stdout and stderr go to the
+    file ``output``, so a full pipe never blocks it."""
     env = worker_env()
-    env['INJECT_REQUEUE_DB_ERROR'] = '1'
+    env[TASK_MODULE_URL_ENV_NAME] = database_url
 
-    return subprocess.Popen(
-        [
-            'uv', 'run', 'horsies', 'worker',
-            REQUEUE_GUARD_INSTANCE,
-            '--profile=isolated-1',
-            '--loglevel=warning',
-        ],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
+    with output.open('w', encoding='utf-8') as output_file:
+        return subprocess.Popen(
+            [
+                'uv', 'run', 'horsies', 'worker',
+                REQUEUE_GUARD_INSTANCE,
+                '--profile=isolated-1',
+                '--loglevel=warning',
+            ],
+            env=env,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+
+
+def _proxy_in_front_of(database_url: str) -> RoundTripProxy:
+    """A proxy, not started, in front of the server of ``database_url``."""
+    url = make_url(database_url)
+    assert url.host is not None and url.port is not None, (
+        f'the e2e database URL names its server: {url.render_as_string(hide_password=True)}'
     )
+    return RoundTripProxy(url.host, url.port)
 
 
-def _start_normal_worker() -> subprocess.Popen[str]:
-    """Start a normal (non-injected) worker for the requeue-guard instance."""
-    env = worker_env()
+def _through_proxy(database_url: str, proxy: RoundTripProxy) -> str:
+    """``database_url`` with its server replaced by the proxy."""
+    proxied = make_url(database_url).set(host='127.0.0.1', port=proxy.port)
+    return proxied.render_as_string(hide_password=False)
 
-    return subprocess.Popen(
-        [
-            'uv', 'run', 'horsies', 'worker',
-            REQUEUE_GUARD_INSTANCE,
-            '--profile=isolated-1',
-            '--loglevel=warning',
-        ],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+
+async def _wait_for_refusals(proxy: RoundTripProxy, timeout_s: float) -> tuple[str, ...]:
+    """The refusals of the proxy once it refused every statement of
+    ``REFUSED_FOR_WORKER_A``, or after ``timeout_s``."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        refused = proxy.refused_statements()
+        if set(REFUSED_FOR_WORKER_A) <= set(refused) or time.monotonic() >= deadline:
+            return refused
+        await asyncio.sleep(0.2)
 
 
 def _kill_requeue_worker(proc: subprocess.Popen[str]) -> None:
@@ -1445,106 +1469,139 @@ async def test_requeue_db_error_age_guard_recovery(
 
     Scenario:
       1. Enqueue task.
-      2. Start Worker A (fault-injected): claims task, dispatch fails,
-         requeue returns DB_ERROR → task stays CLAIMED.
+      2. Start Worker A through a proxy that refuses the start of the task
+         in its child and the release of the claim in the worker
+         (``REFUSED_FOR_WORKER_A``): A claims the task, its child cannot
+         start it, and the release fails, so the task stays CLAIMED while
+         A lives and renews its claims. Once A holds the task, the proxy
+         also refuses A's claims (``REFUSED_ONCE_A_HOLDS_THE_TASK``).
       3. Age guard (max_claim_renew_age_ms=5s) stops lease renewal.
-      4. Start Worker B (normal): reclaims the now-expired task and completes it.
-      5. Assert: task is COMPLETED, owner changed, correct result.
+      4. Start Worker B (directly on the database): reclaims the now-expired
+         task and completes it.
+      5. Assert: task is COMPLETED, owner changed, correct result, one
+         execution, A still running, and the proxy refused both statements.
     """
     from tests.e2e.helpers.worker import kill_stale_workers
     kill_stale_workers()
 
     token = 'requeue_guard_token_l218'
+    proxy = _proxy_in_front_of(instance_requeue_guard.DB_URL)
+    proxy.refuse_statements(REFUSED_FOR_WORKER_A)
+    proxy.start()
+    try:
+        with tempfile.TemporaryDirectory() as log_dir, tempfile.TemporaryDirectory() as output_dir:
+            os.environ['E2E_REQUEUE_GUARD_LOG_DIR'] = log_dir
+            worker_a_output = Path(output_dir) / 'worker_a.log'
+            worker_b_output = Path(output_dir) / 'worker_b.log'
 
-    with tempfile.TemporaryDirectory() as log_dir:
-        os.environ['E2E_REQUEUE_GUARD_LOG_DIR'] = log_dir
+            # 1. Enqueue task
+            handle = unwrap_send(await instance_requeue_guard.requeue_guard_task.send_async(token=token))
+            task_id = handle.task_id
 
-        # 1. Enqueue task
-        handle = unwrap_send(await instance_requeue_guard.requeue_guard_task.send_async(token=token))
-        task_id = handle.task_id
+            worker_a: subprocess.Popen[str] | None = None
+            worker_b: subprocess.Popen[str] | None = None
 
-        worker_a: subprocess.Popen[str] | None = None
-        worker_b: subprocess.Popen[str] | None = None
-
-        try:
-            # 2. Start fault-injected Worker A
-            worker_a = _start_fault_injected_worker()
-
-            # Wait for task to be CLAIMED by Worker A
-            await wait_for_status(
-                current_resources(requeue_guard_broker).session_factory, task_id, 'CLAIMED', timeout_s=20.0,
-            )
-
-            # Record Worker A's id
-            async with current_resources(requeue_guard_broker).session_factory() as session:
-                task = await read_task(session, task_id)
-                assert task is not None
-                worker_a_id = task.claimed_by_worker_id
-                assert worker_a_id is not None, 'Task should be claimed by Worker A'
-
-            # 3. Wait for age guard to stop lease renewal.
-            #    max_claim_renew_age_ms=5s, claim_lease_ms=2s → after ~5s the
-            #    lease stops being renewed, then after another 2s it expires.
-            #    Give it 12s total headroom.
-            await asyncio.sleep(12)
-
-            # 4. Start normal Worker B — it should reclaim the expired task
-            worker_b = _start_normal_worker()
-
-            # Wait for completion
-            await wait_for_status(
-                current_resources(requeue_guard_broker).session_factory, task_id, 'COMPLETED', timeout_s=30.0,
-            )
-
-            # 5. Assert results
-            async with current_resources(requeue_guard_broker).session_factory() as session:
-                task = await read_task(session, task_id)
-                assert task is not None
-                assert task.status == TaskStatus.COMPLETED, (
-                    f'Expected COMPLETED, got {task.status}'
-                )
-                assert task.last_claimed_worker_id is not None, (
-                    'Completed task should retain final owner id'
-                )
-                assert task.last_claimed_worker_id != worker_a_id, (
-                    f'Expected owner transition from Worker A ({worker_a_id}), '
-                    f'still owned by same worker'
+            try:
+                # 2. Start Worker A through the proxy
+                worker_a = _start_requeue_guard_worker(
+                    _through_proxy(instance_requeue_guard.DB_URL, proxy),
+                    worker_a_output,
                 )
 
-                assert task.result is not None, 'COMPLETED task should have a result'
-                result_data: dict[str, Any] = json.loads(task.result)
-                assert result_data.get('ok') == f'done:{token}', (
-                    f'Unexpected completion payload: {result_data}'
+                # Wait for task to be CLAIMED by Worker A
+                await wait_for_status(
+                    current_resources(requeue_guard_broker).session_factory, task_id, 'CLAIMED', timeout_s=20.0,
                 )
 
-            # 6. Assert single execution via marker file
-            token_file = Path(log_dir) / token
-            assert token_file.exists(), f'Token file {token} not created'
-            all_files = list(Path(log_dir).iterdir())
-            assert len(all_files) == 1, (
-                f'Expected exactly 1 execution marker, found {len(all_files)}: '
-                f'{[f.name for f in all_files]}'
-            )
-            executions = [line for line in token_file.read_text(encoding='utf-8').splitlines() if line]
-            assert len(executions) == 1, (
-                f'Expected exactly 1 execution record, found {len(executions)}: {executions}'
-            )
+                # Record Worker A's id
+                async with current_resources(requeue_guard_broker).session_factory() as session:
+                    task = await read_task(session, task_id)
+                    assert task is not None
+                    worker_a_id = task.claimed_by_worker_id
+                    assert worker_a_id is not None, 'Task should be claimed by Worker A'
 
-            # 7. Verify Worker A output contains evidence of DB_ERROR injection
-            if worker_a is not None:
+                # Worker A claims nothing more from here on.
+                proxy.refuse_statements(REFUSED_ONCE_A_HOLDS_THE_TASK)
+
+                # 3. Wait for age guard to stop lease renewal.
+                #    max_claim_renew_age_ms=5s, claim_lease_ms=2s → after ~5s the
+                #    lease stops being renewed, then after another 2s it expires.
+                #    Give it 12s total headroom.
+                await asyncio.sleep(12)
+
+                # 4. Start Worker B on the database — it should reclaim the expired task
+                worker_b = _start_requeue_guard_worker(
+                    instance_requeue_guard.DB_URL,
+                    worker_b_output,
+                )
+
+                # Wait for completion
+                await wait_for_status(
+                    current_resources(requeue_guard_broker).session_factory, task_id, 'COMPLETED', timeout_s=30.0,
+                )
+
+                # 5. Assert results
+                async with current_resources(requeue_guard_broker).session_factory() as session:
+                    task = await read_task(session, task_id)
+                    assert task is not None
+                    assert task.status == TaskStatus.COMPLETED, (
+                        f'Expected COMPLETED, got {task.status}'
+                    )
+                    assert task.last_claimed_worker_id is not None, (
+                        'Completed task should retain final owner id'
+                    )
+                    assert task.last_claimed_worker_id != worker_a_id, (
+                        f'Expected owner transition from Worker A ({worker_a_id}), '
+                        f'still owned by same worker'
+                    )
+
+                    assert task.result is not None, 'COMPLETED task should have a result'
+                    result_data: dict[str, Any] = json.loads(task.result)
+                    assert result_data.get('ok') == f'done:{token}', (
+                        f'Unexpected completion payload: {result_data}'
+                    )
+
+                # 6. Assert single execution via marker file
+                token_file = Path(log_dir) / token
+                assert token_file.exists(), f'Token file {token} not created'
+                all_files = list(Path(log_dir).iterdir())
+                assert len(all_files) == 1, (
+                    f'Expected exactly 1 execution marker, found {len(all_files)}: '
+                    f'{[f.name for f in all_files]}'
+                )
+                executions = [line for line in token_file.read_text(encoding='utf-8').splitlines() if line]
+                assert len(executions) == 1, (
+                    f'Expected exactly 1 execution record, found {len(executions)}: {executions}'
+                )
+
+                # 7. Worker A lived through the run: its claimer heartbeat, not
+                #    its end, let the lease run out.
+                assert worker_a.poll() is None, (
+                    f'Worker A ended with {worker_a.returncode} before the task completed'
+                )
+
+                # 8. The fault reached worker A: the proxy refused the start of
+                #    its child and the release of its claim.
+                refused = await _wait_for_refusals(proxy, REFUSAL_EVIDENCE_TIMEOUT_S)
                 _kill_requeue_worker(worker_a)
-                stdout_text = worker_a.stdout.read() if worker_a.stdout else ''
-                stderr_text = worker_a.stderr.read() if worker_a.stderr else ''
-                combined = stdout_text + stderr_text
-                assert 'DB_ERROR' in combined or 'INJECTED' in combined, (
-                    f'Worker A output should contain evidence of fault injection.\n'
-                    f'stdout: {stdout_text[:500]}\nstderr: {stderr_text[:500]}'
+                assert set(REFUSED_FOR_WORKER_A) <= set(refused), (
+                    f'The proxy refused {refused}, not every statement of '
+                    f'{REFUSED_FOR_WORKER_A}.\n'
+                    f'worker A: {worker_a_output.read_text(encoding="utf-8")[-4000:]}'
                 )
 
-        finally:
-            if worker_a is not None:
-                _kill_requeue_worker(worker_a)
-            if worker_b is not None:
-                _kill_requeue_worker(worker_b)
-            os.environ.pop('E2E_REQUEUE_GUARD_LOG_DIR', None)
-            kill_stale_workers()
+            finally:
+                if worker_a is not None:
+                    _kill_requeue_worker(worker_a)
+                if worker_b is not None:
+                    _kill_requeue_worker(worker_b)
+                os.environ.pop('E2E_REQUEUE_GUARD_LOG_DIR', None)
+                kill_stale_workers()
+                # pytest shows this output when the test fails.
+                for name, output in (('A', worker_a_output), ('B', worker_b_output)):
+                    if output.exists():
+                        print(f'--- worker {name} ---')
+                        print(output.read_text(encoding='utf-8')[-6000:])
+                print(f'--- proxy refusals: {proxy.refused_statements()}')
+    finally:
+        proxy.stop()

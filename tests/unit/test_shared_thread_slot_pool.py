@@ -34,9 +34,9 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker.child_main import BAD_PARENT_FRAME_EXIT_CODE
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker.child_main import BAD_PARENT_FRAME_EXIT_CODE
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     InitFrame,
     IsolatedChild,
     SeatRefusal,
@@ -45,9 +45,9 @@ from horsies.core.worker.child_protocol import (
     SharedThreadChild,
     ThreadSeatTask,
 )
-from horsies.core.worker import slots as slots_module
+from tests.dualrun.reference.worker_parent.worker import slots as slots_module
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.slots import (
     CHILD_KILL_WAIT_S,
     ChildEnded,
     ChildKilledPastDeadlines,
@@ -69,13 +69,13 @@ from horsies.core.worker.slots import (
     SlotPool,
     SlotPoolConfig,
 )
-from horsies.core.worker.stored_timeout import TimeoutValueInvalid
-from horsies.core.worker.shared_stop import (
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import TimeoutValueInvalid
+from tests.dualrun.reference.worker_parent.worker.shared_stop import (
     NoCancelSignal,
     RetryPlacement,
     TimedOutAtKill,
 )
-from horsies.core.worker.thread_slots import (
+from tests.dualrun.reference.worker_parent.worker.thread_slots import (
     ClosedAtDeadline,
     RunCulprit,
     ThreadRunRequest,

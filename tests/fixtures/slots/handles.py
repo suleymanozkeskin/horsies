@@ -6,9 +6,9 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Final
 
-from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable, RunFrame
-from horsies.core.worker.stored_timeout import NoTimeout
-from horsies.core.worker.slots import SlotHandle, SlotOutcome, TaskFinished
+from tests.dualrun.reference.worker_parent.worker.child_protocol import NoTaskLoop, RssUnreadable, RunFrame
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import NoTimeout
+from tests.dualrun.reference.worker_parent.worker.slots import SlotHandle, SlotOutcome, TaskFinished
 
 HANDLE_CLAIMED_AT: Final = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 """The claim time of the run frame of every handle built here."""

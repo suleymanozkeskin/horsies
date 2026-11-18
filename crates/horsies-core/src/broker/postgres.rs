@@ -1247,6 +1247,12 @@ impl PostgresBroker {
         self
     }
 
+    /// The client family of this handle: the family that its install records
+    /// and that its writes check.
+    pub fn client_family(&self) -> ClientFamily {
+        self.client_family
+    }
+
     /// The same handle with no listener (Python's
     /// `PostgresBroker(assume_initialized=True)`): a result wait reads again
     /// every 200 ms (`TASK_RESULT_REPOLL_POLLING`), and an operation that

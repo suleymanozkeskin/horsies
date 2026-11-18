@@ -1,4 +1,8 @@
-"""Unit tests for child_runner.py — full coverage.
+"""Unit tests for child_runner.py — full coverage, on the version-2 child.
+
+The child takes its work from version-2 frames (``tests.fixtures.core_frames``)
+and ends a run with a ``RunReturn``: the result envelope after the RUNNING
+update, or the reason of a stop before it.
 
 Sections:
 A. _serialization_error_response
@@ -23,8 +27,8 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Generator
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any, Final, Generator
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import BaseModel, SecretStr, field_validator
@@ -36,14 +40,12 @@ from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     OperationalErrorCode,
-    OutcomeCode,
     TaskError,
     TaskResult,
 )
@@ -56,14 +58,17 @@ from horsies.core.worker.stored_timeout import (
 )
 from horsies.core.task_decorator import TaskBodyKind
 from horsies.core.worker.task_loop import LoopOpen, TaskLoop
+from horsies.core.worker.child_main import python_program_of
 from horsies.core.worker.child_runner import (
+    RunTheTask,
     _debug_imports_log,
     _run_task_entry,
     _serialization_error_response,
     attempt_elapsed_ms,
 )
 from horsies.core.worker.run_return import SetRunning, StoppedBeforeRunning
-from tests.fixtures.run_return import wire_of
+from tests.fixtures.core_frames import init_frame, isolated_kind, pool
+from tests.fixtures.run_return import envelope_of
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
@@ -72,57 +77,6 @@ TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 # ---------------------------------------------------------------------------
 # Shared fakes
 # ---------------------------------------------------------------------------
-
-
-class _FakeCursor:
-    """Minimal cursor mock supporting execute / fetchone."""
-
-    def __init__(self, fetchone_return: Any = None) -> None:
-        self._fetchone_return = fetchone_return
-        self.queries: list[tuple[str, tuple[Any, ...]]] = []
-
-    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        self.queries.append((sql, params))
-
-    def fetchone(self) -> Any:
-        return self._fetchone_return
-
-    def close(self) -> None:
-        pass
-
-
-class _FakeConn:
-    """Minimal connection mock tracking commit / rollback."""
-
-    def __init__(self, cursor: _FakeCursor | None = None) -> None:
-        self._cursor = cursor or _FakeCursor()
-        self.commits = 0
-        self.rollbacks = 0
-
-    def cursor(self, **kwargs: Any) -> _FakeCursor:
-        return self._cursor
-
-    def commit(self) -> None:
-        self.commits += 1
-
-    def rollback(self) -> None:
-        self.rollbacks += 1
-
-
-class _FakePool:
-    """Minimal pool mock yielding a _FakeConn via context manager."""
-
-    def __init__(self, conn: _FakeConn) -> None:
-        self._conn = conn
-
-    @contextmanager
-    def connection(
-        self,
-        timeout: float | None = None,
-    ) -> Generator[_FakeConn, None, None]:
-        """``timeout`` is the wait for a connection, as in psycopg_pool."""
-        _ = timeout
-        yield self._conn
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:
@@ -222,6 +176,31 @@ def _parse_task_result(json_str: str) -> dict[str, Any]:
     return json.loads(json_str)  # type: ignore[no-any-return]
 
 
+_SERIALIZATION_ERROR: Final = {
+    '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+}
+"""The stored error code of ``WORKER_SERIALIZATION_ERROR``."""
+
+
+def _error_of(payload: str) -> dict[str, Any]:
+    """The task error of a result envelope; a success fails the test."""
+    err: object = _parse_task_result(payload).get('err')
+    assert isinstance(err, dict), payload
+    return err  # pyright: ignore[reportUnknownVariableType]
+
+
+def _error_code(payload: str) -> object:
+    """The stored error code of the task error of a result envelope."""
+    return _error_of(payload)['error_code']
+
+
+def _error_message(payload: str) -> str:
+    """The message of the task error of a result envelope."""
+    message = _error_of(payload)['message']
+    assert isinstance(message, str), payload
+    return message
+
+
 # ===================================================================
 # A. _serialization_error_response
 # ===================================================================
@@ -229,23 +208,18 @@ def _parse_task_result(json_str: str) -> dict[str, Any]:
 
 @pytest.mark.unit
 class TestSerializationErrorResponse:
-    """_serialization_error_response builds correct error tuples."""
+    """_serialization_error_response builds the error envelope."""
 
-    def test_returns_true_ok_with_error_payload(self) -> None:
+    def test_returns_the_error_envelope_with_the_message(self) -> None:
         error = SerializationError('bad json input')
-        ok, payload, reason = _serialization_error_response('my_task', error)
+        payload = _serialization_error_response('my_task', error).text
 
-        assert ok is True
-        assert reason == 'SerializationError: bad json input'
-
-        parsed = _parse_task_result(payload)
-        err_data = parsed.get('err') or parsed.get('error')
-        assert err_data is not None
-        assert err_data['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value}
+        assert _error_code(payload) == _SERIALIZATION_ERROR
+        assert _error_message(payload) == 'bad json input'
 
     def test_includes_task_name_in_data(self) -> None:
         error = SerializationError('corrupt')
-        _, payload, _ = _serialization_error_response('process_order', error)
+        payload = _serialization_error_response('process_order', error).text
 
         parsed = _parse_task_result(payload)
         err_data = parsed.get('err') or parsed.get('error')
@@ -285,9 +259,30 @@ class TestDebugImportsLog:
 # ===================================================================
 
 
+_INIT_POOL: Final = pool(min_size=0, max_size=1, check=False)
+"""The pool of the child kind of the init frames of these tests."""
+
+
+def _initializer_arguments(
+    app_locator: str,
+    imports: tuple[str, ...],
+) -> tuple[core.InitFrame, core.PythonProgram]:
+    """The init frame of an isolated child of ``app_locator`` with
+    ``imports``, a task-send pool of 2 and the pool ``_INIT_POOL``, and its
+    Python program: the arguments of ``_child_initializer``."""
+    init = init_frame(
+        app_locator=app_locator,
+        imports=imports,
+        log_level='info',
+        child_kind=isolated_kind(task_send_pool=2, child_pool=_INIT_POOL),
+    )
+    return init, python_program_of(init)
+
+
 @pytest.mark.unit
 class TestChildInitializer:
-    """_child_initializer wires up the child process environment."""
+    """_child_initializer wires up the child process environment from its
+    init frame."""
 
     def _make_patches(
         self,
@@ -322,7 +317,6 @@ class TestChildInitializer:
         return {'app': mock_app}
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_module')
@@ -335,7 +329,6 @@ class TestChildInitializer:
         mock_import_module: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
@@ -343,73 +336,48 @@ class TestChildInitializer:
         mocks = self._make_patches(app_tasks={'add': True})
         mock_locate_app.return_value = mocks['app']
 
-        _child_initializer(
-            app_locator='mymod:app',
-            imports=['extra_mod'],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-            pool=ResolvedPool(min_size=0, max_size=2, check=True),
-            task_send_pool=2,
-        )
+        init, program = _initializer_arguments('mymod:app', ('extra_mod',))
 
+        returned = _child_initializer(init, program)
+
+        assert returned is mocks['app']
         mock_set_level.assert_called_once_with(20)
         mock_locate_app.assert_called_once_with('mymod:app')
         mock_set_current.assert_called_once_with(mocks['app'])
         mock_import_module.assert_any_call('extra_mod')
-        mock_init_pool.assert_called_once_with(
-            'postgresql://localhost/test',
-            connect_kwargs=None,
-            min_size=0,
-            max_size=2,
-            check_on_checkout=True,
-        )
-        mock_init_core_handle.assert_called_once_with(
-            mocks['app'].config.broker,
-            ResolvedPool(min_size=0, max_size=2, check=True),
-        )
+        mocks['app'].set_task_send_pool.assert_called_once_with(2)
+        mock_init_core_handle.assert_called_once_with(init)
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.logging.configure_logging')
-    def test_child_pool_bounds_are_forwarded(
+    def test_the_child_pool_goes_to_the_core_handle_with_the_init_frame(
         self,
         mock_set_level: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
+        """The child opens no pool of its own: the bounds of the pool of its
+        kind and the connection settings reach the core handle in the init
+        frame (``CoreChildHandle.from_init``)."""
         from horsies.core.worker.child_runner import _child_initializer
 
         mocks = self._make_patches(app_tasks={'add': True})
         mock_locate_app.return_value = mocks['app']
+        init, program = _initializer_arguments('mymod:app', ())
 
-        _child_initializer(
-            app_locator='mymod:app',
-            imports=[],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-            pool=ResolvedPool(min_size=0, max_size=1, check=False),
-            task_send_pool=2,
-            connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
-        )
+        _ = _child_initializer(init, program)
 
-        mock_init_pool.assert_called_once_with(
-            'postgresql://localhost/test',
-            connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
-            min_size=0,
-            max_size=1,
-            check_on_checkout=False,
-        )
+        mock_init_core_handle.assert_called_once_with(init)
+        handed: core.InitFrame = mock_init_core_handle.call_args.args[0]
+        child_pool = handed.child_kind.pool
+        assert (child_pool.min_size, child_pool.max_size, child_pool.check) == (0, 1, False)
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
@@ -420,7 +388,6 @@ class TestChildInitializer:
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
@@ -432,15 +399,7 @@ class TestChildInitializer:
         mocks['app']._broker = inherited_broker
         mock_locate_app.return_value = mocks['app']
 
-        _child_initializer(
-            app_locator='mymod:app',
-            imports=[],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-            pool=ResolvedPool(min_size=0, max_size=2, check=True),
-            task_send_pool=2,
-        )
+        _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
 
         inherited_broker.discard_inherited_resources.assert_called_once_with()
         assert mocks['app']._broker is None
@@ -491,7 +450,6 @@ class TestChildInitializer:
             _ = app.get_broker().close()
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
@@ -502,7 +460,6 @@ class TestChildInitializer:
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
@@ -511,19 +468,10 @@ class TestChildInitializer:
         mock_locate_app.return_value = mocks['app']
 
         with pytest.raises(RuntimeError, match='suppress failed'):
-            _child_initializer(
-                app_locator='mymod:app',
-                imports=[],
-                sys_path_roots=[],
-                loglevel=20,
-                database_url='postgresql://localhost/test',
-                pool=ResolvedPool(min_size=0, max_size=2, check=True),
-                task_send_pool=2,
-            )
-        mock_init_pool.assert_not_called()
+            _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
+        mock_init_core_handle.assert_not_called()
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
@@ -534,7 +482,6 @@ class TestChildInitializer:
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
@@ -543,19 +490,10 @@ class TestChildInitializer:
         mock_locate_app.return_value = mocks['app']
 
         with pytest.raises(RuntimeError, match='discovery failed'):
-            _child_initializer(
-                app_locator='mymod:app',
-                imports=[],
-                sys_path_roots=[],
-                loglevel=20,
-                database_url='postgresql://localhost/test',
-                pool=ResolvedPool(min_size=0, max_size=2, check=True),
-                task_send_pool=2,
-            )
-        mock_init_pool.assert_not_called()
+            _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
+        mock_init_core_handle.assert_not_called()
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
@@ -566,7 +504,6 @@ class TestChildInitializer:
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
@@ -575,18 +512,9 @@ class TestChildInitializer:
         mock_locate_app.return_value = mocks['app']
 
         with pytest.raises(RuntimeError, match='keys_list failed'):
-            _child_initializer(
-                app_locator='mymod:app',
-                imports=[],
-                sys_path_roots=[],
-                loglevel=20,
-                database_url='postgresql://localhost/test',
-                pool=ResolvedPool(min_size=0, max_size=2, check=True),
-                task_send_pool=2,
-            )
+            _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
@@ -601,7 +529,6 @@ class TestChildInitializer:
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
@@ -609,14 +536,8 @@ class TestChildInitializer:
         mocks = self._make_patches()
         mock_locate_app.return_value = mocks['app']
 
-        _child_initializer(
-            app_locator='/tmp/myapp.py:app',
-            imports=['/tmp/tasks.py'],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-            pool=ResolvedPool(min_size=0, max_size=2, check=True),
-            task_send_pool=2,
+        _ = _child_initializer(
+            *_initializer_arguments('/tmp/myapp.py:app', ('/tmp/tasks.py',)),
         )
         # /tmp/tasks.py should be imported via import_by_path, not import_module
         assert mock_import_path.called
@@ -624,7 +545,6 @@ class TestChildInitializer:
         mock_samefile.assert_called()
 
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
-    @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
@@ -639,7 +559,6 @@ class TestChildInitializer:
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
-        mock_init_pool: MagicMock,
         mock_init_core_handle: MagicMock,
     ) -> None:
         """When import file matches app file, import_by_path is NOT called."""
@@ -648,126 +567,11 @@ class TestChildInitializer:
         mocks = self._make_patches()
         mock_locate_app.return_value = mocks['app']
 
-        _child_initializer(
-            app_locator='/tmp/myapp.py:app',
-            imports=['/tmp/myapp.py'],
-            sys_path_roots=[],
-            loglevel=20,
-            database_url='postgresql://localhost/test',
-            pool=ResolvedPool(min_size=0, max_size=2, check=True),
-            task_send_pool=2,
+        _ = _child_initializer(
+            *_initializer_arguments('/tmp/myapp.py:app', ('/tmp/myapp.py',)),
         )
         # import_by_path should NOT be called because samefile returns True
         mock_import_path.assert_not_called()
-
-
-# ===================================================================
-# C2. _initialize_worker_pool connect kwargs
-# ===================================================================
-
-
-@pytest.mark.unit
-class TestInitializeWorkerPoolConnectKwargs:
-    """connect_kwargs (TCP keepalives, PgBouncer knob) reach the pool.
-
-    Regression for idle child-pool connections reaped mid-query (GH #100).
-    """
-
-    @contextmanager
-    def _reset_pool(self) -> Generator[None, None, None]:
-        import horsies.core.worker.child_pool as child_pool
-
-        child_pool._worker_pool = None
-        try:
-            yield
-        finally:
-            child_pool._worker_pool = None
-
-    def test_connect_kwargs_forwarded_to_pool(self) -> None:
-        from horsies.core.worker.child_pool import _initialize_worker_pool
-
-        connect_kwargs = {
-            'keepalives': 1,
-            'keepalives_idle': 30,
-            'prepare_threshold': None,
-        }
-        with self._reset_pool(), patch(
-            'horsies.core.worker.child_pool.ConnectionPool'
-        ) as mock_pool, patch(
-            'horsies.core.worker.child_pool.atexit.register'
-        ):
-            _initialize_worker_pool(
-                'postgresql://localhost/test',
-                connect_kwargs=connect_kwargs,
-            )
-
-        assert mock_pool.call_args.kwargs['kwargs'] == {
-            **connect_kwargs,
-            'autocommit': True,
-        }
-
-    def test_no_connect_kwargs_yields_an_autocommit_pool(self) -> None:
-        """Every connection of a child pool is in autocommit, and the
-        checkout check is off unless asked for."""
-        from horsies.core.worker.child_pool import _initialize_worker_pool
-
-        with self._reset_pool(), patch(
-            'horsies.core.worker.child_pool.ConnectionPool'
-        ) as mock_pool, patch(
-            'horsies.core.worker.child_pool.atexit.register'
-        ):
-            _initialize_worker_pool('postgresql://localhost/test')
-
-        assert mock_pool.call_args.kwargs['kwargs'] == {'autocommit': True}
-        assert mock_pool.call_args.kwargs['check'] is None
-
-    @pytest.mark.asyncio
-    async def test_the_shared_async_pool_is_an_autocommit_pool(self) -> None:
-        from horsies.core.worker.child_pool import open_shared_async_pool
-
-        with patch('horsies.core.worker.child_pool.AsyncConnectionPool') as mock_pool:
-            mock_pool.return_value.open = AsyncMock()
-            _ = await open_shared_async_pool(
-                'postgresql://localhost/test',
-                connect_kwargs={'keepalives': 1},
-                min_size=0,
-                max_size=2,
-                check_on_checkout=False,
-            )
-
-        assert mock_pool.call_args.kwargs['kwargs'] == {
-            'keepalives': 1,
-            'autocommit': True,
-        }
-        assert mock_pool.call_args.kwargs['check'] is None
-
-    def test_a_refused_pool_thread_is_a_refused_thread_start(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The open starts the threads of the real pool. A refused start is
-        named as such, and no pool is kept."""
-        import horsies.core.worker.child_pool as child_pool
-        from horsies.core.models.boot_failure import ThreadStartRefusedError
-
-        def refuse(_thread: threading.Thread) -> None:
-            raise RuntimeError("can't start new thread")
-
-        with (
-            self._reset_pool(),
-            patch('horsies.core.worker.child_pool.atexit.register') as register,
-        ):
-            monkeypatch.setattr(threading.Thread, 'start', refuse)
-            with pytest.raises(ThreadStartRefusedError) as raised:
-                child_pool._initialize_worker_pool(  # pyright: ignore[reportPrivateUsage]
-                    'postgresql://localhost/test',
-                )
-            monkeypatch.undo()
-
-            assert raised.value.thread == 'a thread of the connection pool'
-            assert str(raised.value.refusal) == "can't start new thread"
-            assert child_pool._worker_pool is None  # pyright: ignore[reportPrivateUsage]
-            register.assert_not_called()
 
 
 # ===================================================================
@@ -816,8 +620,8 @@ def _start_with(
 @pytest.mark.unit
 class TestStopBeforeStart:
     """A miss of a workflow task sends one
-    ``horsies_workflow_task_stop_before_start``; its step gives the wire
-    tuple."""
+    ``horsies_workflow_task_stop_before_start``; its step gives the stop of
+    the run."""
 
     def test_a_cancelled_workflow_stops_the_task_in_one_call(self) -> None:
         handle = _FakeChildHandle(
@@ -827,7 +631,7 @@ class TestStopBeforeStart:
 
         result = _start_with(handle)
 
-        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert result == StoppedBeforeRunning('WORKFLOW_STOPPED')
         assert handle.names() == ['start_attempt', 'stop_workflow_task_before_start']
 
     def test_a_paused_workflow_stops_the_task_in_one_call(self) -> None:
@@ -838,7 +642,7 @@ class TestStopBeforeStart:
 
         result = _start_with(handle)
 
-        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert result == StoppedBeforeRunning('WORKFLOW_STOPPED')
         assert handle.names() == ['start_attempt', 'stop_workflow_task_before_start']
 
     def test_a_node_that_is_not_linked_with_the_self_heal_off_fails_the_workflow_check(
@@ -851,7 +655,7 @@ class TestStopBeforeStart:
 
         result = _start_with(handle, orphan_self_heal=False)
 
-        assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
+        assert result == StoppedBeforeRunning('NODE_NOT_LINKED')
         assert handle.calls[1][2]['orphan_self_heal'] is False
 
     def test_a_node_that_is_not_linked_with_the_self_heal_on_is_cancelled(self) -> None:
@@ -862,7 +666,7 @@ class TestStopBeforeStart:
 
         result = _start_with(handle, orphan_self_heal=True)
 
-        assert result == (False, '', 'ORPHAN_CANCELLED')
+        assert result == StoppedBeforeRunning('ORPHAN_CANCELLED')
         assert handle.calls[1][2]['orphan_self_heal'] is True
 
     @pytest.mark.parametrize('reason', ['WORKFLOW_PAUSED', 'WORKFLOW_CANCELLED', 'NODE_NOT_LINKED'])
@@ -915,7 +719,7 @@ class TestStopBeforeStart:
                 stops=[_stopped(outcome, move_outcome)],
             )
 
-            assert _start_with(handle) == (False, '', 'WORKFLOW_STOPPED'), outcome
+            assert _start_with(handle) == StoppedBeforeRunning('WORKFLOW_STOPPED'), outcome
 
     def test_an_expiry_found_by_the_stop_expires_the_task(self) -> None:
         handle = _FakeChildHandle(
@@ -923,7 +727,7 @@ class TestStopBeforeStart:
             stops=[_stopped('EXPIRED', 'APPLIED')],
         )
 
-        assert _start_with(handle) == (False, '', OutcomeCode.TASK_EXPIRED.value)
+        assert _start_with(handle) == StoppedBeforeRunning('TASK_EXPIRED')
 
     def test_a_claim_that_the_stop_finds_not_held_is_lost(self) -> None:
         handle = _FakeChildHandle(
@@ -931,7 +735,7 @@ class TestStopBeforeStart:
             stops=[_stopped('NOT_HELD', 'LOST_CLAIM')],
         )
 
-        assert _start_with(handle) == (False, '', 'CLAIM_LOST')
+        assert _start_with(handle) == StoppedBeforeRunning('CLAIM_LOST')
 
     def test_a_resume_before_the_stop_starts_again(self) -> None:
         from horsies.core.worker.child_runner import _WorkflowResumedBeforeStart
@@ -956,7 +760,7 @@ class TestStopBeforeStart:
             ],
         )
 
-        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _start_with(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 # ===================================================================
@@ -1009,10 +813,10 @@ def _run_entry_defaults() -> dict[str, Any]:
     """Default args for _run_task_entry."""
     return {
         'task_name': 'my_task',
-        'args_json': '[]',
-        'kwargs_json': '{}',
-        'task_id': 'tid-1',
+        'input_json': '{}',
+        'task_id': TASK_ID,
         'master_worker_id': 'w-1',
+        'work': RunTheTask(),
         'claimed_at': CLAIMED_AT,
         'task_loop': TaskLoop(),
         'orphan_self_heal': True,
@@ -1149,15 +953,15 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """When ownership returns a tuple, _run_task_entry returns it as a
-        run that stopped before its RUNNING update."""
-        sentinel = (False, '', 'CLAIM_LOST')
-        patches = _make_run_task_patches(ownership=sentinel)
+        """When the ownership confirm returns a stop, _run_task_entry returns
+        it as a run that stopped before its RUNNING update."""
+        stopped = StoppedBeforeRunning('CLAIM_LOST')
+        patches = _make_run_task_patches(ownership=stopped)
 
         with _apply_patches(patches):
             result = _run_task_entry(**_run_entry_defaults)
 
-        assert result == StoppedBeforeRunning(sentinel)
+        assert result == stopped
 
     def test_a_run_after_the_running_update_set_its_row_running(
         self,
@@ -1180,102 +984,12 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches(task_missing=True)
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert 'KeyError' in (reason or '')
+        assert 'KeyError' in _error_message(payload)
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
         assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_RESOLUTION_ERROR.value}
-
-    def test_args_json_invalid(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """Malformed args_json → WORKER_SERIALIZATION_ERROR."""
-        patches = _make_run_task_patches()
-        _run_entry_defaults['args_json'] = '{{{invalid json'
-
-        with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
-
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
-        parsed = _parse_task_result(payload)
-        err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value}
-
-    def test_args_json_empty_text(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """An empty args text is not JSON (None is no args) → WORKER_SERIALIZATION_ERROR."""
-        patches = _make_run_task_patches()
-        _run_entry_defaults['args_json'] = ''
-
-        with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
-
-        assert ok is True
-        assert reason == 'SerializationError: JSON parse failed: the text is empty'
-        parsed = _parse_task_result(payload)
-        err = parsed.get('err')
-        assert err is not None
-        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value}
-        assert err['message'] == 'JSON parse failed: the text is empty'
-
-    def test_args_json_none_is_no_args(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """NULL args (the claim sends None) reach the task with no positional args."""
-        patches = _make_run_task_patches()
-        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
-        mock_task = MagicMock()
-        mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.task_ok_type = int
-        mock_task.return_value = TaskResult(ok=42)
-        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-        _run_entry_defaults['args_json'] = None
-
-        with _apply_patches(patches):
-            ok, payload, _reason = wire_of(_run_task_entry(**_run_entry_defaults))
-
-        assert ok is True
-        parsed = _parse_task_result(payload)
-        assert parsed.get('err') is None
-        assert parsed.get('ok') == 42
-
-    def test_args_json_not_a_list(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """args_json is valid JSON but not a list → WORKER_SERIALIZATION_ERROR."""
-        patches = _make_run_task_patches()
-        _run_entry_defaults['args_json'] = '"a string"'
-
-        with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
-
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
-
-    # test_positional_args_rejected_before_rehydration removed: the
-    # legacy ``rehydrate_value`` decoder no longer exists (strict-serde
-    # phase 7 deleted it). Positional args are still rejected at the
-    # raw-JSON inspection layer (see ``child_runner`` args block); that
-    # behaviour is exercised by ``test_positional_args_rejected`` in
-    # this class.
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
-        parsed = _parse_task_result(payload)
-        err = parsed.get('err') or parsed.get('error')
-        assert (
-            err['error_code']
-            == {'__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value}
-        )
-        msg = err.get('message') or ''
-        assert 'positional' in msg.lower()
 
     def test_kwargs_json_invalid(
         self,
@@ -1283,13 +997,12 @@ class TestRunTaskEntryErrorPaths:
     ) -> None:
         """Malformed kwargs_json → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
-        _run_entry_defaults['kwargs_json'] = '{{{bad'
+        _run_entry_defaults['input_json'] = '{{{bad'
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
 
     def test_kwargs_json_lone_surrogate(
         self,
@@ -1297,13 +1010,12 @@ class TestRunTaskEntryErrorPaths:
     ) -> None:
         """An escape such as \\ud800 → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
-        _run_entry_defaults['kwargs_json'] = r'{"x":"\ud800"}'
+        _run_entry_defaults['input_json'] = r'{"x":"\ud800"}'
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'lone surrogate' in reason
+        assert 'lone surrogate' in _error_message(payload)
         assert 'WORKER_SERIALIZATION_ERROR' in payload
 
     def test_kwargs_json_past_the_depth_bound(
@@ -1312,15 +1024,14 @@ class TestRunTaskEntryErrorPaths:
     ) -> None:
         """A text past the bound → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
-        _run_entry_defaults['kwargs_json'] = (
+        _run_entry_defaults['input_json'] = (
             '{"x":' + '[' * 1_100 + ']' * 1_100 + '}'
         )
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'nested deeper than' in reason
+        assert 'nested deeper than' in _error_message(payload)
         assert 'WORKER_SERIALIZATION_ERROR' in payload
 
     def test_kwargs_json_number_outside_finite_binary64(
@@ -1329,13 +1040,12 @@ class TestRunTaskEntryErrorPaths:
     ) -> None:
         """A literal such as 1e9999 → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
-        _run_entry_defaults['kwargs_json'] = '{"x":1e9999}'
+        _run_entry_defaults['input_json'] = '{"x":1e9999}'
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'finite binary64' in reason
+        assert 'finite binary64' in _error_message(payload)
         assert 'WORKER_SERIALIZATION_ERROR' in payload
 
     def test_kwargs_json_not_a_dict(
@@ -1344,28 +1054,21 @@ class TestRunTaskEntryErrorPaths:
     ) -> None:
         """kwargs_json is valid JSON but not a dict → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
-        _run_entry_defaults['kwargs_json'] = '[1, 2]'
+        _run_entry_defaults['input_json'] = '[1, 2]'
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
 
-    def test_kwargs_json_null_treated_as_empty(
+    def test_an_empty_input_object_runs_a_task_with_no_arguments(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """kwargs_json=None (DB NULL) is accepted as empty kwargs.
-
-        Regression: ``.send()`` leaves kwargs_json=None for no-kwargs
-        calls (task_decorator.py emits NULL when ``kwargs_dict`` is
-        falsy); the child runner must mirror the args-NULL handling and
-        treat NULL kwargs_json as ``{}`` rather than rejecting it as
-        WORKER_SERIALIZATION_ERROR. Without this branch every no-kwargs
-        e2e task (healthcheck, return_none_task, etc.) fails at the
-        worker, deadlocking ``_make_ready_check`` in run_worker.
-        """
+        """The stored input of a task sent with no keyword arguments is the
+        empty object, and the task runs with none. Without this every task
+        with no arguments (healthcheck, return_none_task, ...) fails at the
+        worker."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
@@ -1373,17 +1076,16 @@ class TestRunTaskEntryErrorPaths:
         mock_task.task_ok_type = int
         mock_task.return_value = TaskResult(ok=42)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-        _run_entry_defaults['kwargs_json'] = None
+        _run_entry_defaults['input_json'] = '{}'
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         parsed = _parse_task_result(payload)
-        err = parsed.get('err') or parsed.get('error')
-        assert err is None, (
-            f'expected no error for NULL kwargs_json, got: {err}'
+        assert parsed.get('err') is None, (
+            f'expected no error for an empty input, got: {parsed}'
         )
+        assert parsed['ok'] == 42
 
     def test_a_wrapper_that_returns_no_task_result_is_a_defect(
         self,
@@ -1400,9 +1102,8 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
             '__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value,
@@ -1422,10 +1123,8 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None  # exception path sets reason=None
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
         assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value}
@@ -1458,10 +1157,9 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'holds a lone surrogate' in reason
+        assert 'holds a lone surrogate' in _error_message(payload)
         _ = payload.encode('utf-8')
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == {
@@ -1486,9 +1184,8 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == {
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
@@ -1509,10 +1206,8 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == {
             '__builtin_task_code__': 'RETURN_TYPE_MISMATCH',
@@ -1531,7 +1226,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            _, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == 'MY_ERROR'
@@ -1552,9 +1247,8 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == {
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
@@ -1572,7 +1266,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            _, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == 'MY_ERROR'
@@ -1591,9 +1285,8 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == {
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
@@ -1616,9 +1309,8 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == 'MY_ERROR'
         assert 'data_refused' in parsed['err']['data']
@@ -1634,12 +1326,11 @@ class TestRunTaskEntryErrorPaths:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _constant_surrogate_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-        _run_entry_defaults['kwargs_json'] = json.dumps({'x': {'name': 'plain'}})
+        _run_entry_defaults['input_json'] = json.dumps({'x': {'name': 'plain'}})
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == {
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
@@ -1669,9 +1360,8 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         parsed = _parse_task_result(payload)
         assert parsed['err']['error_code'] == 'MY_ERROR'
         assert 'data_refused' in parsed['err']['data']
@@ -1690,9 +1380,8 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         _ = payload.encode('utf-8')
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
@@ -1732,10 +1421,9 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
         assert err is not None
@@ -1753,13 +1441,13 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='success')
+        mock_task.task_ok_type = str
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
+        assert _parse_task_result(payload)['err'] is None, payload
 
     def test_task_returns_task_result_err(
         self,
@@ -1776,10 +1464,10 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
+        assert _error_code(payload) != _SERIALIZATION_ERROR
+        assert _error_message(payload) == 'failed'
 
     def test_dumps_json_failure_on_task_result(
         self,
@@ -1798,10 +1486,9 @@ class TestRunTaskEntryErrorPaths:
             'horsies.core.worker.child_runner.dumps_json',
             return_value=Err(SerializationError('cannot serialize')),
         ):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
 
 
 # ===================================================================
@@ -1819,7 +1506,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
     ) -> None:
         """__h_taskresult_envelope__ with invalid 'data' string → serde error."""
         patches = _make_run_task_patches()
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             'upstream': {
                 '__h_taskresult_envelope__': True,
                 'data': '{{{invalid',
@@ -1827,10 +1514,9 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
 
     def test_horsies_taskresult_not_a_task_result_json(
         self,
@@ -1838,7 +1524,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
     ) -> None:
         """__h_taskresult_envelope__ with valid JSON but not TaskResult shape → serde error."""
         patches = _make_run_task_patches()
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             'upstream': {
                 '__h_taskresult_envelope__': True,
                 'data': '"just a string"',
@@ -1846,10 +1532,9 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
 
     # (test_workflow_ctx_results_by_id_bad_json removed: the strict-serde
     # phase 5/6 rewrite of workflow_ctx kwarg decode no longer raises
@@ -1875,7 +1560,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
@@ -1888,10 +1573,9 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
 
     def test_workflow_ctx_summaries_by_id_bad_status(
         self,
@@ -1915,7 +1599,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
@@ -1928,10 +1612,9 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
 
     def test_workflow_meta_injection(
         self,
@@ -1949,11 +1632,12 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='meta_ok')
+        mock_task.task_ok_type = str
         mock_task._original_fn = _task_with_meta
         mock_task._fn = _task_with_meta
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             '__h_workflow_meta__': {
                 'workflow_id': 'wf-1',
                 'task_index': 3,
@@ -1962,10 +1646,9 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
+        assert _parse_task_result(payload)['err'] is None, payload
 
 
 # ===================================================================
@@ -2087,7 +1770,7 @@ class TestExpireClaimedBeforeStart:
 
         result = _start_with(handle)
 
-        assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
+        assert result == StoppedBeforeRunning('TASK_EXPIRED')
         name, task_id, arguments = handle.calls[1]
         assert name == 'expire_owned_claim'
         assert task_id == uuid.UUID(TASK_ID)
@@ -2103,7 +1786,7 @@ class TestExpireClaimedBeforeStart:
             expiries=[_refusal(refusal)],
         )
 
-        assert _start_with(handle) == (False, '', 'CLAIM_LOST')
+        assert _start_with(handle) == StoppedBeforeRunning('CLAIM_LOST')
 
     def test_a_failed_expiry_is_unconfirmed(self) -> None:
         handle = _FakeChildHandle(
@@ -2121,7 +1804,7 @@ class TestExpireClaimedBeforeStart:
             ],
         )
 
-        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _start_with(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 # ===================================================================
@@ -2182,7 +1865,7 @@ class TestStartAttempt:
 
         result = _start_with(handle)
 
-        assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
+        assert result == StoppedBeforeRunning('TASK_EXPIRED')
         assert handle.names() == ['start_attempt', 'expire_owned_claim']
 
     @pytest.mark.parametrize('reason', ['NOT_HELD', 'LEASE_EXPIRED'])
@@ -2193,7 +1876,7 @@ class TestStartAttempt:
 
         result = _start_with(handle)
 
-        assert result == (False, '', 'CLAIM_LOST')
+        assert result == StoppedBeforeRunning('CLAIM_LOST')
         assert handle.names() == ['start_attempt']
 
     def test_the_time_left_before_the_deadline_goes_with_the_start(self) -> None:
@@ -2239,13 +1922,13 @@ class TestStartAttempt:
             ],
         )
 
-        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _start_with(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
     def test_a_core_that_cannot_run_the_call_is_unconfirmed(self) -> None:
         handle = MagicMock()
         handle.start_attempt.side_effect = core.TooManyPendingCalls('the queue is full')
 
-        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _start_with(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
     def test_a_record_outside_the_catalog_is_a_defect(self) -> None:
         handle = _FakeChildHandle(starts=[object()])
@@ -2269,12 +1952,11 @@ class TestStartAttempt:
             result = _confirm_until_not_resumed(
                 TASK_ID,
                 'worker-A',
-                True,
                 CLAIMED_AT,
                 orphan_self_heal=True,
             )
 
-        assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
         assert handle.names() == [
             'start_attempt',
             'stop_workflow_task_before_start',
@@ -2343,7 +2025,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         mock_app.tasks.get = MagicMock(side_effect=_task_lookup)
 
         # New envelope: source_task_name + inner = full task-result envelope.
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             'upstream': {
                 '__h_taskresult_envelope__': True,
                 'source_task_name': 'upstream_task',
@@ -2356,10 +2038,9 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
+        assert _parse_task_result(payload)['err'] is None, payload
 
     def test_workflow_ctx_successful_results_and_summaries(
         self,
@@ -2375,6 +2056,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='ctx_ok')
+        mock_task.task_ok_type = str
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -2390,7 +2072,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
             'failed_tasks': 0,
             'skipped_tasks': 0,
         })
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
@@ -2405,10 +2087,9 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
+        assert _parse_task_result(payload)['err'] is None, payload
 
     # (test_workflow_ctx_results_by_id_task_result_from_json_error removed:
     # the patched-out ``task_result_from_json`` helper no longer exists
@@ -2450,7 +2131,7 @@ class TestChildWritesNoRunnerHeartbeat:
         task._original_fn = body
         app = MagicMock()
         app.tasks.__getitem__ = MagicMock(return_value=task)
-        cursor = _FakeCursor()
+        handle = MagicMock()
         patches: dict[str, Any] = {
             'horsies.core.worker.child_runner._confirm_ownership_and_set_running': MagicMock(
                 return_value=None,
@@ -2458,23 +2139,21 @@ class TestChildWritesNoRunnerHeartbeat:
             'horsies.core.worker.child_runner.get_current_app': MagicMock(
                 return_value=app,
             ),
-            'horsies.core.worker.child_runner._get_worker_pool': MagicMock(
-                return_value=_FakePool(_FakeConn(cursor)),
+            'horsies.core.worker.child_runner._get_child_core_handle': MagicMock(
+                return_value=handle,
             ),
         }
 
         with _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert (ok, reason) == (True, None)
         assert _parse_task_result(payload)['ok'] == 'done'
         assert names_during_run
         assert not any(name.startswith('heartbeat') for name in names_during_run)
-        statements = [' '.join(sql.split()) for sql, _ in cursor.queries]
-        assert not any('horsies_heartbeats' in sql for sql in statements)
-        # The child writes the marker after the run has ended, with the work
-        # that the task left on its loop (child_main._report_run).
-        assert not any('SET finalizing_at = NOW()' in sql for sql in statements)
+        # Every write of the child goes through its core handle: the run
+        # makes none. The child writes the marker after the run has ended,
+        # with the work that the task left on its loop (child_main._report_run).
+        assert handle.mock_calls == []
 
 
 # ===================================================================
@@ -2497,12 +2176,10 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
     def _assert_no_marker(
         self,
         payload: str,
-        reason: str | None,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        assert reason is not None and 'SerializationError' in reason
+        assert _error_code(payload) == _SERIALIZATION_ERROR
         assert _INPUT_MARKER not in payload
-        assert _INPUT_MARKER not in reason
         assert _INPUT_MARKER not in caplog.text
 
     def test_kwargs_decode_refusal(
@@ -2516,13 +2193,12 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _typed_count_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-        _run_entry_defaults['kwargs_json'] = json.dumps({'count': _INPUT_MARKER})
+        _run_entry_defaults['input_json'] = json.dumps({'count': _INPUT_MARKER})
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        self._assert_no_marker(payload, reason, caplog)
+        self._assert_no_marker(payload, caplog)
         assert 'count: Input should be a valid integer' in payload
 
     def test_args_from_decode_refusal(
@@ -2543,7 +2219,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
 
         mock_app.tasks.__getitem__ = MagicMock(side_effect=_task_lookup)
         mock_app.tasks.get = MagicMock(side_effect=_task_lookup)
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             'upstream': {
                 '__h_taskresult_envelope__': True,
                 'source_task_name': 'upstream_task',
@@ -2552,10 +2228,9 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         })
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        self._assert_no_marker(payload, reason, caplog)
+        self._assert_no_marker(payload, caplog)
 
     def test_task_call_raises_validation_error(
         self,
@@ -2573,10 +2248,8 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
         assert _INPUT_MARKER not in payload
         assert _INPUT_MARKER not in caplog.text
         assert 'ValidationError: Input should be a valid integer' in payload
@@ -2595,10 +2268,9 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        self._assert_no_marker(payload, reason, caplog)
+        self._assert_no_marker(payload, caplog)
 
 
 @pytest.mark.unit
@@ -2623,7 +2295,7 @@ class TestRunTaskEntryStoredErrorRefusal:
 
         mock_app.tasks.__getitem__ = MagicMock(side_effect=_task_lookup)
         mock_app.tasks.get = MagicMock(side_effect=_task_lookup)
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             'upstream': {
                 '__h_taskresult_envelope__': True,
                 'source_task_name': 'upstream_task',
@@ -2636,9 +2308,8 @@ class TestRunTaskEntryStoredErrorRefusal:
         })
 
         with _apply_patches(patches):
-            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
             '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
@@ -2662,7 +2333,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         mock_app.tasks.get = MagicMock(return_value=mock_task)
-        _run_entry_defaults['kwargs_json'] = json.dumps({
+        _run_entry_defaults['input_json'] = json.dumps({
             '__h_workflow_ctx__': {
                 'workflow_id': 'wf-1',
                 'task_index': 0,
@@ -2680,10 +2351,8 @@ class TestRunTaskEntryStoredErrorRefusal:
         })
 
         with _apply_patches(patches):
-            ok, _, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            _ = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        assert ok is True
-        assert reason is None
         injected = mock_task.call_args.kwargs['workflow_ctx']
         entry = injected._results_by_id['node_a'].unwrap_err()
         assert entry.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
@@ -2728,7 +2397,8 @@ _REFUSALS: list[tuple[TimeoutRefusal, str]] = [
 
 @pytest.mark.unit
 class TestRunTaskEntryStoredTimeout:
-    """A stored timeout reaches the child as `StoredTimeout`."""
+    """Stored options that the worker refused reach the child as the work of
+    its run frame (``isolated_work_of``)."""
 
     @pytest.mark.parametrize(('refusal', 'field'), _REFUSALS)
     def test_a_refusal_fails_the_task_after_running_and_before_resolve(
@@ -2743,16 +2413,11 @@ class TestRunTaskEntryStoredTimeout:
         ]
         app_lookup = patches['horsies.core.worker.child_runner.get_current_app']
 
-        with _apply_patches(patches):
-            ok, payload, reason = wire_of(
-                _run_task_entry(
-                    **_run_entry_defaults,
-                    timeout=refusal,
-                )
-            )
+        _run_entry_defaults['work'] = refusal
 
-        assert ok is True
-        assert reason == f'StoredTimeoutRefused: {refusal.reason}'
+        with _apply_patches(patches):
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
+
         confirm.assert_called_once()
         app_lookup.assert_not_called()
         err = _parse_task_result(payload)['err']
@@ -2767,14 +2432,10 @@ class TestRunTaskEntryStoredTimeout:
         _run_entry_defaults: dict[str, Any],
     ) -> None:
         patches = _make_run_task_patches()
+        _run_entry_defaults['work'] = TimeoutValueInvalid(reason='stored timeout_ms is a bool')
 
         with _apply_patches(patches):
-            _, payload, _ = wire_of(
-                _run_task_entry(
-                    **_run_entry_defaults,
-                    timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
-                )
-            )
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
         data = _parse_task_result(payload)['err']['data']
         assert data == {
@@ -2789,16 +2450,12 @@ class TestRunTaskEntryStoredTimeout:
         _run_entry_defaults: dict[str, Any],
     ) -> None:
         patches = _make_run_task_patches()
+        _run_entry_defaults['work'] = CancelGraceInvalid(
+            reason='stored cancel_grace_ms is absent',
+        )
 
         with _apply_patches(patches):
-            _, payload, _ = wire_of(
-                _run_task_entry(
-                    **_run_entry_defaults,
-                    timeout=CancelGraceInvalid(
-                        reason='stored cancel_grace_ms is absent'
-                    ),
-                )
-            )
+            payload = envelope_of(_run_task_entry(**_run_entry_defaults))
 
         data = _parse_task_result(payload)['err']['data']
         assert data == {
@@ -2844,12 +2501,11 @@ class TestRunTaskEntryCoroutineCall:
 
         try:
             with _apply_patches(patches):
-                ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+                payload = envelope_of(_run_task_entry(**_run_entry_defaults))
             loop_state = task_loop.state
         finally:
             task_loop.close()
 
-        assert (ok, reason) == (True, None)
         assert _ok_value(payload, int) == 5
         assert isinstance(loop_state, LoopOpen)
         assert seen == [loop_state.loop]

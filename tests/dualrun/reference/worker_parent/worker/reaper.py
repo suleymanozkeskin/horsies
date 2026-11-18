@@ -1,0 +1,1036 @@
+"""Reaper: stale-task recovery, workflow recovery, retention cleanup.
+
+ReaperMixin holds the periodic reaper loop and its gated pass. It is a
+worker-internal mixin: the ``TYPE_CHECKING`` block declares the slice of
+``Worker`` state it relies on, and ``Worker`` is the only intended
+subclass.
+"""
+
+# pyright: reportPrivateUsage=false
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import time
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Literal, assert_never
+
+from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
+from horsies.core.types.error_detail import NoCause
+from horsies.core.logging import get_logger
+from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.models.class_coverage import (
+    StreamServed,
+    StreamUnserved,
+    StreamWithoutCapacity,
+)
+from tests.dualrun.reference.worker_parent.worker.class_coverage_log import (
+    CheckFailedKey,
+    describe_uncovered,
+)
+from tests.dualrun.reference.worker_parent.worker.runtime import _ReaperPassState
+from tests.dualrun.reference.worker_parent.worker.sql import (
+    DELETE_EXPIRED_WORKER_STATES_SQL,
+    REAPER_GATE_TRY_LOCK_SQL,
+    _RETENTION_PASS_TIME_BUDGET_S,
+)
+from horsies.core.workflows.recovery import RecoveryPassFailure
+
+if TYPE_CHECKING:
+    from sqlalchemy import TextClause
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from horsies.core.app import Horsies
+    from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.brokers.resources import BrokerResources
+    from horsies.core.history.maintenance.coverage import CoverageOutcome
+    from horsies.core.history.maintenance.pruning import PrunePassSummary
+    from horsies.core.models.recovery import RecoveryConfig
+    from horsies.core.models.retention import RetentionConfig
+    from horsies._core import RecoveryCaseRecord, RecoveryPassRecord
+    from horsies.core.workflows.phase2_recovery import Phase2RecoverySummary
+    from horsies.core.workflows.recovery import RecoveryCaseMetrics, RecoveryReport
+    from horsies.core.worker.config import WorkerConfig
+
+logger = get_logger('worker')
+
+
+def _recovery_case_metrics(record: 'RecoveryCaseRecord') -> 'RecoveryCaseMetrics':
+    """The case metrics of a core record. Pure."""
+    from horsies.core.workflows.recovery import RecoveryCaseMetrics
+
+    return RecoveryCaseMetrics(
+        rows_selected=record.rows_selected,
+        candidates_returned=record.candidates_returned,
+        duration_ms=record.duration_ms,
+        refusals=record.refusals,
+        errors=record.errors,
+        failures_counted=record.failures_counted,
+        limit_reached=record.limit_reached,
+    )
+
+
+def _recovery_report_of(record: 'RecoveryPassRecord') -> 'RecoveryReport':
+    """The report of a core pass record. Pure.
+
+    ``errors`` holds the failures that no case counted, as the Python pass
+    kept them; the audit page is the one the case 2/3 metrics count (a page
+    of 0 workflows has no completion yield, as no page).
+    """
+    from horsies.core.workflows.recovery import AuditPage, RecoveryReport
+
+    return RecoveryReport(
+        recovered=record.recovered,
+        errors=record.pass_errors,
+        metrics={
+            'case_0': _recovery_case_metrics(record.case_0),
+            'case_1': _recovery_case_metrics(record.case_1),
+            'case_1_5': _recovery_case_metrics(record.case_1_5),
+            'case_1_6': _recovery_case_metrics(record.case_1_6),
+            'case_2_3': _recovery_case_metrics(record.case_2_3),
+            'case_4': _recovery_case_metrics(record.case_4),
+        },
+        audit=AuditPage(
+            scanned=record.case_2_3.rows_selected,
+            completion_candidates=record.case_2_3.candidates_returned,
+        ),
+        over_failure_limit=record.over_failure_limit,
+    )
+
+
+def _operation_sqlstate(error: BrokerOperationError) -> str | None:
+    cause: BaseException
+    match broker_error_cause(error):
+        case NoCause():
+            return None
+        case exception:
+            cause = exception
+    original: object = getattr(cause, 'orig', cause)
+    sqlstate = getattr(original, 'sqlstate', None)
+    if isinstance(sqlstate, str):
+        return sqlstate
+    pgcode = getattr(original, 'pgcode', None)
+    return pgcode if isinstance(pgcode, str) else None
+
+
+def _orphan_audit_failure_health(
+    error: BrokerOperationError,
+    *,
+    duration_ms: int,
+) -> dict[str, int | str]:
+    refused = _operation_sqlstate(error) == '55P03'
+    return {
+        'state': 'refused' if refused else 'error',
+        'rows_selected': 0,
+        'candidates_returned': 0,
+        'cancelled': 0,
+        'duration_ms': duration_ms,
+        'refusals': 1 if refused else 0,
+        'errors': 0 if refused else 1,
+        'error': error.message,
+    }
+
+
+class ReaperMixin:
+    """Periodic reaper loop, advisory gate, and the recovery/retention pass."""
+
+    if TYPE_CHECKING:
+        # Worker state this mixin reads (provided by the composed Worker).
+        sf: async_sessionmaker[AsyncSession]
+        cfg: WorkerConfig
+        broker: PostgresBroker | None
+        _app: Horsies | None
+        _stop: asyncio.Event
+        _partition_coverage_health: dict[str, Any] | None
+        _partition_pruning_health: dict[str, Any] | None
+        _phase2_recovery_health: dict[str, Any] | None
+        _workflow_recovery_health: dict[str, Any] | None
+        _orphan_task_recovery_health: dict[str, Any] | None
+
+    def _advisory_key_reaper(self) -> int:
+        """Fixed 64-bit key gating reaper passes (one reaper per interval)."""
+        h = hashlib.sha256(b'horsies:reaper:v1').digest()
+        return int.from_bytes(h[:8], byteorder='big', signed=True)
+
+    def _reaper_gate_enabled(self) -> bool:
+        """Whether the advisory reaper gate can be used without starving the pool.
+
+        A gated pass needs two simultaneous coordinator connections: the
+        gate session holding the xact lock, plus the pass body's own
+        session. The pool of the worker process has no overflow; with
+        fewer than two connections, the second checkout blocks until pool
+        timeout — so the gate must be skipped.
+        """
+        return self.cfg.parent_pool_size >= 2
+
+    # Stale detection is handled via heartbeat policy for RUNNING tasks.
+
+    async def _run_reaper_pass(
+        self,
+        temp_broker: 'PostgresBroker',
+        resources: 'BrokerResources',
+        recovery_cfg: 'RecoveryConfig',
+        retention_cfg: 'RetentionConfig',
+        state: _ReaperPassState,
+    ) -> None:
+        """One reaper pass: stale-task recovery, pending expiry, workflow
+        recovery, retention cleanup, partition maintenance and the class
+        coverage check. Runs under the cluster-wide reaper gate (one
+        executing worker per interval).
+
+        ``resources`` is the set selected from ``temp_broker`` when the
+        reaper loop started.
+        """
+        # Auto-requeue stale CLAIMED tasks. The step runs on every pass while
+        # the worker lives; each failing pass logs an error.
+        if recovery_cfg.auto_requeue_stale_claimed:
+            match await temp_broker.requeue_stale_claimed(
+                stale_threshold_ms=recovery_cfg.claimed_stale_threshold_ms,
+            ):
+                case Ok(requeued):
+                    if requeued > 0:
+                        logger.info(
+                            f'Reaper requeued {requeued} stale CLAIMED task(s)',
+                        )
+                case Err(err) if err.retryable:
+                    logger.error(
+                        f'Reaper requeue_stale_claimed failed transiently and '
+                        f'runs again on the next pass: {err.message}',
+                    )
+                case Err(err):
+                    logger.error(
+                        f'Reaper requeue_stale_claimed failed and runs again '
+                        f'on the next pass: {err.message}',
+                    )
+
+        # Cancel orphaned workflow tasks (no live workflow_task linkage). These
+        # cannot reach RUNNING, so requeue (above) skips them and they would
+        # otherwise stay CLAIMED forever; cancelling frees budget and lets
+        # retention sweep them.
+        if (
+            recovery_cfg.auto_terminate_orphaned_workflow_tasks
+            and time.monotonic() >= state.next_orphan_task_audit_at
+        ):
+            orphan_audit_started = time.monotonic()
+            try:
+                match await temp_broker.audit_orphaned_workflow_tasks():
+                    case Ok(report):
+                        self._orphan_task_recovery_health = report.health()
+                        if report.cancelled > 0:
+                            logger.warning(
+                                f'Reaper cancelled {report.cancelled} orphaned workflow '
+                                f'task(s) (no live workflow_task linkage)',
+                            )
+                    case Err(err) if _operation_sqlstate(err) == '55P03':
+                        self._orphan_task_recovery_health = (
+                            _orphan_audit_failure_health(
+                                err,
+                                duration_ms=int(
+                                    (time.monotonic() - orphan_audit_started)
+                                    * 1000
+                                ),
+                            )
+                        )
+                        logger.warning(
+                            'Reaper orphan workflow-task audit lock was busy; '
+                            'the next scheduled audit will retry',
+                        )
+                    case Err(err) if err.retryable:
+                        self._orphan_task_recovery_health = (
+                            _orphan_audit_failure_health(
+                                err,
+                                duration_ms=int(
+                                    (time.monotonic() - orphan_audit_started)
+                                    * 1000
+                                ),
+                            )
+                        )
+                        logger.error(
+                            f'Reaper orphan workflow-task audit failed '
+                            f'transiently and will retry on its next schedule: '
+                            f'{err.message}',
+                        )
+                    case Err(err):
+                        self._orphan_task_recovery_health = (
+                            _orphan_audit_failure_health(
+                                err,
+                                duration_ms=int(
+                                    (time.monotonic() - orphan_audit_started)
+                                    * 1000
+                                ),
+                            )
+                        )
+                        logger.error(
+                            f'Reaper orphan workflow-task audit failed and '
+                            f'runs again on its next schedule: {err.message}',
+                        )
+            finally:
+                state.next_orphan_task_audit_at = (
+                    time.monotonic()
+                    + recovery_cfg.orphan_task_audit_interval_ms / 1000.0
+                )
+
+        # Auto-fail stale RUNNING tasks. The step runs on every pass while the
+        # worker lives; each failing pass logs an error.
+        if recovery_cfg.auto_fail_stale_running:
+            match await temp_broker.mark_stale_tasks_as_failed(
+                stale_threshold_ms=recovery_cfg.running_stale_threshold_ms,
+                finalizing_stale_threshold_ms=(
+                    recovery_cfg.finalizing_stale_threshold_ms
+                ),
+            ):
+                case Ok(failed):
+                    if failed > 0:
+                        logger.warning(
+                            f'Reaper marked {failed} stale RUNNING task(s) as FAILED',
+                        )
+                case Err(err) if err.retryable:
+                    logger.error(
+                        f'Reaper mark_stale_tasks_as_failed failed transiently '
+                        f'and runs again on the next pass: {err.message}',
+                    )
+                case Err(err):
+                    logger.error(
+                        f'Reaper mark_stale_tasks_as_failed failed and runs '
+                        f'again on the next pass: {err.message}',
+                    )
+
+        # Expire PENDING tasks past good_until deadline
+        try:
+            match await temp_broker.expire_pending_tasks():
+                case Ok(expired):
+                    if expired > 0:
+                        logger.info(
+                            f'Reaper expired {expired} PENDING task(s) past good_until',
+                        )
+                case Err(err):
+                    logger.warning(
+                        f'Reaper expire_pending_tasks failed: {err.message}',
+                    )
+        except Exception as expire_err:
+            logger.error(f'Reaper expire_pending_tasks error: {expire_err}')
+
+        # Recover stuck workflows
+        try:
+            recovery_report = await self._recover_workflows(
+                temp_broker,
+                failure_limit=recovery_cfg.workflow_recovery_failure_limit,
+            )
+            self._workflow_recovery_health = recovery_report.health()
+            if recovery_report.recovered > 0:
+                logger.info(
+                    f'Reaper recovered {recovery_report.recovered} stuck '
+                    f'workflow item(s)'
+                )
+        except RecoveryPassFailure as wf_err:
+            self._workflow_recovery_health = wf_err.health()
+            logger.error(f'Workflow recovery error: {wf_err.error}')
+        except Exception as wf_err:
+            self._workflow_recovery_health = {
+                'state': 'error',
+                'error': str(wf_err),
+            }
+            logger.error(f'Workflow recovery error: {wf_err}')
+
+        # Phase-2 recovery: the crashed-worker case, driven by the
+        # terminalization outbox rather than by a scan of terminal live
+        # rows, which the split made unreachable. Rides the same
+        # cluster-wide gate as the rest of this pass, so no second
+        # holder is taken; the grace window and the row cap are the ones
+        # the retired scan carried.
+        try:
+            from horsies.core.workflows.recovery import GLOBAL_SCAN_ROW_CAP
+
+            phase2 = await self._recover_phase2(
+                temp_broker,
+                grace_ms=recovery_cfg.crashed_worker_recovery_grace_ms,
+                max_rows=GLOBAL_SCAN_ROW_CAP,
+                quarantine_after_attempts=(
+                    recovery_cfg.phase2_quarantine_after_attempts
+                ),
+            )
+            if phase2.applied or phase2.retained or phase2.failed:
+                logger.info(
+                    'Phase-2 recovery: '
+                    f'{phase2.applied} applied, '
+                    f'{phase2.already_applied} already applied, '
+                    f'{phase2.superseded} superseded, '
+                    f'{phase2.retained} retained, '
+                    f'{phase2.failed} failed, '
+                    f'{phase2.quarantined} quarantined'
+                )
+            self._phase2_recovery_health = {
+                'considered': phase2.considered,
+                'applied': phase2.applied,
+                'already_applied': phase2.already_applied,
+                'superseded': phase2.superseded,
+                'retained': phase2.retained,
+                'failed': phase2.failed,
+                'quarantined': phase2.quarantined,
+                'raised_counted': phase2.raised_counted,
+                'over_attempt_bound': phase2.over_attempt_bound,
+                'retained_details': list(phase2.retained_details),
+                'quarantine_refusals': list(phase2.quarantine_refusals),
+            }
+        except Exception as phase2_err:
+            logger.error(f'Phase-2 recovery error: {phase2_err}')
+
+        now_monotonic = time.monotonic()
+        if now_monotonic >= state.next_retention_cleanup_at:
+            try:
+                deleted_worker_states = 0
+                deleted_workflows = 0
+
+                # Shared wall-clock budget across both statements. A
+                # backlog that outlives the budget resumes next pass.
+                # Terminal TASK rows move to the task-history archive at
+                # terminalization and age by retention class; heartbeat
+                # rows live in partitions that drop whole. Both are
+                # pruned by the partition-maintenance pass below —
+                # neither is row-deleted here.
+                deadline = now_monotonic + _RETENTION_PASS_TIME_BUDGET_S
+
+                batch_size = retention_cfg.retention_delete_batch_size
+
+                if retention_cfg.worker_state_retention_hours is not None:
+                    deleted_worker_states = await self._delete_expired_in_batches(
+                        resources.session_factory,
+                        DELETE_EXPIRED_WORKER_STATES_SQL,
+                        {
+                            'retention_hours': retention_cfg.worker_state_retention_hours,
+                        },
+                        deadline,
+                        batch_size,
+                    )
+
+                if retention_cfg.terminal_record_retention_hours is not None:
+                    # Workflows and their node rows go together in one
+                    # workflow-batched statement (node purge is a CTE inside
+                    # it), which the core runs in batches until one deletes
+                    # nothing or the pass budget has passed. The
+                    # all-backing-tasks-terminal guard makes partial
+                    # progress safe.
+                    deleted_workflows = await self._delete_expired_workflows(
+                        temp_broker,
+                        retention_hours=retention_cfg.terminal_record_retention_hours,
+                        batch_size=batch_size,
+                        deadline_monotonic=deadline,
+                    )
+
+                if deleted_worker_states > 0 or deleted_workflows > 0:
+                    logger.info(
+                        'Reaper retention cleanup: worker_states=%s workflows=%s',
+                        deleted_worker_states,
+                        deleted_workflows,
+                    )
+            except Exception as cleanup_err:
+                logger.error(f'Retention cleanup error: {cleanup_err}')
+            finally:
+                state.next_retention_cleanup_at = (
+                    now_monotonic + retention_cfg.retention_sweep_interval_s
+                )
+
+        # Paused-age expiry: the declared policy's sweep. Gated on the
+        # opt-in knob (None = the pass reads nothing) and running under
+        # the same cluster-wide reaper gate; the writer is the cancel
+        # body of horsies_workflow_expire_paused with EXPIRED as the
+        # terminal status, so an expiring workflow leaves no claimable
+        # backing rows and no ENQUEUED nodes behind.
+        if retention_cfg.paused_workflow_auto_cancel_after is not None:
+            try:
+                expired = await self._expire_paused_workflows(
+                    temp_broker,
+                    older_than=retention_cfg.paused_workflow_auto_cancel_after,
+                )
+                if expired > 0:
+                    logger.info(
+                        f'Expired {expired} paused workflow(s) past the '
+                        f'declared age policy'
+                    )
+            except Exception as expiry_err:
+                logger.error(
+                    f'Paused-workflow expiry sweep error: {expiry_err}'
+                )
+
+        # Partition maintenance: both halves of the retention promise.
+        # Coverage keeps history and heartbeat leaves created ahead of
+        # writes and the staged readers published; pruning detaches and
+        # drops leaves whose class duration has elapsed. Rides the
+        # reaper's cluster-wide gate, so one worker per interval runs
+        # it; a refusal is reported verbatim and never retried into
+        # silence — the next pass tries again.
+        if now_monotonic >= state.next_partition_maintenance_at:
+            from horsies.core.history.maintenance.coverage import (
+                CoverageEnsureFailed,
+                CoverageEnsured,
+                history_coverage_payload,
+            )
+
+            try:
+                coverage = await self._run_partition_coverage(
+                    temp_broker,
+                    resources,
+                    retention_cfg,
+                )
+                # A leaf the catalog still calls attached whose relation
+                # is gone means someone dropped it behind the manager's
+                # back. The readers have already been regenerated without
+                # it, so reads keep working and the loss is now silent —
+                # which is exactly why it is logged at warning rather
+                # than folded into the info line. The rows it held are
+                # gone; the catalog row is deliberately left intact as
+                # the operator's evidence.
+                if coverage.absent_leaves:
+                    logger.warning(
+                        'Partition coverage: cataloged leaves have no '
+                        'relation and were excluded from the staged '
+                        'readers: '
+                        f'{", ".join(coverage.absent_leaves)}. Reads and '
+                        'terminalization are restored; the records those '
+                        'leaves held are gone. The catalog rows are kept '
+                        'as evidence and resolving them is an operator '
+                        'decision.'
+                    )
+                match coverage:
+                    case CoverageEnsureFailed():
+                        logger.error(
+                            f'Partition coverage ensure failed: {coverage!r}'
+                        )
+                        self._partition_coverage_health = {
+                            'state': 'failed',
+                            'stage': coverage.stage,
+                            'class_key': coverage.class_key,
+                            'refusal': coverage.refusal,
+                            'heartbeat_covered_now': (
+                                coverage.heartbeat_covered_now
+                            ),
+                            'absent_leaves': list(coverage.absent_leaves),
+                        }
+                    case CoverageEnsured(
+                        created_history_leaves=created_history,
+                        created_heartbeat_leaves=created_heartbeats,
+                        republished=republished,
+                    ) if created_history or created_heartbeats or republished:
+                        logger.info(
+                            'Partition coverage: '
+                            f'+{created_history} history leaves, '
+                            f'+{created_heartbeats} heartbeat leaves, '
+                            f'republished={republished}'
+                        )
+                    case _:
+                        pass
+                match coverage:
+                    case CoverageEnsured():
+                        self._partition_coverage_health = {
+                            'state': 'ensured',
+                            'heartbeat_covered_now': (
+                                coverage.heartbeat_covered_now
+                            ),
+                            'history_covered_through': history_coverage_payload(
+                                coverage.history_covered_through
+                            ),
+                            'heartbeats_covered_through': (
+                                coverage.heartbeats_covered_through.isoformat()
+                            ),
+                            'absent_leaves': list(coverage.absent_leaves),
+                        }
+                    case _:
+                        pass
+            except Exception as coverage_err:
+                logger.error(
+                    f'Partition coverage ensure error: {coverage_err}'
+                )
+
+            # Pruning runs after coverage inside the same gate window:
+            # a coverage failure never blocks pruning and vice versa.
+            # Refusals (pinned locators, loader references, blocked
+            # finalizations) skip their leaf and surface on the health
+            # dict; the skipped leaf is the next pass's candidate.
+            try:
+                prune = await self._run_partition_pruning(temp_broker, resources)
+                if prune.acted:
+                    summary = (
+                        'Partition pruning: '
+                        f'{len(prune.finalized_leaves)} finalized, '
+                        f'{prune.detached_count} detached, '
+                        f'{prune.dropped_count} dropped, '
+                        f'{len(prune.refusals)} refusal(s), '
+                        f'{len(prune.errors)} error(s), '
+                        f'reach {prune.reach.value}'
+                    )
+                    if prune.errors:
+                        logger.warning(summary)
+                    else:
+                        logger.info(summary)
+                self._partition_pruning_health = {
+                    'finalized': len(prune.finalized_leaves),
+                    'detached': prune.detached_count,
+                    'dropped': prune.dropped_count,
+                    'refusals': list(prune.refusals),
+                    'errors': list(prune.errors),
+                    'reach': prune.reach.value,
+                }
+            except Exception as prune_err:
+                logger.error(f'Partition pruning error: {prune_err}')
+            finally:
+                state.next_partition_maintenance_at = (
+                    now_monotonic
+                    + retention_cfg.partition_maintenance_interval_s
+                )
+
+        # The fleet check: a pending (queue, class) that no live worker
+        # serves waits until one starts. Every step above has run first.
+        try:
+            await self._check_class_coverage(temp_broker, state)
+        except Exception as coverage_err:
+            logger.error(f'Class coverage check error: {coverage_err}')
+
+    async def _run_partition_coverage(
+        self,
+        temp_broker: 'PostgresBroker',
+        resources: 'BrokerResources',
+        retention_cfg: 'RetentionConfig',
+    ) -> 'CoverageOutcome':
+        """One periodic coverage pass in the core, on the core handle of
+        ``temp_broker`` (``maintain_partition_coverage_in_core``,
+        ``PER_LEAF_LOCKS``): no coverage gate; the per-leaf locks contain an
+        overlap with a worker's startup pass. ``resources`` is not read: the
+        pass runs on the core pools, not on ``partition_maintenance``.
+
+        Returns the outcome; raises the record's ``CoreFailure`` when the
+        pass has no outcome and ``CoreError`` when the core of this process
+        cannot run it. The caller logs both and records the health.
+        """
+        from horsies.core.history.maintenance.coverage import (
+            CoverageSerialization,
+            maintain_partition_coverage_in_core,
+        )
+
+        return await maintain_partition_coverage_in_core(
+            temp_broker._core_handle,
+            history_horizon_days=retention_cfg.history_leaf_horizon_days,
+            heartbeat_horizon_hours=retention_cfg.heartbeat_leaf_horizon_hours,
+            declared_classes=retention_cfg.registrable_classes(),
+            serialization=CoverageSerialization.PER_LEAF_LOCKS,
+        )
+
+    async def _run_partition_pruning(
+        self,
+        temp_broker: 'PostgresBroker',
+        resources: 'BrokerResources',
+    ) -> 'PrunePassSummary':
+        """One pruning pass in the core, on the core handle of
+        ``temp_broker`` (``prune_expired_partitions_in_core``): the expired
+        heartbeat and period leaves are detached and dropped, at most 64 per
+        pass. ``resources`` is not read: the pass runs on the core pools, not
+        on ``partition_maintenance``.
+
+        Returns the summary; raises the record's ``CoreFailure`` when the
+        pass has no report and ``CoreError`` when the core of this process
+        cannot run it. The caller logs both and records the health.
+        """
+        from horsies.core.history.maintenance.pruning import (
+            prune_expired_partitions_in_core,
+        )
+
+        return await prune_expired_partitions_in_core(temp_broker._core_handle)
+
+    async def _check_class_coverage(
+        self,
+        temp_broker: 'PostgresBroker',
+        state: _ReaperPassState,
+    ) -> None:
+        """Log each pending (queue, class) that no live worker can run.
+
+        An unserved stream logs an error, a stream whose serving workers
+        have no capacity in service a warning, and a failed check a
+        warning. ``state.coverage_log`` bounds each to one line per
+        ``CLASS_COVERAGE_LOG_INTERVAL_S``. Before
+        ``state.class_coverage_checks_from`` it reads nothing. Reads only.
+        """
+        if time.monotonic() < state.class_coverage_checks_from:
+            return
+        match await temp_broker.get_class_coverage_async():
+            case Ok(coverage):
+                pass
+            case Err(err):
+                if state.coverage_log.take(CheckFailedKey(), time.monotonic()):
+                    logger.warning(f'Class coverage check failed: {err.message}')
+                return
+        for stream in state.coverage_log.take_uncovered(
+            coverage.streams,
+            time.monotonic(),
+        ):
+            match stream.state:
+                case StreamUnserved():
+                    logger.error(describe_uncovered(stream))
+                case StreamWithoutCapacity():
+                    logger.warning(describe_uncovered(stream))
+                case StreamServed():
+                    raise AssertionError('take_uncovered returned a served stream')
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+    async def _recover_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        failure_limit: int,
+    ) -> 'RecoveryReport':
+        """The global workflow recovery pass, in the core
+        (``CoreHandle.recover_workflows_async``): cases 0 to 4, each candidate
+        in its own transaction with the child starts it owes built through
+        the broker's child spec source, then the count of workflows over
+        ``failure_limit``.
+
+        Returns the report of the pass, in the form whose ``health()`` the
+        reaper publishes.
+
+        Raises:
+            RecoveryPassFailure: the pass failed, with its partial report and
+                the record's ``CoreFailure`` as its cause.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import RecoveryPassFailed, RecoveryPassRecord
+
+        record = await temp_broker._core_handle.recover_workflows_async(
+            failure_limit=failure_limit,
+        )
+        match record:
+            case RecoveryPassRecord():
+                return _recovery_report_of(record)
+            case RecoveryPassFailed(report=report, exception=exception):
+                raise RecoveryPassFailure(_recovery_report_of(report), exception)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _recover_phase2(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        grace_ms: int,
+        max_rows: int,
+        quarantine_after_attempts: int,
+    ) -> 'Phase2RecoverySummary':
+        """One phase-2 recovery pass, in the core
+        (``CoreHandle.recover_workflow_phase2_async``): the phase-2 records
+        older than ``grace_ms`` and under ``quarantine_after_attempts``,
+        oldest first, at most ``max_rows``, each in its own transaction,
+        with the child starts it owes built through the broker's child spec
+        source.
+
+        A record that the function found gone while its node is not terminal
+        counts as already applied, as the Python pass counted it.
+
+        Raises:
+            CoreFailure: the pass failed before it recovered a record (the
+                record's exception).
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import Phase2RecoveryFailed, Phase2RecoveryRecord
+        from horsies.core.workflows.phase2_recovery import Phase2RecoverySummary
+
+        record = await temp_broker._core_handle.recover_workflow_phase2_async(
+            grace_ms=grace_ms,
+            max_rows=max_rows,
+            quarantine_after_attempts=quarantine_after_attempts,
+        )
+        match record:
+            case Phase2RecoveryRecord():
+                return Phase2RecoverySummary(
+                    considered=record.considered,
+                    applied=record.applied,
+                    already_applied=record.already_applied + record.pending_absent,
+                    superseded=record.superseded,
+                    retained=record.retained,
+                    failed=record.failed,
+                    quarantined=record.quarantined,
+                    raised_counted=record.raised_counted,
+                    over_attempt_bound=record.over_attempt_bound,
+                    retained_details=tuple(record.retained_details),
+                    quarantine_refusals=tuple(record.quarantine_refusals),
+                )
+            case Phase2RecoveryFailed(exception=exception):
+                raise exception
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _expire_paused_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        older_than: timedelta,
+    ) -> int:
+        """The paused expiry of the retention policy, in the core
+        (``CoreHandle.expire_paused_workflows_async``): the PAUSED workflows
+        older than ``older_than``, at most ``PAUSED_EXPIRY_BATCH_SIZE``,
+        oldest first, one ``horsies_workflow_expire_paused`` each. The age
+        goes in exact microseconds.
+
+        Returns the number of workflows expired.
+
+        Raises:
+            CoreFailure: the call failed (the record's exception); the
+                candidates before the failed one are expired, the rest wait
+                for the next pass.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import PausedExpired, PausedExpiryFailed
+        from horsies.core.workflows.lifecycle import PAUSED_EXPIRY_BATCH_SIZE
+
+        record = await temp_broker._core_handle.expire_paused_workflows_async(
+            older_than // timedelta(microseconds=1), PAUSED_EXPIRY_BATCH_SIZE,
+        )
+        match record:
+            case PausedExpired(expired=expired):
+                return expired
+            case PausedExpiryFailed(exception=exception):
+                raise exception
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _delete_expired_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        retention_hours: int,
+        batch_size: int,
+        deadline_monotonic: float,
+    ) -> int:
+        """The workflow part of the retention cleanup, in the core
+        (``CoreHandle.delete_expired_workflows_async``): batches of terminal
+        workflows older than ``retention_hours`` with no live backing task,
+        with their node rows, until a batch deletes no workflow or the pass
+        deadline has passed after a batch. The first batch always runs.
+
+        Returns the number of workflows deleted.
+
+        Raises:
+            CoreFailure: the pass failed (the record's exception); the
+                batches before the failure stay committed (their count is
+                logged), and the backlog resumes on the next pass.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import WorkflowDeleteFailed, WorkflowsDeleted
+
+        budget_ms = max(0, int((deadline_monotonic - time.monotonic()) * 1000))
+        record = await temp_broker._core_handle.delete_expired_workflows_async(
+            retention_hours, batch_size, budget_ms,
+        )
+        match record:
+            case WorkflowsDeleted(deleted=deleted):
+                return deleted
+            case WorkflowDeleteFailed(deleted_before=deleted_before, exception=exception):
+                logger.warning(
+                    'delete_expired_workflows deleted %s workflow(s) before the failure',
+                    deleted_before,
+                )
+                raise exception
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _delete_expired_in_batches(
+        self,
+        session_factory: 'async_sessionmaker[AsyncSession]',
+        statement: 'TextClause',
+        params: dict[str, Any],
+        deadline_monotonic: float,
+        batch_size: int,
+        *,
+        drained_when: Literal['short_batch', 'empty_batch'] = 'short_batch',
+    ) -> int:
+        """Run one retention DELETE in bounded batches, committing per batch.
+
+        Always runs at least one batch; stops when the backlog reads as
+        drained or the pass deadline is reached (backlog resumes next pass).
+        Per-batch commits bound transaction size so a large backlog never
+        becomes one unbounded DELETE.
+
+        ``drained_when`` names the drained signal: ``short_batch`` for
+        statements whose rowcount equals the rows the batch selects (a short
+        batch means nothing eligible is left); ``empty_batch`` for the
+        workflow statement, whose rowcount counts workflows while its node
+        budget keeps batches routinely short of ``batch_size`` — there only
+        a zero-row batch means drained, at the cost of one empty statement
+        per drained pass.
+        """
+        total_deleted = 0
+        while True:
+            async with session_factory() as s:
+                result = await s.execute(
+                    statement,
+                    {**params, 'batch_size': batch_size},
+                )
+                deleted = int(getattr(result, 'rowcount', 0) or 0)
+                await s.commit()
+            total_deleted += deleted
+            match drained_when:
+                case 'short_batch':
+                    drained = deleted < batch_size
+                case 'empty_batch':
+                    drained = deleted == 0
+            if drained:
+                return total_deleted
+            if time.monotonic() >= deadline_monotonic:
+                logger.info(
+                    'Retention pass time budget reached; %s rows deleted, '
+                    'remaining backlog resumes next pass',
+                    total_deleted,
+                )
+                return total_deleted
+
+    async def _reaper_loop(self) -> None:
+        """Automatic stale task handling loop.
+
+        Periodically checks for and recovers stale tasks based on RecoveryConfig:
+        - Requeues tasks stuck in CLAIMED (safe - user code never ran)
+        - Marks stale RUNNING tasks as FAILED (not safe to requeue)
+        - Prunes old telemetry and terminal records based on retention settings
+
+        No recovery step stops while the worker lives: a step that fails runs
+        again on the next pass (the orphan audit on its next schedule), and
+        each failing pass logs an error.
+
+        Raises:
+            AssertionError: the broker already serves its limit of event
+                loops. This is a programmer error. The loop ends, and
+                the worker treats a dead service loop as fatal.
+        """
+        if not self.cfg.recovery_config:
+            return
+
+        from horsies.core.models.retention import RetentionConfig
+
+        recovery_cfg = self.cfg.recovery_config
+        # A worker built without a retention section still needs one: the
+        # maintenance pass reads coverage horizons and sweep cadence from
+        # it, and those have defaults rather than being optional.
+        retention_cfg = self.cfg.retention_config or RetentionConfig()
+        check_interval_ms = recovery_cfg.check_interval_ms
+        temp_broker = None
+        owns_temp_broker = False
+        state = _ReaperPassState(
+            next_retention_cleanup_at=time.monotonic(),
+            class_coverage_checks_from=time.monotonic() + check_interval_ms / 1000.0,
+        )
+
+        logger.info(
+            f'Reaper configuration: auto_requeue_claimed={recovery_cfg.auto_requeue_stale_claimed}, '
+            f'auto_fail_running={recovery_cfg.auto_fail_stale_running}, '
+            f'check_interval={check_interval_ms}ms ({check_interval_ms/1000:.1f}s)',
+        )
+
+        try:
+            # Prefer the worker-owned broker to avoid creating redundant
+            # engines/listeners or falling back to producer-sized pool defaults.
+            temp_broker = self.broker
+
+            if temp_broker is None:
+                from horsies.core.brokers.postgres import PostgresBroker
+                from horsies.core.models.broker import PostgresConfig
+
+                temp_broker_config = PostgresConfig(
+                    database_url=self.cfg.dsn,
+                    session_database_url=self.cfg.session_dsn or None,
+                    pgbouncer_transaction_mode=self.cfg.pgbouncer_transaction_mode,
+                    pool_size=self.cfg.parent_pool_size,
+                    max_overflow=0,
+                )
+                temp_broker = PostgresBroker(
+                    temp_broker_config,
+                    assume_initialized=True,
+                )
+                owns_temp_broker = True
+                if self._app is not None:
+                    temp_broker.app = self._app
+
+            # Selected once for the life of this loop. Either broker above
+            # serves this event loop, so reaching the loop limit is a
+            # programmer error.
+            # It is raised before the pass loop: that loop's handler logs
+            # and continues.
+            match await temp_broker.select_resources():
+                case Err(loop_limit):
+                    raise AssertionError(
+                        f'reaper loop broker resources: {loop_limit.describe()}',
+                    )
+                case Ok(resources):
+                    pass
+
+            # The gate session holds a pool connection (and the xact lock)
+            # for the duration of the pass, while the pass body checks out
+            # its own session from the same pool — peak two connections.
+            # A single-connection coordinator pool would deadlock on the
+            # second checkout until pool timeout, every interval, so the
+            # gate is skipped there. Ungated concurrency is safe for
+            # every step the pass runs: SKIP LOCKED covers the recovery
+            # and retention statements, and the coverage/publication
+            # ensure is idempotent (registration, leaf creation, and
+            # republication all converge under concurrent callers) — the
+            # gate only dedupes redundant work across workers.
+            gate_enabled = self._reaper_gate_enabled()
+            if not gate_enabled:
+                logger.warning(
+                    'Reaper gate disabled: coordinator pool has a single '
+                    'connection (pool.max_size=%s); passes run ungated (safe '
+                    'via SKIP LOCKED, may be redundant across workers)',
+                    self.cfg.parent_pool_size,
+                )
+
+            while not self._stop.is_set():
+                try:
+                    # Gate: every worker runs this loop, but one executing
+                    # reaper per interval is enough — SKIP LOCKED makes
+                    # concurrent passes safe, just redundant. The try-lock
+                    # is held by the gate session for the duration of the
+                    # pass and releases automatically (xact scope) if the
+                    # holder dies mid-pass.
+                    if not gate_enabled:
+                        await self._run_reaper_pass(
+                            temp_broker,
+                            resources,
+                            recovery_cfg,
+                            retention_cfg,
+                            state,
+                        )
+                    else:
+                        async with self.sf() as gate_session:
+                            gate_result = await gate_session.execute(
+                                REAPER_GATE_TRY_LOCK_SQL,
+                                {'key': self._advisory_key_reaper()},
+                            )
+                            if bool(gate_result.scalar()):
+                                await self._run_reaper_pass(
+                                    temp_broker,
+                                    resources,
+                                    recovery_cfg,
+                                    retention_cfg,
+                                    state,
+                                )
+                            else:
+                                logger.debug(
+                                    'Reaper pass skipped: another worker holds the gate',
+                                )
+                except Exception as e:
+                    logger.error(f'Reaper loop error: {e}')
+
+                # Wait for check interval or stop signal (convert ms to seconds for asyncio)
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=check_interval_ms / 1000.0
+                    )
+                    break  # Stop signal received
+                except asyncio.TimeoutError:
+                    continue  # Continue to next iteration
+
+        except asyncio.CancelledError:
+            logger.info('Reaper loop cancelled')
+            return
+        finally:
+            if owns_temp_broker and temp_broker is not None:
+                close_result = await temp_broker.close_async()
+                if is_err(close_result):
+                    logger.error(
+                        f'Error closing reaper broker: {close_result.err_value.message}'
+                    )

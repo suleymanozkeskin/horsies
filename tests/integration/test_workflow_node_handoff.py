@@ -17,18 +17,17 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.worker.worker import (
-    _confirm_ownership_and_set_running,
-    _initialize_worker_pool,
-)
+from horsies.core.worker.child_runner import _confirm_ownership_and_set_running
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from tests.integration.conftest import compute_test_command_fingerprint
-from tests.broker_resources_support import listener_of
 
 pytestmark = [pytest.mark.integration]
 
 WORKER_ID = 'node-handoff-worker'
 SEEDED_NODE_STARTED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
-WORKFLOW_CHECK_FAILED = (False, '', 'WORKFLOW_CHECK_FAILED')
+WORKFLOW_CHECK_FAILED = StoppedBeforeRunning('NODE_NOT_LINKED')
+"""The stop of a workflow task whose node is not linked, with the orphan
+self-heal of the run off."""
 
 
 async def _seed_claimed_workflow_task(
@@ -149,7 +148,7 @@ async def _arrange(
         case str():
             await _seed_running_workflow_with_node(session, task_id, node_status)
     await session.commit()  # the child confirm runs on its own connection
-    _initialize_worker_pool(listener_of(broker).database_url)
+    _ = broker
     return task_id, claimed_at
 
 
@@ -177,7 +176,6 @@ async def test_a_start_writes_one_runner_beat(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at,
         orphan_self_heal=False,
     )
@@ -199,12 +197,11 @@ async def test_a_start_that_does_not_apply_writes_no_beat(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at + timedelta(seconds=1),
         orphan_self_heal=False,
     )
 
-    assert result == (False, '', 'CLAIM_LOST')
+    assert result == StoppedBeforeRunning('CLAIM_LOST')
     assert await _task_status(session, task_id) == 'CLAIMED'
     assert await _beat_count(session, task_id) == 0
 
@@ -221,7 +218,6 @@ async def test_a_failed_workflow_check_keeps_no_beat(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at,
         orphan_self_heal=False,
     )
@@ -244,7 +240,6 @@ async def test_running_node_keeps_its_tuple_and_first_start(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at,
         orphan_self_heal=False,
     )
@@ -271,7 +266,6 @@ async def test_waiting_node_moves_to_running_with_a_new_start(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at,
         orphan_self_heal=False,
     )
@@ -298,7 +292,6 @@ async def test_terminal_node_fails_the_workflow_check(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at,
         orphan_self_heal=False,
     )
@@ -323,7 +316,6 @@ async def test_missing_node_fails_the_workflow_check(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at,
         orphan_self_heal=False,
     )
@@ -348,12 +340,11 @@ async def test_a_node_that_is_not_linked_with_the_self_heal_on_cancels_the_task(
     result = _confirm_ownership_and_set_running(
         task_id,
         WORKER_ID,
-        True,
         claimed_at=claimed_at,
         orphan_self_heal=True,
     )
 
-    assert result == (False, '', 'ORPHAN_CANCELLED')
+    assert result == StoppedBeforeRunning('ORPHAN_CANCELLED')
     live = await session.scalar(
         text('SELECT COUNT(*) FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
         {'id': task_id},

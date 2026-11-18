@@ -35,10 +35,10 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.current import set_current_app
-from horsies.core.worker.runtime import _RequeueOutcome
-from horsies.core.worker.child_protocol import SeatFinished
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.current import set_current_app
+from tests.dualrun.reference.worker_parent.worker.runtime import _RequeueOutcome
+from tests.dualrun.reference.worker_parent.worker.child_protocol import SeatFinished
+from tests.dualrun.reference.worker_parent.worker.slots import (
     ChildLost,
     KilledBySignal,
     LossCause,
@@ -46,9 +46,9 @@ from horsies.core.worker.slots import (
     NotDispatched,
     NotRunCause,
 )
-from horsies.core.worker.stored_timeout import TaskTimeout
-from horsies.core.worker.task_loop import TaskLoop
-from horsies.core.worker.worker import (
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import TaskTimeout
+from tests.dualrun.reference.worker_parent.worker.task_loop import TaskLoop
+from tests.dualrun.reference.worker_parent.worker.worker import (
     Worker,
     _FinalizeError,
     _FINALIZE_STAGE_PHASE1,
@@ -57,7 +57,7 @@ from horsies.core.worker.worker import (
     _initialize_worker_pool,
     _run_task_entry,
 )
-from tests.dispatch_claim_support import claim_at
+from tests.fixtures.reference_worker_support import claim_at
 from tests.integration.conftest import (
     compute_test_command_fingerprint,
     get_task_status as get_workflow_task_status,
@@ -72,7 +72,7 @@ from tests.fixtures.slots.handles import (
     finished_handle,
     task_finished_handle,
 )
-from tests.fixtures.run_return import wire_of
+from tests.fixtures.reference_worker_support import wire_of
 
 pytestmark = [pytest.mark.integration]
 

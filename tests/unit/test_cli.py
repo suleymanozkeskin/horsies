@@ -4,28 +4,25 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import types
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import SecretStr
 
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
 from horsies.core.app import Horsies
-from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.cli import (
     REMOVED_WORKER_FLAGS,
     ExecutionSettings,
     ProfileNotGiven,
     ProfileUnknown,
     SelectedProfile,
-    _build_queue_settings,
     _ensure_schema_with_retry,
     _is_file_path,
     _parse_locator,
@@ -41,6 +38,7 @@ from horsies.core.cli import (
     worker_command,
 )
 from horsies.core.docs_fetcher import MainBranch, ReleaseTag
+from horsies.core.worker.core_run import EXIT_FAILED, EXIT_STOPPED, WorkerLaunch
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -76,17 +74,7 @@ from horsies.core.models.worker_profile import (
     WorkerProfile,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker.profile_fit import (
-    CgroupLimit,
-    CgroupUnreadable,
-    MachineMemory,
-    MachineMemoryUnreadable,
-    NoCgroupLimit,
-    ServerConnectionLimit,
-    ServerConnectionLimitUnreadable,
-)
 from tests.broker_resources_support import (
-    attach_loop_limit,
     attach_resources,
     fake_resources,
 )
@@ -846,107 +834,118 @@ class TestWorkerCommand:
             worker_command(args)
         assert exc_info.value.code == 1
 
-    # The panic rule is process-wide, and a core that another test of this
-    # process started has fixed it.
-    @patch('horsies.core.cli.set_panic_rule', autospec=True)
-    @patch('horsies.core.cli.PostgresBroker', autospec=True)
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_broker_horsies_error_exits_1(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        mock_broker_cls: MagicMock,
-        _mock_panic_rule: MagicMock,
-    ) -> None:
-        # Arrange
-        app = _make_mock_app()
-        mock_broker_cls.side_effect = HorsiesError(message='broker config error')
-        mock_discover.return_value = (app, 'app', 'my.mod', None)
-        args = _make_worker_namespace()
-
-        # Act / Assert
-        with pytest.raises(SystemExit) as exc_info:
-            worker_command(args)
-        assert exc_info.value.code == 1
-
-    # The panic rule is process-wide, and a core that another test of this
-    # process started has fixed it.
-    @patch('horsies.core.cli.set_panic_rule', autospec=True)
-    @patch('horsies.core.cli.PostgresBroker', autospec=True)
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_broker_generic_exception_exits_1(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        mock_broker_cls: MagicMock,
-        _mock_panic_rule: MagicMock,
-    ) -> None:
-        # Arrange
-        app = _make_mock_app()
-        mock_broker_cls.side_effect = RuntimeError('connection failed')
-        mock_discover.return_value = (app, 'app', 'my.mod', None)
-        args = _make_worker_namespace()
-
-        # Act / Assert
-        with pytest.raises(SystemExit) as exc_info:
-            worker_command(args)
-        assert exc_info.value.code == 1
-
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_keyboard_interrupt_during_run_returns_gracefully(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        # Arrange
-        app = _make_mock_app()
-        schema_broker = _make_mock_broker()
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
-        args = _make_worker_namespace()
-
-        # Act — should NOT raise SystemExit
+def _run_worker_command(
+    app: MagicMock,
+    args: argparse.Namespace,
+    exit_code: int,
+) -> MagicMock:
+    """Run worker_command with `app` up to the core run, which answers
+    `exit_code`. Returns the mock of the core run."""
+    with (
+        patch('horsies.core.cli.setup_logging', autospec=True),
+        patch(
+            'horsies.core.cli.discover_app',
+            autospec=True,
+            return_value=(app, 'app', 'my.mod', '/project'),
+        ),
+        patch('horsies.core.cli.print_banner', autospec=True),
+        patch(
+            'horsies.core.cli.run_core_worker',
+            autospec=True,
+            return_value=exit_code,
+        ) as mock_run,
+    ):
         worker_command(args)
+    return mock_run
 
-        # Assert — asyncio.run was called (started the worker)
+
+def _launch_of(mock_run: MagicMock) -> WorkerLaunch:
+    """The `WorkerLaunch` that worker_command gave the core run."""
+    launch = mock_run.call_args.args[1]
+    assert isinstance(launch, WorkerLaunch)
+    return launch
+
+
+@pytest.mark.unit
+class TestWorkerCommandCoreRun:
+    """worker_command hands the checked app to the core run and exits with
+    the code of the run: 0 only at an operator stop."""
+
+    def test_an_operator_stop_returns_without_an_exit(self) -> None:
+        mock_run = _run_worker_command(
+            _make_mock_app(), _make_worker_namespace(), EXIT_STOPPED,
+        )
         mock_run.assert_called_once()
 
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_exception_during_run_exits_1(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        # Arrange
-        app = _make_mock_app()
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = _closing_run_side_effect(RuntimeError('worker crashed'))
-        args = _make_worker_namespace()
-
-        # Act / Assert
+    def test_a_failed_run_exits_with_its_code(self) -> None:
         with pytest.raises(SystemExit) as exc_info:
-            worker_command(args)
+            _ = _run_worker_command(
+                _make_mock_app(), _make_worker_namespace(), EXIT_FAILED,
+            )
+        assert exc_info.value.code == EXIT_FAILED
+
+    def test_the_profile_the_modules_and_the_level_reach_the_launch(self) -> None:
+        app = _make_mock_app()
+        app.config.worker_profiles = _two_profiles()
+        mock_run = _run_worker_command(
+            app,
+            _make_worker_namespace(profile='batch', loglevel='DEBUG'),
+            EXIT_STOPPED,
+        )
+        launch = _launch_of(mock_run)
+        assert launch.profile == 'batch'
+        assert launch.app_locator == 'my.mod:app'
+        assert launch.imports == ('my.tasks',)
+        assert launch.sys_path_roots == ('/project',)
+        assert launch.loglevel == 'DEBUG'
+        app.import_task_modules.assert_called_once()
+
+    def test_no_discovered_modules_still_proceeds(self) -> None:
+        app = _make_mock_app()
+        app.get_discovered_task_modules.return_value = []
+        mock_run = _run_worker_command(app, _make_worker_namespace(), EXIT_STOPPED)
+        assert _launch_of(mock_run).imports == ()
+
+    def test_a_file_path_locator_gives_an_absolute_app_locator(self) -> None:
+        mock_run = _run_worker_command(
+            _make_mock_app(),
+            _make_worker_namespace(module='app/configs/horsies.py:app'),
+            EXIT_STOPPED,
+        )
+        assert _launch_of(mock_run).app_locator == (
+            f"{os.path.realpath('app/configs/horsies.py')}:app"
+        )
+
+    def test_a_file_path_locator_without_py_gets_the_suffix(self) -> None:
+        mock_run = _run_worker_command(
+            _make_mock_app(),
+            _make_worker_namespace(module='app/configs/horsies:app'),
+            EXIT_STOPPED,
+        )
+        assert _launch_of(mock_run).app_locator == (
+            f"{os.path.realpath('app/configs/horsies.py')}:app"
+        )
+
+    def test_startup_errors_stop_before_the_core_run(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        app = _make_mock_app()
+        app.check.return_value = [HorsiesError(message='bad queue config')]
+        with (
+            patch('horsies.core.cli.setup_logging', autospec=True),
+            patch(
+                'horsies.core.cli.discover_app',
+                autospec=True,
+                return_value=(app, 'app', 'my.mod', '/project'),
+            ),
+            patch('horsies.core.cli.run_core_worker', autospec=True) as mock_run,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            worker_command(_make_worker_namespace())
         assert exc_info.value.code == 1
+        assert 'bad queue config' in capsys.readouterr().err
+        mock_run.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1394,188 +1393,8 @@ class TestDiscoverAppAdditionalBranches:
 
 
 # ---------------------------------------------------------------------------
-# worker_command — additional branch coverage
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestWorkerCommandAdditionalBranches:
-    """Extra tests to cover remaining worker_command branches."""
-
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_no_discovered_modules_still_proceeds(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        """When no task modules discovered, warning is logged but worker starts (line 381)."""
-        # Arrange
-        app = _make_mock_app()
-        app.get_discovered_task_modules.return_value = []
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
-        args = _make_worker_namespace()
-
-        # Act — should not raise
-        worker_command(args)
-
-        mock_run.assert_called_once()
-
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_timeout_error_during_run_exits_nonzero(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        """Startup timeout → exit 1 (supervisor contract: the worker never
-        came up; a clean exit would suppress the supervisor restart)."""
-        # Arrange
-        import asyncio as _asyncio
-
-        app = _make_mock_app()
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = _closing_run_side_effect(_asyncio.TimeoutError())
-        args = _make_worker_namespace()
-
-        with pytest.raises(SystemExit) as excinfo:
-            worker_command(args)
-
-        assert excinfo.value.code == 1
-        mock_run.assert_called_once()
-
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_file_path_locator_builds_absolute_app_locator(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        """File path module locator builds absolute app_locator (lines 395-398)."""
-        # Arrange
-        app = _make_mock_app()
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        # Use file path locator format
-        mock_discover.return_value = (app, 'app', 'my_module', '/project')
-        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
-        args = _make_worker_namespace(module='app/configs/horsies.py:app')
-
-        # Act
-        worker_command(args)
-
-        # Assert — worker was started (gets past the locator building)
-        mock_run.assert_called_once()
-
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_custom_queue_mode_builds_priorities(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        """CUSTOM queue mode builds queue_priorities and queue_max_concurrency (lines 370-374)."""
-        # Arrange
-        app = _make_mock_app()
-        app.config.queue_mode.name = 'CUSTOM'
-        custom_q = MagicMock()
-        custom_q.name = 'high'
-        custom_q.priority = 10
-        custom_q.max_concurrency = 5
-        app.config.custom_queues = [custom_q]
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
-        args = _make_worker_namespace()
-
-        # Act
-        worker_command(args)
-
-        # Assert — worker was started (passes through CUSTOM branch)
-        mock_run.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
 # check_command — additional branch coverage
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestBuildQueueSettings:
-    """Uncapped queues are omitted from the worker concurrency map."""
-
-    @staticmethod
-    def _custom_app(queues: list[Any]) -> MagicMock:
-        app = MagicMock()
-        app.config.queue_mode.name = 'CUSTOM'
-        app.config.custom_queues = queues
-        return app
-
-    @staticmethod
-    def _queue(name: str, priority: int, max_concurrency: int | None) -> MagicMock:
-        q = MagicMock()
-        q.name = name
-        q.priority = priority
-        q.max_concurrency = max_concurrency
-        return q
-
-    def test_capped_queue_present_in_both_maps(self) -> None:
-        app = self._custom_app([self._queue('fast', 1, 10)])
-
-        priorities, concurrency = _build_queue_settings(app)
-
-        assert priorities == {'fast': 1}
-        assert concurrency == {'fast': 10}
-
-    def test_uncapped_queue_omitted_from_concurrency_map(self) -> None:
-        """None queues keep their priority but get no concurrency entry —
-        the worker's claim pass only counts queues present in the map."""
-        app = self._custom_app([
-            self._queue('fast', 1, 10),
-            self._queue('bulk', 2, None),
-        ])
-
-        priorities, concurrency = _build_queue_settings(app)
-
-        assert priorities == {'fast': 1, 'bulk': 2}
-        assert concurrency == {'fast': 10}
-
-    def test_default_mode_yields_empty_maps(self) -> None:
-        app = MagicMock()
-        app.config.queue_mode.name = 'DEFAULT'
-        app.config.custom_queues = None
-
-        assert _build_queue_settings(app) == ({}, {})
 
 
 @pytest.mark.unit
@@ -1656,43 +1475,6 @@ class TestSetupLoggingHandlers:
 
 
 # ---------------------------------------------------------------------------
-# worker_command — outer KeyboardInterrupt and file-path .py append
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestWorkerCommandOuterInterrupt:
-    """Covers file-path locator .py append branch (line 397)."""
-
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_file_path_locator_without_py_appends_py(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        """File path locator without .py gets .py appended (line 397)."""
-        # Arrange — use file path without .py extension
-        app = _make_mock_app()
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        mock_discover.return_value = (app, 'app', 'my_module', '/project')
-        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
-        args = _make_worker_namespace(module='app/configs/horsies:app')
-
-        # Act
-        worker_command(args)
-
-        mock_run.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
 # scheduler_command — outer KeyboardInterrupt + file-path module import
 # ---------------------------------------------------------------------------
 
@@ -1730,541 +1512,8 @@ class TestSchedulerCommandAdditionalBranches:
 
 
 # ---------------------------------------------------------------------------
-# worker_command — CUSTOM queue exception branch
+# run_scheduler inner async function coverage
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestWorkerCommandQueueException:
-    """Cover the except pass in CUSTOM queue building (lines 373-374)."""
-
-    @patch('horsies.core.cli.asyncio.run', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    def test_custom_queue_exception_silently_passes(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        """Exception in CUSTOM queue building is silently ignored (except: pass)."""
-        # Arrange — make custom_queues iteration raise
-        app = _make_mock_app()
-        app.config.queue_mode.name = 'CUSTOM'
-        # custom_queues is not iterable → raises TypeError when for-loop runs
-        app.config.custom_queues = 42  # type: ignore[assignment]
-        broker = _make_mock_broker()
-        app.get_broker.return_value = broker
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_run.side_effect = _closing_run_side_effect(KeyboardInterrupt)
-        args = _make_worker_namespace()
-
-        # Act — should NOT raise (exception is caught by except: pass)
-        worker_command(args)
-
-
-# ---------------------------------------------------------------------------
-# run_worker / run_scheduler inner async function coverage
-# ---------------------------------------------------------------------------
-
-
-@contextmanager
-def _patched_brokers(
-    schema_brokers: list[MagicMock],
-    worker_brokers: list[MagicMock],
-) -> Generator[tuple[MagicMock, MagicMock, MagicMock], None, None]:
-    """Patch the brokers that ``run_worker`` builds: ``PostgresBroker``
-    returns ``schema_brokers`` (the schema step), ``WorkerProcessBroker``
-    returns ``worker_brokers`` (the worker process). ``set_panic_rule`` is
-    replaced, so the test process keeps its panic rule. Yields the two
-    broker classes and the panic rule setter."""
-    with (
-        patch(
-            'horsies.core.cli.PostgresBroker',
-            autospec=True,
-            side_effect=schema_brokers,
-        ) as schema_cls,
-        patch(
-            'horsies.core.cli.WorkerProcessBroker',
-            autospec=True,
-            side_effect=worker_brokers,
-        ) as worker_cls,
-        patch('horsies.core.cli.set_panic_rule') as panic_rule,
-    ):
-        yield schema_cls, worker_cls, panic_rule
-
-
-def _broker_configs(schema_cls: MagicMock, worker_cls: MagicMock) -> list[Any]:
-    """The configs of the brokers that ``run_worker`` built, in order."""
-    return [
-        call.args[0]
-        for call in [*schema_cls.call_args_list, *worker_cls.call_args_list]
-    ]
-
-
-async def _run_captured_worker(
-    args: argparse.Namespace,
-    brokers: list[MagicMock],
-) -> None:
-    """Run ``worker_command`` and then await the ``run_worker`` coroutine it built.
-
-    The first of ``brokers`` is the schema broker (``PostgresBroker``); the
-    others are returned by successive ``WorkerProcessBroker(...)`` calls.
-    """
-    captured_coro: list[Any] = []
-
-    def capture_run(coro: Any) -> None:
-        captured_coro.append(coro)
-        raise KeyboardInterrupt
-
-    with (
-        _patched_brokers(brokers[:1], brokers[1:]),
-        patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
-    ):
-        worker_command(args)
-        assert len(captured_coro) == 1
-        await captured_coro[0]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-@pytest.mark.filterwarnings('ignore:coroutine.*was never awaited:RuntimeWarning')
-class TestRunWorkerResourceSelection:
-    """run_worker selects the worker broker's resources once and builds the Worker from them."""
-
-    @pytest.fixture(autouse=True)
-    def _server_connection_limit(self) -> Any:
-        """The run_worker coroutine reads the server connection limit before
-        it builds the Worker; the mocked session factory cannot answer."""
-        with patch(
-            'horsies.core.cli.read_server_connection_limit',
-            AsyncMock(return_value=ServerConnectionLimit(max_connections=100, reserved=3)),
-        ) as reader:
-            yield reader
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_worker_gets_selected_session_factory_and_listener(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        session_factory = MagicMock()
-        listener = MagicMock()
-        broker = _make_mock_broker()
-        attach_resources(
-            broker,
-            fake_resources(
-                session_factory=session_factory,
-                listener=ListenerEnabled(listener=listener),
-            ),
-        )
-        mock_discover.return_value = (_make_mock_app(), 'app', 'my.mod', '/project')
-        mock_worker_cls.return_value = MagicMock(run_forever=AsyncMock())
-
-        await _run_captured_worker(
-            _make_worker_namespace(), [_make_mock_broker(), broker],
-        )
-
-        broker.select_resources.assert_awaited_once()
-        assert mock_worker_cls.call_args.args[0] is session_factory
-        assert mock_worker_cls.call_args.args[1] is listener
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_event_loop_limit_crashes_loud(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        broker = _make_mock_broker()
-        loop_limit = attach_loop_limit(broker)
-        mock_discover.return_value = (_make_mock_app(), 'app', 'my.mod', '/project')
-
-        with pytest.raises(AssertionError) as raised:
-            await _run_captured_worker(
-                _make_worker_namespace(), [_make_mock_broker(), broker],
-            )
-
-        assert str(raised.value) == (
-            f'worker broker resources: {loop_limit.describe()}'
-        )
-        mock_worker_cls.assert_not_called()
-        broker.close_async.assert_awaited_once()
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_disabled_listener_crashes_loud(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        broker = _make_mock_broker()
-        attach_resources(broker, fake_resources(listener=ListenerDisabled()))
-        mock_discover.return_value = (_make_mock_app(), 'app', 'my.mod', '/project')
-
-        with pytest.raises(AssertionError, match='worker broker has no listener'):
-            await _run_captured_worker(
-                _make_worker_namespace(), [_make_mock_broker(), broker],
-            )
-
-        mock_worker_cls.assert_not_called()
-        broker.close_async.assert_awaited_once()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-@pytest.mark.filterwarnings('ignore:coroutine.*was never awaited:RuntimeWarning')
-class TestRunWorkerCoroutine:
-    """Cover the inner run_worker async body by capturing the coroutine."""
-
-    @pytest.fixture(autouse=True)
-    def _server_connection_limit(self) -> Any:
-        """The run_worker coroutine reads the server connection limit before
-        it builds the Worker; the mocked session factory cannot answer."""
-        with patch(
-            'horsies.core.cli.read_server_connection_limit',
-            AsyncMock(return_value=ServerConnectionLimit(max_connections=100, reserved=3)),
-        ) as reader:
-            yield reader
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_the_worker_brokers_take_the_worker_pre_ping(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        """The worker process builds its brokers with ``worker_pool_pre_ping``
-        (off by default); ``pool_pre_ping`` stays on for the other engines."""
-        app = _make_mock_app()
-        app.config.worker_profiles = {
-            'default': WorkerProfile(isolated=IsolatedChildren(count=1)),
-        }
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_worker = MagicMock()
-        mock_worker.run_forever = AsyncMock()
-        mock_worker_cls.return_value = mock_worker
-        captured_coro: list[Any] = []
-
-        def capture_run(coro: Any) -> None:
-            captured_coro.append(coro)
-            raise KeyboardInterrupt
-
-        with (
-            _patched_brokers(
-                [_make_mock_broker()], [_make_mock_broker()],
-            ) as (schema_cls, worker_cls, _panic_rule),
-            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
-        ):
-            worker_command(_make_worker_namespace())
-            assert len(captured_coro) == 1
-            await captured_coro[0]
-
-        configs = _broker_configs(schema_cls, worker_cls)
-        assert [config.pool_pre_ping for config in configs] == [False, False]
-        assert app.config.broker.pool_pre_ping is True
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_run_worker_coroutine_success(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        """Capture the coroutine passed to asyncio.run and execute it."""
-        # Arrange
-        app = _make_mock_app()
-        schema_broker = _make_mock_broker()
-        broker = _make_mock_broker()
-        app.config.worker_profiles = {
-            'default': WorkerProfile(
-                isolated=IsolatedChildren(
-                    count=1,
-                    pool=IsolatedPool(
-                        min_size=1,
-                        max_size=PoolSize(connections=3),
-                        check=False,
-                    ),
-                    task_send_pool=PoolSize(connections=4),
-                ),
-                pool=ParentPool(max_size=PoolSize(connections=9)),
-                drain_timeout=timedelta(seconds=7.5),
-                preload=ChildPreload.APP,
-            ),
-        }
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        args = _make_worker_namespace()
-
-        # Mock Worker instance
-        mock_worker = MagicMock()
-        mock_worker.run_forever = AsyncMock()
-        mock_worker.request_stop = MagicMock()
-        mock_worker_cls.return_value = mock_worker
-
-        captured_coro: list[Any] = []
-
-        def capture_run(coro: Any) -> None:
-            captured_coro.append(coro)
-            raise KeyboardInterrupt  # Break out of worker_command
-
-        # The schema install is the first core call of the process, so the
-        # panic rule must be set before it.
-        events: list[str] = []
-
-        async def record_schema_install(*_args: Any, **_kwargs: Any) -> Any:
-            events.append('schema install')
-            return Ok(None)
-
-        def record_panic_rule(rule: str) -> None:
-            events.append(f'panic rule {rule}')
-
-        schema_broker.ensure_schema_initialized.side_effect = record_schema_install
-
-        with (
-            _patched_brokers([schema_broker], [broker]) as (
-                schema_cls,
-                worker_cls,
-                panic_rule,
-            ),
-            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
-        ):
-            panic_rule.side_effect = record_panic_rule
-            worker_command(args)
-
-            # Act — now run the captured coroutine
-            assert len(captured_coro) == 1
-            await captured_coro[0]
-
-        # Assert: the schema broker and the worker broker open the parent
-        # pool of the profile, with no overflow, not the producer pool.
-        assert [
-            (config.pool_size, config.max_overflow)
-            for config in _broker_configs(schema_cls, worker_cls)
-        ] == [(9, 0), (9, 0)]
-        panic_rule.assert_called_once_with('ABORT_PROCESS')
-        assert events == ['panic rule ABORT_PROCESS', 'schema install']
-        schema_broker.ensure_schema_initialized.assert_awaited_once()
-        schema_broker.close_async.assert_awaited_once()
-        mock_worker_cls.assert_called_once()
-        worker_cfg = mock_worker_cls.call_args.args[2]
-        assert worker_cfg.drain_timeout_s == 7.5
-        assert worker_cfg.child_preload is ChildPreload.APP
-        assert worker_cfg.parent_pool_size == 9
-        assert worker_cfg.isolated_pool == ResolvedPool(
-            min_size=1,
-            max_size=3,
-            check=False,
-        )
-        assert worker_cfg.isolated_task_send_pool == 4
-        assert mock_worker_cls.call_args.kwargs == {'broker': broker}
-        mock_worker.run_forever.assert_awaited_once()
-        broker.close_async.assert_awaited_once()
-
-    @patch('horsies.core.cli.asyncio.get_running_loop', autospec=True)
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_run_worker_signal_handlers_installed_before_schema_init(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-        mock_get_loop: MagicMock,
-    ) -> None:
-        """SIGTERM/SIGINT handlers are active while schema init can block."""
-        app = _make_mock_app()
-        schema_broker = _make_mock_broker()
-        broker = _make_mock_broker()
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        args = _make_worker_namespace()
-
-        fake_loop = MagicMock()
-        mock_get_loop.return_value = fake_loop
-
-        async def ensure_schema() -> Any:
-            handled = [call.args[0] for call in fake_loop.add_signal_handler.call_args_list]
-            assert handled == [signal.SIGTERM, signal.SIGINT]
-            return Ok(None)
-
-        schema_broker.ensure_schema_initialized = AsyncMock(side_effect=ensure_schema)
-        mock_worker = MagicMock()
-        mock_worker.run_forever = AsyncMock()
-        mock_worker_cls.return_value = mock_worker
-
-        captured_coro: list[Any] = []
-
-        def capture_run(coro: Any) -> None:
-            captured_coro.append(coro)
-            raise KeyboardInterrupt
-
-        with (
-            _patched_brokers([schema_broker], [broker]),
-            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
-        ):
-            worker_command(args)
-
-            await captured_coro[0]
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_run_worker_coroutine_schema_fail_reraises(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        """Schema init failure inside run_worker raises out."""
-        # Arrange
-        app = _make_mock_app()
-        schema_broker = _make_mock_broker()
-        err_obj = _make_schema_err(retryable=False, message='fatal')
-        schema_broker.ensure_schema_initialized = AsyncMock(return_value=Err(err_obj))
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        args = _make_worker_namespace()
-
-        captured_coro: list[Any] = []
-
-        def capture_run(coro: Any) -> None:
-            captured_coro.append(coro)
-            raise KeyboardInterrupt
-
-        with (
-            _patched_brokers([schema_broker], []),
-            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
-        ):
-            worker_command(args)
-
-            # Act / Assert — coroutine should raise RuntimeError
-            with pytest.raises(RuntimeError, match='fatal'):
-                await captured_coro[0]
-        schema_broker.close_async.assert_awaited_once()
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_run_worker_constructor_failure_closes_broker(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        """Broker is closed if Worker construction fails after schema init."""
-        app = _make_mock_app()
-        schema_broker = _make_mock_broker()
-        broker = _make_mock_broker()
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        mock_worker_cls.side_effect = RuntimeError('worker init failed')
-        args = _make_worker_namespace()
-
-        captured_coro: list[Any] = []
-
-        def capture_run(coro: Any) -> None:
-            captured_coro.append(coro)
-            raise KeyboardInterrupt
-
-        with (
-            _patched_brokers([schema_broker], [broker]),
-            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
-        ):
-            worker_command(args)
-
-            with pytest.raises(RuntimeError, match='worker init failed'):
-                await captured_coro[0]
-        schema_broker.close_async.assert_awaited_once()
-        broker.close_async.assert_awaited_once()
-
-    @patch('horsies.core.cli.Worker', autospec=True)
-    @patch('horsies.core.cli.print_banner', autospec=True)
-    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
-    @patch('horsies.core.cli.setup_logging', autospec=True)
-    @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_run_worker_broker_close_err_logged(
-        self,
-        mock_discover: MagicMock,
-        _mock_logging: MagicMock,
-        _mock_url: MagicMock,
-        _mock_banner: MagicMock,
-        mock_worker_cls: MagicMock,
-    ) -> None:
-        """Broker close returning Err is handled gracefully (logged, no crash)."""
-        # Arrange
-        app = _make_mock_app()
-        schema_broker = _make_mock_broker()
-        broker = _make_mock_broker()
-        close_err = _make_schema_err(retryable=False, message='close failed')
-        broker.close_async = AsyncMock(return_value=Err(close_err))
-        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        args = _make_worker_namespace()
-
-        mock_worker = MagicMock()
-        mock_worker.run_forever = AsyncMock()
-        mock_worker_cls.return_value = mock_worker
-
-        captured_coro: list[Any] = []
-
-        def capture_run(coro: Any) -> None:
-            captured_coro.append(coro)
-            raise KeyboardInterrupt
-
-        with (
-            _patched_brokers([schema_broker], [broker]),
-            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
-        ):
-            worker_command(args)
-
-            # Act — should complete without error despite close failure
-            await captured_coro[0]
-
-        schema_broker.close_async.assert_awaited_once()
-        broker.close_async.assert_awaited_once()
 
 
 @pytest.mark.unit
@@ -2509,7 +1758,7 @@ class TestWorkerCommandProfileSelection:
                 autospec=True,
                 return_value=(app, 'app', 'my.mod', None),
             ),
-            patch('horsies.core.cli.asyncio.run', autospec=True) as mock_run,
+            patch('horsies.core.cli.run_core_worker', autospec=True) as mock_run,
             pytest.raises(SystemExit) as exc_info,
         ):
             worker_command(_make_worker_namespace(profile=profile))
@@ -2712,13 +1961,9 @@ class TestExecutionSettings:
             execution_settings(WorkerProfile())
 
 
-def _start_worker_with(
-    profile: WorkerProfile,
-    machine: MachineMemory | MachineMemoryUnreadable,
-    cgroup: CgroupLimit | NoCgroupLimit | CgroupUnreadable = NoCgroupLimit(),
-) -> MagicMock:
-    """Run worker_command up to asyncio.run with one profile, a host RAM
-    reading and a cgroup limit reading."""
+def _start_worker_with(profile: WorkerProfile) -> MagicMock:
+    """Run worker_command with one profile up to the core run, which ends
+    at an operator stop."""
     app = _make_mock_app()
     app.config.worker_profiles = {'default': profile}
     with (
@@ -2729,25 +1974,14 @@ def _start_worker_with(
             return_value=(app, 'app', 'my.mod', '/project'),
         ),
         patch('horsies.core.cli.print_banner', autospec=True),
-        patch('horsies.core.cli.read_machine_memory', return_value=machine),
-        patch('horsies.core.cli.read_cgroup_memory_limit', return_value=cgroup),
         patch(
-            'horsies.core.cli.asyncio.run',
+            'horsies.core.cli.run_core_worker',
             autospec=True,
-            side_effect=_closing_run_side_effect(KeyboardInterrupt),
+            return_value=EXIT_STOPPED,
         ) as mock_run,
     ):
         worker_command(_make_worker_namespace())
     return mock_run
-
-
-def _memory_profile(count: int, mb: int) -> WorkerProfile:
-    return WorkerProfile(
-        isolated=IsolatedChildren(
-            count=count,
-            recycle=IsolatedRecycle(above=MemoryLimit(mb=mb)),
-        ),
-    )
 
 
 @pytest.mark.unit
@@ -2770,7 +2004,7 @@ class TestWorkerStartLog:
             ),
         )
         with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_run = _start_worker_with(profile, MachineMemory(mb=4096))
+            mock_run = _start_worker_with(profile)
 
         mock_run.assert_called_once()
         [line] = [
@@ -2803,7 +2037,7 @@ class TestWorkerStartLog:
             pool=ParentPool(max_size=PoolSize(connections=12)),
         )
         with caplog.at_level(logging.INFO, logger='horsies'):
-            _ = _start_worker_with(profile, MachineMemory(mb=4096))
+            _ = _start_worker_with(profile)
 
         [line] = [
             r.getMessage()
@@ -2811,295 +2045,6 @@ class TestWorkerStartLog:
             if r.getMessage().startswith("Worker profile 'default': isolated=")
         ]
         assert ', pool=12 connections, claim per queue per pass: ' in line
-
-
-@pytest.mark.unit
-class TestBootMemoryFit:
-    """The sum of the memory limits against the memory the worker can use
-    (container limit or host RAM) warns and never refuses."""
-
-    def test_limits_above_the_host_ram_warn_and_the_worker_starts(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_run = _start_worker_with(_memory_profile(4, 512), MachineMemory(mb=1000))
-
-        mock_run.assert_called_once()
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings == [
-            "Worker profile 'default': the per-child memory limits add up to "
-            '2048 MB, above the 1000 MB host RAM. Children can use more memory '
-            'than the worker has before they are recycled.',
-        ]
-
-    def test_limits_above_the_container_limit_warn_and_name_it(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """16 GiB host, 1 GiB container: the container limit is the bound."""
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_run = _start_worker_with(
-                _memory_profile(4, 512),
-                MachineMemory(mb=16_384),
-                CgroupLimit(limit_bytes=1024 * 1024 * 1024),
-            )
-
-        mock_run.assert_called_once()
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings == [
-            "Worker profile 'default': the per-child memory limits add up to "
-            '2048 MB, above the 1024 MB container limit. Children can use more '
-            'memory than the worker has before they are recycled.',
-        ]
-
-    def test_an_unreadable_container_limit_warns_and_uses_the_host_ram(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_run = _start_worker_with(
-                _memory_profile(2, 512),
-                MachineMemory(mb=4096),
-                CgroupUnreadable(reason='/sys/fs/cgroup/memory.max: PermissionError: denied'),
-            )
-
-        mock_run.assert_called_once()
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings == [
-            "Worker profile 'default': the container memory limit could not be "
-            'read (/sys/fs/cgroup/memory.max: PermissionError: denied); the '
-            'per-child memory limits are compared with the host RAM',
-        ]
-        assert any(
-            'add up to 1024 MB of the 4096 MB host RAM' in r.getMessage()
-            for r in caplog.records
-        )
-
-    def test_limits_within_the_ram_do_not_warn(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_run = _start_worker_with(_memory_profile(2, 512), MachineMemory(mb=1024))
-
-        mock_run.assert_called_once()
-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any(
-            'add up to 1024 MB of the 1024 MB host RAM' in r.getMessage()
-            for r in caplog.records
-        )
-
-    def test_unreadable_ram_warns_and_the_worker_starts(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_run = _start_worker_with(
-                _memory_profile(2, 512),
-                MachineMemoryUnreadable(reason='OSError: no /proc'),
-            )
-
-        mock_run.assert_called_once()
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        assert 'the memory of the machine could not be read (OSError: no /proc)' in warnings[0]
-
-    def test_no_memory_limit_has_nothing_to_compare(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            _start_worker_with(
-                WorkerProfile(isolated=IsolatedChildren(count=2)),
-                MachineMemory(mb=1),
-            )
-
-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any('no per-child memory limit' in r.getMessage() for r in caplog.records)
-
-    def test_the_profile_settings_reach_the_worker_config(self) -> None:
-        """The CLI builds WorkerConfig from the chosen profile, not from flags."""
-        app = _make_mock_app()
-        app.config.worker_profiles = {
-            'default': WorkerProfile(isolated=IsolatedChildren(count=1)),
-            'batch': WorkerProfile(
-                isolated=IsolatedChildren(
-                    count=3,
-                    recycle=IsolatedRecycle(after=TaskLimit(tasks=7)),
-                ),
-                claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=3)),
-            ),
-        }
-        with (
-            patch('horsies.core.cli.setup_logging', autospec=True),
-            patch(
-                'horsies.core.cli.discover_app',
-                autospec=True,
-                return_value=(app, 'app', 'my.mod', '/project'),
-            ),
-            patch('horsies.core.cli.print_banner', autospec=True),
-            patch('horsies.core.cli.WorkerConfig', autospec=True) as mock_cfg,
-            patch(
-                'horsies.core.cli.asyncio.run',
-                autospec=True,
-                side_effect=_closing_run_side_effect(KeyboardInterrupt),
-            ),
-        ):
-            worker_command(_make_worker_namespace(profile='batch'))
-
-        kwargs = mock_cfg.call_args.kwargs
-        assert kwargs['processes'] == 3
-        assert kwargs['max_tasks_per_child'] == 7
-        assert kwargs['max_claim_per_worker'] == 3
-        assert kwargs['max_claim_batch'] == 0
-
-    def test_the_shared_thread_children_reach_the_worker_config(self) -> None:
-        thread = SharedThreadChildren(count=2, seats=6)
-        app = _make_mock_app()
-        app.config.worker_profiles = {
-            'threads': WorkerProfile(shared_thread=thread),
-        }
-        with (
-            patch('horsies.core.cli.setup_logging', autospec=True),
-            patch(
-                'horsies.core.cli.discover_app',
-                autospec=True,
-                return_value=(app, 'app', 'my.mod', '/project'),
-            ),
-            patch('horsies.core.cli.print_banner', autospec=True),
-            patch('horsies.core.cli.WorkerConfig', autospec=True) as mock_cfg,
-            patch(
-                'horsies.core.cli.asyncio.run',
-                autospec=True,
-                side_effect=_closing_run_side_effect(KeyboardInterrupt),
-            ),
-        ):
-            worker_command(_make_worker_namespace(profile='threads'))
-
-        kwargs = mock_cfg.call_args.kwargs
-        assert kwargs['processes'] == 0
-        assert kwargs['shared_thread'] == thread
-        assert kwargs['shared_async'] == NoSharedAsyncChildren()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-@pytest.mark.filterwarnings('ignore:coroutine.*was never awaited:RuntimeWarning')
-class TestBootConnectionFit:
-    """At boot, before the Worker is built, the server connection limit is
-    read and compared. A worker that can need more warns and still starts."""
-
-    async def _boot(
-        self,
-        reader: AsyncMock,
-        app: MagicMock,
-        order: list[str],
-    ) -> MagicMock:
-        def build_worker(*_args: Any, **_kwargs: Any) -> MagicMock:
-            order.append('worker built')
-            return MagicMock(run_forever=AsyncMock())
-
-        async def read(*args: Any) -> Any:
-            order.append('limit read')
-            return await reader(*args)
-
-        with (
-            patch('horsies.core.cli.setup_logging', autospec=True),
-            patch(
-                'horsies.core.cli.discover_app',
-                autospec=True,
-                return_value=(app, 'app', 'my.mod', '/project'),
-            ),
-            patch('horsies.core.cli.print_banner', autospec=True),
-            patch('horsies.core.cli.to_psycopg_url', return_value='psycopg://x'),
-            patch('horsies.core.cli.read_server_connection_limit', side_effect=read),
-            patch('horsies.core.cli.Worker', side_effect=build_worker) as mock_worker,
-        ):
-            await _run_captured_worker(
-                _make_worker_namespace(), [_make_mock_broker(), _make_mock_broker()],
-            )
-        return mock_worker
-
-    async def test_a_profile_above_the_limit_warns_and_the_worker_starts(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        app = _make_mock_app()
-        app.config.worker_profiles = {
-            'default': WorkerProfile(isolated=IsolatedChildren(count=20)),
-        }
-        reader = AsyncMock(
-            return_value=ServerConnectionLimit(max_connections=30, reserved=3),
-        )
-        order: list[str] = []
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_worker = await self._boot(reader, app, order)
-
-        mock_worker.assert_called_once()
-        assert order == ['limit read', 'worker built']
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        assert warnings[0].startswith(
-            "Worker profile 'default': one worker opens up to 28 Postgres "
-            'connections itself, not counting task code; the server has 27 '
-            'usable slots',
-        )
-        assert (
-            '20 isolated children x isolated.task_send_pool 2 = 40 more, 68 in all'
-        ) in warnings[0]
-
-    async def test_a_profile_within_the_limit_does_not_warn(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        reader = AsyncMock(
-            return_value=ServerConnectionLimit(max_connections=100, reserved=3),
-        )
-        order: list[str] = []
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            await self._boot(reader, _make_mock_app(), order)
-
-        assert order == ['limit read', 'worker built']
-        assert not [
-            r for r in caplog.records
-            if r.levelno >= logging.WARNING and 'connections' in r.getMessage()
-        ]
-
-    async def test_an_unreadable_limit_warns_and_the_worker_starts(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        reader = AsyncMock(
-            return_value=ServerConnectionLimitUnreadable(reason='OSError: reset'),
-        )
-        order: list[str] = []
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_worker = await self._boot(reader, _make_mock_app(), order)
-
-        mock_worker.assert_called_once()
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert any(
-            'the server connection limit could not be read (OSError: reset)' in w
-            for w in warnings
-        )
-
-    async def test_a_transaction_pooler_reads_nothing(self) -> None:
-        app = _make_mock_app()
-        app.config.broker = PostgresConfig(
-            database_url=SecretStr('postgresql://user:pass@localhost:6432/db'),
-            session_database_url=SecretStr(
-                'postgresql://user:pass@localhost:5432/db',
-            ),
-            pgbouncer_transaction_mode=True,
-        )
-        reader = AsyncMock()
-        order: list[str] = []
-        mock_worker = await self._boot(reader, app, order)
-
-        mock_worker.assert_called_once()
-        assert order == ['worker built']
-        reader.assert_not_awaited()
 
 
 @pytest.mark.unit

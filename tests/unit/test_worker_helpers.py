@@ -1,4 +1,4 @@
-"""Tests for pure-logic functions in horsies.core.worker.worker."""
+"""Tests for pure-logic functions in tests.dualrun.reference.worker_parent.worker.worker."""
 
 from __future__ import annotations
 
@@ -24,27 +24,27 @@ from horsies.core.types.result import Ok, Err
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
-from horsies.core.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
 from horsies.core.lifecycle.outcomes import PhaseTwoStep
-from horsies.core.worker.finalize import (
+from tests.dualrun.reference.worker_parent.worker.finalize import (
     _NodeFinishOwed,
     _Phase1Input,
     _PlainTaskDone,
     _finalize_data_for_log,
 )
 from horsies.core.workflows.node_finish import FactsUnknown
-from horsies.core.worker.runtime import (
+from tests.dualrun.reference.worker_parent.worker.runtime import (
     FinalizeStage,
     _FINALIZE_STAGE_TIMEOUT,
     _AttemptEndUnknown,
     _TimeoutSettled,
     _TimeoutWriteFailed,
 )
-from horsies.core.worker.shared_finalize import timeout_retry_write
-from horsies.core.worker.shared_stop import NoCancelSignal, RetryPlacement
+from tests.dualrun.reference.worker_parent.worker.shared_finalize import timeout_retry_write
+from tests.dualrun.reference.worker_parent.worker.shared_stop import NoCancelSignal, RetryPlacement
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.worker.claiming import (
+from tests.dualrun.reference.worker_parent.worker.claiming import (
     SHORT_PASS_REPASS_LIMIT,
     ClaimMixin,
     ClaimPass,
@@ -62,7 +62,7 @@ from horsies._core import (
     ReleaseFailed,
     TooManyPendingCalls,
 )
-from horsies.core.worker.worker import (
+from tests.dualrun.reference.worker_parent.worker.worker import (
     Worker,
     WorkerConfig,
     DELETE_EXPIRED_WORKER_STATES_SQL,
@@ -100,7 +100,7 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.models.health import DownSlot, SlotsDown, parse_slot_health
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     IsolatedChild,
     NoTaskLoop,
     RssMb,
@@ -108,14 +108,14 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     encode_parent_frame,
 )
-from horsies.core.worker.stored_timeout import (
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import (
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
     TaskTimeout,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.slots import (
     BootAttemptsExhausted,
     ChildBaseline,
     ChildHookFailed,
@@ -256,7 +256,7 @@ def _keep_the_test_process_unfrozen(monkeypatch: pytest.MonkeyPatch) -> None:
     shares, so the freeze is a no-op here. ``TestStartupObjectsFreeze``
     checks the call."""
     monkeypatch.setattr(
-        'horsies.core.worker.worker.freeze_startup_objects',
+        'tests.dualrun.reference.worker_parent.worker.worker.freeze_startup_objects',
         lambda: None,
     )
 
@@ -854,8 +854,8 @@ class TestReaperRetentionPass:
     ) -> None:
         import inspect
 
-        import horsies.core.worker.reaper as reaper_module
-        import horsies.core.worker.sql as sql_module
+        import tests.dualrun.reference.worker_parent.worker.reaper as reaper_module
+        import tests.dualrun.reference.worker_parent.worker.sql as sql_module
 
         for module in (sql_module, reaper_module):
             source = inspect.getsource(module)
@@ -1226,7 +1226,7 @@ class TestRequeueClaimedTask:
         worker = _make_worker()
         handle = _with_core_release(worker, _released_record(ReleasedRow))
 
-        with patch('horsies.core.worker.release.ReleaseClaimsRequest') as request_class:
+        with patch('tests.dualrun.reference.worker_parent.worker.release.ReleaseClaimsRequest') as request_class:
             outcome = await worker._requeue_claimed_task(
                 REQUEUED_TASK,
                 'test reason',
@@ -1246,7 +1246,7 @@ class TestRequeueClaimedTask:
         worker = _make_worker()
         _ = _with_core_release(worker, _released_record(NotHeldRow))
 
-        with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
+        with patch('tests.dualrun.reference.worker_parent.worker.release.ReleaseClaimsRequest'):
             outcome = await worker._requeue_claimed_task(
                 REQUEUED_TASK,
                 'owner mismatch',
@@ -1268,7 +1268,7 @@ class TestRequeueClaimedTask:
             ),
         )
 
-        with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
+        with patch('tests.dualrun.reference.worker_parent.worker.release.ReleaseClaimsRequest'):
             outcome = await worker._requeue_claimed_task(REQUEUED_TASK, 'db failure', CLAIM)
 
         assert outcome is _RequeueOutcome.DB_ERROR
@@ -1281,7 +1281,7 @@ class TestRequeueClaimedTask:
             TooManyPendingCalls('CoreHandle.release_claims_async', 65_536),
         )
 
-        with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
+        with patch('tests.dualrun.reference.worker_parent.worker.release.ReleaseClaimsRequest'):
             outcome = await worker._requeue_claimed_task(REQUEUED_TASK, 'core busy', CLAIM)
 
         assert outcome is _RequeueOutcome.DB_ERROR
@@ -1835,7 +1835,7 @@ class TestSlotPoolSetup:
         pool = MagicMock()
         pool.start = AsyncMock(return_value=Err(ChildHookFailed()))
 
-        with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
+        with patch('tests.dualrun.reference.worker_parent.worker.worker.SlotPool', return_value=pool):
             with pytest.raises(ChildHookFailedError):
                 await worker._start_slots()
 
@@ -1845,7 +1845,7 @@ class TestSlotPoolSetup:
         pool = MagicMock()
         pool.start = AsyncMock(return_value=Err(PoolStopped()))
 
-        with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
+        with patch('tests.dualrun.reference.worker_parent.worker.worker.SlotPool', return_value=pool):
             await worker._start_slots()
 
     @pytest.mark.asyncio
@@ -1867,7 +1867,7 @@ class TestSlotPoolSetup:
         pool = MagicMock()
         pool.start = AsyncMock(return_value=Err(PreloadRefused('no such file')))
 
-        with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
+        with patch('tests.dualrun.reference.worker_parent.worker.worker.SlotPool', return_value=pool):
             with pytest.raises(ChildStartFailedError, match='no such file'):
                 await worker._start_slots()
 
@@ -1908,7 +1908,7 @@ class TestStartupObjectsFreeze:
         worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
 
         with patch(
-            'horsies.core.worker.worker.freeze_startup_objects', autospec=True,
+            'tests.dualrun.reference.worker_parent.worker.worker.freeze_startup_objects', autospec=True,
         ) as freeze:
             await asyncio.wait_for(worker.run_forever(), timeout=_WAKE_TIMEOUT_S)
 
@@ -1923,7 +1923,7 @@ class TestStartupObjectsFreeze:
         worker.stop = AsyncMock()  # type: ignore[method-assign]
 
         with patch(
-            'horsies.core.worker.worker.freeze_startup_objects', autospec=True,
+            'tests.dualrun.reference.worker_parent.worker.worker.freeze_startup_objects', autospec=True,
         ) as freeze:
             await worker.run_forever()
 
@@ -2036,7 +2036,7 @@ class TestLeaseRenewalAgeGuard:
 
     def test_renew_sql_contains_age_guard_predicate(self) -> None:
         """SQL must include claimed_at guard referencing max_claim_age_ms param."""
-        from horsies.core.worker.sql import RENEW_CLAIM_LEASE_SQL
+        from tests.dualrun.reference.worker_parent.worker.sql import RENEW_CLAIM_LEASE_SQL
 
         sql_text = RENEW_CLAIM_LEASE_SQL.text
         normalised = ' '.join(sql_text.split())
@@ -2046,7 +2046,7 @@ class TestLeaseRenewalAgeGuard:
 
     def test_renew_sql_still_scoped_to_owner(self) -> None:
         """Age guard does not replace the owner scope — both must be present."""
-        from horsies.core.worker.sql import RENEW_CLAIM_LEASE_SQL
+        from tests.dualrun.reference.worker_parent.worker.sql import RENEW_CLAIM_LEASE_SQL
 
         sql_text = RENEW_CLAIM_LEASE_SQL.text
         assert ':wid' in sql_text
@@ -3887,7 +3887,7 @@ class TestStartWithResilienceConfig:
         worker.start = AsyncMock(side_effect=_start_side_effect)  # type: ignore[assignment]
         worker._handle_retryable_start_error = AsyncMock()  # type: ignore[assignment]
         monkeypatch.setattr(
-            'horsies.core.worker.worker.is_retryable_connection_error',
+            'tests.dualrun.reference.worker_parent.worker.worker.is_retryable_connection_error',
             lambda exc: isinstance(exc, OperationalError),
         )
 
@@ -3907,7 +3907,7 @@ class TestStartWithResilienceConfig:
         worker = _make_worker()
         worker.start = AsyncMock(side_effect=ValueError('bad config'))  # type: ignore[assignment]
         monkeypatch.setattr(
-            'horsies.core.worker.worker.is_retryable_connection_error',
+            'tests.dualrun.reference.worker_parent.worker.worker.is_retryable_connection_error',
             lambda exc: False,
         )
 
@@ -4815,23 +4815,23 @@ class TestPreloadModulesMain:
         }
 
         monkeypatch.setattr(
-            'horsies.core.worker.worker._locate_app',
+            'tests.dualrun.reference.worker_parent.worker.worker._locate_app',
             mocks['locate_app'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker.set_current_app',
+            'tests.dualrun.reference.worker_parent.worker.worker.set_current_app',
             mocks['set_current_app'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker.import_by_path',
+            'tests.dualrun.reference.worker_parent.worker.worker.import_by_path',
             mocks['import_by_path'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker.import_module',
+            'tests.dualrun.reference.worker_parent.worker.worker.import_module',
             mocks['import_module'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker._build_sys_path_roots',
+            'tests.dualrun.reference.worker_parent.worker.worker._build_sys_path_roots',
             mocks['build_sys_path_roots'],
         )
         return mocks
@@ -4985,7 +4985,7 @@ class TestPreloadModulesMain:
 # 19. Monitoring — psutil, worker state, heartbeat loops
 # ---------------------------------------------------------------------------
 
-from horsies.core.worker.worker import (
+from tests.dualrun.reference.worker_parent.worker.worker import (
     _collect_psutil_metrics,
     INSERT_WORKER_STATE_SQL,
 )
@@ -5097,7 +5097,7 @@ class TestUpdateWorkerState:
         _unstarted_pool(worker)
 
         monkeypatch.setattr(
-            'horsies.core.worker.health._collect_psutil_metrics',
+            'tests.dualrun.reference.worker_parent.worker.health._collect_psutil_metrics',
             lambda: (100.0, 5.5, 12.3, 250.0),
         )
         worker._count_only_running_for_worker = AsyncMock(return_value=3)  # type: ignore[assignment]
@@ -5151,7 +5151,7 @@ class TestUpdateWorkerState:
         worker.cfg.processes = 1
         _unstarted_pool(worker)
         monkeypatch.setattr(
-            'horsies.core.worker.health._collect_psutil_metrics',
+            'tests.dualrun.reference.worker_parent.worker.health._collect_psutil_metrics',
             lambda: (1.0, 1.0, 1.0, 1.0),
         )
         worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
@@ -5180,7 +5180,7 @@ class TestUpdateWorkerState:
         pool = _unstarted_pool(worker)
         pool._slots[1].state = _down(failed_boots=4)  # pyright: ignore[reportPrivateUsage]
         monkeypatch.setattr(
-            'horsies.core.worker.health._collect_psutil_metrics',
+            'tests.dualrun.reference.worker_parent.worker.health._collect_psutil_metrics',
             lambda: (1.0, 1.0, 1.0, 1.0),
         )
         worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
@@ -5229,7 +5229,7 @@ class TestUpdateWorkerState:
         """Exception in _update_worker_state is logged, does not propagate."""
         worker = _make_worker()
         monkeypatch.setattr(
-            'horsies.core.worker.health._collect_psutil_metrics',
+            'tests.dualrun.reference.worker_parent.worker.health._collect_psutil_metrics',
             MagicMock(side_effect=RuntimeError('psutil boom')),
         )
 
@@ -6023,7 +6023,7 @@ from horsies.core.lifecycle.persistence import (
     FusedCompletionBatch,
 )
 from horsies.core.types.result import Result
-from horsies.core.worker.workflow_success import FinishWorkflowSuccess
+from tests.dualrun.reference.worker_parent.worker.workflow_success import FinishWorkflowSuccess
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import NotSent, OutcomeUnknown, StatementRefused
 import psycopg
@@ -6130,7 +6130,7 @@ class TestPersistTerminalStateFusedPath:
         worker, session = _make_session_worker(fetchone_results=[])
 
         with _with_core_handle(), patch(
-            'horsies.core.worker.finalize.complete_fused_batch_in_core',
+            'tests.dualrun.reference.worker_parent.worker.finalize.complete_fused_batch_in_core',
             AsyncMock(
                 return_value=Ok((_applied(TerminalizationKind.COMPLETE_FUSED),)),
             ),
@@ -6163,7 +6163,7 @@ class TestPersistTerminalStateFusedPath:
         worker, session = _make_session_worker(fetchone_results=[])
 
         with _with_core_handle(), patch(
-            'horsies.core.worker.finalize.complete_fused_batch_in_core',
+            'tests.dualrun.reference.worker_parent.worker.finalize.complete_fused_batch_in_core',
             AsyncMock(return_value=Ok((_lost_claim(),))),
         ):
             result = await self._persist_plain_ok(worker)
@@ -6249,7 +6249,7 @@ class TestPersistTerminalStateFusedPath:
         worker, _session = _make_session_worker(fetchone_results=[])
 
         with _with_core_handle(), patch(
-            'horsies.core.worker.finalize.complete_fused_batch_in_core',
+            'tests.dualrun.reference.worker_parent.worker.finalize.complete_fused_batch_in_core',
             AsyncMock(return_value=Err(error)),
         ):
             result = await self._persist_plain_ok(worker)
@@ -6289,7 +6289,7 @@ class TestPersistTerminalStateFusedPath:
         )
 
         with patch(
-            'horsies.core.worker.finalize.finish_workflow_success_in_core',
+            'tests.dualrun.reference.worker_parent.worker.finalize.finish_workflow_success_in_core',
             AsyncMock(return_value=applied),
         ) as finish:
             result = await worker._persist_task_terminal_state(
@@ -6325,7 +6325,7 @@ class TestPersistTerminalStateFusedPath:
         worker.broker = MagicMock()
 
         with patch(
-            'horsies.core.worker.finalize.finish_workflow_success_in_core',
+            'tests.dualrun.reference.worker_parent.worker.finalize.finish_workflow_success_in_core',
             AsyncMock(return_value=_lost_claim()),
         ):
             result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]
@@ -6350,7 +6350,7 @@ class TestPersistTerminalStateFusedPath:
 
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
-from horsies.core.worker.runtime import _ReaperPassState
+from tests.dualrun.reference.worker_parent.worker.runtime import _ReaperPassState
 
 # More passes than the three permanent failures after which the removed
 # per-step latch stopped a step.

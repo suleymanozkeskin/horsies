@@ -26,9 +26,9 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker import preload, preload_main, slots
+from tests.dualrun.reference.worker_parent.worker import preload, preload_main, slots
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     IsolatedChild,
     ChildForkedFrame,
     ForkFailedFrame,
@@ -36,9 +36,9 @@ from horsies.core.worker.child_protocol import (
     PreloadReadyFrame,
     RunFrame,
 )
-from horsies.core.worker.stored_timeout import NoTimeout
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import NoTimeout
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.preload import (
+from tests.dualrun.reference.worker_parent.worker.preload import (
     PreloadDown,
     PreloadNotLinux,
     PreloadParent,
@@ -49,9 +49,9 @@ from horsies.core.worker.preload import (
     preload_support,
     reap_landed_orphans,
 )
-from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE, parse_arguments
+from tests.dualrun.reference.worker_parent.worker.preload_main import REPARENT_FAILED_EXIT_CODE, parse_arguments
 from horsies.core.models.boot_failure import SpawnFailed
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.slots import (
     PRELOAD_ENTRY,
     BootAttemptsExhausted,
     Child,
@@ -924,8 +924,8 @@ class TestChildExitCodes:
         exits with its own code when its runner heartbeats fail closed. A
         reader tells the cause from the code, so no two causes share one,
         and none is a code the CLI exits with."""
-        from horsies.core.worker import child_main, runner_heartbeat
-        from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+        from tests.dualrun.reference.worker_parent.worker import child_main, runner_heartbeat
+        from tests.dualrun.reference.worker_parent.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 
         codes = {
             name: value
@@ -948,7 +948,7 @@ class TestChildExitCodes:
 class TestReparentWait:
     def test_a_child_that_never_reparents_exits(self) -> None:
         code = (
-            'from horsies.core.worker import preload_main as main\n'
+            'from tests.dualrun.reference.worker_parent.worker import preload_main as main\n'
             'main.REPARENT_TIMEOUT_S = 0.05\n'
             'main._wait_for_reparent(1 << 30)\n'
         )
@@ -998,7 +998,7 @@ class TestProcessState:
     def _refusal(setup: str) -> str:
         code = f"""
 import socket, threading, time
-from horsies.core.worker.preload_main import fork_refusal
+from tests.dualrun.reference.worker_parent.worker.preload_main import fork_refusal
 {setup}
 print(fork_refusal(-1))
 """
@@ -1036,7 +1036,7 @@ print(fork_refusal(-1))
 
     def test_a_core_that_started_in_this_process_is_refused(self) -> None:
         setup = (
-            'import horsies.core.worker.preload_main as preload_main\n'
+            'import tests.dualrun.reference.worker_parent.worker.preload_main as preload_main\n'
             "preload_main.core_state = lambda: 'running'"
         )
         assert self._refusal(setup) == 'the core of horsies._core is running in this process'

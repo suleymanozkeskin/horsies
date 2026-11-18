@@ -94,11 +94,21 @@ pub struct StubClass {
     pub methods: &'static [StubFunction],
 }
 
+/// A static method of a class: a function with no `self`, called on the
+/// class.
+#[derive(Clone, Copy, Debug)]
+pub struct StubStaticMethod {
+    /// The name of the class that holds it, as in [`StubClass::name`].
+    pub class_name: &'static str,
+    pub function: StubFunction,
+}
+
 /// The whole module.
 #[derive(Clone, Copy, Debug)]
 pub struct ModuleSurface {
     pub exceptions: &'static [StubException],
     pub classes: &'static [StubClass],
+    pub static_methods: &'static [StubStaticMethod],
     pub functions: &'static [StubFunction],
 }
 
@@ -2089,7 +2099,7 @@ const HANDLE_CLASSES: &[StubClass] = &[
 },
     StubClass {
         name: "CoreChildHandle",
-        doc: "The core handle of one worker's child process: the producer manifest of its child pool,\nthe connections the pool keeps open, and the ping at checkout. Built in the child after\nits start; building it starts nothing.",
+        doc: "The core handle of one worker's child process, built from its init frame (from_init), or\nfrom the producer manifest of its child pool, the connections the pool keeps open, and the\nping at checkout. Built in the child after its start; building it starts nothing.",
         constructor: Constructor::Parameters(CORE_CHILD_HANDLE_PARAMETERS),
         properties: &[],
         methods: CORE_CHILD_HANDLE_METHODS,
@@ -3251,24 +3261,31 @@ const FRAME_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "ChildPool",
+        doc: "The connection pool of a child: min_size connections kept open, at most max_size; check\npings each pooled connection at checkout.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("min_size", "int"), property("max_size", "int"), property("check", "bool")],
+        methods: &[],
+    },
+    StubClass {
         name: "IsolatedChildKind",
         doc: "An isolated child: one task at a time.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_send_pool", "int")],
+        properties: &[property("pool", "ChildPool"), property("task_send_pool", "int")],
         methods: &[],
     },
     StubClass {
         name: "SharedAsyncChildKind",
         doc: "A shared async child: up to seats async tasks on one event loop.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("seats", "int"), property("executor_threads", "int"), property("task_send_pool", "int")],
+        properties: &[property("seats", "int"), property("pool", "ChildPool"), property("executor_threads", "int"), property("task_send_pool", "int")],
         methods: &[],
     },
     StubClass {
         name: "SharedThreadChildKind",
         doc: "A shared thread child: up to seats blocking tasks, each on a thread.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("seats", "int"), property("task_send_pool", "int")],
+        properties: &[property("seats", "int"), property("pool", "ChildPool"), property("task_send_pool", "int")],
         methods: &[],
     },
     StubClass {
@@ -3350,9 +3367,9 @@ const FRAME_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "ProtocolNumbers",
-        doc: "The protocol version, the exit codes of a child and the spawn request byte.",
+        doc: "The protocol version, the exit codes of a child, the spawn request byte, and the bounds\nthat a child applies before it builds a frame: the names of a report of left work, and the\nbytes of a body.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int")],
+        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
         methods: &[],
     },
     StubClass {
@@ -3763,8 +3780,19 @@ const FUNCTIONS: &[StubFunction] = &[
 ];
 
 /// The surface of `horsies._core`.
+const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
+    class_name: "CoreChildHandle",
+    function: StubFunction {
+        name: "from_init",
+        parameters: &[positional("init", "InitFrame")],
+        returns: TypeText::Plain("CoreChildHandle"),
+        doc: "The child handle of the child that init boots: the database URL, the connection settings\nand the pool of the child kind come from the frame and stay in the core. Starts nothing.",
+    },
+}];
+
 pub const CORE_MODULE: ModuleSurface = ModuleSurface {
     exceptions: EXCEPTIONS,
     classes: &CLASSES,
+    static_methods: STATIC_METHODS,
     functions: FUNCTIONS,
 };

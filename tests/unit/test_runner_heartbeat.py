@@ -35,17 +35,17 @@ from horsies.core.models.recovery import (
     fail_closed_threshold_floor_ms,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker import runner_heartbeat
+from tests.dualrun.reference.worker_parent.worker import runner_heartbeat
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
+from tests.dualrun.reference.worker_parent.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
 from horsies.core.worker.config import ChildPreload, WorkerConfig
-from horsies.core.worker.live_dispatches import (
+from tests.dualrun.reference.worker_parent.worker.live_dispatches import (
     Held,
     LiveDispatch,
     LiveDispatches,
     RegistryClosed,
 )
-from horsies.core.worker.runner_heartbeat import (
+from tests.dualrun.reference.worker_parent.worker.runner_heartbeat import (
     INSERT_RUNNER_HEARTBEATS_SQL,
     RUNNER_HEARTBEAT_LOST_EXIT_CODE,
     BeatsOverdue,
@@ -80,8 +80,8 @@ from horsies.core.worker.runner_heartbeat import (
     retry_delay_s,
     stale_running_recovery,
 )
-from horsies.core.worker import slots as slots_module
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker import slots as slots_module
+from tests.dualrun.reference.worker_parent.worker.slots import (
     Busy,
     ChildLost,
     Down,
@@ -93,8 +93,8 @@ from horsies.core.worker.slots import (
     StopReport,
     TaskFinished,
 )
-from horsies.core.worker.stored_timeout import NoTimeout
-from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import NoTimeout
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
 
 pytestmark = [pytest.mark.unit]
 
@@ -928,7 +928,7 @@ async def test_start_slots_launches_the_heartbeat_on_the_pool_registry() -> None
     launched = MagicMock()
 
     with (
-        patch('horsies.core.worker.worker.SlotPool', return_value=pool),
+        patch('tests.dualrun.reference.worker_parent.worker.worker.SlotPool', return_value=pool),
         patch.object(RunnerHeartbeat, 'launch', launched),
     ):
         await worker._start_slots()
@@ -959,11 +959,11 @@ async def test_a_heartbeat_that_fails_closed_stops_the_worker_non_zero(
 
     with (
         patch(
-            'horsies.core.worker.worker.beat_timing',
+            'tests.dualrun.reference.worker_parent.worker.worker.beat_timing',
             return_value=BeatTiming(interval_s=INTERVAL_S),
         ),
         patch(
-            'horsies.core.worker.worker.PostgresBeatWriter',
+            'tests.dualrun.reference.worker_parent.worker.worker.PostgresBeatWriter',
             return_value=_ScriptedWriter(_always_failing),
         ),
     ):
@@ -999,11 +999,11 @@ async def test_a_worker_whose_reaper_fails_no_running_row_runs_on(
 
     with (
         patch(
-            'horsies.core.worker.worker.beat_timing',
+            'tests.dualrun.reference.worker_parent.worker.worker.beat_timing',
             return_value=BeatTiming(interval_s=INTERVAL_S),
         ),
         patch(
-            'horsies.core.worker.worker.PostgresBeatWriter',
+            'tests.dualrun.reference.worker_parent.worker.worker.PostgresBeatWriter',
             return_value=_ScriptedWriter(_always_failing),
         ),
     ):
