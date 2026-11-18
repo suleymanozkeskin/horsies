@@ -9,7 +9,15 @@ use serde::{Deserialize, Serialize};
 ///                      → CANCELLED (user requested)
 ///                      → EXPIRED (paused past the configured lifetime)
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(
     module = "status",
@@ -94,7 +102,15 @@ impl std::fmt::Display for WorkflowStatus {
 ///                                         → FAILED
 ///                   → SKIPPED (deps failed and allow_failed_deps=False)
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(
     module = "status",

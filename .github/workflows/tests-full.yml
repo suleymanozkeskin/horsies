@@ -230,6 +230,9 @@ jobs:
       - name: Test the macros
         run: cargo test -p horsies-macros
 
+      - name: Test the core derives
+        run: cargo test -p horsies-core-derive
+
       # The core's tests create one database per test, copied from a
       # template that each test process installs, on the server of
       # DATABASE_URL (crates/horsies-core/src/test_support/database.rs).

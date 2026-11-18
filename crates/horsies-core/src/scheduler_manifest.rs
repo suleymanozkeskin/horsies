@@ -181,7 +181,7 @@ impl ManifestValue for RetentionClassKey {
 }
 
 /// The options of the task that each slot sends.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum ScheduleTaskOptions {
     /// The options text that the client encoded when the task was defined:
@@ -202,7 +202,7 @@ impl ScheduleTaskOptions {
 }
 
 /// What each slot of an enabled schedule sends.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleSendManifest {
     /// The task that each slot sends.
@@ -222,7 +222,7 @@ pub struct ScheduleSendManifest {
 }
 
 /// Whether a schedule fires.
-#[derive(Debug, Clone, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum ScheduleActivation {
     /// The schedule fires.
@@ -242,7 +242,7 @@ pub enum ScheduleActivation {
 }
 
 /// One configured schedule.
-#[derive(Debug, Clone, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleManifest {
     /// The name of the schedule, unique in the manifest: the key of its
@@ -252,7 +252,7 @@ pub struct ScheduleManifest {
 }
 
 /// The manifest of a scheduler process.
-#[derive(Debug, Clone, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerManifest {
     /// Always `SCHEDULER_MANIFEST_VERSION`, the one version this core reads.

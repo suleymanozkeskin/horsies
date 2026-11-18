@@ -267,7 +267,7 @@ jobs:
           # Same rule as the webui job: an unknown base runs rather than skips.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- showcase/ python/horsies/ crates/horsies-python/ crates/horsies-core/ crates/horsies-macros/ Cargo.toml Cargo.lock rust-toolchain.toml; then
+          elif git diff --quiet "$base" HEAD -- showcase/ python/horsies/ crates/horsies-python/ crates/horsies-core/ crates/horsies-core-derive/ Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -409,19 +409,20 @@ jobs:
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
           fi
           # The generator renders the catalogs and the stubs from horsies-core
-          # (which derives its catalogs with horsies-macros). A change to an
-          # input or to a committed output can make a committed file stale.
-          if git diff --quiet "$base" HEAD -- crates/horsies-core/ crates/horsies-macros/ crates/horsies-codegen/ python/horsies/_catalog/ python/horsies/_core.pyi Cargo.toml Cargo.lock rust-toolchain.toml; then
+          # (which derives its catalogs with horsies-core-derive). A change to
+          # an input or to a committed output can make a committed file stale.
+          if git diff --quiet "$base" HEAD -- crates/horsies-core/ crates/horsies-core-derive/ crates/horsies-codegen/ python/horsies/_catalog/ python/horsies/_core.pyi Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run_generated=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_generated=true' >> "$GITHUB_OUTPUT"
           fi
           # horsies._core is built from crates/horsies-python, crates/horsies-core
-          # and crates/horsies-macros with the root Cargo and toolchain files, so
-          # a change there can change a Python result. A PR that changes only the
-          # Rust client, the generator, rust/, or the format and lint settings
-          # cannot: the Python jobs are skipped for it.
-          if git diff --quiet "$base" HEAD -- . ':(exclude)crates/horsies/' ':(exclude)crates/horsies-codegen/' ':(exclude)rust/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
+          # and crates/horsies-core-derive with the root Cargo and toolchain
+          # files, so a change there can change a Python result. A PR that
+          # changes only the Rust client, its macros, the generator, rust/, or
+          # the format and lint settings cannot: the Python jobs are skipped for
+          # it.
+          if git diff --quiet "$base" HEAD -- . ':(exclude)crates/horsies/' ':(exclude)crates/horsies-macros/' ':(exclude)crates/horsies-codegen/' ':(exclude)rust/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
             echo 'run_python=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_python=true' >> "$GITHUB_OUTPUT"
@@ -532,9 +533,13 @@ jobs:
         run: cargo build -p horsies-examples --examples
 
       # The compile-pass and compile-fail cases of the task attributes and
-      # derives (trybuild).
+      # derives of the Rust client (trybuild).
       - name: Test the macros
         run: cargo test -p horsies-macros
+
+      # The derives of the core's code catalogs and manifest types.
+      - name: Test the core derives
+        run: cargo test -p horsies-core-derive
 
       # The core's tests create one database per test, copied from a
       # template that each test process installs, on the server of

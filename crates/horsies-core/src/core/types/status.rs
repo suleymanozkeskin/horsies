@@ -10,7 +10,15 @@ use serde::{Deserialize, Serialize};
 ///   CLAIMED → EXPIRED (good_until passed before execution started)
 ///   RUNNING → PENDING (retry on failure/crash)
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(
     module = "status",
@@ -108,7 +116,15 @@ impl std::str::FromStr for TaskStatus {
 ///
 /// Recorded in `horsies_task_attempts.outcome`.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "status", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
