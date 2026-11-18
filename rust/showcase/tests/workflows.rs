@@ -237,7 +237,8 @@ async fn compressed_schedule_sends_a_due_task() {
             ..IntervalSchedule::default()
         }),
     )
-    .input(json!({ "campaign_id": marker.as_str() }));
+    .input(&json!({ "campaign_id": marker.as_str() }))
+    .expect("the schedule input writes as JSON");
     let mut config = config_for_url(settings.sqlx_url());
     config.schedule = Some(ScheduleConfig::new(vec![schedule]).check_interval_seconds(1));
     let showcase =

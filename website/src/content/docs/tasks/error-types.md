@@ -69,6 +69,17 @@ When the core of the process cannot run the call, the call returns its failure c
 | `CoreStartFailed` | The core runtime could not start | `False` | Nothing ran |
 | `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent. Start children that call horsies with `spawn` or `forkserver` | `False` | Nothing ran |
 
+When the core ran the call and the call failed, `exception` is the core's class of the cause, from `horsies._core`. The declared type of `exception` does not change:
+
+| Class | When | Fields |
+| ----- | ---- | ------ |
+| `CoreServerError` | The server answered with an error | `subject`, `sqlstate`, `message` (the server's primary message), `retryable` |
+| `CoreConnectionError` | No answer from the server: a connect or a checkout failed or timed out, the connection was lost, or a reply did not come within its bound | `subject`, `message`, `retryable` |
+| `CoreContractViolation` | A row, a stored value or a result broke the contract that the core reads it with. The same call meets it again | `subject`, `message` |
+| `CorePreconditionFailed` | A precondition of the call does not hold: the settings, the client family or the schema of the database, an argument, or a key or a lock that another command holds | `subject`, `message`, `retryable` |
+
+`CoreServerError` and `CoreConnectionError` share the base class `CoreDatabaseError`; the four classes share `CoreFailure`. `subject` names the core operation, for example `release_claims`. A lock that another session holds is `CoreServerError` with `sqlstate` `'55P03'`.
+
 <!-- members: BrokerErrorCode -->
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |

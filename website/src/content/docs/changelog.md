@@ -45,6 +45,22 @@ written in Rust, on a new baseline schema.
   a workflow start and a workflow resume keep a resource set per event loop.
   The sync send pool is gone.
 
+- **The `exception` of a database failure is the core's class of the
+  cause.** Where a call ran on the core and failed, the `exception` field of
+  its error (for example `BrokerOperationFailed.exception`,
+  `TaskActionDbOperationFailed.exception`,
+  `HandleDbOperationFailed.exception`) holds one class of `horsies._core`:
+  `CoreServerError` (the server answered with an error: `sqlstate` and the
+  server's primary `message`), `CoreConnectionError` (no answer from the
+  server), `CoreContractViolation` (a row or a stored value broke the
+  core's read contract) or `CorePreconditionFailed` (a precondition of the
+  call does not hold, for example a database of the other client family).
+  Each has `subject`, the core operation, and `message`; all but
+  `CoreContractViolation` have `retryable`. The declared types do not
+  change. `rerun_task` raises `CorePreconditionFailed` for a database of the
+  other client family. A refused orphan cursor is `CoreServerError` with
+  `sqlstate` `'55P03'`.
+
 - **A process forked without exec after the core started cannot call
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
@@ -667,6 +683,15 @@ unless it starts with "Added".
   `stop_handle()`. `run_scheduler()` runs it until `SIGTERM` or `SIGINT`.
   Both return `SchedulerStopped` or a closed `SchedulerRunError`. A schedule
   section that is missing or switched off is refused.
+- **`TaskSchedule.input` is the input's JSON text, and `.input` returns a
+  `Result`.** The field is `Option<JsonText>` in place of a
+  `serde_json::Value`. `.input(&value)` takes the task's input value (the
+  `Input` of a `#[task]`), writes it with the strict writer of every stored
+  form, and returns `Result<TaskSchedule, JsonTextRefused>`
+  (`horsies::JsonTextRefused`). An integer outside the `i64` and `u64` range
+  keeps every digit: a schedule input of `u128::MAX` is stored as written
+  and its task reads `u128::MAX`. A JSON config text keeps the text of the
+  `input` member; a TOML config text refuses an `input` member.
 - **Added: the blocking API, `horsies::blocking`.** `TaskFunction::blocking()`,
   `TaskHandle::blocking()`, `Horsies::blocking()`,
   `WorkflowFunction::blocking()`, `WorkflowTemplate::blocking()` and
