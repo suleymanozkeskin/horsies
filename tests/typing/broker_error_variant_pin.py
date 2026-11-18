@@ -49,14 +49,12 @@ from horsies.core.brokers.postgres import (
     SendCommand,
     _async_context_err,  # pyright: ignore[reportPrivateUsage]
     _command_fingerprint,  # pyright: ignore[reportPrivateUsage]
-    _loop_runner_err,  # pyright: ignore[reportPrivateUsage]
     _parse_enqueue_input,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.task_decorator import (
     _map_broker_err,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.types.result import Result
-from horsies.core.utils.loop_runner import LoopRunnerError
 
 TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
 
@@ -206,10 +204,7 @@ def enqueue_helpers_return_their_subsets(good_until: datetime) -> None:
     async_context: Err[BrokerAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
     )
-    loop_runner: Err[BrokerLoopRunnerFailed] = _loop_runner_err(
-        'PostgresBroker.enqueue()', LoopRunnerError('stopped'),
-    )
-    _ = (stored_input, fingerprint, answered, async_context, loop_runner)
+    _ = (stored_input, fingerprint, answered, async_context)
 
 
 def send_command_returns_only_the_input_refusals(broker: PostgresBroker) -> None:
