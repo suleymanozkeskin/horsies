@@ -2607,6 +2607,8 @@ async fn manifest_excludes_absent_probes_and_keeps_the_complete_attached_set() {
         .expect("self-correcting coverage pass");
     match coverage {
         CoverageOutcome::Failed(failure) => {
+            assert_eq!(failure.stage, "ensure_leaf_coverage");
+            assert_eq!(failure.class_key.as_deref(), Some(class_key));
             assert!(failure.refusal.contains(class_key));
             assert_eq!(failure.absent_leaves, vec![gone.leaf_name().to_owned()]);
         }

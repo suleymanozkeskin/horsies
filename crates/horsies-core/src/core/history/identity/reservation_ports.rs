@@ -126,6 +126,40 @@ async fn only_the_owner_terminalizes_a_reservation_once() {
     transaction.rollback().await.expect("rollback");
 }
 
+/// `TestClaimReplayConflict.test_different_fingerprint_is_a_typed_conflict`:
+/// a claim of a reserved key with another fingerprint is a typed conflict
+/// that names the task that holds the key and the fingerprint version it
+/// observed.
+#[tokio::test]
+#[serial]
+async fn a_claim_with_another_fingerprint_is_a_typed_conflict() {
+    let pool = shared_pool().await;
+    let key = fresh_key();
+    let original = Uuid::new_v4();
+    let mut transaction = pool.begin().await.expect("begin");
+    assert_eq!(
+        claim(&mut transaction, &key, &digest("command"), original).await,
+        ReservationClaim::Applied { task_id: original }
+    );
+
+    let outcome = claim(
+        &mut transaction,
+        &key,
+        &digest("another command"),
+        Uuid::new_v4(),
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        ReservationClaim::Conflict {
+            task_id: original,
+            observed_fingerprint_version: 1,
+        }
+    );
+    transaction.rollback().await.expect("rollback");
+}
+
 /// `TestTerminalizationAndReuse.test_unexpired_terminal_reservation_still_replays`.
 #[tokio::test]
 #[serial]

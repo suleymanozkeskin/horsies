@@ -38,9 +38,12 @@ use super::seat_runs::{
     RunStopReport, RunWork, SeatRun, SeatRuns, StopReportFrame, StopStep, SHARED_STUCK_BACKSTOP,
 };
 use super::shared::{Accepting, QueuedSeatRun, SharedPoolShared, Take};
-use crate::worker::executor::protocol::{ChildFrame, ParentFrame, RunRef, SharedResultFrame};
+use crate::worker::executor::protocol::{
+    ChildFrame, ParentFrame, ProcessId, RunRef, SharedResultFrame,
+};
 use crate::worker::executor::supervisor::{
-    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
+    log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
+    FrameWait, LossCause, MailboxBound, SendFailure,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
@@ -751,13 +754,18 @@ async fn read_until_exit(generation: &mut Generation) -> ChildLost {
 
 /// End every run of a lost child (Python `_lose_shared_child`,
 /// `_end_all_runs`).
+///
+/// A child that held no run and ended with
+/// [`ChildExitCode::CoreStopped`](crate::worker::executor::protocol::ChildExitCode)
+/// is logged at error level once its exit is seen; every other loss logs a
+/// warning.
 async fn lose_child(pool: &SharedPoolShared, mut generation: Generation, lost: ChildLost) {
-    tracing::warn!(
-        pid = generation.channel.pid().get(),
-        tasks = generation.runs.count(),
-        lost = %lost,
-        "lost a shared child",
-    );
+    let pid = generation.channel.pid();
+    let held = generation.runs.count();
+    match held {
+        0 => {}
+        _ => warn_lost_shared_child(pid, held, &lost),
+    }
     let closer = generation.service.close_culprit();
     let kill = generation.runs.kill().clone();
     let exit = generation.channel.exit_watch();
@@ -774,7 +782,22 @@ async fn lose_child(pool: &SharedPoolShared, mut generation: Generation, lost: C
             answer_without_seen_exit(pool, seats, lost, generation.kill, exit)
         }
     }
-    let _ = generation.channel.dispose_lost().await;
+    let exit = generation.channel.dispose_lost().await;
+    match (held, EndWithoutTask::of(exit)) {
+        (0, EndWithoutTask::CoreStopped) => log_core_stopped_child(pid),
+        (0, EndWithoutTask::Other) => warn_lost_shared_child(pid, held, &lost),
+        (_, EndWithoutTask::CoreStopped | EndWithoutTask::Other) => {}
+    }
+}
+
+/// The warning of a lost shared child.
+fn warn_lost_shared_child(pid: ProcessId, held: usize, lost: &ChildLost) {
+    tracing::warn!(
+        pid = pid.get(),
+        tasks = held,
+        lost = %lost,
+        "lost a shared child",
+    );
 }
 
 /// The runs of a child whose exit was not seen after a kill: the end is
