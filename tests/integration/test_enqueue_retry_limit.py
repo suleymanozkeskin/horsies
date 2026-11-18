@@ -23,7 +23,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import MAX_RETRY_ATTEMPTS
 from horsies.core.types.result import Err, is_err
-from tests.integration.test_task_history_schema_emission import (
+from tests.integration.isolated_database import (
     MakeDatabase,
     make_database,
 )

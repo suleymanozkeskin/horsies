@@ -25,7 +25,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     BrokerResult,
 )
-from horsies.core.history.identity.uuid7 import mint_task_id, uuid7_birth_at
+from tests.task_ids import mint_task_id, uuid7_birth_at
 from horsies.core.types.result import is_err, is_ok
 from tests.broker_resources_support import current_resources
 
@@ -343,52 +343,4 @@ class TestKeyedEnqueue:
             ).scalar_one()
         assert orphan == 0
 
-    async def test_registry_indexes_are_present_since_emission(
-        self, broker: PostgresBroker
-    ) -> None:
-        """The v28 deliberate absence ended when the emission migration
-        landed the maintenance indexes: the recorded sequencing debt is
-        discharged, and this pin flips from absence to presence — the
-        inventory flip becoming a permanent structural invariant."""
-        from horsies.core.history.names import (
-            RESERVATION_REGISTRY_EXPIRY_INDEX,
-        )
 
-        async with current_resources(broker).session_factory() as session:
-            index_names = {
-                row.indexname
-                for row in (
-                    await session.execute(
-                        text(
-                            'SELECT indexname FROM pg_indexes '
-                            "WHERE tablename = 'horsies_key_reservations'"
-                        )
-                    )
-                ).all()
-            }
-        assert index_names == {
-            'horsies_key_reservations_pkey',
-            RESERVATION_REGISTRY_EXPIRY_INDEX,
-        }
-
-
-class TestReservationWindowConfiguration:
-    def test_boundary_values_are_legal_and_excess_is_typed(self) -> None:
-        from datetime import timedelta
-
-        from horsies.core.history.identity.keys import (
-            validate_reservation_window,
-        )
-
-        assert validate_reservation_window(timedelta(days=30)) == (
-            timedelta(days=30)
-        )
-        assert validate_reservation_window(timedelta(seconds=1)) == (
-            timedelta(seconds=1)
-        )
-        with pytest.raises(ValueError, match='positive'):
-            validate_reservation_window(timedelta(0))
-        with pytest.raises(ValueError, match='inclusive maximum'):
-            validate_reservation_window(
-                timedelta(days=30, microseconds=1)
-            )

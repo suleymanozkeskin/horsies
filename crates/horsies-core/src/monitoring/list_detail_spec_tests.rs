@@ -16,6 +16,9 @@ use super::spec_support::{
     seed_live, seed_node, seed_run, seed_terminal, set_history_status, set_history_times, window,
     Ending, LiveTask, NodeKind, NodeSeed, RunSeed, SpecDatabase,
 };
+use crate::broker::lifecycle_tests::support::{
+    database_options, unpinged_single_connection_pool, WireProxy,
+};
 use crate::broker::PostgresBroker;
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand, TerminalizationOutcome};
@@ -419,6 +422,51 @@ async fn an_unknown_stored_status_in_history_is_a_contract_violation() {
     );
     assert!(!error.retryable());
     assert!(error.message().contains("NOT_KNOWN"), "{}", error.message());
+    database.drop().await;
+}
+
+/// The task detail read and the workflow node read are each one round trip:
+/// one statement in autocommit, with no transaction of their own. The reads
+/// run through a proxy that counts round trips. A first read of each opens
+/// the connection and prepares its statement, so the counted reads are the
+/// steady state of the statement cache; they run within the idle ping limit
+/// of the pool, so no ping is sent before them.
+#[tokio::test]
+#[serial]
+async fn the_task_detail_and_the_node_read_are_one_round_trip_each() {
+    let database = SpecDatabase::create().await;
+    let mut task = LiveTask::pending("alpha_task");
+    task.is_workflow_task = true;
+    seed_live(&database.pool, &task).await;
+    let run = RunSeed::running("alpha_flow");
+    seed_run(&database.pool, &run).await;
+    let mut node = NodeSeed::task(run.id, 0);
+    node.status = "ENQUEUED".to_owned();
+    node.kind = NodeKind::Task {
+        task_id: Some(task.id),
+    };
+    seed_node(&database.pool, &node).await;
+    let upstream = database_options(&database.pool);
+    let proxy = WireProxy::start(&upstream).await;
+    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+    let broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
+    let _warm_detail = detail_of(&broker, task.id).await;
+    let _warm_node = get_workflow_node(&broker, run.id, 0)
+        .await
+        .expect("read the node");
+
+    proxy.reset_round_trips();
+    let _detail = detail_of(&broker, task.id).await;
+    let detail_round_trips = proxy.round_trips();
+    proxy.reset_round_trips();
+    let _node = get_workflow_node(&broker, run.id, 0)
+        .await
+        .expect("read the node");
+    let node_round_trips = proxy.round_trips();
+
+    assert_eq!(detail_round_trips, 1);
+    assert_eq!(node_round_trips, 1);
+    proxied.close().await;
     database.drop().await;
 }
 

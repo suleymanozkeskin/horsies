@@ -24,7 +24,7 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
-from tests.integration.test_task_history_schema_emission import (
+from tests.integration.isolated_database import (
     MakeDatabase,
     make_database,
 )
