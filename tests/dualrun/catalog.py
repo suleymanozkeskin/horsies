@@ -444,9 +444,12 @@ _WORKFLOWS: Final = TableRules(
         'name',
         'definition_key',
         'sent_at',
+        'status',
     ),
     identity=('id',),
 )
+"""``status`` orders the workflows that a test seeds with one name and one
+send time and that differ only in their status."""
 
 _WORKFLOW_TASKS: Final = TableRules(
     name='horsies_workflow_tasks',
@@ -534,9 +537,15 @@ _TASKS: Final = TableRules(
         'input',
         'sent_at',
         'enqueued_at',
+        'execution',
+        'status',
     ),
     identity=('id',),
 )
+"""``execution`` and ``status`` order the tasks that a test seeds with one
+name, queue, priority, input and send time and that differ only in their
+execution class or their status (a claim test's rows of three classes, the
+rows that a claim took and the rows it left)."""
 
 _TASK_HISTORY: Final = TableRules(
     name='horsies_task_history',

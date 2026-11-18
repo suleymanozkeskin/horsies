@@ -9,6 +9,7 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
+from tests.dualrun.catalog import BASELINE_CATALOG
 from tests.dualrun.cells import (
     NormalizeError,
     RawRow,
@@ -519,7 +520,9 @@ def test_reference_order_still_finds_a_changed_reference() -> None:
     assert [type(entry) for entry in diff.entries] == [MissingRow, ExtraRow]
 
 
-def test_tied_rows_with_equal_references_are_ambiguous() -> None:
+def test_tied_rows_whose_references_hold_an_id_without_a_label_are_ambiguous() -> None:
+    """The children hold a worker that the children table labels later, in
+    the children's order, which follows the labels of the tied parents."""
     reference = _raw(
         [_parent('a1', 'alpha', RUN_A), _parent('a2', 'alpha', RUN_A)],
         [('a1', '1', 'w'), ('a2', '1', 'w')],
@@ -568,6 +571,251 @@ def test_tied_rows_equal_apart_from_unreferenced_new_labels_are_interchangeable(
         compare_snapshots(reference_snapshot, _normalize(candidate, RUN_B)).entries
         == ()
     )
+
+
+def test_tied_rows_whose_references_differ_through_a_later_id_stay_ambiguous() -> None:
+    """Parent a1's child shares its worker with a third parent's child, and
+    a2's child does not. Each order of a1 and a2 gives other worker labels to
+    the children, so the order is not free."""
+    raw = _raw(
+        [
+            _parent('a1', 'alpha', RUN_A),
+            _parent('a2', 'alpha', RUN_A),
+            _parent('a3', 'beta', RUN_A),
+        ],
+        [('a1', '1', 'w1'), ('a2', '1', 'w2'), ('a3', '1', 'w1')],
+    )
+
+    snapshot = _normalize(raw, RUN_A)
+
+    assert [group.row_count for group in snapshot.ambiguities] == [2]
+
+
+TIES: Final = SnapshotCatalog(
+    tables=(
+        TableRules(
+            name='tasks',
+            columns=(
+                ColumnSpec(name='id', rule=NormalisedId(family=IdFamily.TASK)),
+                ColumnSpec(name='name', rule=Exact()),
+                ColumnSpec(name='owner', rule=NormalisedId(family=IdFamily.WORKER)),
+                ColumnSpec(
+                    name='digest',
+                    rule=NormalisedId(family=IdFamily.COMMAND_FINGERPRINT),
+                ),
+            ),
+            order_by=('id', 'name'),
+            identity=('id',),
+        ),
+        TableRules(
+            name='events',
+            columns=(
+                ColumnSpec(name='channel', rule=Exact()),
+                ColumnSpec(name='task_id', rule=NormalisedId(family=IdFamily.TASK)),
+                ColumnSpec(name='worker', rule=NormalisedId(family=IdFamily.WORKER)),
+            ),
+            order_by=('channel', 'task_id', 'worker'),
+            identity=('channel', 'task_id', 'worker'),
+        ),
+    ),
+)
+"""Task rows, then the events that name them: each tied task is held by the
+event rows of its own id."""
+
+
+def _ties(
+    tasks: Sequence[tuple[str, str | None, str]],
+    events: Sequence[tuple[str, str | None, str | None]],
+    run: datetime,
+) -> NormalizedSnapshot:
+    raw = RawSnapshot(
+        tables=(
+            RawTable(
+                name='tasks',
+                rows=tuple((task, 'bench', owner, digest) for task, owner, digest in tasks),
+            ),
+            RawTable(name='events', rows=tuple(events)),
+        ),
+    )
+    return _unwrap(normalize_snapshot(raw, TIES, _window(run)))
+
+
+def test_tied_rows_with_equal_labelled_references_are_interchangeable() -> None:
+    """Each task is named by one event of its own; one of them is also
+    claimed by the worker that every task holds."""
+    reference = _ties(
+        [('a1', 'w', 'd1'), ('a2', 'w', 'd2'), ('a3', 'w', 'd3')],
+        [('new', 'a1', None), ('new', 'a2', None), ('new', 'a3', None), ('claimed', 'a2', 'w')],
+        RUN_A,
+    )
+    candidate = _ties(
+        [('b3', 'v', 'e3'), ('b2', 'v', 'e2'), ('b1', 'v', 'e1')],
+        [('claimed', 'b3', 'v'), ('new', 'b1', None), ('new', 'b3', None), ('new', 'b2', None)],
+        RUN_B,
+    )
+
+    assert reference.ambiguities == ()
+    assert candidate.ambiguities == ()
+    assert compare_snapshots(reference, candidate).entries == ()
+
+
+def test_a_shared_new_value_with_references_elsewhere_keeps_a_tie_interchangeable() -> None:
+    """The owner is new in the tie and held by every tied row; its label does
+    not depend on their order, so its rows elsewhere do not matter."""
+    snapshot = _ties(
+        [('a1', 'w', 'd1'), ('a2', 'w', 'd2')],
+        [('new', 'a1', None), ('new', 'a2', None), ('beat', None, 'w')],
+        RUN_A,
+    )
+
+    assert snapshot.ambiguities == ()
+
+
+def test_a_reference_that_holds_the_new_values_of_two_tied_rows_keeps_them_ambiguous() -> None:
+    snapshot = _ties(
+        [('a1', None, 'd1'), ('a2', None, 'd2')],
+        [('link', 'a1', 'd2'), ('link', 'a2', 'd1')],
+        RUN_A,
+    )
+
+    assert [group.row_count for group in snapshot.ambiguities] == [2]
+
+
+def test_a_tie_that_a_change_breaks_still_reports_the_change() -> None:
+    """The claimed task is another one in the candidate: the tie of the
+    other two orders freely, and the claim still compares as a difference."""
+    reference = _ties(
+        [('a1', 'w', 'd1'), ('a2', 'w', 'd2')],
+        [('new', 'a1', None), ('new', 'a2', None), ('claimed', 'a1', 'w')],
+        RUN_A,
+    )
+    candidate = _ties(
+        [('b1', 'v', 'e1'), ('b2', 'v', 'e2')],
+        [('new', 'b1', None), ('new', 'b2', None), ('claimed', 'b1', 'v'), ('claimed', 'b2', 'v')],
+        RUN_B,
+    )
+
+    diff = compare_snapshots(reference, candidate)
+
+    assert reference.ambiguities == ()
+    assert [type(entry) for entry in diff.entries] == [ExtraRow]
+
+
+def _baseline_raw(table: str, rows: Sequence[dict[str, str | None]]) -> RawSnapshot:
+    """A raw snapshot of ``BASELINE_CATALOG`` with ``rows`` in ``table`` and no
+    other row; a column that a row does not name is NULL."""
+    return RawSnapshot(
+        tables=tuple(
+            RawTable(
+                name=rules.name,
+                rows=tuple(
+                    tuple(row.get(spec.name) for spec in rules.columns)
+                    for row in (rows if rules.name == table else ())
+                ),
+            )
+            for rules in BASELINE_CATALOG.tables
+        ),
+    )
+
+
+def _seeded_task(raw_id: str, run: datetime, execution: str, status: str) -> dict[str, str | None]:
+    """A task row as a claim test seeds it: one name, queue, priority, input
+    and send time for every row."""
+    at = _text(run)
+    return {
+        'id': raw_id,
+        'task_name': 'class_task',
+        'queue_name': 'class_q',
+        'priority': '100',
+        'input': '{}',
+        'execution': execution,
+        'retention_class_key': 'standard_30d',
+        'sent_at': at,
+        'created_at': at,
+        'command_fingerprint_version': '1',
+        'command_fingerprint': f'{raw_id}-fingerprint',
+        'status': status,
+        'enqueued_at': at,
+        'retry_count': '0',
+        'max_retries': '0',
+        'is_workflow_task': 'false',
+        'updated_at': at,
+        'retain_rerun_input': 'false',
+    }
+
+
+def _seeded_workflow(raw_id: str, run: datetime, status: str) -> dict[str, str | None]:
+    """A workflow row as a claim test seeds it: one name and send time for every row."""
+    at = _text(run)
+    return {
+        'id': raw_id,
+        'name': 'bounds_wf',
+        'status': status,
+        'on_error': 'fail',
+        'root_workflow_id': raw_id,
+        'depth': '0',
+        'sent_at': at,
+        'created_at': at,
+        'started_at': at,
+        'updated_at': at,
+    }
+
+
+def _baseline(raw: RawSnapshot, run: datetime) -> NormalizedSnapshot:
+    return _unwrap(normalize_snapshot(raw, BASELINE_CATALOG, _window(run)))
+
+
+def test_seeded_tasks_that_differ_only_in_class_or_status_are_ordered_by_them() -> None:
+    classes = [
+        ('ISOLATED', 'PENDING'),
+        ('SHARED_THREAD', 'PENDING'),
+        ('ISOLATED', 'CLAIMED'),
+        ('SHARED_ASYNC', 'RUNNING'),
+    ]
+    reference = _baseline(
+        _baseline_raw(
+            'horsies_tasks',
+            [_seeded_task(f'a{n}', RUN_A, *each) for n, each in enumerate(classes)],
+        ),
+        RUN_A,
+    )
+    candidate = _baseline(
+        _baseline_raw(
+            'horsies_tasks',
+            [
+                _seeded_task(f'b{n}', RUN_B, *each)
+                for n, each in reversed(list(enumerate(classes)))
+            ],
+        ),
+        RUN_B,
+    )
+
+    assert reference.ambiguities == ()
+    assert compare_snapshots(reference, candidate).entries == ()
+
+
+def test_seeded_workflows_that_differ_only_in_status_are_ordered_by_it() -> None:
+    statuses = ['PAUSED', 'CANCELLED', 'RUNNING']
+    reference = _baseline(
+        _baseline_raw(
+            'horsies_workflows',
+            [_seeded_workflow(f'a{n}', RUN_A, status) for n, status in enumerate(statuses)],
+        ),
+        RUN_A,
+    )
+    candidate = _baseline(
+        _baseline_raw(
+            'horsies_workflows',
+            [
+                _seeded_workflow(f'b{n}', RUN_B, status)
+                for n, status in reversed(list(enumerate(statuses)))
+            ],
+        ),
+        RUN_B,
+    )
+
+    assert reference.ambiguities == ()
+    assert compare_snapshots(reference, candidate).entries == ()
 
 
 def test_tied_rows_that_assign_no_new_label_are_not_ambiguous() -> None:
