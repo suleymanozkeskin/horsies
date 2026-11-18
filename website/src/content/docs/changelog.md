@@ -652,7 +652,8 @@ before you upgrade a 0.7 deployment.
   (`horsies.core.history.commands`, `outcomes`, `heartbeats`, `phase2`,
   `identity.uuid7`, `identity.reservations`, `maintenance.coverage`,
   `maintenance.pruning`, `partitions.catalog`, `health`, `locks`,
-  `manager`, `retirement`), the terminal writes
+  `manager`, `retirement`), the stored result decoder
+  (`horsies.core.history.archive.results`), the terminal writes
   (`horsies.core.lifecycle.classify`, `commands`, `fences`, `persistence`,
   `horsies.core.history.terminalization`, `horsies.core.brokers.stale_running`,
   `horsies.core.utils.retry`), `horsies.monitoring.execution_classes`, the
