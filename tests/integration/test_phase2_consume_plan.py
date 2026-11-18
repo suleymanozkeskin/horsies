@@ -1,9 +1,10 @@
-"""horsies_phase2_consume plans its history lookup once per connection.
+"""The phase-2 apply functions plan their history lookup once per connection.
 
-The function carries plan_cache_mode = force_generic_plan, so the lookup
-through the partitioned history parent prunes leaves at run time instead
-of planning over every leaf on each call. The setting is function-local:
-the caller's own setting is back in force after the call.
+horsies_workflow_node_apply (the apply step of the node finish) and
+horsies_phase2_consume carry plan_cache_mode = force_generic_plan, so the
+lookup through the partitioned history parent prunes leaves at run time
+instead of planning over every leaf on each call. The setting is
+function-local: the caller's own setting is back in force after the call.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ async def test_function_forces_a_generic_plan(broker: PostgresBroker) -> None:
                 text("""
                 SELECT array_to_string(proconfig, ',')
                 FROM pg_proc
-                WHERE oid = to_regprocedure('horsies_phase2_consume(uuid,text)')
+                WHERE oid = to_regprocedure('horsies_workflow_node_apply(uuid,boolean)')
             """)
             )
         ).scalar_one()

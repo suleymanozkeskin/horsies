@@ -703,6 +703,72 @@ mod wait_tests {
         assert_eq!(wait.expect("no workflow error"), WorkflowWait::NotFound);
     }
 
+    /// Python `tests/unit/test_workflow_handle_async_cleanup.py::TestWorkflowHandleZeroTimeout`
+    /// (`test_zero_timeout_returns_wait_timeout_immediately`,
+    /// `test_zero_timeout_returns_result_when_already_complete`): a zero
+    /// timeout is a budget of no time, not "no limit". On a RUNNING workflow
+    /// the wait ends as `TimedOut` within one repoll interval, so it waits
+    /// for no repoll; on a COMPLETED workflow it gives the stored result. A
+    /// broker with no listener polls, as the Python test's failed subscribe.
+    #[tokio::test]
+    #[serial]
+    async fn a_zero_timeout_ends_the_wait_at_once_with_the_end_or_timed_out() {
+        const COMPLETED_RESULT: &str = r#"{"ok":42}"#;
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+        broker.ensure_schema_initialized().await.expect("schema");
+        let workflow_id = Uuid::new_v4();
+        sql::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'zero_timeout_get', 'RUNNING', 'fail', $2, 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(format!("test.zero-timeout-get.{workflow_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed a RUNNING workflow");
+
+        let running = tokio::time::timeout(
+            WORKFLOW_RESULT_REPOLL_POLLING,
+            wait_workflow_end(&broker, workflow_id, Some(Duration::ZERO)),
+        )
+        .await
+        .expect("a zero timeout waits for no repoll");
+        assert_eq!(running.expect("the wait"), WorkflowWait::TimedOut);
+
+        sql::query(
+            "UPDATE horsies_workflows
+             SET status = 'COMPLETED', result = $2, completed_at = NOW(), updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(workflow_id)
+        .bind(COMPLETED_RESULT)
+        .execute(&pool)
+        .await
+        .expect("complete the workflow");
+        let completed = tokio::time::timeout(
+            WORKFLOW_RESULT_REPOLL_POLLING,
+            wait_workflow_end(&broker, workflow_id, Some(Duration::ZERO)),
+        )
+        .await
+        .expect("a finished workflow is one read");
+        assert_eq!(
+            completed.expect("the wait"),
+            WorkflowWait::Ended(WorkflowEnd::Completed {
+                result: Some(COMPLETED_RESULT.to_owned()),
+            })
+        );
+
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup the workflow");
+    }
+
     #[tokio::test]
     #[serial]
     async fn the_wait_returns_immediately_for_a_paused_workflow() {
