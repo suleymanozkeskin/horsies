@@ -628,10 +628,13 @@ unless it starts with "Added".
   parameter with a warning, `connect_timeout`, `target_session_attrs`,
   `channel_binding`, `sslnegotiation` and `load_balance_hosts` included.
   Those five now apply.
-- **A worker profile with a preload is refused.** A Rust worker starts each
-  child with `exec` of its own binary, so `Horsies::new` refuses a profile
-  whose `preload` is `Library` (the default) or `App`, with the path
-  `worker_profiles.<name>.preload`. Set `preload: ChildPreload::NoPreload`.
+- **A worker profile with a preload is refused, and no preload is the
+  default.** A Rust worker starts each child with `exec` of its own binary,
+  so `Horsies::new` refuses a profile whose `preload` is `Library` or `App`,
+  with the path `worker_profiles.<name>.preload`. `ChildPreload::default()`
+  is `NoPreload`, so a profile that does not set `preload` starts: one built
+  with `..WorkerProfile::default()`, or one read from a config text without
+  the key. The Python client keeps its own default, `ChildPreload.LIBRARY`.
 - **`role` and `set_role` use `AppRole`** (`Producer`, `Worker`,
   `Scheduler`) in place of a string.
 - **Added: send suppression on the app.** `suppress_sends(bool)` and

@@ -89,7 +89,7 @@ The other fields have the names and the meanings of the [Broker Config](/horsies
 | Config | Refusal |
 |--------|---------|
 | `broker.pool_size` outside 1 to 10,000, or `broker.max_overflow` above 10,000 | `HorsiesError` "invalid broker config: broker.<field>: ..." with no code |
-| A worker profile whose `preload` is `ChildPreload::Library` (the default) or `ChildPreload::App` | `HRS-218` (`ConfigInvalidWorkerProfile`) with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary, so there is nothing to preload. Set `preload: ChildPreload::NoPreload` |
+| A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` | `HRS-218` (`ConfigInvalidWorkerProfile`) with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary, so there is nothing to preload. A profile that does not set `preload` (`..WorkerProfile::default()`, or a config file without the key) has `ChildPreload::NoPreload` |
 
 ## Queues
 
