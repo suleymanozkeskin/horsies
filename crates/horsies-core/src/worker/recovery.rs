@@ -260,7 +260,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -358,7 +358,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -419,7 +419,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -611,7 +611,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -901,7 +901,7 @@ pub fn spawn_reaper(
             let pass = async {
                 run_reaper_pass(
                     &broker,
-                    &child_specs,
+                    child_specs.as_ref(),
                     &config,
                     &retention,
                     &health,
@@ -2340,7 +2340,7 @@ mod tests {
                 advisory_key_reaper(),
                 run_reaper_pass(
                     &broker,
-                    &crate::test_support::child_specs::no_child_specs(),
+                    crate::test_support::child_specs::no_child_specs().as_ref(),
                     &recovery,
                     &RetentionConfig::default(),
                     &health,

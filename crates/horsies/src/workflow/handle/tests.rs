@@ -592,7 +592,7 @@ fn an_empty_stored_summary_is_stored_data_invalid() {
     assert_eq!(refused.workflow_id(), workflow());
     assert!(
         refused
-            .message
+            .message()
             .starts_with("node 0 has a stored sub-workflow summary that does not read"),
         "{}",
         refused.message()
