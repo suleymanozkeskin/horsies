@@ -132,6 +132,22 @@ class PairFact(Enum):
     )
     """A leaf (``tableoid``) follows the send time."""
 
+    ONE_KEYED_SEND_WINNER = (
+        'exactly one of the concurrent sends of one idempotency key committed its '
+        'task, and the task holds a command as its input; not which command'
+    )
+    """The sends carry two commands. The input of a task that a keyed send
+    committed is the command of the send that won."""
+
+    ONE_MOVER_PER_ROUND = (
+        'per round, the finalize or the stale recovery moved the task to history, '
+        'and the history row and the capacity wakes agree with it; not which one, '
+        'and not what the move wrote'
+    )
+    """The finalize writes ``FAIL_RUNNING`` (a failure; a plain task also gets
+    the capacity wake of its queue) or ``COMPLETE_LOCKED`` (the success of a
+    workflow task). The stale recovery writes ``FAIL_STALE`` and no wake."""
+
 
 @dataclass(frozen=True, slots=True)
 class PairRule:
