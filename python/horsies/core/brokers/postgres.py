@@ -693,6 +693,126 @@ def _database_ping_answer(
             assert_never(unreachable)
 
 
+def _worker_ping_call_failed(exc: CoreError) -> Err[BrokerOperationFailed]:
+    """The ping's error for a core boundary error: ``WORKER_PING_FAILED`` with
+    the error, retryable by ``core_error_retryable``. The NOTIFY may have been
+    sent."""
+    return Err(
+        BrokerOperationFailed(
+            code=BrokerErrorCode.WORKER_PING_FAILED,
+            message=f'ping_workers failed: {exc}',
+            retryable=core_error_retryable(exc),
+            exception=exc,
+        ),
+    )
+
+
+def _worker_ping_answer(
+    outcome: WorkerPongsRecord | BrokerFailure,
+) -> BrokerResult[list[WorkerPong]]:
+    """The answer of the core's worker ping. Pure.
+
+    - ``WorkerPongsRecord``: one ``WorkerPong`` per reply, in reply order.
+    - ``BrokerFailure``: ``INVALID_INPUT`` (``BrokerInvalidInput``),
+      ``LISTENER_DISABLED`` (``BrokerListenerDisabled``), or
+      ``WORKER_PING_FAILED`` (``BrokerOperationFailed`` with the core's text,
+      retryable flag and exception).
+
+    Another code contradicts the ping's catalog: ``AssertionError``.
+    """
+    match outcome:
+        case WorkerPongsRecord(pongs=pongs):
+            return Ok(
+                [
+                    WorkerPong(
+                        worker_id=pong.worker_id,
+                        hostname=pong.hostname,
+                        pid=pong.pid,
+                        round_trip_ms=pong.round_trip_ms,
+                    )
+                    for pong in pongs
+                ],
+            )
+        case BrokerFailure(code='INVALID_INPUT', message=message):
+            return Err(BrokerInvalidInput(message=message, exception=NoCause()))
+        case BrokerFailure(code='LISTENER_DISABLED', message=message):
+            return Err(BrokerListenerDisabled(message=message))
+        case BrokerFailure(
+            code='WORKER_PING_FAILED',
+            message=message,
+            retryable=retryable,
+            exception=exception,
+        ):
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                    message=message,
+                    retryable=retryable,
+                    exception=exception,
+                ),
+            )
+        case BrokerFailure(code=code):
+            raise AssertionError(f'the core worker ping answered the code {code}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _worker_states_answer(
+    operation: str, outcome: WorkerStatesRecord | BrokerFailure,
+) -> BrokerResult[list[WorkerStateSnapshot]]:
+    """The answer of a read of worker state snapshots (the latest per worker,
+    or the history of one worker). Pure."""
+    match outcome:
+        case WorkerStatesRecord(states=states):
+            return Ok([worker_state_snapshot(state) for state in states])
+        case BrokerFailure() as failure:
+            return _monitoring_read_failed(operation, failure)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _worker_state_answer(
+    outcome: WorkerStateRecord | WorkerStateAbsent | BrokerFailure,
+) -> BrokerResult[WorkerStateSnapshot | None]:
+    """The answer of the read of one worker's latest snapshot: ``Ok(None)``
+    for a worker with no snapshot. Pure."""
+    match outcome:
+        case WorkerStateRecord() as state:
+            return Ok(worker_state_snapshot(state))
+        case WorkerStateAbsent():
+            return Ok(None)
+        case BrokerFailure() as failure:
+            return _monitoring_read_failed('get_worker_state', failure)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _class_coverage_answer(
+    outcome: ClassCoverageRecord | BrokerFailure,
+) -> BrokerResult[ClassCoverage]:
+    """The answer of the fleet check. Pure."""
+    match outcome:
+        case ClassCoverageRecord() as coverage:
+            return Ok(class_coverage_of(coverage))
+        case BrokerFailure() as failure:
+            return _monitoring_read_failed('get_class_coverage', failure)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _class_report_answer(
+    outcome: ClassReportRecord | BrokerFailure,
+) -> BrokerResult[ClassReport]:
+    """The answer of the class report. Pure."""
+    match outcome:
+        case ClassReportRecord() as report:
+            return Ok(class_report_of(report))
+        case BrokerFailure() as failure:
+            return _monitoring_read_failed('get_class_report', failure)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _close_answer(errors: list[BaseException]) -> BrokerResult[None]:
     """The answer of a close for the failures of its steps. Pure.
 
@@ -1315,7 +1435,8 @@ class PostgresBroker:
 
     Provides both async and sync APIs:
       - Async: enqueue_async(), get_raw_result_record_async()
-      - Sync: enqueue(), get_raw_result_record() (run in background loop)
+      - Sync: enqueue(), get_raw_result_record() (blocking forms of the core,
+        on the calling thread)
 
     Features:
       - Real-time notifications via PostgreSQL triggers
@@ -1383,7 +1504,7 @@ class PostgresBroker:
         # positive answer is kept: until a worker publishes the readers,
         # each result probe checks again.
         self._staged_result_reader_published = False
-        self._loop_runner = LoopRunner()  # for sync facades
+        self._loop_runner = LoopRunner()  # for run_sync
         # The operations that run in the core use the pools of this handle.
         # It is built from the same config as the engines, so its pools have
         # their shape. Building it starts nothing: the first core operation
@@ -1689,28 +1810,24 @@ class PostgresBroker:
     ) -> T:
         """Run ``coro_fn`` on this broker's sync runner and block until it returns.
 
-        Every sync facade calls this, so a broker has one sync event loop.
-        It blocks the calling thread, so it must not run inside an event loop.
-        Every sync facade returns ``ASYNC_CONTEXT`` before it calls this on
-        a thread that runs an event loop, so a call from such a thread is a
-        defect: a facade without that check.
+        No sync facade of the package calls it: each one calls a blocking
+        form of the core on the calling thread. It blocks the calling
+        thread, so it must not run inside an event loop: a call from a thread
+        that runs an event loop is a defect of the caller.
 
         Raises:
             AssertionError: the calling thread runs an event loop. Nothing
                 ran, and the runner was not started.
             LoopRunnerError: the runner is stopped, its thread did not
                 start, or scheduling onto its loop failed. Nothing ran.
-                Every sync facade returns this as its ``LOOP_RUNNER_FAILED``
-                error.
-            Exception: the coroutine's own exception, unchanged. Every sync
-                facade lets it propagate, as the async form does.
+            Exception: the coroutine's own exception, unchanged.
         """
         if in_running_event_loop():
             raise AssertionError(
                 f'PostgresBroker.run_sync({coro_fn.__name__}) was called on '
                 f'thread {threading.current_thread().name!r}, which runs an '
-                'event loop; every sync facade must return ASYNC_CONTEXT '
-                'before it calls run_sync',
+                'event loop; run_sync blocks its thread, so it must not run '
+                'there',
             )
         return self._loop_runner.call(coro_fn, *args, **kwargs)
 
@@ -2960,49 +3077,35 @@ class PostgresBroker:
                 min_responses=min_responses,
             )
         except CoreError as exc:
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.WORKER_PING_FAILED,
-                    message=f'ping_workers failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
-                ),
+            return _worker_ping_call_failed(exc)
+        return _worker_ping_answer(outcome)
+
+    def _ping_workers_blocking(
+        self,
+        *,
+        target_worker_id: str | None,
+        timeout_seconds: float,
+        min_responses: int | None,
+    ) -> BrokerResult[list[WorkerPong]]:
+        """The blocking form of ``ping_workers_async``, for
+        ``Horsies.ping_workers``: ``CoreHandle.ping_workers`` on the calling
+        thread, with the GIL released, and the same outcomes. The call is
+        bounded by the window plus the core's bound of a blocking call, and
+        not bounded for an infinite window; a call past its bound is
+        ``WORKER_PING_FAILED`` with the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.ping_workers(
+                target_worker_id=target_worker_id,
+                timeout_seconds=timeout_seconds,
+                min_responses=min_responses,
             )
-        match outcome:
-            case WorkerPongsRecord(pongs=pongs):
-                return Ok(
-                    [
-                        WorkerPong(
-                            worker_id=pong.worker_id,
-                            hostname=pong.hostname,
-                            pid=pong.pid,
-                            round_trip_ms=pong.round_trip_ms,
-                        )
-                        for pong in pongs
-                    ],
-                )
-            case BrokerFailure(code='INVALID_INPUT', message=message):
-                return Err(BrokerInvalidInput(message=message, exception=NoCause()))
-            case BrokerFailure(code='LISTENER_DISABLED', message=message):
-                return Err(BrokerListenerDisabled(message=message))
-            case BrokerFailure(
-                code='WORKER_PING_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=exception,
-            ):
-                return Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.WORKER_PING_FAILED,
-                        message=message,
-                        retryable=retryable,
-                        exception=exception,
-                    ),
-                )
-            case BrokerFailure(code=code):
-                raise AssertionError(f'the core worker ping answered the code {code}')
-            case _ as unreachable:
-                assert_never(unreachable)
+        except CoreError as exc:
+            return _worker_ping_call_failed(exc)
+        return _worker_ping_answer(outcome)
 
     async def list_worker_states_async(self) -> BrokerResult[list[WorkerStateSnapshot]]:
         """Latest state snapshot per worker, including idle workers.
@@ -3021,13 +3124,23 @@ class PostgresBroker:
             outcome = await self._core_handle.worker_states_async()
         except CoreError as exc:
             return _monitoring_call_failed('list_worker_states', exc)
-        match outcome:
-            case WorkerStatesRecord(states=states):
-                return Ok([worker_state_snapshot(state) for state in states])
-            case BrokerFailure() as failure:
-                return _monitoring_read_failed('list_worker_states', failure)
-            case _ as unreachable:
-                assert_never(unreachable)
+        return _worker_states_answer('list_worker_states', outcome)
+
+    def _list_worker_states_blocking(self) -> BrokerResult[list[WorkerStateSnapshot]]:
+        """The blocking form of ``list_worker_states_async``, for
+        ``Horsies.list_worker_states``: ``CoreHandle.worker_states`` on the calling
+        thread, with the GIL released, and the same outcomes. A call past the
+        core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
+        the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.worker_states()
+        except CoreError as exc:
+            return _monitoring_call_failed('list_worker_states', exc)
+        return _worker_states_answer('list_worker_states', outcome)
 
     async def get_worker_state_async(
         self,
@@ -3043,15 +3156,25 @@ class PostgresBroker:
             outcome = await self._core_handle.worker_state_async(worker_id)
         except CoreError as exc:
             return _monitoring_call_failed('get_worker_state', exc)
-        match outcome:
-            case WorkerStateRecord() as state:
-                return Ok(worker_state_snapshot(state))
-            case WorkerStateAbsent():
-                return Ok(None)
-            case BrokerFailure() as failure:
-                return _monitoring_read_failed('get_worker_state', failure)
-            case _ as unreachable:
-                assert_never(unreachable)
+        return _worker_state_answer(outcome)
+
+    def _get_worker_state_blocking(
+        self, worker_id: str,
+    ) -> BrokerResult[WorkerStateSnapshot | None]:
+        """The blocking form of ``get_worker_state_async``, for
+        ``Horsies.get_worker_state``: ``CoreHandle.worker_state`` on the calling
+        thread, with the GIL released, and the same outcomes. A call past the
+        core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
+        the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.worker_state(worker_id)
+        except CoreError as exc:
+            return _monitoring_call_failed('get_worker_state', exc)
+        return _worker_state_answer(outcome)
 
     async def get_worker_state_history_async(
         self,
@@ -3077,13 +3200,27 @@ class PostgresBroker:
             )
         except CoreError as exc:
             return _monitoring_call_failed('get_worker_state_history', exc)
-        match outcome:
-            case WorkerStatesRecord(states=states):
-                return Ok([worker_state_snapshot(state) for state in states])
-            case BrokerFailure() as failure:
-                return _monitoring_read_failed('get_worker_state_history', failure)
-            case _ as unreachable:
-                assert_never(unreachable)
+        return _worker_states_answer('get_worker_state_history', outcome)
+
+    def _get_worker_state_history_blocking(
+        self, worker_id: str, *, limit: int | None,
+    ) -> BrokerResult[list[WorkerStateSnapshot]]:
+        """The blocking form of ``get_worker_state_history_async``, for
+        ``Horsies.get_worker_state_history``: ``CoreHandle.worker_state_history`` on the calling
+        thread, with the GIL released, and the same outcomes. A call past the
+        core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
+        the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.worker_state_history(
+                worker_id, limit=limit,
+            )
+        except CoreError as exc:
+            return _monitoring_call_failed('get_worker_state_history', exc)
+        return _worker_states_answer('get_worker_state_history', outcome)
 
     async def get_class_coverage_async(self) -> BrokerResult[ClassCoverage]:
         """The fleet check: for each (queue, class) with PENDING rows, whether
@@ -3103,13 +3240,23 @@ class PostgresBroker:
             outcome = await self._core_handle.class_coverage_async()
         except CoreError as exc:
             return _monitoring_call_failed('get_class_coverage', exc)
-        match outcome:
-            case ClassCoverageRecord() as coverage:
-                return Ok(class_coverage_of(coverage))
-            case BrokerFailure() as failure:
-                return _monitoring_read_failed('get_class_coverage', failure)
-            case _ as unreachable:
-                assert_never(unreachable)
+        return _class_coverage_answer(outcome)
+
+    def _get_class_coverage_blocking(self) -> BrokerResult[ClassCoverage]:
+        """The blocking form of ``get_class_coverage_async``, for
+        ``Horsies.get_class_coverage``: ``CoreHandle.class_coverage`` on the calling
+        thread, with the GIL released, and the same outcomes. A call past the
+        core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
+        the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.class_coverage()
+        except CoreError as exc:
+            return _monitoring_call_failed('get_class_coverage', exc)
+        return _class_coverage_answer(outcome)
 
     async def get_class_report_async(self) -> BrokerResult[ClassReport]:
         """Pending streams with the wait of their oldest due row and their
@@ -3125,13 +3272,23 @@ class PostgresBroker:
             outcome = await self._core_handle.class_report_async()
         except CoreError as exc:
             return _monitoring_call_failed('get_class_report', exc)
-        match outcome:
-            case ClassReportRecord() as report:
-                return Ok(class_report_of(report))
-            case BrokerFailure() as failure:
-                return _monitoring_read_failed('get_class_report', failure)
-            case _ as unreachable:
-                assert_never(unreachable)
+        return _class_report_answer(outcome)
+
+    def _get_class_report_blocking(self) -> BrokerResult[ClassReport]:
+        """The blocking form of ``get_class_report_async``, for
+        ``Horsies.get_class_report``: ``CoreHandle.class_report`` on the calling
+        thread, with the GIL released, and the same outcomes. A call past the
+        core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
+        the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.class_report()
+        except CoreError as exc:
+            return _monitoring_call_failed('get_class_report', exc)
+        return _class_report_answer(outcome)
 
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
         """PENDING tasks whose ``good_until`` passed before a worker took

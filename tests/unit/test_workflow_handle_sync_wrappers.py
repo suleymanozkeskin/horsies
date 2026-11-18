@@ -1,233 +1,157 @@
-"""Unit tests for WorkflowHandle sync wrapper error mapping.
+"""Unit tests for the error mapping of WorkflowHandle's sync methods.
 
-Tests that _sync_call and _sync_task_result_call translate a
-LoopRunnerError into a typed error payload and let any other exception
-propagate unchanged.
+Each sync method calls a blocking form of the core handle. A core boundary
+error of that call (``CoreError``) is the method's own failure: the
+wrap-strategy methods return ``Err(HandleDbOperationFailed)`` with the error,
+retryable by the core's rule; the fold-strategy methods return
+``TaskResult(err=BROKER_ERROR)`` with the error's type and text. Any other
+exception propagates unchanged, and a record passes to the method's answer.
 """
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+import uuid
+from collections.abc import Callable
+from typing import Any, Final
+from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
+import horsies._core as core
+from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.models.workflow.handle_types import HandleErrorCode
-from horsies.core.types.result import is_ok, is_err
-from horsies.core.utils.loop_runner import LoopRunnerError
+from horsies.core.models.workflow.handle_types import (
+    HandleDbOperationFailed,
+    HandleErrorCode,
+)
+from horsies.core.models.workflow.enums import WorkflowStatus
+from horsies.core.types.result import is_err, is_ok
+
+WORKFLOW_ID: Final = '2b4d6f8a-0c2e-4a6c-9e1a-3c5e7a9c1e3a'
+WORKFLOW_KEY: Final = uuid.UUID(WORKFLOW_ID)
+NODE_KEY: Final[NodeKey[Any]] = NodeKey('test-node')
 
 
-def _make_handle() -> WorkflowHandle[Any]:
-    """Create a WorkflowHandle with a mock broker."""
+def _make_handle(method: str, answer: object) -> tuple[WorkflowHandle[Any], MagicMock]:
+    """A WorkflowHandle, and its broker (a mock) whose blocking ``method``
+    answers ``answer``: a record, or an exception that the call raises."""
     broker = MagicMock()
-    return WorkflowHandle(workflow_id='test-wf-id', broker=broker)
+    match answer:
+        case BaseException():
+            setattr(broker._core_handle, method, MagicMock(side_effect=answer))
+        case _:
+            setattr(broker._core_handle, method, MagicMock(return_value=answer))
+    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker), broker
 
 
 # =============================================================================
-# Wrap-strategy sync wrappers (_sync_call)
+# Wrap strategy
 # =============================================================================
+
+WRAP_METHODS: Final[dict[str, tuple[str, Callable[[WorkflowHandle[Any]], Any]]]] = {
+    'status': ('workflow_status', lambda handle: handle.status()),
+    'cancel': ('cancel_workflow', lambda handle: handle.cancel()),
+    'pause': ('pause_workflow', lambda handle: handle.pause()),
+    'resume': ('resume_workflow', lambda handle: handle.resume()),
+    'results': ('workflow_node_results', lambda handle: handle.results()),
+    'tasks': ('workflow_nodes', lambda handle: handle.tasks()),
+}
 
 
 @pytest.mark.unit
-class TestSyncCallWrapStrategy:
-    """Tests for _sync_call used by wrap-strategy sync methods."""
+class TestWrapStrategy:
+    """The wrap-strategy sync methods and a core boundary error."""
 
-    def test_status_loop_runner_failure_returns_loop_runner_failed(self) -> None:
-        """status() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
-        handle = _make_handle()
+    @pytest.mark.parametrize('name', list(WRAP_METHODS))
+    def test_a_core_boundary_error_is_db_operation_failed(self, name: str) -> None:
+        method, call = WRAP_METHODS[name]
+        refused = core.TooManyPendingCalls(f'CoreHandle.{method}', 65_536)
+        handle, broker = _make_handle(method, refused)
 
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.status()
+        result = call(handle)
 
         assert is_err(result)
-        assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.retryable is False
-        assert result.err_value.workflow_id == 'test-wf-id'
+        error = result.err_value
+        assert isinstance(error, HandleDbOperationFailed)
+        assert error.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert error.retryable is True
+        assert error.workflow_id == WORKFLOW_ID
+        assert error.exception is refused
+        broker.run_sync.assert_not_called()
 
-    def test_cancel_loop_runner_failure_returns_loop_runner_failed(self) -> None:
-        """cancel() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
-        handle = _make_handle()
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.cancel()
-
-        assert is_err(result)
-        assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.workflow_id == 'test-wf-id'
-
-    def test_pause_loop_runner_failure_returns_loop_runner_failed(self) -> None:
-        """pause() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
-        handle = _make_handle()
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.pause()
-
-        assert is_err(result)
-        assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.workflow_id == 'test-wf-id'
-
-    def test_resume_loop_runner_failure_returns_loop_runner_failed(self) -> None:
-        """resume() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
-        handle = _make_handle()
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.resume()
-
-        assert is_err(result)
-        assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.workflow_id == 'test-wf-id'
-
-    def test_results_loop_runner_failure_returns_loop_runner_failed(self) -> None:
-        """results() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
-        handle = _make_handle()
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.results()
-
-        assert is_err(result)
-        assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.workflow_id == 'test-wf-id'
-
-    def test_tasks_loop_runner_failure_returns_loop_runner_failed(self) -> None:
-        """tasks() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
-        handle = _make_handle()
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.tasks()
-
-        assert is_err(result)
-        assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.workflow_id == 'test-wf-id'
-
-    def test_status_unexpected_exception_propagates(self) -> None:
-        """status() lets an exception that is not a LoopRunnerError propagate."""
-        handle = _make_handle()
+    @pytest.mark.parametrize('name', list(WRAP_METHODS))
+    def test_an_unexpected_exception_propagates(self, name: str) -> None:
+        method, call = WRAP_METHODS[name]
         defect = RuntimeError('something unexpected')
+        handle, _ = _make_handle(method, defect)
 
-        with (
-            patch.object(handle.broker, 'run_sync', side_effect=defect),
-            pytest.raises(RuntimeError) as exc_info,
-        ):
-            handle.status()
+        with pytest.raises(RuntimeError) as exc_info:
+            call(handle)
 
         assert exc_info.value is defect
 
-    def test_sync_call_propagates_ok_result(self) -> None:
-        """Wrap-strategy sync wrapper passes through Ok result from async."""
-        handle = _make_handle()
+    def test_a_record_passes_to_the_answer(self) -> None:
+        read = MagicMock(spec=core.WorkflowStatusRead)
+        read.status = 'RUNNING'
+        handle, broker = _make_handle('workflow_status', read)
 
-        from horsies.core.types.result import Ok
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.return_value = Ok('RUNNING')
-            result = handle.status()
+        result = handle.status()
 
         assert is_ok(result)
-        assert result.ok_value == 'RUNNING'
+        assert result.ok_value is WorkflowStatus.RUNNING
+        broker._core_handle.workflow_status.assert_called_once_with(WORKFLOW_KEY)
 
 
 # =============================================================================
-# Fold-strategy sync wrappers (_sync_task_result_call)
+# Fold strategy
 # =============================================================================
+
+FOLD_METHODS: Final[dict[str, tuple[str, Callable[[WorkflowHandle[Any]], Any]]]] = {
+    'get': ('wait_workflow_result', lambda handle: handle.get(timeout_ms=100)),
+    'result_for': ('workflow_node_result', lambda handle: handle.result_for(NODE_KEY)),
+}
 
 
 @pytest.mark.unit
-class TestSyncTaskResultCallFoldStrategy:
-    """Tests for _sync_task_result_call used by fold-strategy sync methods."""
+class TestFoldStrategy:
+    """The fold-strategy sync methods and a core boundary error."""
 
-    def test_get_loop_runner_failure_returns_broker_error(self) -> None:
-        """get() returns TaskResult(err=BROKER_ERROR) when LoopRunner fails."""
-        handle = _make_handle()
+    @pytest.mark.parametrize('name', list(FOLD_METHODS))
+    def test_a_core_boundary_error_is_broker_error(self, name: str) -> None:
+        method, call = FOLD_METHODS[name]
+        refused = core.TooManyPendingCalls(f'CoreHandle.{method}', 65_536)
+        handle, broker = _make_handle(method, refused)
 
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.get(timeout_ms=100)
+        result = call(handle)
 
         assert result.is_err()
-        assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
-        assert 'Loop runner failed' in (result.unwrap_err().message or '')
+        error = result.unwrap_err()
+        assert error.error_code == OperationalErrorCode.BROKER_ERROR
+        assert 'TooManyPendingCalls' in (error.message or '')
+        broker.run_sync.assert_not_called()
 
-    def test_result_for_loop_runner_failure_returns_broker_error(self) -> None:
-        """result_for() returns TaskResult(err=BROKER_ERROR) when LoopRunner fails."""
-        handle = _make_handle()
-
-        # Create a mock node with a node_id
-        mock_node = MagicMock()
-        mock_node.node_id = 'test-node'
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = LoopRunnerError(
-                'Thread dead',
-            )
-            result = handle.result_for(mock_node)
-
-        assert result.is_err()
-        assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
-
-    def test_get_unexpected_exception_propagates(self) -> None:
-        """get() lets an exception that is not a LoopRunnerError propagate."""
-        handle = _make_handle()
+    @pytest.mark.parametrize('name', list(FOLD_METHODS))
+    def test_an_unexpected_exception_propagates(self, name: str) -> None:
+        method, call = FOLD_METHODS[name]
         defect = RuntimeError('something unexpected')
+        handle, _ = _make_handle(method, defect)
 
-        with (
-            patch.object(handle.broker, 'run_sync', side_effect=defect),
-            pytest.raises(RuntimeError) as exc_info,
-        ):
-            handle.get(timeout_ms=100)
+        with pytest.raises(RuntimeError) as exc_info:
+            call(handle)
 
         assert exc_info.value is defect
 
-    def test_fold_sync_call_propagates_task_result(self) -> None:
-        """Fold-strategy sync wrapper passes through TaskResult from async."""
-        handle = _make_handle()
+    def test_a_record_passes_to_the_answer(self) -> None:
+        completed = MagicMock(spec=core.WorkflowCompletedRead)
+        completed.result_json = '{"__h_task_result__": true, "ok": 42, "err": null}'
+        handle, broker = _make_handle('wait_workflow_result', completed)
+        handle.out_type = int
 
-        expected = TaskResult(ok=42)
-
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.return_value = expected
-            result = handle.get(timeout_ms=100)
+        result = handle.get(timeout_ms=100)
 
         assert result.is_ok()
         assert result.unwrap() == 42
+        broker._core_handle.wait_workflow_result.assert_called_once_with(
+            WORKFLOW_KEY, timeout_ms=100,
+        )

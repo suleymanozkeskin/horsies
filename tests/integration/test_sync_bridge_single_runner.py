@@ -1,11 +1,11 @@
-"""Sync task calls and sync workflow calls share one sync runner.
+"""Sync task calls and sync workflow calls are not held by a sync runner.
 
-The pool has one connection. When one sync call holds it and another sync
-call waits for it, the waiter must get the connection when the holder
-returns it. A waiter on a different event loop is not woken by that return:
-it gets the connection only when its own ``pool_timeout`` timer fires, and
-after that every wait from the other loop fails with "bound to a different
-event loop". The listener binds to one loop in the same way.
+The pools have one connection. A call on the broker's sync runner holds the
+one connection of the runner loop's engine for ``HOLD_SECONDS``. The sync
+facades call the core's blocking forms on their own thread, on the core
+pool, so a sync send and a sync workflow call end long before the holder
+returns its connection, and a sync workflow wait is followed by a working
+``ping_workers``.
 
 The calls run on threads that have no event loop, as in a sync application.
 """
@@ -31,9 +31,9 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.models.workflow.handle_types import HandleErrorCode, HandleResult
+from horsies.core.models.workflow.handle_types import HandleErrorCode
 from horsies.core.task_decorator import TaskFunction
-from horsies.core.types.result import Ok, is_err, is_ok
+from horsies.core.types.result import is_err, is_ok
 from tests.integration.conftest import DB_URL
 from tests.broker_resources_support import current_resources
 
@@ -97,13 +97,6 @@ async def _hold_connection(broker: PostgresBroker, seconds: float) -> None:
         await connection.execute(text('SELECT pg_sleep(:s)'), {'s': seconds})
 
 
-async def _hold_connection_result(
-    broker: PostgresBroker, seconds: float,
-) -> HandleResult[None]:
-    await _hold_connection(broker, seconds)
-    return Ok(None)
-
-
 def _start_thread(target: Callable[[], Any]) -> threading.Thread:
     thread = threading.Thread(target=target, daemon=True)
     thread.start()
@@ -153,13 +146,8 @@ def test_task_send_gets_connection_released_by_workflow_bridge(
     one_connection_app: OneConnectionApp,
 ) -> None:
     broker = one_connection_app.app.get_broker()
-    handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=str(uuid.uuid4()), broker=broker,
-    )
     holder = _start_thread(
-        lambda: handle._sync_call(
-            _hold_connection_result, 'hold', broker, HOLD_SECONDS,
-        ),
+        lambda: broker.run_sync(_hold_connection, broker, HOLD_SECONDS),
     )
     time.sleep(WAITER_START_DELAY_SECONDS)
     echo = one_connection_app.echo

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from collections import deque
@@ -18,7 +17,7 @@ from horsies.core.codec.json_io import dumps_json, loads_json, SerializationErro
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.tasks import Execution, OutcomeCode, TaskError
-from horsies.core.types.result import Ok, Err, is_err as _is_err
+from horsies.core.types.result import Ok, Err, Result, is_err as _is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
@@ -31,7 +30,6 @@ from horsies.core.errors import WorkflowValidationError, ErrorCode
 from horsies.core.utils.db import autocommit_connection
 from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
-    HandleLoopRunnerFailed,
     HandleResult,
     HandleResumeRecoveryFailed,
     HandleWorkflowNotFound,
@@ -40,7 +38,6 @@ from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartEnqueueFailed,
     WorkflowStartIdConflict,
-    WorkflowStartLoopRunnerFailed,
     WorkflowStartResult,
     WorkflowStartValidationFailed,
 )
@@ -75,6 +72,21 @@ def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
 
 
 if TYPE_CHECKING:
+    from horsies._core import (
+        CoreError,
+        HandleFailed,
+        WorkflowAbsent,
+        WorkflowExists,
+        WorkflowIdTaken,
+        WorkflowNotPaused,
+        WorkflowNotRunning,
+        WorkflowPaused,
+        WorkflowResumed,
+        WorkflowResumeRecoveryFailed,
+        WorkflowStartFailed,
+        WorkflowStarted,
+        WorkflowStartRequest,
+    )
     from horsies.core.models.workflow import WorkflowSpec
     from horsies.core.brokers.postgres import PostgresBroker
 
@@ -298,20 +310,46 @@ async def start_workflow_async(
         returns the existing handle (best-effort idempotent by workflow_id,
         not payload-verified); with another name, ``WorkflowStartIdConflict``.
     """
-    from horsies._core import (
-        CoreError,
-        WorkflowExists,
-        WorkflowIdTaken,
-        WorkflowStartFailed,
-        WorkflowStarted,
-        WorkflowStartRequest,
-    )
-    from horsies.core.types.core_failure import core_error_retryable
-    from horsies.core.workflows.spec_data import workflow_spec_json
-    from horsies.core.workflows.start_tree import top_node_rows
+    from horsies._core import CoreError
 
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
+    match _start_request(
+        spec, broker, workflow_id, wf_id, workflow_sent_at, resend_on_transient_err,
+    ):
+        case Err(err_value=refused):
+            return Err(refused)
+        case Ok(ok_value=request):
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    try:
+        outcome = await broker._core_handle.start_workflow_async(request)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return Err(_start_call_failed(spec, wf_id, exc))
+    return _start_answer(spec, broker, wf_id, outcome)
+
+
+def _start_request(
+    spec: 'WorkflowSpec[OutT]',
+    broker: 'PostgresBroker',
+    workflow_id: str | None,
+    wf_id: str,
+    sent_at: datetime,
+    resend_on_transient_err: bool,
+) -> Result[WorkflowStartRequest, WorkflowStartValidationFailed]:
+    """The start request of ``spec`` under ``wf_id``, or the validation that
+    refuses it. No I/O. ``workflow_id`` is the id that the caller gave, if
+    any: only a given id is checked to be a UUID.
+
+    The prevalidation and the spec as data of ``start_workflow`` and
+    ``start_workflow_async``. A ``WorkflowValidationError`` of the checks,
+    and spec data that does not encode, are ``WorkflowStartValidationFailed``;
+    any other exception is a defect and propagates.
+    """
+    from horsies._core import WorkflowStartRequest
+    from horsies.core.workflows.spec_data import workflow_spec_json
+    from horsies.core.workflows.start_tree import top_node_rows
 
     # ── Zone 1: Prevalidation (never retried) ────────────────────────
     try:
@@ -356,8 +394,6 @@ async def start_workflow_async(
                     notes=[f"TaskNode '{task.name}' has priority=None"],
                     help_text='use app.workflow() to create WorkflowSpec with proper validation',
                 )
-    except asyncio.CancelledError:
-        raise
     except WorkflowValidationError as exc:
         # The checks above raise only WorkflowValidationError on purpose.
         # Any other exception is a defect and propagates.
@@ -381,24 +417,49 @@ async def start_workflow_async(
             ))
         case _ as unreachable:
             assert_never(unreachable)
-    request = WorkflowStartRequest(
+    return Ok(WorkflowStartRequest(
         spec_json=spec_json,
         workflow_id=uuid.UUID(wf_id),
-        sent_at=workflow_sent_at,
+        sent_at=sent_at,
         resend_on_transient_err=resend_on_transient_err,
+    ))
+
+
+def _start_call_failed(
+    spec: 'WorkflowSpec[OutT]',
+    wf_id: str,
+    exc: CoreError,
+) -> WorkflowStartEnqueueFailed:
+    """The start's error for a core boundary error of the call: nothing ran,
+    or the outcome is unknown (``CoreCallTimedOut``). Retryable by
+    ``core_error_retryable``. Pure."""
+    from horsies.core.types.core_failure import core_error_retryable
+
+    return WorkflowStartEnqueueFailed(
+        message=f'start of workflow {spec.name!r}: {type(exc).__name__}: {exc}',
+        retryable=core_error_retryable(exc),
+        workflow_name=spec.name,
+        workflow_id=wf_id,
+        exception=exc,
     )
 
-    # ── Zone 3: the start in the core ────────────────────────────────
-    try:
-        outcome = await broker._core_handle.start_workflow_async(request)  # pyright: ignore[reportPrivateUsage]
-    except CoreError as exc:
-        return Err(WorkflowStartEnqueueFailed(
-            message=f'start of workflow {spec.name!r}: {type(exc).__name__}: {exc}',
-            retryable=core_error_retryable(exc),
-            workflow_name=spec.name,
-            workflow_id=wf_id,
-            exception=exc,
-        ))
+
+def _start_answer(
+    spec: 'WorkflowSpec[OutT]',
+    broker: 'PostgresBroker',
+    wf_id: str,
+    outcome: WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed,
+) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+    """The answer of ``start_workflow`` and ``start_workflow_async`` for the
+    core's start record. Pure apart from the WARNING log of an existing
+    workflow and the type lookups of the handle's output type."""
+    from horsies._core import (
+        WorkflowExists,
+        WorkflowIdTaken,
+        WorkflowStartFailed,
+        WorkflowStarted,
+    )
+
     match outcome:
         case WorkflowStarted():
             pass
@@ -450,12 +511,17 @@ def start_workflow(
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """Start a workflow synchronously.
 
-    Sync wrapper around ``start_workflow_async()``.
+    The blocking form of ``start_workflow_async()``: the same checks and the
+    same start in the core (``CoreHandle.start_workflow``), on the calling
+    thread with the GIL released, and the same outcomes. The children of
+    the sub-workflow roots are built by their ``build_with`` on the core's
+    callback thread while this thread waits. A raised signal handler (Ctrl+C)
+    leaves the call: the start runs on to its end, and its outcome is
+    unknown to the caller (a resend with the same id then finds the
+    workflow). A start that does not end within the core's bound of a
+    blocking call is ``WorkflowStartEnqueueFailed`` with the
+    ``CoreCallTimedOut``; its outcome is unknown.
 
-    Inner async ``Err`` passes through unchanged.
-    A failure of the broker's sync runner is returned as
-    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
-    as from ``start_workflow_async()``.
     On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
     writes nothing; ``retry_start_async(err)`` completes the start with the
     error's id.
@@ -467,13 +533,16 @@ def start_workflow(
         broker: PostgreSQL broker for database operations.
         workflow_id: Optional custom workflow ID.
         sent_at: Optional workflow call-site timestamp from Python.
-        resend_on_transient_err: Forwarded to ``start_workflow_async()``.
+        resend_on_transient_err: As for ``start_workflow_async()``.
 
     Returns:
         ``Ok(WorkflowHandle)`` on success, ``Err(WorkflowStartError)`` on failure.
+
+    Raises:
+        As ``start_workflow_async()``.
     """
+    from horsies._core import CoreError
     from horsies.core.utils.loop_runner import (
-        LoopRunnerError,
         async_context_message,
         in_running_event_loop,
     )
@@ -489,25 +558,20 @@ def start_workflow(
             workflow_id=wf_id,
         ))
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
+    match _start_request(
+        spec, broker, workflow_id, wf_id, workflow_sent_at, resend_on_transient_err,
+    ):
+        case Err(err_value=refused):
+            return Err(refused)
+        case Ok(ok_value=request):
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     try:
-        return broker.run_sync(
-            start_workflow_async,
-            spec,
-            broker,
-            wf_id,
-            workflow_sent_at,
-            resend_on_transient_err=resend_on_transient_err,
-        )
-    except LoopRunnerError as exc:
-        return Err(WorkflowStartLoopRunnerFailed(
-            message=f'Loop runner failed for start_workflow(): {exc}',
-            workflow_name=spec.name,
-            workflow_id=wf_id,
-            exception=exc,
-        ))
-
-
-
+        outcome = broker._core_handle.start_workflow(request)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return Err(_start_call_failed(spec, wf_id, exc))
+    return _start_answer(spec, broker, wf_id, outcome)
 
 
 async def pause_workflow(
@@ -548,17 +612,10 @@ async def pause_workflow(
         PanicException: the function returned a row outside its contract
             (a defect of the core).
     """
-    from horsies._core import (
-        CoreError,
-        HandleFailed,
-        WorkflowAbsent,
-        WorkflowNotRunning,
-        WorkflowPaused,
-    )
+    from horsies._core import CoreError
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
-        handle_failed_error,
         workflow_uuid,
     )
 
@@ -571,6 +628,58 @@ async def pause_workflow(
         record = await broker._core_handle.pause_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(core_call_error(exc, workflow_id, WorkflowOperation.PAUSE))
+    return _pause_answer(workflow_id, record)
+
+
+def pause_workflow_blocking(
+    broker: 'PostgresBroker',
+    workflow_id: str,
+) -> HandleResult[bool]:
+    """The blocking form of ``pause_workflow()``: ``CoreHandle.pause_workflow``
+    on the calling thread, with the GIL released, and the same outcomes. A
+    raised signal handler (Ctrl+C) leaves the call; the pause runs on to its
+    end. A pause that does not end within the core's bound of a blocking
+    call is ``HandleDbOperationFailed`` with the ``CoreCallTimedOut``; its
+    outcome is unknown.
+
+    The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+    event loop (``pause_workflow_sync``, ``WorkflowHandle.pause``).
+    """
+    from horsies._core import CoreError
+    from horsies.core.workflows.handle_records import (
+        WorkflowOperation,
+        core_call_error,
+        workflow_uuid,
+    )
+
+    match workflow_uuid(workflow_id, WorkflowOperation.PAUSE):
+        case Err(not_an_id):
+            return Err(not_an_id)
+        case Ok(workflow_key):
+            pass
+    try:
+        record = broker._core_handle.pause_workflow(workflow_key)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return Err(core_call_error(exc, workflow_id, WorkflowOperation.PAUSE))
+    return _pause_answer(workflow_id, record)
+
+
+def _pause_answer(
+    workflow_id: str,
+    record: WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed,
+) -> HandleResult[bool]:
+    """The answer of a pause for the core's record. Pure."""
+    from horsies._core import (
+        HandleFailed,
+        WorkflowAbsent,
+        WorkflowNotRunning,
+        WorkflowPaused,
+    )
+    from horsies.core.workflows.handle_records import (
+        WorkflowOperation,
+        handle_failed_error,
+    )
+
     # The status trigger (horsies_notify_workflow_changes) sends
     # workflow_done for each paused workflow at commit, so get() returns
     # WORKFLOW_PAUSED without waiting for a poll.
@@ -632,14 +741,9 @@ def pause_workflow_sync(
 ) -> HandleResult[bool]:
     """Pause a running workflow synchronously.
 
-    Sync wrapper around ``pause_workflow()``.
-
-    Inner async ``Err`` passes through unchanged.
-    A failure of the broker's sync runner is returned as
-    ``HandleLoopRunnerFailed``; nothing ran. Any other exception propagates,
-    as from the async form.
-    On a thread that runs an event loop it returns ``HandleAsyncContext``
-    and changes nothing.
+    The blocking form of ``pause_workflow()`` (``pause_workflow_blocking``):
+    the same outcomes, on the calling thread. On a thread that runs an event
+    loop it returns ``HandleAsyncContext`` and changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -651,7 +755,6 @@ def pause_workflow_sync(
         ``Err(...)`` on failure — see ``HandleOperationError``.
     """
     from horsies.core.utils.loop_runner import (
-        LoopRunnerError,
         async_context_message,
         in_running_event_loop,
     )
@@ -664,18 +767,7 @@ def pause_workflow_sync(
             ),
             workflow_id=workflow_id,
         ))
-    try:
-        return broker.run_sync(pause_workflow, broker, workflow_id)
-    except LoopRunnerError as exc:
-        return Err(HandleLoopRunnerFailed(
-            message=f'Loop runner failed for pause_workflow_sync(): {exc}',
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-
-
-
-
+    return pause_workflow_blocking(broker, workflow_id)
 
 
 async def resume_workflow(
@@ -722,18 +814,10 @@ async def resume_workflow(
             in a resume that failed with it, such as ``SerializationError``
             for task options of a child root that do not parse.
     """
-    from horsies._core import (
-        CoreError,
-        HandleFailed,
-        WorkflowAbsent,
-        WorkflowNotPaused,
-        WorkflowResumed,
-        WorkflowResumeRecoveryFailed,
-    )
+    from horsies._core import CoreError
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
-        handle_failed_error,
         workflow_uuid,
     )
 
@@ -746,6 +830,67 @@ async def resume_workflow(
         record = await broker._core_handle.resume_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(core_call_error(exc, workflow_id, WorkflowOperation.RESUME))
+    return _resume_answer(workflow_id, record)
+
+
+def resume_workflow_blocking(
+    broker: 'PostgresBroker',
+    workflow_id: str,
+) -> HandleResult[bool]:
+    """The blocking form of ``resume_workflow()``: ``CoreHandle.resume_workflow``
+    on the calling thread, with the GIL released, and the same outcomes and
+    raises. The child starts that the resume owes build their children by
+    their ``build_with`` on the core's callback thread while this thread
+    waits. A raised signal handler (Ctrl+C) leaves the call; the resume runs
+    on to its end. A resume that does not end within the core's bound of a
+    blocking call is ``HandleDbOperationFailed`` with the
+    ``CoreCallTimedOut``; its outcome is unknown.
+
+    The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+    event loop (``resume_workflow_sync``, ``WorkflowHandle.resume``).
+    """
+    from horsies._core import CoreError
+    from horsies.core.workflows.handle_records import (
+        WorkflowOperation,
+        core_call_error,
+        workflow_uuid,
+    )
+
+    match workflow_uuid(workflow_id, WorkflowOperation.RESUME):
+        case Err(not_an_id):
+            return Err(not_an_id)
+        case Ok(workflow_key):
+            pass
+    try:
+        record = broker._core_handle.resume_workflow(workflow_key)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return Err(core_call_error(exc, workflow_id, WorkflowOperation.RESUME))
+    return _resume_answer(workflow_id, record)
+
+
+def _resume_answer(
+    workflow_id: str,
+    record: (
+        WorkflowResumed
+        | WorkflowNotPaused
+        | WorkflowResumeRecoveryFailed
+        | WorkflowAbsent
+        | HandleFailed
+    ),
+) -> HandleResult[bool]:
+    """The answer of a resume for the core's record. Pure."""
+    from horsies._core import (
+        HandleFailed,
+        WorkflowAbsent,
+        WorkflowNotPaused,
+        WorkflowResumed,
+        WorkflowResumeRecoveryFailed,
+    )
+    from horsies.core.workflows.handle_records import (
+        WorkflowOperation,
+        handle_failed_error,
+    )
+
     match record:
         case WorkflowResumed():
             return Ok(True)
@@ -774,14 +919,10 @@ def resume_workflow_sync(
 ) -> HandleResult[bool]:
     """Resume a paused workflow synchronously.
 
-    Sync wrapper around ``resume_workflow()``.
-
-    Inner async ``Err`` passes through unchanged.
-    A failure of the broker's sync runner is returned as
-    ``HandleLoopRunnerFailed``; nothing ran. Any other exception propagates,
-    as from the async form.
-    On a thread that runs an event loop it returns ``HandleAsyncContext``
-    and changes nothing.
+    The blocking form of ``resume_workflow()`` (``resume_workflow_blocking``):
+    the same outcomes and raises, on the calling thread. On a thread that
+    runs an event loop it returns ``HandleAsyncContext`` and changes
+    nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -793,7 +934,6 @@ def resume_workflow_sync(
         ``Err(...)`` on failure — see ``HandleOperationError``.
     """
     from horsies.core.utils.loop_runner import (
-        LoopRunnerError,
         async_context_message,
         in_running_event_loop,
     )
@@ -806,14 +946,7 @@ def resume_workflow_sync(
             ),
             workflow_id=workflow_id,
         ))
-    try:
-        return broker.run_sync(resume_workflow, broker, workflow_id)
-    except LoopRunnerError as exc:
-        return Err(HandleLoopRunnerFailed(
-            message=f'Loop runner failed for resume_workflow_sync(): {exc}',
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
+    return resume_workflow_blocking(broker, workflow_id)
 
 
 async def expire_paused_workflows(

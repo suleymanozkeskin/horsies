@@ -40,6 +40,23 @@ written in Rust, on a new baseline schema.
   a workflow start and a workflow resume keep a resource set per event loop.
   The sync send pool is gone.
 
+- **Every sync call runs on the calling thread.** The sync methods of
+  `Horsies` (`get_result`, `get_task_info`, `ping_database`,
+  `ping_workers`, `list_worker_states`, `get_worker_state`,
+  `get_worker_state_history`, `get_class_coverage`, `get_class_report`) and
+  of `WorkflowHandle` (`status`, `get`, `result_for`, `results`, `tasks`,
+  `cancel`, `pause`, `resume`), `start_workflow`, `WorkflowSpec.start`,
+  `pause_workflow_sync`, `resume_workflow_sync` and `PostgresBroker.close`
+  call the core's blocking form on the calling thread, with the GIL
+  released and signals checked every 100 ms: Ctrl+C ends a blocking wait,
+  `WorkflowHandle.get()` with no limit included. Their outcomes are those of
+  the async forms. No sync call starts the broker's `horsies-loop` thread,
+  and none returns `LOOP_RUNNER_FAILED`; the error types keep the variant.
+  A sync call that does not end within 30 minutes returns its failure code
+  with `CoreCallTimedOut`; a wait (`get()`, `get_result()`, `ping_workers()`)
+  is bounded by its limit plus 30 minutes, and a wait with no limit is not
+  bounded.
+
 - **The `exception` of a database failure is the core's class of the
   cause.** Where a call ran on the core and failed, the `exception` field of
   its error (for example `BrokerOperationFailed.exception`,
