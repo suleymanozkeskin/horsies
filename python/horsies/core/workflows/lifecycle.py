@@ -9,10 +9,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 
 
 
-from horsies.core.codec.json_io import loads_json, SerializationError
-from horsies.core.codec.task_options import stored_execution, stored_max_retries
-from horsies.core.models.tasks import Execution
-from horsies.core.types.result import Ok, Err, Result, is_err as _is_err
+from horsies.core.types.result import Ok, Err, Result
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
@@ -37,12 +34,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartResult,
     WorkflowStartValidationFailed,
 )
-from horsies.core.history.periods import RetentionClassKey
-from horsies.core.workflows.sql import (
-    SubWorkflowParams,
-    TaskNodeFacts,
-    task_node_facts,
-)
+from horsies.core.workflows.sql import SubWorkflowParams
 
 logger = get_logger('workflow.engine')
 
@@ -83,105 +75,6 @@ def guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
             'Positional args are not supported for workflow nodes; '
             'use kwargs instead.',
         )
-
-
-def root_retry_and_deadline(
-    task_options_json: str | None,
-    node_name: str,
-) -> tuple[int, str | None]:
-    """Extract (max_retries, good_until_str) for a task node at workflow start.
-
-    Mirrors enqueue_workflow_task's task_options parsing. One deliberate
-    difference: the promotion path folds corrupt options into a FAILED task
-    (it re-reads rows written by another transaction); here the JSON is the
-    task decorator's own serialization of a validated ``TaskOptions``, so
-    corruption is a defect. The start transaction and the engine's child
-    workflow start do not catch the ``SerializationError``: it propagates,
-    and the caller's transaction rolls back.
-
-    ``good_until_str`` is the ``good_until`` text of the options; the
-    database parses it into the timestamp column.
-
-    Raises:
-        SerializationError: task_options_json does not parse to an object,
-            or its retry_policy does not validate as RetryPolicy.
-    """
-    if task_options_json is None:
-        return 0, None
-
-    parsed_r = loads_json(task_options_json)
-    if _is_err(parsed_r) or not isinstance(parsed_r.ok_value, dict):
-        raise SerializationError(
-            f'Corrupt task_options for root node {node_name}',
-        )
-    options = parsed_r.ok_value
-    retry_limit_r = stored_max_retries(options)
-    if _is_err(retry_limit_r):
-        raise SerializationError(
-            f'Invalid retry_policy for root node {node_name}: '
-            f'{retry_limit_r.err_value.detail}',
-        )
-    good_until_raw = options.get('good_until')
-    good_until_str = None if good_until_raw is None else str(good_until_raw)
-    return retry_limit_r.ok_value, good_until_str
-
-
-def root_execution(
-    task_options_json: str | None,
-    node_name: str,
-) -> Execution:
-    """The `Execution` that a fast-path root stores, from its task options.
-
-    The JSON is the task decorator's own serialization of a validated
-    ``TaskOptions``, as in ``root_retry_and_deadline``, so options that do
-    not parse or do not validate are a defect: the ``SerializationError``
-    propagates and the caller's transaction rolls back. No options store
-    ``ISOLATED``.
-
-    Raises:
-        SerializationError: task_options_json does not parse, or its
-            ``execution`` or ``cancel_grace_ms`` does not validate.
-    """
-    if task_options_json is None:
-        return Execution.ISOLATED
-    parsed_r = loads_json(task_options_json)
-    if _is_err(parsed_r):
-        raise SerializationError(
-            f'Corrupt task_options for root node {node_name}',
-        )
-    execution_r = stored_execution(parsed_r.ok_value)
-    if _is_err(execution_r):
-        raise SerializationError(
-            f'Invalid execution for root node {node_name}: '
-            f'{execution_r.err_value.detail}',
-        )
-    return execution_r.ok_value
-
-
-def start_task_node_facts(
-    task_options_json: str | None,
-    node_name: str,
-    queue_retention_class: RetentionClassKey | None,
-) -> TaskNodeFacts:
-    """The typed facts that a workflow start writes on a task node row.
-
-    Every task node gets them, root or not; a fast-path root's task row
-    stores the same values. The options are the task decorator's own
-    serialization of a validated ``TaskOptions``, as in
-    ``root_retry_and_deadline`` and ``root_execution``. Does no I/O.
-
-    Raises:
-        SerializationError: the options do not parse to an object, or their
-            ``retry_policy``, ``execution`` or ``cancel_grace_ms`` does not
-            validate.
-    """
-    max_retries, good_until = root_retry_and_deadline(task_options_json, node_name)
-    return task_node_facts(
-        max_retries=max_retries,
-        execution=root_execution(task_options_json, node_name),
-        good_until=good_until,
-        queue_retention_class=queue_retention_class,
-    )
 
 
 def subworkflow_params_of(node: SubWorkflowNode[Any]) -> SubWorkflowParams:
@@ -256,12 +149,15 @@ async def start_workflow_async(
     Raises:
         ForkedAfterCoreStart, CoreStopped: the core of this process refuses
             every call (``call_refusal_or_raise``). Nothing was written.
-        SerializationError: a value of the node rows does not serialize (a
-            defect of values that the process built and validated); or the
-            build of a sub-workflow child raised it (task options of a child
-            root that do not parse), and the start rolled back.
+        SerializationError: a value of the node rows does not serialize, or
+            the task options of a node with a ``good_until`` do not parse to
+            a JSON object (a defect of values that the process built and
+            validated); or the build of a sub-workflow child raised it, and
+            the start rolled back.
         PanicException: a row outside a function's contract, or spec data
-            that the core refuses (a defect).
+            that the core refuses, such as task options whose retry policy
+            or execution class does not validate (a defect). Nothing was
+            written.
         KeyboardInterrupt, SystemExit: raised by a child's ``build_with``;
             the start rolled back.
         Exception: another exception that the build of a sub-workflow child
