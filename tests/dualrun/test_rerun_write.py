@@ -225,7 +225,7 @@ def _row_fingerprint(row: Any) -> bytes:
         queue_name=row.queue_name,
         priority=row.priority,
         args_json=None,
-        kwargs_json=row.input,
+        input_json=row.input,
         good_until=row.good_until,
         enqueue_delay_seconds=None,
         task_options_json=row.task_options,

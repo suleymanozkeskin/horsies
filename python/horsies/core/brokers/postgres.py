@@ -369,8 +369,8 @@ def _command_fingerprint(
 ) -> Result[bytes, BrokerInvalidInput]:
     """The version-1 command fingerprint of a send. Pure.
 
-    The input travels in the fingerprint's kwargs element as the stored
-    ``input`` text, and the args element is always null: a Python send has
+    The input travels in the fingerprint's ``input_json`` element as the
+    stored ``input`` text, and the args element is always null: a Python send has
     no positional arguments. The fingerprint is therefore a function of the
     stored row. A value that the fingerprint refuses is ``INVALID_INPUT``.
     """
@@ -380,7 +380,7 @@ def _command_fingerprint(
             queue_name=queue_name,
             priority=priority,
             args_json=None,
-            kwargs_json=stored_input,
+            input_json=stored_input,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
             task_options_json=task_options,
