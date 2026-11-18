@@ -765,6 +765,13 @@ unless it starts with "Added".
   the start, `HandleErrorCode::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
+- **A send in a fork panics.** A send, a schedule or a retry, async or
+  blocking, in a process that was forked without `exec` after the core's
+  process runtime started in its parent panics with both process ids and
+  the fix; it never returns `EnqueueFailed`. Python's sends raise
+  `ForkedAfterCoreStart` in the same state. A blocking send whose runtime
+  the operating system refused to start is still a retryable
+  `EnqueueFailed`.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

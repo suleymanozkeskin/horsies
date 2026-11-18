@@ -112,7 +112,7 @@ When the process runtime of the core cannot run the call, the call returns the d
 
 | Call | Error |
 |------|-------|
-| A send or a retry | `TaskSendError::EnqueueFailed` with the task id and payload |
+| A send or a retry | `TaskSendError::EnqueueFailed` with the task id and payload when the operating system refused the runtime's threads. In a fork, the send panics: see below |
 | A read | `ReadError::Database` |
 | A health read | `BrokerOperationError` with the code of the read |
 | `check_live` | `CheckReport` with the connectivity refusal |
@@ -121,6 +121,8 @@ When the process runtime of the core cannot run the call, the call returns the d
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DbOperationFailed` |
 
 The process runtime cannot run in a process that was forked after it started (not retryable), and when the operating system refused its threads (retryable: the next call tries again).
+
+A send or a retry in a process that was forked without `exec` after the process runtime started panics; it never returns `EnqueueFailed`. A fork is a state of the process, not of one send, as for Python's sends, which raise `ForkedAfterCoreStart`. Nothing was sent. Start child processes with `exec` (`std::process::Command`), or fork before the parent's first call that runs on the core.
 
 ## Things to Avoid
 
