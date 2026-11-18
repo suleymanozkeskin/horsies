@@ -328,6 +328,28 @@ class LabelledText:
 
 
 @dataclass(frozen=True, slots=True)
+class MeasureToken:
+    """The place of a run measure (``RunMeasure``) inside a text."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredText:
+    """A text of a ``RunMeasuresInText`` path whose run measures are tokens.
+
+    ``parts`` holds the literal text and the tokens in text order.
+    """
+
+    parts: tuple[str | MeasureToken, ...]
+
+
+def render_measure(token: MeasureToken) -> str:
+    """Text of a run measure token: ``<name>``."""
+    return f'<{token.name}>'
+
+
+@dataclass(frozen=True, slots=True)
 class JsonDocument:
     """A stored JSON value, parsed; path-rule leaves are normalized values."""
 
@@ -347,6 +369,7 @@ NormalizedValue = (
     | DigestMatches
     | DigestMismatch
     | LabelledText
+    | MeasuredText
     | JsonDocument
 )
 
@@ -404,6 +427,8 @@ def sort_token(value: OrderKeyValue) -> tuple[int, str]:
             return (12, text)
         case LabelledText(parts=parts):
             return (13, render_text(parts, lambda label: sort_token(label)[1]))
+        case MeasuredText(parts=parts):
+            return (14, render_text(parts, render_measure))
 
 
 def render_value(value: OrderKeyValue) -> str:
@@ -439,6 +464,8 @@ def render_value(value: OrderKeyValue) -> str:
             return text
         case LabelledText(parts=parts):
             return render_text(parts, render_value)
+        case MeasuredText(parts=parts):
+            return render_text(parts, render_measure)
 
 
 @dataclass(frozen=True, slots=True)
