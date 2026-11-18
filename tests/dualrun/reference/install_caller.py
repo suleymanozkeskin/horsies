@@ -31,10 +31,7 @@ core run installs once, in ``ensure_schema_initialized``.
 
 from __future__ import annotations
 
-from typing import cast
-
 from horsies._catalog.manifest import dump_producer_manifest
-from horsies._core import CoreHandle
 from horsies.core.brokers.postgres import (
     PostgresBroker,
     _loop_limit_err,
@@ -52,7 +49,6 @@ from horsies.core.history.maintenance.coverage import (
 from horsies.core.manifest import to_producer_manifest
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.operations.rebinding import TripwireCoreHandle
 
 
 async def ensure_initialized(self: PostgresBroker) -> None:
@@ -86,10 +82,8 @@ async def observe_only_core_handle(self: PostgresBroker) -> None:
     broker's handle, and close the old one.
 
     The new handle has the manifest of the old one with the schema mode
-    ``OBSERVE_ONLY`` (a listener, no install), the broker's child spec
-    source, and the wrapper of the old one: a handle that the Python run's
-    tripwires wrap is wrapped again with the same tripped methods. Raises
-    what ``close_async`` of the old handle raises.
+    ``OBSERVE_ONLY`` (a listener, no install) and the broker's child spec
+    source. Raises what ``close_async`` of the old handle raises.
     """
     from horsies.core.workflows.child_spec_source import child_spec_source_of
 
@@ -100,19 +94,10 @@ async def observe_only_core_handle(self: PostgresBroker) -> None:
             idempotency_reservation_window=self.idempotency_reservation_window,
         ),
     )
-    # In the Python run the broker's handle may be a TripwireCoreHandle that
-    # stands in for a CoreHandle; the casts name that.
-    match cast(object, self._core_handle):
-        case TripwireCoreHandle() as wrapped:
-            replaced = cast(CoreHandle, wrapped.native_handle)
-            observing = type(replaced)(manifest, pool_profile=self._CORE_POOL_PROFILE)
-            observing.register_child_spec_source(child_spec_source_of(self))
-            self._core_handle = cast(CoreHandle, TripwireCoreHandle(observing, wrapped._tripped))
-        case _:
-            replaced = self._core_handle
-            observing = type(replaced)(manifest, pool_profile=self._CORE_POOL_PROFILE)
-            observing.register_child_spec_source(child_spec_source_of(self))
-            self._core_handle = observing
+    replaced = self._core_handle
+    observing = type(replaced)(manifest, pool_profile=self._CORE_POOL_PROFILE)
+    observing.register_child_spec_source(child_spec_source_of(self))
+    self._core_handle = observing
     _ = await replaced.close_async()
 
 

@@ -9,6 +9,7 @@ use chrono::Utc;
 use horsies::{
     HorsiesError, OutputlessResults, TaskNode, TaskOutcome, WorkflowHandle, WorkflowSpecBuilder,
 };
+use horsies_test_support::poll;
 use horsies_test_support::rows::{self, NodeRow};
 use horsies_test_worker::harness::{within, Suite};
 use horsies_test_worker::instance::{Instance, Profile};
@@ -314,14 +315,37 @@ async fn test_workflow_cancellation() {
     assert_eq!(failed_code(&handle).await, "WORKFLOW_CANCELLED");
 }
 
+/// The reaper interval of the suite's instance: the worker runs a reaper
+/// pass at its start, then one each `check_interval_ms`.
+fn reaper_interval(suite: &Suite) -> Duration {
+    Duration::from_millis(suite.config().recovery.check_interval_ms)
+}
+
+/// The age that a phase-2 record of an expired workflow task must reach
+/// before a reaper pass recovers its node and ends its workflow
+/// (`crashed_worker_recovery_grace_ms`).
+fn phase2_grace(suite: &Suite) -> Duration {
+    Duration::from_millis(suite.config().recovery.crashed_worker_recovery_grace_ms)
+}
+
+/// The time on top of a reaper interval for one reaper step to show: the
+/// pass itself, the write that the step waits for, and the polls of the
+/// wait.
+const REAPER_PASS_MARGIN: Duration = Duration::from_secs(10);
+
 /// Python: `test_layer4_workflow_structure.py::test_workflow_task_expires_before_claim`.
 /// The second node's deadline passes while the first node holds the only
-/// child: the node never runs, and the workflow fails.
+/// child, so the task of the second node is PENDING with a passed deadline
+/// when the first node completes. A claim never takes such a row: the
+/// pending expiry of the next reaper pass ends the task, at most one reaper
+/// interval later. The pass that recovers its phase-2 record, at least
+/// `phase2_grace` after the expiry, fails the node and the workflow.
 #[tokio::test]
 #[serial]
 async fn test_workflow_task_expired_while_claimed_before_start() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
     let mut spec = builder("expiring_node");
     let a = spec.task(slow_step(&suite, "a", 3_000));
     let b = spec.task(
@@ -331,7 +355,48 @@ async fn test_workflow_task_expired_while_claimed_before_start() {
     );
     let _output = spec.output(b);
     let handle = start::<String>(&suite, spec).await;
-    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    let expiring = poll::poll_until(WORKFLOW_WAIT, "node b gets its task", async || {
+        rows::workflow_node(&client, handle.workflow_id(), 1)
+            .await
+            .task_id
+    })
+    .await;
+    rows::wait_for_task_status(
+        &client,
+        expiring,
+        "EXPIRED",
+        reaper_interval(&suite) + REAPER_PASS_MARGIN,
+    )
+    .await;
+    let expired = rows::read_task(&client, expiring)
+        .await
+        .expect("the task of node b");
+    assert_eq!(expired.error_code.as_deref(), Some("TASK_EXPIRED"));
+    assert_eq!(
+        (expired.claimed_at, expired.worker_id, expired.started_at),
+        (None, None, None),
+        "no claim took the task of node b"
+    );
+    let ended_by: String = client
+        .query_one(
+            "SELECT terminalization_kind::text FROM horsies_task_history WHERE task_id = $1",
+            &[&expiring],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("read how task {expiring} ended: {error}"))
+        .get(0);
+    assert_eq!(
+        ended_by, "EXPIRE_PENDING",
+        "the pending expiry of the reaper ended the task of node b"
+    );
+    let ended = rows::wait_for_workflow_end(
+        &client,
+        handle.workflow_id(),
+        phase2_grace(&suite) + reaper_interval(&suite) + REAPER_PASS_MARGIN,
+    )
+    .await;
+    assert_eq!(ended, "FAILED", "the workflow status");
+    let nodes = rows::workflow_nodes(&client, handle.workflow_id()).await;
     assert_eq!(nodes[0].status, "COMPLETED");
     assert_eq!(nodes[1].status, "FAILED");
     assert_eq!(failed_code(&handle).await, "TASK_EXPIRED");

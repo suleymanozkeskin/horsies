@@ -4,9 +4,7 @@ When the enqueue statement fails (here: a lock timeout while another session
 holds the table lock), the send returns ``ENQUEUE_FAILED`` whose message
 names the cause and the statement, and neither the message nor the
 exception text holds the bound values. The send on the core names the
-statement by its name (``enqueue_task``); the Python send before the switch,
-the reference of ``--dual-run=broker``, quoted its SQL text, with
-``hide_parameters=True`` on its engines.
+statement by its name (``enqueue_task``).
 """
 
 from __future__ import annotations
@@ -26,8 +24,6 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
-from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
-from tests.dualrun.operations.table import Implementation, SwitchModule
 from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
@@ -43,20 +39,6 @@ LOCK_TIMEOUT_MS = 200
 
 CORE_STATEMENT: Final = 'statement `enqueue_task` was refused'
 """How the send on the core names its refused statement."""
-REFERENCE_STATEMENT: Final = 'INSERT INTO horsies_tasks'
-"""How the Python send before the switch named it: its SQL text."""
-
-
-def _named_statement(implementation: ImplementationRun) -> str:
-    """The statement text of the send of this run: the reference's in the
-    Python run of ``--dual-run=broker``, else the core's."""
-    match implementation:
-        case DualRunCase(
-            module=SwitchModule.BROKER, implementation=Implementation.PYTHON_REFERENCE,
-        ):
-            return REFERENCE_STATEMENT
-        case DualRunCase() | SingleRun():
-            return CORE_STATEMENT
 
 
 def _with_lock_timeout(url: str) -> str:
@@ -75,7 +57,6 @@ def _secret_task(app: Horsies) -> Any:
 
 async def test_failed_enqueue_hides_the_task_arguments(
     make_database: MakeDatabase,
-    implementation: ImplementationRun,
 ) -> None:
     url = await make_database()
     config = PostgresConfig(database_url=SecretStr(_with_lock_timeout(url)))
@@ -101,7 +82,7 @@ async def test_failed_enqueue_hides_the_task_arguments(
     error = sent.err_value
     assert isinstance(error, TaskSendEnqueueFailed)
     assert 'canceling statement due to lock timeout' in error.message
-    assert _named_statement(implementation) in error.message
+    assert CORE_STATEMENT in error.message
     assert ARGUMENT_MARKER not in error.message
     assert isinstance(error.exception, BaseException)
     assert ARGUMENT_MARKER not in str(error.exception)

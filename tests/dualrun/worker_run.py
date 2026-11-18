@@ -4,15 +4,17 @@ profile and sends. Their snapshots and their per-task reports must be equal.
 
 One side of a pair:
 
-1. Write the sends: the task ids and the ``sent_at`` of the scenario, which
+1. Read the database clock, then install the baseline on the empty
+   database. The reading starts the run span of the side.
+2. Write the sends: the task ids and the ``sent_at`` of the scenario, which
    both sides share, and the stored options of each registered task
    (``enqueue_async``, the write of every send). Start the workflows of the
    scenario with their fixed ids (``start_workflow_async``). Apply the row
    edits of the scenario (stored options without a key, a stored class that
    does not fit the registered task).
-2. Read the database clock, then start the worker of the side with the
+3. Read the database clock, then start the worker of the side with the
    profile of the scenario and a new marker directory.
-3. Wait for the stop point of the scenario, at most ``TERMINAL_WAIT``:
+4. Wait for the stop point of the scenario, at most ``TERMINAL_WAIT``:
    - ``StopWhenTerminal``: every sent task and every task of the started
      workflows has its history row, and every started workflow is
      COMPLETED, FAILED, CANCELLED, EXPIRED or PAUSED;
@@ -21,9 +23,9 @@ One side of a pair:
    - ``PauseWhenRunning``: the first node writes its marker; the runner
      pauses the workflow and writes the release marker, then waits as
      ``StopWhenTerminal``.
-4. Stop the worker with ``SIGTERM`` and wait at most ``STOP_WAIT`` for its
+5. Stop the worker with ``SIGTERM`` and wait at most ``STOP_WAIT`` for its
    exit. A worker that does not exit is killed with its process group.
-5. Read the clock again, then capture the snapshot and the report: each
+6. Read the clock again, then capture the snapshot and the report: each
    sent task, each node of each started workflow, and the status of each
    started workflow. Every sent task must be terminal at this point.
 
@@ -37,6 +39,14 @@ not a decision of the code. The liveness generation table is left out too:
 only the core worker holds a liveness lock. Run times inside the run window
 compare as ``DuringRun``, the worker id as its label. Speed numbers never
 come from these pairs.
+
+Two snapshots that differ are a ``DualRunMismatch`` when the run spans of
+both sides lie in one UTC hour, and a ``ClockBoundaryStraddle`` when they
+do not (``judge_snapshots``). The install and the worker of a side each
+create the hourly heartbeat leaves from their own hour on, and leaf names
+are read relative to the hour of the run window, so a pair across an hour
+can differ by a leaf for the clock alone. The judgement leaves no entry
+out of the diff.
 
 The reference side starts the Python worker parent and its version-1 child
 from their copy (``tests.dualrun.reference.worker_parent``, made by
@@ -87,7 +97,11 @@ from tests.dualrun.catalog import (
 )
 from tests.dualrun.clients import open_broker
 from tests.dualrun.compare import SnapshotDiff, compare_snapshots
-from tests.dualrun.databases import DualRunDatabase
+from tests.dualrun.databases import (
+    DatabaseSetupFailed,
+    DualRunDatabase,
+    install_baseline_schema,
+)
 from tests.dualrun.normalize import NormalizedSnapshot
 from tests.dualrun.rules import (
     ColumnRule,
@@ -103,7 +117,7 @@ from tests.dualrun.rules import (
     TimeOrderBeforeRun,
     TimeOrderOnly,
 )
-from tests.dualrun.values import RunWindowInvalid, make_run_window
+from tests.dualrun.values import RunWindow, RunWindowInvalid, make_run_window
 
 APP_LOCATOR: Final = 'tests.dualrun.apps.whole_run_app:app'
 
@@ -416,6 +430,74 @@ def compare_reports(
     )
 
 
+# ---- The judgement of the two snapshots ----
+
+
+@dataclass(frozen=True, slots=True)
+class PairEqual:
+    """The two snapshots compare equal."""
+
+
+@dataclass(frozen=True, slots=True)
+class DualRunMismatch:
+    """The two snapshots differ, and both run spans lie in one UTC hour."""
+
+    diff: SnapshotDiff
+
+
+@dataclass(frozen=True, slots=True)
+class ClockBoundaryStraddle:
+    """The two snapshots differ, and the run spans do not lie in one UTC
+    hour: a span crossed an hour, or the two sides ran in two hours. A leaf
+    name or a time rank can differ for that reason alone: the install and
+    the worker of a side each create the hourly heartbeat leaves from their
+    own hour on, and a leaf name is read relative to the hour of the run
+    window (``generated_name``). ``diff`` holds every entry."""
+
+    diff: SnapshotDiff
+    reference_span: RunWindow
+    candidate_span: RunWindow
+
+
+type PairJudgement = PairEqual | DualRunMismatch | ClockBoundaryStraddle
+
+
+def _hour(at: datetime) -> datetime:
+    return at.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+
+
+def crosses_hour(span: RunWindow) -> bool:
+    """Whether the span holds the start of a UTC hour after its own start."""
+    return _hour(span.start) != _hour(span.end)
+
+
+def in_one_hour(reference: RunWindow, candidate: RunWindow) -> bool:
+    """Whether both spans lie in one UTC hour: neither crosses an hour, and
+    both start in the same hour."""
+    return (
+        not crosses_hour(reference)
+        and not crosses_hour(candidate)
+        and _hour(reference.start) == _hour(candidate.start)
+    )
+
+
+def judge_snapshots(
+    diff: SnapshotDiff, reference_span: RunWindow, candidate_span: RunWindow
+) -> PairJudgement:
+    """``PairEqual`` for a diff with no entry; else ``DualRunMismatch`` when
+    both run spans lie in one UTC hour, and ``ClockBoundaryStraddle`` when
+    they do not. No entry is left out. Pure."""
+    if not diff.entries:
+        return PairEqual()
+    match in_one_hour(reference_span, candidate_span):
+        case True:
+            return DualRunMismatch(diff=diff)
+        case False:
+            return ClockBoundaryStraddle(
+                diff=diff, reference_span=reference_span, candidate_span=candidate_span
+            )
+
+
 # ---- The whole-run catalog ----
 
 
@@ -577,12 +659,16 @@ class WorkerEnd:
 
 @dataclass(frozen=True, slots=True)
 class SideRun:
-    """What one side left: the comparable snapshot, the task report and how
-    its worker ended."""
+    """What one side left: the comparable snapshot, the task report, how
+    its worker ended, and its run span: the database clock from before the
+    install of its baseline to its end reading. Every write of the side
+    lies in the span, the heartbeat leaves of its install and of its
+    worker among them."""
 
     snapshot: NormalizedSnapshot
     report: dict[ReportKey, ReportEntry]
     worker: WorkerEnd
+    run_span: RunWindow
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,7 +703,18 @@ class CaptureFailed:
     cause: CaptureError | ClockReadFailed | RunWindowInvalid
 
 
-type SideFailure = TasksNotTerminal | WorkerExitedEarly | PauseRefused | CaptureFailed
+@dataclass(frozen=True, slots=True)
+class InstallFailed:
+    """The install of the baseline on the empty database of the side
+    failed; the database exists and holds what the failed install left."""
+
+    side: str
+    cause: DatabaseSetupFailed
+
+
+type SideFailure = (
+    TasksNotTerminal | WorkerExitedEarly | PauseRefused | CaptureFailed | InstallFailed
+)
 
 
 _HISTORY_SQL: Final[LiteralString] = (
@@ -957,8 +1054,14 @@ def run_side(
     database: DualRunDatabase,
     scenario: Scenario,
 ) -> Result[SideRun, SideFailure]:
-    """Run one side of ``scenario`` on ``database``, whose baseline is
-    installed. Leaves no worker process and no marker directory behind."""
+    """Install the baseline on the empty ``database``, then run one side of
+    ``scenario`` on it. Leaves no worker process and no marker directory
+    behind."""
+    match _install(command, database):
+        case Ok(installing):
+            pass
+        case Err(failed):
+            return Err(failed)
     asyncio.run(_write_sends(database, scenario))
     task_ids = [send.task_id for send in scenario.sends]
     log_fd, log_path = tempfile.mkstemp(
@@ -967,9 +1070,30 @@ def run_side(
     os.close(log_fd)
     marker_dir = tempfile.mkdtemp(prefix=f'whole-run-{command.name}-markers-')
     try:
-        return _run_side_in(command, database, scenario, task_ids, log_path, marker_dir)
+        return _run_side_in(
+            command, database, scenario, task_ids, log_path, marker_dir, installing
+        )
     finally:
         shutil.rmtree(marker_dir)
+
+
+def _install(
+    command: WorkerCommand, database: DualRunDatabase
+) -> Result[datetime, SideFailure]:
+    """The database clock, read before the install; then the install of the
+    baseline on the empty ``database``. The reading starts the run span of
+    the side."""
+    with psycopg.connect(database.url, autocommit=True) as connection:
+        match read_database_clock(connection):
+            case Ok(installing):
+                pass
+            case Err(clock_failed):
+                return Err(CaptureFailed(side=command.name, cause=clock_failed))
+    match install_baseline_schema(database):
+        case Ok():
+            return Ok(installing)
+        case Err(failed):
+            return Err(InstallFailed(side=command.name, cause=failed))
 
 
 def _run_side_in(
@@ -979,6 +1103,7 @@ def _run_side_in(
     task_ids: list[UUID],
     log_path: str,
     marker_dir: str,
+    installing: datetime,
 ) -> Result[SideRun, SideFailure]:
     with psycopg.connect(database.url, autocommit=True) as connection:
         _apply_row_edits(connection, scenario)
@@ -1021,10 +1146,10 @@ def _run_side_in(
                 pass
             case Err(clock_failed):
                 return Err(CaptureFailed(side=command.name, cause=clock_failed))
-        match make_run_window(started, ended):
-            case Ok(window):
+        match make_run_window(started, ended), make_run_window(installing, ended):
+            case (Ok(window), Ok(run_span)):
                 pass
-            case Err(invalid):
+            case (Err(invalid), _) | (_, Err(invalid)):
                 return Err(CaptureFailed(side=command.name, cause=invalid))
         match capture_snapshot(connection, WHOLE_RUN_CATALOG, window):
             case Ok(snapshot):
@@ -1032,16 +1157,21 @@ def _run_side_in(
             case Err(capture_error):
                 return Err(CaptureFailed(side=command.name, cause=capture_error))
         report = read_report(connection, scenario)
-    return Ok(SideRun(snapshot=compared_part(snapshot), report=report, worker=worker))
+    return Ok(
+        SideRun(
+            snapshot=compared_part(snapshot), report=report, worker=worker, run_span=run_span
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class PairRun:
-    """Both sides of one scenario and their differences."""
+    """Both sides of one scenario, the judgement of their snapshots and the
+    differences of their reports."""
 
     reference: SideRun
     candidate: SideRun
-    snapshot_diff: SnapshotDiff
+    snapshots: PairJudgement
     report_differences: tuple[ReportDifference, ...]
 
 
@@ -1050,8 +1180,9 @@ def run_pair(
     reference_database: DualRunDatabase,
     candidate_database: DualRunDatabase,
 ) -> Result[PairRun, SideFailure]:
-    """Run the reference side, then the candidate side, and compare them. The
-    sides run one after the other, so they do not share the machine."""
+    """Run the reference side, then the candidate side, each on its empty
+    database, and compare them. The sides run one after the other, so they
+    do not share the machine."""
     match run_side(REFERENCE_WORKER, reference_database, scenario):
         case Ok(reference):
             pass
@@ -1066,7 +1197,11 @@ def run_pair(
         PairRun(
             reference=reference,
             candidate=candidate,
-            snapshot_diff=compare_snapshots(reference.snapshot, candidate.snapshot),
+            snapshots=judge_snapshots(
+                compare_snapshots(reference.snapshot, candidate.snapshot),
+                reference.run_span,
+                candidate.run_span,
+            ),
             report_differences=compare_reports(reference.report, candidate.report),
         ),
     )
