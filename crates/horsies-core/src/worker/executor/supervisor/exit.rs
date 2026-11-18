@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::worker::executor::protocol::ChildExitCode;
+use crate::worker::executor::protocol::{ChildExitCode, ProcessId, CORE_STOPPED_EXIT_CODE};
 
 /// The exit of a child that the spawner thread reaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -87,6 +87,56 @@ impl fmt::Display for ChildExit {
             Self::ExitUnknown => f.write_str("no exit seen after SIGKILL"),
         }
     }
+}
+
+/// How a child that held no task ended by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EndWithoutTask {
+    /// Exit code [`ChildExitCode::CoreStopped`]: the core of the child
+    /// stopped, and the child ended itself after it reported any start it
+    /// refused. The slot logs it at error level and boots a new child.
+    CoreStopped,
+    /// Any other end. The slot replaces the child with no log of its own.
+    Other,
+}
+
+impl EndWithoutTask {
+    /// The reading of `exit`. Pure.
+    pub fn of(exit: ChildExit) -> Self {
+        let reaped = match exit {
+            ChildExit::Reaped(reaped) => reaped,
+            ChildExit::ReapedElsewhere | ChildExit::ExitUnknown => return Self::Other,
+        };
+        match reaped.meaning() {
+            ExitMeaning::Protocol(ChildExitCode::CoreStopped) => Self::CoreStopped,
+            ExitMeaning::Protocol(
+                ChildExitCode::ParentGone
+                | ChildExitCode::BadParentFrame
+                | ChildExitCode::BadArguments
+                | ChildExitCode::StoppedWithExecutorThreads
+                | ChildExitCode::BootFailed
+                | ChildExitCode::ReparentFailed
+                | ChildExitCode::ProtocolMismatch
+                | ChildExitCode::ChildHookFailed,
+            )
+            | ExitMeaning::Clean
+            | ExitMeaning::OtherCode(_)
+            | ExitMeaning::Signal(_) => Self::Other,
+        }
+    }
+}
+
+/// Log a child that ended with [`ChildExitCode::CoreStopped`] while it held
+/// no task: error level, with the cause. The slot then boots a new child.
+pub fn log_core_stopped_child(pid: ProcessId) {
+    tracing::error!(
+        pid = pid.get(),
+        exit_code = CORE_STOPPED_EXIT_CODE,
+        "child {} ended itself with exit code {CORE_STOPPED_EXIT_CODE}: its core stopped (a panic \
+         in a core background task of the child, or a fork after its core started; the last \
+         log line of the child names the cause). It held no task; a new child replaces it",
+        pid.get(),
+    );
 }
 
 /// The process state of a spawned child, as the spawner thread publishes it.

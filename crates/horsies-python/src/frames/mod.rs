@@ -11,10 +11,13 @@
 //!   spawn request byte, so the Python side defines none of them.
 //!
 //! Every call is pure: no runtime starts, no thread, no connection. The calls
-//! that decode or encode check only the fork rule of every core call, so the
-//! preload process, where the core never starts, may call them before it
-//! forks. A refused frame is a value; a defect of the caller (a constructor
-//! value outside its bound) raises `ValueError`.
+//! that decode or encode check only the fork rule of every core call
+//! (`process_core::fork_refusal`): the preload process, where the core never
+//! starts, may call them before it forks, and a worker child whose core
+//! stopped still reports its last frames to the worker before it ends itself
+//! (the release of a start it refused). A fork of a child cannot speak on the
+//! channel of its parent. A refused frame is a value; a defect of the caller
+//! (a constructor value outside its bound) raises `ValueError`.
 
 mod child;
 mod parent;
@@ -38,7 +41,7 @@ use pyo3::types::PyBytes;
 use pyo3::IntoPyObjectExt;
 
 use crate::errors::refusal_error;
-use crate::process_core::pure_call_refusal;
+use crate::process_core::fork_refusal;
 
 use child::ChildFrameArgument;
 use parent::{parent_frame_object, parent_refusal_object};
@@ -115,9 +118,9 @@ impl FrameTooLarge {
 }
 
 /// Refuse a call in a process forked without `exec` after the core started
-/// in its parent, or in a process whose core stopped.
+/// in its parent. A process whose core stopped is not refused.
 fn refuse_by_fork_rule() -> PyResult<()> {
-    match pure_call_refusal() {
+    match fork_refusal() {
         Some(refusal) => Err(refusal_error(refusal)),
         None => Ok(()),
     }

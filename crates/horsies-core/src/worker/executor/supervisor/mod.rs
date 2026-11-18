@@ -32,7 +32,9 @@ pub use channel::{
     ChildChannel, ChildLost, FrameWait, LossCause, MailboxBound, PartialFrame, SendFailure,
     WorkerKillMark, CHILD_KILL_WAIT, CHILD_STOP_TIMEOUT,
 };
-pub use exit::{ChildExit, ExitMeaning, ExitState, ReapedExit};
+pub use exit::{
+    log_core_stopped_child, ChildExit, EndWithoutTask, ExitMeaning, ExitState, ReapedExit,
+};
 pub use exit_watch::POLLED_EXIT_INTERVAL;
 pub use socket::{child_socket_pair, ChildSocketPair, SOCKET_BUFFER_BYTES};
 pub use source::{ChildSource, SpawnFuture};

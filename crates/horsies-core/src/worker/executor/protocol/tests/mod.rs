@@ -1393,6 +1393,21 @@ fn exit_codes_are_distinct_and_leave_the_worker_code_free() {
     assert_eq!(ChildExitCode::from_code(1), None);
 }
 
+/// The code of a child whose core stopped is a code of the protocol, apart
+/// from the codes of the worker process.
+#[test]
+fn the_core_stopped_code_is_a_named_child_code() {
+    assert_eq!(super::CORE_STOPPED_EXIT_CODE, 80);
+    assert_eq!(
+        ChildExitCode::from_code(super::CORE_STOPPED_EXIT_CODE),
+        Some(ChildExitCode::CoreStopped)
+    );
+    assert_eq!(
+        ChildExitCode::CoreStopped.code(),
+        super::CORE_STOPPED_EXIT_CODE
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The step parser and the read plan (Python `tests/unit/test_frame_parser.py`)
 // ---------------------------------------------------------------------------
