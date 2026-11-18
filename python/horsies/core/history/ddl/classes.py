@@ -29,20 +29,16 @@ from ..partitions.catalog import (
     history_class_parent_name,
     read_retention_class,
 )
-from ..periods import RetentionClassKey, RetentionDays, period_class_key
+from horsies._catalog.retention_class import (
+    DEFAULT_RETENTION_CLASS_KEY as DEFAULT_RETENTION_CLASS_KEY,
+)
+
+from ..periods import RetentionClassKey, RetentionDays
 from .tables import FOREVER_CLASS_KEY
 
 DEFAULT_RETENTION_DAYS: Final = RetentionDays(30)
-"""The default period."""
-
-DEFAULT_RETENTION_CLASS_KEY: Final = period_class_key(DEFAULT_RETENTION_DAYS)
-"""The class every enqueue stamps unless the caller says otherwise:
-``standard_30d``.
-
-The ratified resolution: the default is an immutable 30-day finite
-class; forever is chosen only by an EXPLICIT ``None``. A forever
-default would exempt every unconfigured task from retention — the
-unpurgeable-rows hole this program exists to close."""
+"""The default period. ``DEFAULT_RETENTION_CLASS_KEY`` (generated from
+horsies-core) is its class key."""
 
 DEFAULT_RETENTION_DURATION: Final = timedelta(days=DEFAULT_RETENTION_DAYS)
 """The default class's immutable duration."""

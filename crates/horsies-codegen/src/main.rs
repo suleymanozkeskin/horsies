@@ -14,10 +14,11 @@
 //! - `_catalog/release_bounds.py`, `_catalog/monitoring_bounds.py` and
 //!   `_catalog/broker_bounds.py`: integer constants of horsies-core
 //!   (`constants::CONSTANT_MODULES`).
-//! - `_catalog/broker_errors.py`, `_catalog/workflow_handle_errors.py` and
-//!   `_catalog/monitoring_errors.py`: the error classes, subsets and unions
-//!   of `horsies_core::error_catalog`, and `_catalog/error_detail.py` with
-//!   `NoCause`.
+//! - `_catalog/broker_errors.py`, `_catalog/workflow_handle_errors.py`,
+//!   `_catalog/monitoring_errors.py` and `_catalog/task_send_errors.py`: the
+//!   error classes, subsets, record classes and unions of
+//!   `horsies_core::error_catalog`; `_catalog/error_detail.py` with
+//!   `NoCause`; `_catalog/retention_class.py` with `RetentionClassKey`.
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:

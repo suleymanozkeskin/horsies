@@ -105,6 +105,18 @@ before you upgrade a 0.7 deployment.
   `TaskActionError` are the generated union of the catalog plus the classes
   that only the Python client produces.
 
+- **The send error classes and the send payload are generated from the
+  core.** The seven classes of the core's send catalog
+  (`TaskSendSuppressed`, `TaskSendAsyncContext`,
+  `TaskSendValidationFailed`, `TaskSendEnqueueFailed`,
+  `TaskSendPayloadMismatch`, `TaskSendPayloadTooLarge`,
+  `TaskSendIdempotencyKeyConflict`), `TaskSendPayload`, `RetentionClassKey`
+  and `DEFAULT_RETENTION_CLASS_KEY` are rendered into `horsies._catalog`
+  from the core's records. Their names, fields, defaults and docs do not
+  change, and the old import paths re-export them. `TaskSendError` is the
+  generated union `TaskSendCoreError` plus `TaskSendEventLoopLimit` and
+  `TaskSendLoopRunnerFailed`, which only the Python client produces.
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async
@@ -606,10 +618,33 @@ unless it starts with "Added".
 - **A pool size outside the core's bounds is refused.** `Horsies::new`
   refuses `broker.pool_size` outside 1 to 10,000 and `broker.max_overflow`
   above 10,000, with the field name.
-- **A worker profile with a preload is refused.** A Rust worker starts each
-  child with `exec` of its own binary, so `Horsies::new` refuses a profile
-  whose `preload` is `Library` (the default) or `App`, with the path
-  `worker_profiles.<name>.preload`. Set `preload: ChildPreload::NoPreload`.
+- **The core reads only the connection settings that it supports.** These
+  are the URL and its supported query parameters (`host`, `port`, `user`,
+  `password`, `dbname`, `application_name`, `options`, `connect_timeout`,
+  `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `sslnegotiation`,
+  `channel_binding`, `target_session_attrs`, `load_balance_hosts`), the TLS
+  files that the URL names, `PGPASSWORD` and `~/.pgpass`, as in the Python
+  client. Another libpq parameter (for example `hostaddr`), a parameter of
+  sqlx (`ssl-mode`, `ssl-root-cert`, `ssl-ca`, `ssl-cert`, `ssl-key`,
+  `statement-cache-capacity`), an unknown parameter, a parameter given
+  twice, a URL with no host, and a libpq environment variable that libpq
+  would apply are refused by name when the first pool opens; `check_live`
+  reports the refusal. The keepalive parameters and `tcp_user_timeout` are
+  refused in the URL: set them in `PostgresConfig`. The alpha opened its
+  connections with sqlx 0.8: it applied `PGHOST`, `PGHOSTADDR`, `PGPORT`,
+  `PGUSER`, `PGDATABASE`, `PGSSLMODE`, `PGSSLROOTCERT`, `PGSSLCERT`,
+  `PGSSLKEY`, `PGAPPNAME`, `PGOPTIONS` and `PGPASSFILE` when the URL did
+  not set the parameter, read the sqlx parameters, and ignored every other
+  parameter with a warning, `connect_timeout`, `target_session_attrs`,
+  `channel_binding`, `sslnegotiation` and `load_balance_hosts` included.
+  Those five now apply.
+- **A worker profile with a preload is refused, and no preload is the
+  default.** A Rust worker starts each child with `exec` of its own binary,
+  so `Horsies::new` refuses a profile whose `preload` is `Library` or `App`,
+  with the path `worker_profiles.<name>.preload`. `ChildPreload::default()`
+  is `NoPreload`, so a profile that does not set `preload` starts: one built
+  with `..WorkerProfile::default()`, or one read from a config text without
+  the key. The Python client keeps its own default, `ChildPreload.LIBRARY`.
 - **`role` and `set_role` use `AppRole`** (`Producer`, `Worker`,
   `Scheduler`) in place of a string.
 - **Added: send suppression on the app.** `suppress_sends(bool)` and

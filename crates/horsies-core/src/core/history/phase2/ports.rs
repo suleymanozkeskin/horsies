@@ -253,6 +253,33 @@ async fn consumption_applies_the_history_result_to_the_node() {
     transaction.rollback().await.expect("rollback");
 }
 
+/// `TestDurableDispositions.test_replay_after_evidence_is_gone_is_already_applied`:
+/// a second consumption, after the first deleted the pending row, is
+/// `ALREADY_APPLIED` and reports the node status that the first wrote.
+#[tokio::test]
+#[serial]
+async fn a_replay_after_the_evidence_is_gone_is_already_applied() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    let first = consume_phase2(&mut transaction, evidence.task_id, "FAILED")
+        .await
+        .expect("consume");
+    assert_eq!(first.disposition, Phase2DispositionKind::AppliedToNode);
+    assert_eq!(
+        pending_source(&mut transaction, evidence.task_id).await,
+        None
+    );
+
+    let replay = consume_phase2(&mut transaction, evidence.task_id, "FAILED")
+        .await
+        .expect("consume again");
+
+    assert_eq!(replay.disposition, Phase2DispositionKind::AlreadyApplied);
+    assert_eq!(replay.node_status.as_deref(), Some("FAILED"));
+    transaction.rollback().await.expect("rollback");
+}
+
 /// `TestDurableDispositions.test_paused_workflow_still_records_the_node` and
 /// `test_phase2_applies_node_from_history_while_running_or_paused` (prototype,
 /// PAUSED half).
@@ -699,4 +726,101 @@ fn the_node_lock_is_pinned_by_its_row_id_and_its_workflow() {
     let body = consume_function_text();
     assert!(body.contains("wt.id = v_pending.workflow_node_row_id"));
     assert!(body.contains("wt.workflow_id = v_pending.workflow_id"));
+}
+
+/// Every disposition that the decoder reads.
+const EVERY_DISPOSITION: [Phase2DispositionKind; 8] = [
+    Phase2DispositionKind::AppliedToNode,
+    Phase2DispositionKind::AlreadyApplied,
+    Phase2DispositionKind::SupersededByWorkflowTerminal,
+    Phase2DispositionKind::SourceStateConflict,
+    Phase2DispositionKind::PendingAbsent,
+    Phase2DispositionKind::SourceAbsent,
+    Phase2DispositionKind::SourceVersionConflict,
+    Phase2DispositionKind::SourceDigestMismatch,
+];
+
+/// The place of `kind` in [`EVERY_DISPOSITION`]. A new disposition fails
+/// this match until it is listed there.
+fn listed_place(kind: Phase2DispositionKind) -> usize {
+    match kind {
+        Phase2DispositionKind::AppliedToNode => 0,
+        Phase2DispositionKind::AlreadyApplied => 1,
+        Phase2DispositionKind::SupersededByWorkflowTerminal => 2,
+        Phase2DispositionKind::SourceStateConflict => 3,
+        Phase2DispositionKind::PendingAbsent => 4,
+        Phase2DispositionKind::SourceAbsent => 5,
+        Phase2DispositionKind::SourceVersionConflict => 6,
+        Phase2DispositionKind::SourceDigestMismatch => 7,
+    }
+}
+
+/// `tests/unit/test_task_history_phase2.py::TestDispositionVocabulary::test_sql_and_decoder_vocabularies_are_closed_together`
+/// and `TestDecoder::test_unknown_disposition_raises`: each disposition of the
+/// decoder is a text that the baseline body of `horsies_phase2_consume`
+/// returns, and it reads back as its kind; the durable dispositions are among
+/// them; any other text is a contract error that names it.
+#[test]
+fn each_disposition_of_the_consume_function_reads_and_an_unknown_one_is_refused() {
+    let body = consume_function_text();
+    for kind in EVERY_DISPOSITION {
+        assert_eq!(EVERY_DISPOSITION[listed_place(kind)], kind);
+        assert!(body.contains(&format!("'{}'", kind.as_str())), "{kind:?}");
+        assert!(
+            matches!(Phase2DispositionKind::try_from(kind.as_str()), Ok(read) if read == kind),
+            "{kind:?}"
+        );
+    }
+    assert!(Phase2DispositionKind::DURABLE
+        .iter()
+        .all(|kind| EVERY_DISPOSITION.contains(kind)));
+    match Phase2DispositionKind::try_from("EXPLODED") {
+        Err(HistoryError::Contract(detail)) => {
+            assert!(detail.contains("unknown phase-2 disposition"), "{detail}");
+            assert!(detail.contains("EXPLODED"), "{detail}");
+        }
+        other => panic!("an unknown disposition must be a contract error, got {other:?}"),
+    }
+}
+
+/// `tests/unit/test_task_history_phase2.py::TestDispositionVocabulary::test_pending_deletes_exist_only_on_durable_paths`:
+/// the body of `horsies_phase2_consume` deletes the pending row in two
+/// statements, on its durable paths: the workflow is already terminal, and
+/// the node write.
+#[test]
+fn the_consumption_deletes_the_pending_row_in_two_statements() {
+    assert_eq!(
+        consume_function_text()
+            .matches("DELETE FROM horsies_workflow_phase2_pending")
+            .count(),
+        2
+    );
+}
+
+/// `tests/unit/test_task_history_phase2.py::TestDispositionVocabulary::test_the_type_is_created_before_the_function`
+/// and `::test_type_carries_the_progression_context`: the baseline creates
+/// the row type `horsies_phase2_disposition` before `horsies_phase2_consume`,
+/// and the type carries the workflow status, depth, root and `on_error`.
+#[test]
+fn the_disposition_type_precedes_the_function_and_carries_the_progression_context() {
+    let sql = crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL;
+    let type_start = sql
+        .find("CREATE TYPE horsies_phase2_disposition AS (")
+        .expect("the baseline defines horsies_phase2_disposition");
+    let function_start = sql
+        .find("CREATE FUNCTION horsies_phase2_consume(")
+        .expect("the baseline defines horsies_phase2_consume");
+    assert!(type_start < function_start);
+    let type_length = sql[type_start..]
+        .find(");")
+        .expect("the type definition ends");
+    let type_text = &sql[type_start..type_start + type_length];
+    for column in [
+        "workflow_status text",
+        "workflow_depth integer",
+        "root_workflow_id uuid",
+        "on_error text",
+    ] {
+        assert!(type_text.contains(column), "{column}: {type_text}");
+    }
 }

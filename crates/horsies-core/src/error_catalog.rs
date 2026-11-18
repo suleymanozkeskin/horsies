@@ -21,8 +21,16 @@
 //! Adding an error enum: derive `ErrorCatalog` on it, add it to
 //! [`ERROR_CATALOGS`], and name its per-operation unions in
 //! [`ERROR_UNIONS`].
+//!
+//! A field type of a class that is a record of its own (the payload of a
+//! send) is a [`RecordClass`] in [`ERROR_RECORDS`], and a `NewType` that a
+//! record field holds is a [`TextNewType`] in [`TEXT_NEW_TYPES`]. They are
+//! written by hand here, in Python's shape: the core's own structs hold the
+//! same facts in Rust types.
 
 use crate::catalog::{CodeCatalog, CodeEnum};
+use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
+use crate::core::task::send_types::TaskSendError;
 use crate::monitoring::{MonitoringQueryError, TaskActionError};
 use crate::{BrokerOperationError, BrokerOperationFailedCode, HandleOperationError};
 
@@ -33,12 +41,17 @@ pub enum SlotType {
     Str,
     /// `bool`.
     Bool,
+    /// `int`.
+    Int,
     /// `uuid.UUID`.
     Uuid,
     /// `str` holding the text of a UUID: a workflow id of the Python client.
     UuidText,
     /// `TaskStatus`, the code catalog of `horsies._catalog.status`.
     TaskStatus,
+    /// `TaskSendPayload`, the record [`TASK_SEND_PAYLOAD`] in the module of
+    /// the class.
+    TaskSendPayload,
 }
 
 /// Whether the generated `repr` of a class shows a field.
@@ -148,7 +161,188 @@ pub const ERROR_CATALOGS: &[ErrorCatalog] = &[
     <HandleOperationError as ErrorEnum>::ERROR_CATALOG,
     <MonitoringQueryError as ErrorEnum>::ERROR_CATALOG,
     <TaskActionError as ErrorEnum>::ERROR_CATALOG,
+    <TaskSendError as ErrorEnum>::ERROR_CATALOG,
 ];
+
+/// The Python type of a field of a generated record class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordFieldType {
+    /// `str`.
+    Str,
+    /// `int`.
+    Int,
+    /// `datetime`.
+    DateTime,
+    /// `str | None`.
+    OptionalStr,
+    /// `int | None`.
+    OptionalInt,
+    /// `datetime | None`.
+    OptionalDateTime,
+    /// `RetentionClassKey | None`, the [`RETENTION_CLASS_KEY`] new type.
+    OptionalRetentionClassKey,
+}
+
+/// The default of a field of a generated record class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldDefault {
+    /// No default: the caller gives the value.
+    Required,
+    /// `None`.
+    NoneValue,
+    /// [`DEFAULT_RETENTION_CLASS`], a constant of [`RETENTION_CLASS_KEY`].
+    DefaultRetentionClassKey,
+}
+
+/// One field of a generated record class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordField {
+    pub name: &'static str,
+    pub python_type: RecordFieldType,
+    pub default: FieldDefault,
+    /// Comment lines above the field; empty for none.
+    pub note: &'static str,
+}
+
+/// A frozen dataclass that a field of an error class holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordClass {
+    /// The module under `horsies._catalog` that holds the record.
+    pub python_module: &'static str,
+    pub python_class: &'static str,
+    pub doc: &'static str,
+    /// The fields in their Python order: each field with a default comes
+    /// after every field without one.
+    pub fields: &'static [RecordField],
+}
+
+/// A named value of a [`TextNewType`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewTypeConstant {
+    pub name: &'static str,
+    pub doc: &'static str,
+    pub value: &'static str,
+}
+
+/// A `NewType` of `str`, with its named values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextNewType {
+    /// The module under `horsies._catalog` that holds it.
+    pub python_module: &'static str,
+    pub name: &'static str,
+    pub doc: &'static str,
+    pub constants: &'static [NewTypeConstant],
+}
+
+/// The key of a retention class, and the key of the default class.
+pub const RETENTION_CLASS_KEY: TextNewType = TextNewType {
+    python_module: "retention_class",
+    name: "RetentionClassKey",
+    doc: "The key of a finite period class. ``period_class_key`` of\n\
+          ``horsies.core.history.periods`` builds it.\n\
+          \n\
+          The enqueue paths take this type, so a raw string key is a type error at\n\
+          a typed call site, not a row that has no partition later. Like\n\
+          ``RetentionDays``, it is static only: ``RetentionClassKey('x')`` runs.",
+    constants: &[DEFAULT_RETENTION_CLASS],
+};
+
+/// The key of the class that an enqueue stamps when the caller names none.
+pub const DEFAULT_RETENTION_CLASS: NewTypeConstant = NewTypeConstant {
+    name: "DEFAULT_RETENTION_CLASS_KEY",
+    doc: "The class every enqueue stamps unless the caller says otherwise:\n\
+          ``standard_30d``, an immutable 30-day finite class.\n\
+          \n\
+          Forever is chosen only by an explicit ``None``: a forever default would\n\
+          exempt every unconfigured task from retention.",
+    value: DEFAULT_RETENTION_CLASS_KEY,
+};
+
+/// Every `NewType` that the Python package gets, in render order.
+pub const TEXT_NEW_TYPES: &[TextNewType] = &[RETENTION_CLASS_KEY];
+
+/// The payload of a send that the retry methods send again (Python
+/// `TaskSendPayload`). The core's [`crate::core::task::send_types::TaskSendPayload`]
+/// holds the same facts with a resolved retention.
+pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
+    python_module: <TaskSendError as ErrorEnum>::ERROR_CATALOG.python_module,
+    python_class: "TaskSendPayload",
+    doc: "Serialized envelope for idempotent retry.\n\
+          \n\
+          All value fields are pre-serialized to avoid round-trip issues.\n\
+          The retry methods extract this payload directly — no user args needed.",
+    fields: &[
+        RecordField {
+            name: "task_name",
+            python_type: RecordFieldType::Str,
+            default: FieldDefault::Required,
+            note: "",
+        },
+        RecordField {
+            name: "queue_name",
+            python_type: RecordFieldType::Str,
+            default: FieldDefault::Required,
+            note: "",
+        },
+        RecordField {
+            name: "priority",
+            python_type: RecordFieldType::Int,
+            default: FieldDefault::Required,
+            note: "",
+        },
+        RecordField {
+            name: "input_json",
+            python_type: RecordFieldType::OptionalStr,
+            default: FieldDefault::Required,
+            note: "The task input as JSON text: the keyword arguments as one object, or\n\
+                   None for a send with none (stored as ``{}``).",
+        },
+        RecordField {
+            name: "sent_at",
+            python_type: RecordFieldType::DateTime,
+            default: FieldDefault::Required,
+            note: "",
+        },
+        RecordField {
+            name: "good_until",
+            python_type: RecordFieldType::OptionalDateTime,
+            default: FieldDefault::Required,
+            note: "",
+        },
+        RecordField {
+            name: "enqueue_delay_seconds",
+            python_type: RecordFieldType::OptionalInt,
+            default: FieldDefault::Required,
+            note: "",
+        },
+        RecordField {
+            name: "task_options",
+            python_type: RecordFieldType::OptionalStr,
+            default: FieldDefault::Required,
+            note: "",
+        },
+        RecordField {
+            name: "idempotency_key",
+            python_type: RecordFieldType::OptionalStr,
+            default: FieldDefault::NoneValue,
+            note: "The caller's idempotency key, distinct from task identity. Riding the\n\
+                   payload keeps the uncertain-commit resend keyed: a replayed send\n\
+                   claims with the same key it first sent.",
+        },
+        RecordField {
+            name: "retention_class_key",
+            python_type: RecordFieldType::OptionalRetentionClassKey,
+            default: FieldDefault::DefaultRetentionClassKey,
+            note: "The retention class snapshotted at enqueue. ``None`` means forever,\n\
+                   so the field defaults to the immutable 30-day class rather than to\n\
+                   ``None``: a payload that never had the field set must not read as\n\
+                   a forever request on replay.",
+        },
+    ],
+};
+
+/// Every record class that the Python package gets, in render order.
+pub const ERROR_RECORDS: &[RecordClass] = &[TASK_SEND_PAYLOAD];
 
 /// The unions of the failures of one operation that the core produces, in
 /// render order. Python's public union of the operation adds its
@@ -342,6 +536,176 @@ mod tests {
         assert!(class("BrokerOperationFailed")
             .doc
             .starts_with("A broker operation failed with a database, driver or connection error."));
+    }
+
+    /// The slots of two send classes, as Python declares them
+    /// (`python/horsies/core/models/task_send_types.py`).
+    #[test]
+    fn a_send_class_has_python_s_slots_in_python_s_order() {
+        let classes = <TaskSendError as ErrorEnum>::ERROR_CATALOG.classes;
+        let class = |name: &str| {
+            classes
+                .iter()
+                .find(|class| class.python_class == name)
+                .unwrap_or_else(|| panic!("no class {name}"))
+        };
+        let message = ErrorSlot::Field {
+            name: "message",
+            python_type: SlotType::Str,
+            repr: SlotRepr::Hidden,
+        };
+        assert_eq!(
+            class("TaskSendEnqueueFailed").slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "ENQUEUE_FAILED"
+                },
+                ErrorSlot::Field {
+                    name: "task_id",
+                    python_type: SlotType::Uuid,
+                    repr: SlotRepr::Shown,
+                },
+                ErrorSlot::Field {
+                    name: "payload",
+                    python_type: SlotType::TaskSendPayload,
+                    repr: SlotRepr::Hidden,
+                },
+                message,
+                ErrorSlot::Field {
+                    name: "retryable",
+                    python_type: SlotType::Bool,
+                    repr: SlotRepr::Shown,
+                },
+                ErrorSlot::Exception {
+                    python_type: ExceptionType::ExceptionOrNoCause
+                },
+            ]
+        );
+        assert_eq!(
+            class("TaskSendPayloadTooLarge").slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "PAYLOAD_TOO_LARGE"
+                },
+                message,
+                ErrorSlot::Field {
+                    name: "size_bytes",
+                    python_type: SlotType::Int,
+                    repr: SlotRepr::Shown,
+                },
+                ErrorSlot::Field {
+                    name: "limit_bytes",
+                    python_type: SlotType::Int,
+                    repr: SlotRepr::Shown,
+                },
+            ]
+        );
+        let names: Vec<&str> = classes.iter().map(|class| class.python_class).collect();
+        assert_eq!(
+            names,
+            [
+                "TaskSendSuppressed",
+                "TaskSendAsyncContext",
+                "TaskSendValidationFailed",
+                "TaskSendEnqueueFailed",
+                "TaskSendPayloadMismatch",
+                "TaskSendPayloadTooLarge",
+                "TaskSendIdempotencyKeyConflict",
+            ]
+        );
+    }
+
+    /// A dataclass refuses a field without a default after one with a
+    /// default.
+    #[test]
+    fn a_record_field_with_a_default_follows_every_required_one() {
+        for record in ERROR_RECORDS {
+            let first_default = record
+                .fields
+                .iter()
+                .position(|field| field.default != FieldDefault::Required)
+                .unwrap_or(record.fields.len());
+            assert!(
+                record.fields[first_default..]
+                    .iter()
+                    .all(|field| field.default != FieldDefault::Required),
+                "{}",
+                record.python_class
+            );
+        }
+    }
+
+    /// A class that holds the payload record is in the record's module, so
+    /// the module defines the record and imports nothing for it.
+    #[test]
+    fn the_payload_slot_is_in_the_module_of_the_payload_record() {
+        for catalog in ERROR_CATALOGS {
+            let holds_payload = catalog.classes.iter().any(|class| {
+                class.slots.iter().any(|slot| {
+                    matches!(
+                        slot,
+                        ErrorSlot::Field {
+                            python_type: SlotType::TaskSendPayload,
+                            ..
+                        }
+                    )
+                })
+            });
+            match holds_payload {
+                true => assert_eq!(catalog.python_module, TASK_SEND_PAYLOAD.python_module),
+                false => {}
+            }
+        }
+    }
+
+    /// Python's payload fields, in Python's order, with the default of the
+    /// two that have one.
+    #[test]
+    fn the_payload_record_has_python_s_fields() {
+        let fields: Vec<(&str, RecordFieldType, FieldDefault)> = TASK_SEND_PAYLOAD
+            .fields
+            .iter()
+            .map(|field| (field.name, field.python_type, field.default))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("task_name", RecordFieldType::Str, FieldDefault::Required),
+                ("queue_name", RecordFieldType::Str, FieldDefault::Required),
+                ("priority", RecordFieldType::Int, FieldDefault::Required),
+                (
+                    "input_json",
+                    RecordFieldType::OptionalStr,
+                    FieldDefault::Required
+                ),
+                ("sent_at", RecordFieldType::DateTime, FieldDefault::Required),
+                (
+                    "good_until",
+                    RecordFieldType::OptionalDateTime,
+                    FieldDefault::Required
+                ),
+                (
+                    "enqueue_delay_seconds",
+                    RecordFieldType::OptionalInt,
+                    FieldDefault::Required
+                ),
+                (
+                    "task_options",
+                    RecordFieldType::OptionalStr,
+                    FieldDefault::Required
+                ),
+                (
+                    "idempotency_key",
+                    RecordFieldType::OptionalStr,
+                    FieldDefault::NoneValue
+                ),
+                (
+                    "retention_class_key",
+                    RecordFieldType::OptionalRetentionClassKey,
+                    FieldDefault::DefaultRetentionClassKey
+                ),
+            ]
+        );
     }
 
     /// The derive's class of a value is the class at the index of its

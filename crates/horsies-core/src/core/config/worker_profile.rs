@@ -710,15 +710,21 @@ impl<'de> Deserialize<'de> for DrainTimeout {
 
 /// What a preload parent imports before it forks children. Linux only.
 /// Elsewhere, and when a preload parent is down, children start with `exec`.
+///
+/// The default is `NoPreload`: the value of a profile that does not set
+/// `preload` (`WorkerProfile::default()`, or a config text without the key).
+/// A Rust child is an `exec` of the app's binary. The Python client does not
+/// use this default: it writes the value of its own model (default
+/// `library`) into each worker manifest, and the manifest has no default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildPreload {
     /// Library code only. Each child imports the app itself.
-    #[default]
     Library,
     /// Library and app. Children share module state from the app's import.
     App,
     /// No preload parent. Every child starts with `exec`.
+    #[default]
     #[serde(rename = "none")]
     NoPreload,
 }
@@ -777,6 +783,7 @@ impl ParentCpu {
 /// - `drain_timeout`: how long a stopping worker waits for running tasks.
 ///   Set it below the stop window of the supervisor.
 /// - `preload`: what a Linux worker imports once before it forks children.
+///   Default `NoPreload` ([`ChildPreload`]).
 /// - `parent_cpu`: where the worker process runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1648,9 +1655,11 @@ mod tests {
     }
 
     /// Python `test_worker_profile.py::TestDefaults` and
-    /// `::TestDrainTimeoutBounds::test_profile_defaults`.
+    /// `::TestDrainTimeoutBounds::test_profile_defaults`, except `preload`:
+    /// the core's default is `NoPreload` (a Rust child is an `exec`), and
+    /// Python writes its own default, `library`, into each worker manifest.
     #[test]
-    fn an_empty_profile_has_python_defaults() {
+    fn an_empty_profile_has_the_core_defaults() {
         let profile = parsed(json!({}));
 
         assert_eq!(profile, WorkerProfile::default());
@@ -1673,7 +1682,7 @@ mod tests {
             TaskLimitSetting::NoTaskLimit {}
         );
         assert_eq!(profile.drain_timeout.get(), Duration::from_secs(300));
-        assert_eq!(profile.preload, ChildPreload::Library);
+        assert_eq!(profile.preload, ChildPreload::NoPreload);
         assert_eq!(profile.parent_cpu, ParentCpu::Shared);
     }
 

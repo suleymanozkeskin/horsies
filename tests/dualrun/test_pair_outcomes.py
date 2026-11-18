@@ -88,6 +88,11 @@ ACROSS_HOUR: Final = RunWindow(
     start=datetime(2026, 11, 17, 10, 59, tzinfo=UTC),
     end=datetime(2026, 11, 17, 11, 0, 1, tzinfo=UTC),
 )
+NEXT_HOUR: Final = RunWindow(
+    start=datetime(2026, 11, 17, 11, 0, 4, tzinfo=UTC),
+    end=datetime(2026, 11, 17, 11, 1, 23, tzinfo=UTC),
+)
+"""A window in the hour after ``WITHIN_HOUR``; neither crosses an hour."""
 
 
 def _run(
@@ -450,3 +455,24 @@ def test_judge_pair_names_equal_mismatch_and_straddle() -> None:
     assert isinstance(straddle, ClockBoundaryStraddle)
     assert straddle.candidate_window == ACROSS_HOUR
     assert judge_pair(reference, same, ACROSS_HOUR, WholeSnapshot()) == PairEqual()
+
+
+def test_cases_of_a_pair_in_two_hours_are_a_straddle() -> None:
+    """#1954: the reference case in one hour and the core case in the next,
+    neither window crossing an hour. The core case's coverage adds the next
+    hourly leaf to the seed leaves, and leaf names are read relative to each
+    case's hour, so the snapshots differ by the clock alone."""
+    reference = ReferenceCaptured(
+        snapshot=_run([('a1', 'first')], [('task_done', 'a1')]),
+        window=WITHIN_HOUR,
+    )
+    same = _run([('b1', 'first')], [('task_done', 'b1')])
+    other = _run([('b1', 'first')], [])
+
+    assert not crosses_hour(WITHIN_HOUR)
+    assert not crosses_hour(NEXT_HOUR)
+    straddle = judge_pair(reference, other, NEXT_HOUR, WholeSnapshot())
+    assert isinstance(straddle, ClockBoundaryStraddle)
+    assert straddle.reference_window == WITHIN_HOUR
+    assert straddle.candidate_window == NEXT_HOUR
+    assert judge_pair(reference, same, NEXT_HOUR, WholeSnapshot()) == PairEqual()

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::BrokerError;
+use crate::error_catalog::ErrorEnum;
 use crate::FailureCause;
 
 /// Categorized task send failure codes.
@@ -95,61 +96,126 @@ pub struct TaskSendPayload {
 /// [`TaskSendErrorCode`] that the core or a client's blocking form
 /// produces, each with only the facts of its state (Python
 /// `python/horsies/core/models/task_send_types.py`).
-#[derive(Debug, Clone)]
+///
+/// The `///` lines of each variant are the docstring of its generated
+/// Python class (`horsies._catalog.task_send_errors`); Rust notes are `//`
+/// comments.
+#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+#[error_catalog(
+    module = "task_send_errors",
+    code = "TaskSendErrorCode",
+    union = "TaskSendCoreError",
+    union_doc = "Every failure of a send or schedule that the core records."
+)]
 pub enum TaskSendError {
-    /// Sends are suppressed in this process. Nothing was serialized or
-    /// written. The retry methods refuse it.
-    SendSuppressed { message: String },
-    /// A blocking send, schedule or retry was called on a thread that runs
-    /// an event loop or a tokio runtime. The payload is prepared and nothing
-    /// was written. The retry methods accept it: an async retry completes
-    /// the dispatch with the same task id and payload; a blocking retry on
-    /// the same thread returns this error again. A client produces it, never
-    /// the core's enqueue.
+    /// Sends are suppressed in this process. Nothing was serialized or written.
+    ///
+    /// Suppression is active during the worker and scheduler import phase,
+    /// during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
+    /// methods refuse this error.
+    #[error_class(class = "TaskSendSuppressed", code = "SendSuppressed")]
+    SendSuppressed {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+    },
+    /// A sync send or schedule ran inside a running event loop. Nothing was written.
+    ///
+    /// The payload is prepared. ``retry_send_async(err)`` or
+    /// ``retry_schedule_async(err)`` completes the same dispatch with the same
+    /// task id. A sync retry from the same loop returns this error again.
+    // The Rust client's blocking forms give it on a thread that runs a tokio
+    // runtime; the core's enqueue never does.
+    #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext")]
     AsyncContext {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
     },
-    /// The input or the options were refused before anything was written.
-    /// The retry methods refuse it. `cause` is what refused it (Python
-    /// `TaskSendValidationFailed.exception`).
+    /// The input was refused before anything was written.
+    ///
+    /// ``exception`` is the cause, or ``NoCause()`` when a check refused the
+    /// input without a Python exception. The retry methods refuse this error.
+    // `cause` is what refused it.
+    #[error_class(
+        class = "TaskSendValidationFailed",
+        code = "ValidationFailed",
+        exception = "BaseException | NoCause"
+    )]
     ValidationFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// The database failed during enqueue. The row may or may not exist.
-    /// `retryable` is the driver classification of the cause. A resend of
-    /// the same task id and payload is safe: the broker returns the existing
-    /// task for a duplicate. `cause` is what the enqueue met (Python
-    /// `TaskSendEnqueueFailed.exception`).
+    /// The broker or the database failed during enqueue. The row may or may not exist.
+    ///
+    /// ``retryable`` is the driver classification of the cause. ``retry_send(err)``
+    /// sends the same task id and payload again; the broker returns the existing
+    /// task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
+    /// the failure by a data check.
+    // `cause` is what the enqueue met.
+    #[error_class(
+        class = "TaskSendEnqueueFailed",
+        code = "EnqueueFailed",
+        exception = "BaseException | NoCause"
+    )]
     EnqueueFailed {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// The task id exists with a different command or idempotency key.
-    /// Nothing was written. The retry methods refuse it.
+    /// The task id exists with a different command or idempotency key. Nothing was written.
+    ///
+    /// The message names which one differs. The retry methods refuse this error.
+    #[error_class(class = "TaskSendPayloadMismatch", code = "PayloadMismatch")]
     PayloadMismatch {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
     },
-    /// The serialized input exceeds `payload.reject_bytes`. Nothing was
-    /// written. The retry methods refuse it.
+    /// The serialized kwargs exceed ``payload.reject_bytes``. Nothing was written.
+    ///
+    /// ``size_bytes`` is the length of the serialized kwargs and ``limit_bytes``
+    /// the configured limit. The retry methods refuse this error.
+    #[error_class(class = "TaskSendPayloadTooLarge", code = "PayloadTooLarge")]
     PayloadTooLarge {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Int")]
         size_bytes: u64,
+        #[error_slot(python = "Int")]
         limit_bytes: u64,
     },
-    /// The idempotency key is reserved by `owner_task_id` with a different
-    /// command. Nothing was written. The retry methods accept it.
+    /// The idempotency key is reserved by another task with a different command.
+    ///
+    /// Nothing was written. ``owner_task_id`` names the task that holds the key.
+    /// The retry methods accept this error: a retry after the reservation ends
+    /// is accepted, and a retry before that returns the same error.
+    #[error_class(
+        class = "TaskSendIdempotencyKeyConflict",
+        code = "IdempotencyKeyConflict"
+    )]
     IdempotencyKeyConflict {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Uuid")]
         owner_task_id: Uuid,
     },
 }
@@ -162,17 +228,10 @@ pub struct ResendTarget<'a> {
 }
 
 impl TaskSendError {
-    /// The code of this variant.
+    /// The code of this variant (the derive's one mapping,
+    /// [`ErrorEnum::error_code`]).
     pub fn code(&self) -> TaskSendErrorCode {
-        match self {
-            Self::SendSuppressed { .. } => TaskSendErrorCode::SendSuppressed,
-            Self::AsyncContext { .. } => TaskSendErrorCode::AsyncContext,
-            Self::ValidationFailed { .. } => TaskSendErrorCode::ValidationFailed,
-            Self::EnqueueFailed { .. } => TaskSendErrorCode::EnqueueFailed,
-            Self::PayloadMismatch { .. } => TaskSendErrorCode::PayloadMismatch,
-            Self::PayloadTooLarge { .. } => TaskSendErrorCode::PayloadTooLarge,
-            Self::IdempotencyKeyConflict { .. } => TaskSendErrorCode::IdempotencyKeyConflict,
-        }
+        ErrorEnum::error_code(self)
     }
 
     /// Whether the condition may clear, so the same send can succeed later.

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use horsies::{
-    AppConfig, ChildPreload, DrainTimeout, IsolatedChildCount, IsolatedChildren, IsolatedRecycle,
+    AppConfig, DrainTimeout, IsolatedChildCount, IsolatedChildren, IsolatedRecycle,
     IsolatedSetting, MemoryLimitSetting, MemoryMb, SharedAsyncChildCount, SharedAsyncChildren,
     SharedAsyncSeats, SharedAsyncSetting, TaskCount, TaskLimitSetting, WorkerProfile,
 };
@@ -36,7 +36,6 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
             SharedAsyncSeats::try_from(25)?,
         )),
         drain_timeout: DrainTimeout::try_from(Duration::from_secs(120))?,
-        preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     };
     Ok(AppConfig {
@@ -51,7 +50,7 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 ```
 
 - `WorkerProfile::default()` has no children. `Horsies::new` refuses a profile with no child.
-- Set `preload: ChildPreload::NoPreload`. `Horsies::new` refuses `ChildPreload::Library` (the default) and `ChildPreload::App` with `HRS-218`: a Rust worker starts each child with `exec` of its own binary. See [App Config](/horsies/rust/configuration/app-config/#rules-that-only-a-rust-app-has).
+- Do not set `preload`. Its default, `ChildPreload::NoPreload`, is the only value that a Rust worker takes: a Rust worker starts each child with `exec` of its own binary. `Horsies::new` refuses `ChildPreload::Library` and `ChildPreload::App` with `HRS-218`. See [App Config](/horsies/rust/configuration/app-config/#rules-that-only-a-rust-app-has).
 - A task runs on the children of its execution class. The routing of each class, and the classes to choose by the work of a task, are on [Choosing an Execution Mode](/horsies/workers/execution-modes/).
 
 ## WorkerProfile
@@ -64,7 +63,7 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `pool` | `ParentPool`: the connection pool of the worker process | Its size follows the seats |
 | `claim` | `ClaimLimits` | No limits |
 | `drain_timeout` | `DrainTimeout`: how long a stopping worker waits for running tasks | 300 s |
-| `preload` | `ChildPreload`: `Library`, `App` or `NoPreload` | `Library` |
+| `preload` | `ChildPreload`: `Library`, `App` or `NoPreload`. A Rust app takes only `NoPreload` | `NoPreload` |
 | `parent_cpu` | `ParentCpu`: `Shared` or `OwnCore` | `Shared` |
 
 `child_count()` and `seat_count()` return the children and the seats of the profile.
@@ -194,6 +193,6 @@ To give task bodies a value that each child builds, use `provide` in `main`: eve
 
 **Do not start servers, threads or loops in `main` before `run`.** Each worker child runs `main` again and starts them again.
 
-**Do not keep the default `preload`.** `Horsies::new` refuses `ChildPreload::Library` and `ChildPreload::App` with `HRS-218`.
+**Do not set `preload` to `Library` or `App`.** `Horsies::new` refuses `ChildPreload::Library` and `ChildPreload::App` with `HRS-218`. Leave `preload` at its default, `ChildPreload::NoPreload`.
 
 **Do not set a memory limit at or below the child baseline.** The worker start fails. See [Memory Recycling](/horsies/workers/concurrency/#memory-recycling).
