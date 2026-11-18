@@ -705,6 +705,7 @@ mod tests {
     //! Python specification: `tests/unit/test_history_retirement_rows.py`.
 
     use super::*;
+    use chrono::TimeZone;
 
     const LEAF: &str = "horsies_task_history_standard_30d_2026_08_06";
 
