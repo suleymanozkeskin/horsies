@@ -36,9 +36,10 @@ written in Rust, on a new baseline schema.
   returns its failure code with the core error as `exception`:
   `TooManyPendingCalls` (65,536 calls in flight on one event loop) and
   `CoreCallTimedOut` (a sync call over 30 minutes) are retryable;
-  `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not. Only
-  a workflow start and a workflow resume keep a resource set per event loop.
-  The sync send pool is gone.
+  `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not. A
+  send raises `CoreStopped` and `ForkedAfterCoreStart` instead (see below).
+  Only a workflow start and a workflow resume keep a resource set per event
+  loop. The sync send pool is gone.
 
 - **The `exception` of a database failure is the core's class of the
   cause.** Where a call ran on the core and failed, the `exception` field of
@@ -59,6 +60,15 @@ written in Rust, on a new baseline schema.
 - **A process forked without exec after the core started cannot call
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
+
+- **A send raises `ForkedAfterCoreStart` and `CoreStopped`.** Both are
+  states of the process: the core refuses every later call in it. The four
+  sends, `retry_send`, `retry_schedule` and their async forms, and
+  `PostgresBroker.enqueue` and `enqueue_async` raise them; none returns them
+  as `ENQUEUE_FAILED`. The send result types do not change. For a fork, use
+  the `spawn` or `forkserver` start method, or fork before the parent's
+  first call that runs on the core. For a stopped core (a core background
+  task panicked), restart the process.
 
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of

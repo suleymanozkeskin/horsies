@@ -24,6 +24,8 @@ from horsies._core import (
     ClassReportRecord,
     CoreError,
     CoreFailure,
+    CoreStopped,
+    ForkedAfterCoreStart,
     TaskListComplete,
     TaskListTruncated,
     WorkerStateAbsent,
@@ -1153,9 +1155,13 @@ def _enqueue_request(
 
 
 def _enqueue_core_error(task_name: str, exc: CoreError) -> Err[BrokerEnqueueFailed]:
-    """The core of this process cannot run a send: it stopped, did not
-    start, has too many calls in flight, or a blocking call reached its
-    bound. The row may or may not exist after a timed-out call. Pure."""
+    """The core of this process cannot run a send: it did not start, has
+    too many calls in flight, or a blocking call reached its bound. The row
+    may or may not exist after a timed-out call. Pure.
+
+    The callers raise ``ForkedAfterCoreStart`` and ``CoreStopped`` before
+    they reach this mapping: a state of the process is never a send
+    result."""
     return Err(BrokerEnqueueFailed(
         message=f'Failed to enqueue task {task_name}: {exc}',
         retryable=core_error_retryable(exc),
@@ -2196,6 +2202,12 @@ class PostgresBroker:
         - ``PAYLOAD_MISMATCH``, ``IDEMPOTENCY_KEY_CONFLICT``: nothing was
           written.
 
+        Raises ``ForkedAfterCoreStart`` (this process was forked without
+        ``exec`` after the core started) and ``CoreStopped`` (a core
+        background task panicked): states of the process, never a result.
+        Nothing was written. Every other core error is ``ENQUEUE_FAILED``
+        with it as ``exception``.
+
         A cancel of the caller does not stop the write: the core runs it to
         its end.
         """
@@ -2221,6 +2233,8 @@ class PostgresBroker:
                 pass
         try:
             outcome = await self._core_handle.enqueue_async(request)
+        except (ForkedAfterCoreStart, CoreStopped):
+            raise
         except CoreError as exc:
             return _enqueue_core_error(task_name, exc)
         return _enqueue_result(outcome)
@@ -3538,6 +3552,8 @@ class PostgresBroker:
         and writes nothing. A call that does not end within the core's bound
         of a blocking call is ``ENQUEUE_FAILED`` with the
         ``CoreCallTimedOut`` (retryable): the row may or may not exist.
+        Raises ``ForkedAfterCoreStart`` and ``CoreStopped``, as
+        ``enqueue_async`` does.
         """
         if in_running_event_loop():
             return _async_context_err(
@@ -3565,6 +3581,8 @@ class PostgresBroker:
                 pass
         try:
             outcome = self._core_handle.enqueue(request)
+        except (ForkedAfterCoreStart, CoreStopped):
+            raise
         except CoreError as exc:
             return _enqueue_core_error(task_name, exc)
         return _enqueue_result(outcome)

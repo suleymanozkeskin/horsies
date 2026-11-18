@@ -256,13 +256,18 @@ making web request, local will cost you less tokens and greater knowledgebase at
 <!-- members: TaskSendErrorCode -->
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
-- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (exception is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStopped, CoreStartFailed and ForkedAfterCoreStart are not); the row may or may not exist; retryable is the core's classification
+- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (exception is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStartFailed is not); the row may or may not exist; retryable is the core's classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
 - IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the retry methods accept it
 - PAYLOAD_TOO_LARGE: the serialized input exceeds payload.reject_bytes bytes of UTF-8 text; nothing was enqueued
 - EVENT_LOOP_LIMIT: not returned; a send runs on the core of the process, which has no event loop limit (the variant stays in TaskSendError)
 - ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
 - LOOP_RUNNER_FAILED: not returned; a sync send calls the core on the calling thread, not on the broker's sync runner (the variant stays in TaskSendError and TaskSendRetryable)
+
+### Raised, never returned: ForkedAfterCoreStart, CoreStopped (horsies._core)
+- Both are states of the process: the core refuses every later call in it. send, send_async, schedule, schedule_async, retry_send, retry_send_async, retry_schedule, retry_schedule_async and PostgresBroker.enqueue / enqueue_async raise them; none returns them as ENQUEUE_FAILED. Nothing was sent; a retry in the same process raises again
+- ForkedAfterCoreStart: the process was forked without exec after the core started in its parent (for example a fork-start multiprocessing pool inside a task). Fix: start child processes that call horsies with the spawn or forkserver start method, or fork before the parent's first send or read
+- CoreStopped: a core background task panicked; args are the (subject, cause) of the first panic. Fix: restart the process; report the panic's subject and cause as a defect
 
 ### TaskSendPayload (frozen dataclass)
 - task_name: str, queue_name: str, priority: int
