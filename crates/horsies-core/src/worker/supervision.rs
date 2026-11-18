@@ -201,7 +201,10 @@ mod tests {
         let pool = PgPool::connect(&url).await.expect("connect");
         let cancel = CancellationToken::new();
         let handle = spawn_claimer_heartbeat(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool)),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool,
+                crate::ClientFamily::Rust,
+            )),
             "supervision-w1".to_owned(),
             "host-1".to_owned(),
             1,
@@ -228,7 +231,10 @@ mod tests {
             ..RecoveryConfig::default()
         };
         let handle = spawn_reaper(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool)),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool,
+                crate::ClientFamily::Rust,
+            )),
             crate::test_support::child_specs::no_child_specs(),
             config,
             crate::core::RetentionConfig::default(),
@@ -249,7 +255,10 @@ mod tests {
         let pool = PgPool::connect(&url).await.expect("connect");
         let cancel = CancellationToken::new();
         let handle = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool)),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool,
+                crate::ClientFamily::Rust,
+            )),
             "supervision-w1".to_owned(),
             "host-1".to_owned(),
             std::process::id() as i32,

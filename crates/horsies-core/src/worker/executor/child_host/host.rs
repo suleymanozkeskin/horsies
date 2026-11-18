@@ -19,6 +19,7 @@ use super::role::mark_process_runs_task_bodies;
 use super::rss::read_rss;
 use super::run::HostContext;
 use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, ServeEnd};
+use crate::broker::client_family::ClientFamily;
 use crate::broker::PostgresBroker;
 use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
@@ -71,6 +72,9 @@ pub struct ChildApp {
     pub producer_manifest: ProducerManifest,
     /// What the child does with the log level of its init frame.
     pub log_setup: ChildLogSetup,
+    /// The client family of the binary: the child's broker writes as it and
+    /// checks it before its first write.
+    pub family: ClientFamily,
 }
 
 /// What a child does with the log level of its init frame (the worker's
@@ -432,17 +436,17 @@ pub(super) fn kept_open_of(pool: ChildPool) -> KeptOpen {
     }
 }
 
-/// The child's broker ([`PostgresBroker::connect_child`]): the child
-/// applies no migration. Its main pool keeps `min_size` connections open and,
+/// The child's broker of `family` ([`PostgresBroker::connect_child`]): the
+/// child applies no migration. Its main pool keeps `min_size` connections open and,
 /// with `check`, pings every pooled connection at checkout (Python
 /// `check=ConnectionPool.check_connection`,
 /// `python/horsies/core/worker/child_pool.py:122` and `:168`). Errors: the text of a
 /// refused config or of a failed connect; a `min_size` above `max_size` is a
 /// refused config, as Python's `ValueError`.
-async fn connect(init: &InitFrame) -> Result<PostgresBroker, String> {
+async fn connect(init: &InitFrame, family: ClientFamily) -> Result<PostgresBroker, String> {
     let pool = pool_of(init.child_kind);
     let config = child_broker_config(init.database_url.as_str(), &init.connection, pool);
-    PostgresBroker::connect_child(&config, kept_open_of(pool), pool.check)
+    PostgresBroker::connect_child(&config, kept_open_of(pool), pool.check, family)
         .await
         .map_err(|error| error.to_string())
 }
@@ -564,17 +568,17 @@ fn boot_and_serve(
         ChildLogSetup::NoSetup => {}
         ChildLogSetup::Install(install) => install(init.log_level),
     }
-    publish_child_producer(task_send_manifest(
-        &app.producer_manifest,
-        task_send_pool_of(init.child_kind),
-    ));
+    publish_child_producer(
+        task_send_manifest(&app.producer_manifest, task_send_pool_of(init.child_kind)),
+        app.family,
+    );
     let runtime = match start_child_runtime(init.child_kind) {
         Ok(runtime) => runtime,
         Err((cause, detail)) => {
             return boot_failed(&socket, cause, "RuntimeStartFailed", &detail);
         }
     };
-    let broker = match runtime.block_on(connect(&init)) {
+    let broker = match runtime.block_on(connect(&init, app.family)) {
         Ok(broker) => Arc::new(broker),
         Err(detail) => {
             return boot_failed(

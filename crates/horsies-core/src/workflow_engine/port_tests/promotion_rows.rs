@@ -214,7 +214,7 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     .await;
 
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(db.pool.clone()),
+        &PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
         root_task,
         &TestChildSpecs::empty(),
     )
@@ -407,8 +407,8 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
         .fetch_one(&mut *holder)
         .await
         .expect("read the backend pid of the holder");
-    let recovery_broker = PostgresBroker::from_pool(db.pool.clone());
-    let pause_broker = PostgresBroker::from_pool(db.pool.clone());
+    let recovery_broker = PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust);
+    let pause_broker = PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust);
     let child_specs = TestChildSpecs::empty();
 
     // On the heap. In a debug build, with the pass future inline in the join

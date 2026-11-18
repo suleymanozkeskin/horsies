@@ -2,6 +2,7 @@
 //! version-2 metadata, every refusal, and the read buffer.
 
 mod field_checks;
+mod frame_steps;
 mod python_vectors;
 
 use std::num::NonZeroU64;
@@ -1392,6 +1393,22 @@ fn exit_codes_are_distinct_and_leave_the_worker_code_free() {
     }
     assert_eq!(ChildExitCode::from_code(0), None);
     assert_eq!(ChildExitCode::from_code(1), None);
+}
+
+/// Python `test_preload.py::TestChildExitCodes::test_every_named_exit_code_is_distinct`,
+/// the part of the worker process: the codes that it exits with when it
+/// fails closed are not the codes of the `horsies worker` command (0
+/// stopped, 1 failed, 2 a usage error), so a reader tells the cause from the
+/// code.
+#[test]
+fn the_fail_closed_codes_of_the_worker_process_are_not_command_codes() {
+    const COMMAND_CODES: [i32; 3] = [0, 1, 2];
+    for code in [
+        crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+        crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE,
+    ] {
+        assert!(!COMMAND_CODES.contains(&code), "{code}");
+    }
 }
 
 /// The code of a child whose core stopped is a code of the protocol, apart

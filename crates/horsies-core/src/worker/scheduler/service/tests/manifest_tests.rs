@@ -60,7 +60,7 @@ fn unreachable_broker() -> Arc<PostgresBroker> {
         .acquire_timeout(Duration::from_millis(100))
         .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable")
         .expect("lazy pool");
-    Arc::new(PostgresBroker::from_pool(pool))
+    Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust))
 }
 
 async fn start_of(
@@ -146,7 +146,10 @@ async fn a_manifest_scheduler_starts_and_fires_with_the_send_facts_of_the_manife
             {"name": paused, "activation": {"kind": "DISABLED"}}
         ]),
     );
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
 
     let mut active = match start_of(broker, manifest).await {
         Ok(SchedulerStarted::Active(active)) => active,

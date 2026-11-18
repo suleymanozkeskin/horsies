@@ -19,7 +19,10 @@ use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 // ---------------------------------------------------------------------------
 
 async fn test_broker() -> PostgresBroker {
-    PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await)
+    PostgresBroker::from_pool(
+        crate::broker::terminalization_matrix::migrated_pool().await,
+        crate::ClientFamily::Rust,
+    )
 }
 
 /// The rows of a literal statement, read through the main core pool.

@@ -57,6 +57,7 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
             start_hook: ChildStartHook::NoHook,
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
+            family: crate::ClientFamily::Rust,
         }),
         pid: PID,
         writer,
@@ -66,7 +67,7 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
 
 /// A child context on `pool`; its frames go to a socket no one reads.
 fn context(pool: PgPool) -> (HostContext, UnixStream) {
-    context_on(PostgresBroker::from_pool(pool))
+    context_on(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust))
 }
 
 /// A child context on a port where no server listens: every checkout fails
@@ -86,9 +87,14 @@ async fn one_connection_child_broker() -> PostgresBroker {
     let mut config = PostgresConfig::from_url(migrated_database_url().await);
     config.pool_size = 1;
     config.max_overflow = 0;
-    PostgresBroker::connect_child(&config, KeptOpen::NoConnections, false)
-        .await
-        .expect("connect the broker of a child")
+    PostgresBroker::connect_child(
+        &config,
+        KeptOpen::NoConnections,
+        false,
+        crate::ClientFamily::Rust,
+    )
+    .await
+    .expect("connect the broker of a child")
 }
 
 /// A CLAIMED plain row held by [`WORKER_ID`]; `good_until` passed when
@@ -658,7 +664,7 @@ async fn the_first_runner_beat_names_the_worker_and_the_process_of_the_child() {
 async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_expired() {
     let pool = migrated_pool().await;
     let (task_id, _generation) = seed_claimed(&pool, true).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     let applied = broker
         .expire_claimed_task_before_start(task_id, WORKER_ID, WriteDeadline::start_attempt())
@@ -693,7 +699,7 @@ async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_
 #[serial]
 async fn a_refused_or_absent_expiry_is_not_an_expiry() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let (of_another_worker, _) = seed_claimed(&pool, true).await;
     sqlx::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
         .bind(of_another_worker)

@@ -312,7 +312,7 @@ async fn the_completion_yield_is_the_share_of_scanned_workflows_that_are_candida
     let mut report = RecoveryReport::default();
 
     let pass = audit_end_states(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         &crate::test_support::child_specs::TestChildSpecs::empty(),
         AUDIT_PAGE_ROWS,
         &mut report,
@@ -339,7 +339,7 @@ async fn an_audit_page_that_scanned_no_workflow_has_no_completion_yield() {
     let mut report = RecoveryReport::default();
 
     let pass = audit_end_states(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         &crate::test_support::child_specs::TestChildSpecs::empty(),
         AUDIT_PAGE_ROWS,
         &mut report,
