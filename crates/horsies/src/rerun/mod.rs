@@ -32,7 +32,7 @@ use crate::Horsies;
 pub use horsies_core::{
     CallerColumn, CallerRow, CallerStatement, CallerTransaction, CallerType, IdempotencyKeyError,
     NotEligibleReason, RecordedFamily, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunRowError,
-    RerunTask, StatementValue, TaskAbsenceReason, Uuid7Error,
+    RerunTask, StatementValue, TaskAbsenceReason, UnknownStoredFamily, Uuid7Error,
 };
 #[cfg(feature = "sqlx")]
 pub use sqlx_adapter::SqlxCaller;
@@ -60,6 +60,11 @@ pub enum CallerRerunError<E> {
     /// none. Nothing is written. Not retryable.
     #[error("rerun refused: this database was installed by {stored}; this is the Rust client")]
     ClientFamilyMismatch { stored: RecordedFamily },
+    /// The family row of the database holds a value that is not a client
+    /// family: corrupt stored data. Nothing is written. Not retryable: the
+    /// same row is refused again until it is repaired.
+    #[error("rerun refused: {0}")]
+    UnknownStoredFamily(UnknownStoredFamily),
     /// The caller key of the command is not a valid idempotency key.
     /// Nothing is written.
     #[error("the caller key of the rerun is refused: {0}")]
@@ -114,6 +119,9 @@ where
         }
         RerunPreparation::ClientFamilyMismatch { stored, own: _ } => {
             return Err(CallerRerunError::ClientFamilyMismatch { stored })
+        }
+        RerunPreparation::UnknownStoredFamily(unknown) => {
+            return Err(CallerRerunError::UnknownStoredFamily(unknown))
         }
         RerunPreparation::CallerKeyRefused(refused) => {
             return Err(CallerRerunError::CallerKeyRefused(refused))
@@ -288,6 +296,38 @@ mod tests {
                 CallerRerunError::ClientFamilyMismatch {
                     stored: RecordedFamily::Recorded(ClientFamily::Python)
                 }
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(transaction.ran.len(), 1);
+    }
+
+    /// A family value that is not a client family ends the rerun with the
+    /// named error and its stored value, before the write; no panic.
+    #[tokio::test]
+    async fn a_family_value_that_is_no_client_family_is_refused_before_the_write() {
+        let command = command();
+        let policy = RerunEnqueuePolicy::standard(true);
+        let read = rerun_read(&command, &policy);
+        let row = source_read_row(
+            &read,
+            &[
+                ("class_registered", StatementValue::Bool(true)),
+                ("client_family", StatementValue::Text("GO".to_owned())),
+            ],
+        );
+        let mut transaction = ScriptedTransaction {
+            rows: vec![row],
+            ran: Vec::new(),
+        };
+        let refused = rerun_task_in(&mut transaction, &command, &policy, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                CallerRerunError::UnknownStoredFamily(UnknownStoredFamily { stored })
+                    if stored == "GO"
             ),
             "{refused:?}"
         );

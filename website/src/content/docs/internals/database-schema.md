@@ -40,6 +40,9 @@ enqueue, result wait, task info read, workflow start or scheduler start):
    database holds: a horsies 0.x schema, `horsies_` tables with no bookkeeping, a newer version, a migration
    recorded as failed, a migration applied from another text (checksum), migration versions this build does not
    ship, or the other client family.
+5. A family row whose value is neither `PYTHON` nor `RUST` is corrupt stored data: the CHECK
+   `horsies_client_family_family_known` refuses such a value. The install, every write and a rerun are refused
+   with `CoreContractViolation`, whose message names the stored value, and nothing is changed.
 
 There is no upgrade from a 0.x database. Drain it and point the fleet at a new database.
 

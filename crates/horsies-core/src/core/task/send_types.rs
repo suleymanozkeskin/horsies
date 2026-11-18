@@ -392,6 +392,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::InstallLock(_)
         | BrokerError::InstallCoverage(_)
         | BrokerError::ClientFamilyMismatch { .. }
+        | BrokerError::UnknownStoredFamily(_)
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidClaimArgument(_)

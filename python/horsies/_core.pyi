@@ -2705,6 +2705,20 @@ class RerunClientFamilyMismatch:
 
 
 @final
+class RerunUnknownStoredFamily:
+    """The family row of the database holds a value that is not a client family (stored):
+    corrupt stored data. Nothing written. message names the table, the column and the
+    value; exception is a CoreContractViolation with the subject rerun_task.
+    """
+    @property
+    def stored(self) -> str: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
+
+
+@final
 class RerunCallerKeyRefused:
     """The caller key is not a valid idempotency key; cause names why. Nothing written."""
     @property
@@ -3225,7 +3239,7 @@ def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
 
 
-def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunCallerKeyRefused | IdMintRefused:
+def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused:
     """Decide the rerun from the row of its read (a tuple in column order): the write, or the
     answer that ends it with nothing written. Pure apart from the id mint. A row that does not
     fit the columns raises CoreDefect.

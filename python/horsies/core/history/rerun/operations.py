@@ -57,6 +57,7 @@ from horsies._core import (
     RerunSourceAbsentRecord,
     RerunSourceCorruptRecord,
     RerunSourceLiveRecord,
+    RerunUnknownStoredFamily,
     RerunWriteRecord,
     decode_rerun_write,
     prepare_rerun_write,
@@ -290,6 +291,10 @@ async def rerun_task(
         CorePreconditionFailed: the database was installed by the other
             client family, or records none (subject ``rerun_task``, not
             retryable). Nothing is written.
+        CoreContractViolation: the family row of the database holds a value
+            that is not a client family: corrupt stored data (subject
+            ``rerun_task``; the message names the stored value). Nothing is
+            written.
         CoreError: the core of this process cannot run (forked after the
             core started, or stopped).
         A database error of a statement raises from the caller's driver.
@@ -332,6 +337,8 @@ async def rerun_task(
         case RerunClassNotRegistered(class_key=class_key):
             raise _class_not_registered(class_key)
         case RerunClientFamilyMismatch(exception=exception):
+            raise exception
+        case RerunUnknownStoredFamily(exception=exception):
             raise exception
         case RerunCallerKeyRefused(cause=cause):
             raise ValueError(cause)

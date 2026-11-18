@@ -87,8 +87,11 @@ before you upgrade a 0.7 deployment.
   Each has `subject`, the core operation, and `message`; all but
   `CoreContractViolation` have `retryable`. The declared types do not
   change. `rerun_task` raises `CorePreconditionFailed` for a database of the
-  other client family. A refused orphan cursor is `CoreServerError` with
-  `sqlstate` `'55P03'`.
+  other client family. A family row that holds neither `PYTHON` nor `RUST`
+  is corrupt stored data: the install, each write and `rerun_task` fail with
+  `CoreContractViolation`, whose message names the stored value, and write
+  nothing. A refused orphan cursor is `CoreServerError` with `sqlstate`
+  `'55P03'`.
 
 - **A process forked without exec after the core started cannot call
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
@@ -1254,7 +1257,8 @@ unless it starts with "Added".
   `rerun::TokioPostgresCaller` (feature `tokio-postgres`) and
   `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
   `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
-  { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
+  { stored }`, `UnknownStoredFamily` (a family row that holds no client
+  family), `CallerKeyRefused`, `IdMintRefused`, `Row`.
 - **The client writes each stored form as Python writes it**, as the shared
   vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
   - Task input: a send of a task with no parameters, and a schedule
