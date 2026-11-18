@@ -638,8 +638,8 @@ mod wait_tests {
     #[serial]
     async fn many_concurrent_result_waits_share_one_listener() {
         let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-            crate::broker::terminalization_matrix::migrated_pool().await,
-            &crate::broker::terminalization_matrix::migrated_database_url().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
+            &crate::test_support::migrated_database_url().await,
             crate::ClientFamily::Rust,
         ));
         let pool = broker.pool().clone();
@@ -685,7 +685,7 @@ mod wait_tests {
     #[serial]
     async fn a_wait_with_no_timeout_returns_not_found_for_a_missing_workflow() {
         let broker = PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
         broker.ensure_schema_initialized().await.expect("schema");
@@ -706,7 +706,7 @@ mod wait_tests {
     #[serial]
     async fn the_wait_returns_immediately_for_a_paused_workflow() {
         let broker = Arc::new(PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
@@ -746,7 +746,7 @@ mod wait_tests {
     #[serial]
     async fn the_wait_returns_a_structured_expiry_error_as_stored() {
         let broker = Arc::new(PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
@@ -807,7 +807,7 @@ mod wait_tests {
     #[serial]
     async fn the_wait_returns_a_malformed_expiry_error_as_stored() {
         let broker = Arc::new(PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");

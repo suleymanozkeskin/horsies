@@ -63,9 +63,14 @@ pub(crate) const LISTENER_QUEUE_CAPACITY: usize = 1024;
 /// Why a test statement, a checkout or a connect failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
-    /// The server refused the statement, or the session ended.
+    /// The server refused the statement: its SQLSTATE, message, detail and
+    /// constraint.
     #[error("{0}")]
-    Database(#[from] tokio_postgres::Error),
+    Database(Box<DbError>),
+    /// The driver failed: the session ended, or an I/O, TLS or protocol
+    /// error.
+    #[error("{0}")]
+    Driver(tokio_postgres::Error),
     /// `fetch_one` met no row.
     #[error("the statement returned no row")]
     RowNotFound,
@@ -98,12 +103,24 @@ pub(crate) enum Error {
     TooDeep,
 }
 
+impl From<tokio_postgres::Error> for Error {
+    /// A refusal of the server is [`Error::Database`]; any other driver error
+    /// is [`Error::Driver`].
+    fn from(error: tokio_postgres::Error) -> Error {
+        match error.as_db_error() {
+            Some(server) => Error::Database(Box::new(server.clone())),
+            None => Error::Driver(error),
+        }
+    }
+}
+
 impl Error {
     /// The server's error, when the server refused the statement.
     pub(crate) fn as_database_error(&self) -> Option<&DbError> {
         match self {
-            Error::Database(error) => error.as_db_error(),
-            Error::Connect(_)
+            Error::Database(error) => Some(error.as_ref()),
+            Error::Driver(_)
+            | Error::Connect(_)
             | Error::RowNotFound
             | Error::Decode { .. }
             | Error::Url(_)
@@ -408,7 +425,7 @@ impl<'q> Query<'q> {
 
     /// Runs the statement; returns the count of its command tag.
     ///
-    /// Errors: [`Error::Database`], or a checkout error of a pool.
+    /// Errors: [`Error::Database`], [`Error::Driver`], or a checkout error of a pool.
     pub(crate) async fn execute<'t>(
         self,
         target: impl Into<Target<'t>>,
@@ -420,14 +437,14 @@ impl<'q> Query<'q> {
     /// The first row.
     ///
     /// Errors: [`Error::RowNotFound`] when there is none;
-    /// [`Error::Database`], or a checkout error of a pool.
+    /// [`Error::Database`], [`Error::Driver`], or a checkout error of a pool.
     pub(crate) async fn fetch_one<'t>(self, target: impl Into<Target<'t>>) -> Result<Row, Error> {
         self.fetch_optional(target).await?.ok_or(Error::RowNotFound)
     }
 
     /// The first row, or `None` when there is none.
     ///
-    /// Errors: [`Error::Database`], or a checkout error of a pool.
+    /// Errors: [`Error::Database`], [`Error::Driver`], or a checkout error of a pool.
     pub(crate) async fn fetch_optional<'t>(
         self,
         target: impl Into<Target<'t>>,
@@ -437,7 +454,7 @@ impl<'q> Query<'q> {
 
     /// Every row, in the order the server sent them.
     ///
-    /// Errors: [`Error::Database`], or a checkout error of a pool.
+    /// Errors: [`Error::Database`], [`Error::Driver`], or a checkout error of a pool.
     pub(crate) async fn fetch_all<'t>(
         self,
         target: impl Into<Target<'t>>,
@@ -473,7 +490,7 @@ impl<'q, T: FromSqlOwned> QueryScalar<'q, T> {
     /// The first column of the first row.
     ///
     /// Errors: [`Error::RowNotFound`] when there is no row; [`Error::Decode`];
-    /// [`Error::Database`], or a checkout error of a pool.
+    /// [`Error::Database`], [`Error::Driver`], or a checkout error of a pool.
     pub(crate) async fn fetch_one<'t>(self, target: impl Into<Target<'t>>) -> Result<T, Error> {
         let row = self.query.fetch_one(target).await?;
         column::<T>(&row, 0)
@@ -481,7 +498,7 @@ impl<'q, T: FromSqlOwned> QueryScalar<'q, T> {
 
     /// The first column of the first row, or `None` when there is no row.
     ///
-    /// Errors: [`Error::Decode`]; [`Error::Database`], or a checkout error of
+    /// Errors: [`Error::Decode`]; [`Error::Database`], [`Error::Driver`], or a checkout error of
     /// a pool.
     pub(crate) async fn fetch_optional<'t>(
         self,
@@ -495,7 +512,7 @@ impl<'q, T: FromSqlOwned> QueryScalar<'q, T> {
 
     /// The first column of every row.
     ///
-    /// Errors: [`Error::Decode`]; [`Error::Database`], or a checkout error of
+    /// Errors: [`Error::Decode`]; [`Error::Database`], [`Error::Driver`], or a checkout error of
     /// a pool.
     pub(crate) async fn fetch_all<'t>(
         self,
@@ -533,7 +550,7 @@ impl<'q, T: FromTestRow> QueryAs<'q, T> {
     /// The first row.
     ///
     /// Errors: [`Error::RowNotFound`] when there is no row; [`Error::Decode`];
-    /// [`Error::Database`], or a checkout error of a pool.
+    /// [`Error::Database`], [`Error::Driver`], or a checkout error of a pool.
     pub(crate) async fn fetch_one<'t>(self, target: impl Into<Target<'t>>) -> Result<T, Error> {
         let row = self.query.fetch_one(target).await?;
         T::from_row(&row)
@@ -541,7 +558,7 @@ impl<'q, T: FromTestRow> QueryAs<'q, T> {
 
     /// The first row, or `None` when there is no row.
     ///
-    /// Errors: [`Error::Decode`]; [`Error::Database`], or a checkout error of
+    /// Errors: [`Error::Decode`]; [`Error::Database`], [`Error::Driver`], or a checkout error of
     /// a pool.
     pub(crate) async fn fetch_optional<'t>(
         self,
@@ -555,7 +572,7 @@ impl<'q, T: FromTestRow> QueryAs<'q, T> {
 
     /// Every row.
     ///
-    /// Errors: [`Error::Decode`]; [`Error::Database`], or a checkout error of
+    /// Errors: [`Error::Decode`]; [`Error::Database`], [`Error::Driver`], or a checkout error of
     /// a pool.
     pub(crate) async fn fetch_all<'t>(
         self,
@@ -589,6 +606,72 @@ impl RawSql<'_> {
     ) -> Result<Executed, Error> {
         let rows_affected = target.into().script(self.sql).await?;
         Ok(Executed { rows_affected })
+    }
+}
+
+/// A test database that a fixture reaches by its URL.
+pub(crate) trait TestDatabaseUrl {
+    /// The URL of the database.
+    fn test_url(&self) -> String;
+}
+
+impl TestDatabaseUrl for TestPool {
+    fn test_url(&self) -> String {
+        self.url().to_owned()
+    }
+}
+
+impl<T: TestDatabaseUrl + ?Sized> TestDatabaseUrl for &T {
+    fn test_url(&self) -> String {
+        (**self).test_url()
+    }
+}
+
+/// The host and the port of a test database URL
+/// (`postgresql://user:password@host:port/database?query`): the port is
+/// 5432 when the URL names none.
+///
+/// # Panics
+///
+/// When the URL has no scheme or its port is not a number: a defect of the
+/// test.
+pub(crate) fn endpoint_of(url: &str) -> (String, u16) {
+    let (_scheme, rest) = url.split_once("://").expect("the test URL has a scheme");
+    let authority_end = rest
+        .find(|character: char| character == '/' || character == '?')
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, after)| after);
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) if !host.ends_with(':') && !port.ends_with(']') => (host, port),
+        Some(_) | None => (host_port, ""),
+    };
+    let port = match port {
+        "" => 5432,
+        digits => digits
+            .parse()
+            .expect("the port of the test URL is a number"),
+    };
+    (host.trim_matches(['[', ']']).to_owned(), port)
+}
+
+/// `url` with its host and port replaced; the user, the password, the
+/// database and the query are kept.
+///
+/// # Panics
+///
+/// When the URL has no scheme: a defect of the test.
+pub(crate) fn with_endpoint(url: &str, host: &str, port: u16) -> String {
+    let (scheme, rest) = url.split_once("://").expect("the test URL has a scheme");
+    let authority_end = rest
+        .find(|character: char| character == '/' || character == '?')
+        .unwrap_or(rest.len());
+    let (authority, remainder) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((user_info, _)) => format!("{scheme}://{user_info}@{host}:{port}{remainder}"),
+        None => format!("{scheme}://{host}:{port}{remainder}"),
     }
 }
 
@@ -1171,11 +1254,11 @@ impl TestListener {
 
     /// The next notification; waits for one.
     ///
-    /// Errors: [`Error::Database`] (closed) when the session ended.
+    /// Errors: [`Error::Driver`] (closed) when the session ended.
     pub(crate) async fn recv(&mut self) -> Result<Notification, Error> {
         match self.notifications.recv().await {
             Some(notification) => Ok(notification),
-            None => Err(Error::Database(self.closed_error().await)),
+            None => Err(Error::from(self.closed_error().await)),
         }
     }
 

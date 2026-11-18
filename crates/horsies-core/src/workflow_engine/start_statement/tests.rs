@@ -651,7 +651,7 @@ fn a_build_that_the_client_did_not_run_refuses_the_start() {
 #[tokio::test]
 #[serial]
 async fn the_start_writes_the_tree_in_one_statement() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let broker = Arc::new(PostgresBroker::from_pool(
         pool.clone(),
         crate::ClientFamily::Rust,

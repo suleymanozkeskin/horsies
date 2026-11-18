@@ -9,8 +9,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
@@ -20,11 +18,13 @@ use crate::broker::child_writes::{
     WriteDeadline, CHILD_STATEMENT_BOUND, FINALIZING_MARKER_BOUND, FINALIZING_MARKER_END,
     START_ATTEMPT_END,
 };
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::{OrphanSelfHeal, PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
 use crate::core::registry::task::TaskRegistry;
 use crate::db::{CheckoutClass, CorePool, KeptOpen};
+use crate::test_support::migrated_database_url;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
 use crate::worker::executor::protocol::StopReason;
 
 const WORKER_ID: &str = "start-attempt-worker";
@@ -66,18 +66,20 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
 }
 
 /// A child context on `pool`; its frames go to a socket no one reads.
-fn context(pool: PgPool) -> (HostContext, UnixStream) {
-    context_on(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust))
+fn context(pool: TestPool) -> (HostContext, UnixStream) {
+    context_on(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ))
 }
 
 /// A child context on a port where no server listens: every checkout fails
 /// at once.
 fn unreachable_context() -> (HostContext, UnixStream) {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(100))
-        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-        .expect("a lazy pool opens no connection");
+        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
     context(pool)
 }
 
@@ -99,9 +101,9 @@ async fn one_connection_child_broker() -> PostgresBroker {
 
 /// A CLAIMED plain row held by [`WORKER_ID`]; `good_until` passed when
 /// `expired`. Returns the id and the claim generation.
-async fn seed_claimed(pool: &PgPool, expired: bool) -> (Uuid, DateTime<Utc>) {
+async fn seed_claimed(pool: &TestPool, expired: bool) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
-    let generation = sqlx::query_scalar(
+    let generation = sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -145,21 +147,21 @@ fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
     }
 }
 
-async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read the live row")
 }
 
-async fn remove_task(pool: &PgPool, task_id: Uuid) {
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
@@ -175,8 +177,8 @@ fn workflow_facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
 
 /// Make the seeded row of `task_id` a workflow task. A workflow task has no
 /// command fingerprint (baseline `horsies_tasks_command_fingerprint_by_origin`).
-async fn make_workflow_task(pool: &PgPool, task_id: Uuid) {
-    sqlx::query(
+async fn make_workflow_task(pool: &TestPool, task_id: Uuid) {
+    sql::query(
         "UPDATE horsies_tasks
          SET is_workflow_task = TRUE,
              command_fingerprint = NULL,
@@ -192,9 +194,9 @@ async fn make_workflow_task(pool: &PgPool, task_id: Uuid) {
 /// A workflow in `workflow_status` with one ENQUEUED task node linked to
 /// `task_id`, every baseline column named that has no NULL. Returns the
 /// workflow id.
-async fn link_to_workflow(pool: &PgPool, task_id: Uuid, workflow_status: &str) -> Uuid {
+async fn link_to_workflow(pool: &TestPool, task_id: Uuid, workflow_status: &str) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -206,7 +208,7 @@ async fn link_to_workflow(pool: &PgPool, task_id: Uuid, workflow_status: &str) -
     .execute(pool)
     .await
     .expect("seed the workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, max_retries,
@@ -226,8 +228,8 @@ async fn link_to_workflow(pool: &PgPool, task_id: Uuid, workflow_status: &str) -
 
 /// Set the status of `workflow_id` on `connection`; in an open transaction
 /// the write holds the workflow row until the transaction ends.
-async fn set_workflow_status(connection: &mut PgConnection, workflow_id: Uuid, status: &str) {
-    sqlx::query("UPDATE horsies_workflows SET status = $2, updated_at = NOW() WHERE id = $1")
+async fn set_workflow_status(connection: &mut TestConnection, workflow_id: Uuid, status: &str) {
+    sql::query("UPDATE horsies_workflows SET status = $2, updated_at = NOW() WHERE id = $1")
         .bind(workflow_id)
         .bind(status)
         .execute(connection)
@@ -235,8 +237,8 @@ async fn set_workflow_status(connection: &mut PgConnection, workflow_id: Uuid, s
         .expect("set the workflow status");
 }
 
-async fn node_status(pool: &PgPool, workflow_id: Uuid) -> String {
-    sqlx::query_scalar("SELECT status::text FROM horsies_workflow_tasks WHERE workflow_id = $1")
+async fn node_status(pool: &TestPool, workflow_id: Uuid) -> String {
+    sql::query_scalar("SELECT status::text FROM horsies_workflow_tasks WHERE workflow_id = $1")
         .bind(workflow_id)
         .fetch_one(pool)
         .await
@@ -245,8 +247,8 @@ async fn node_status(pool: &PgPool, workflow_id: Uuid) -> String {
 
 /// The status of the one node of `workflow_id`, the task that the node
 /// links, and the status of the workflow.
-async fn node_and_workflow(pool: &PgPool, workflow_id: Uuid) -> (String, Option<Uuid>, String) {
-    sqlx::query_as(
+async fn node_and_workflow(pool: &TestPool, workflow_id: Uuid) -> (String, Option<Uuid>, String) {
+    sql::query_as(
         "SELECT n.status::text, n.task_id, w.status::text
          FROM horsies_workflow_tasks n
          JOIN horsies_workflows w ON w.id = n.workflow_id
@@ -258,8 +260,8 @@ async fn node_and_workflow(pool: &PgPool, workflow_id: Uuid) -> (String, Option<
     .expect("read the node and its workflow")
 }
 
-async fn remove_workflow(pool: &PgPool, workflow_id: Uuid) {
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+async fn remove_workflow(pool: &TestPool, workflow_id: Uuid) {
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(pool)
         .await
@@ -267,8 +269,8 @@ async fn remove_workflow(pool: &PgPool, workflow_id: Uuid) {
 }
 
 /// Lock the row of `task_id` on `connection` until its transaction ends.
-async fn lock_the_row(connection: &mut PgConnection, task_id: Uuid) {
-    sqlx::query("SELECT 1 FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+async fn lock_the_row(connection: &mut TestConnection, task_id: Uuid) {
+    sql::query("SELECT 1 FROM horsies_tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .execute(connection)
         .await
@@ -278,8 +280,8 @@ async fn lock_the_row(connection: &mut PgConnection, task_id: Uuid) {
 /// The status and the finalizing marker of the row of `task_id`, read under
 /// its row lock: a write that waited on the lock before this read ends
 /// first, so the read sees it.
-async fn row_after_lock_waiters(pool: &PgPool, task_id: Uuid) -> (String, Option<DateTime<Utc>>) {
-    sqlx::query_as("SELECT status, finalizing_at FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+async fn row_after_lock_waiters(pool: &TestPool, task_id: Uuid) -> (String, Option<DateTime<Utc>>) {
+    sql::query_as("SELECT status, finalizing_at FROM horsies_tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -287,9 +289,9 @@ async fn row_after_lock_waiters(pool: &PgPool, task_id: Uuid) -> (String, Option
 }
 
 /// Return once a backend whose statement names `function` waits on a lock.
-async fn until_a_backend_waits_in(pool: &PgPool, function: &str) {
+async fn until_a_backend_waits_in(pool: &TestPool, function: &str) {
     for _ in 0..WAIT_POLLS {
-        let waiting: bool = sqlx::query_scalar(
+        let waiting: bool = sql::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM pg_stat_activity
                  WHERE datname = current_database()
@@ -327,7 +329,7 @@ async fn until_a_checkout_waits(pool: &CorePool) {
 #[tokio::test]
 #[serial]
 async fn a_held_claim_starts_running_with_the_process_of_its_child() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
     let (context, _peer) = context(pool.clone());
 
@@ -347,7 +349,7 @@ async fn a_held_claim_starts_running_with_the_process_of_its_child() {
 #[tokio::test]
 #[serial]
 async fn a_start_of_another_claim_generation_is_a_lost_claim() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
     let (context, _peer) = context(pool.clone());
     let before = live_row(&pool, task_id).await;
@@ -368,7 +370,7 @@ async fn a_start_of_another_claim_generation_is_a_lost_claim() {
 #[tokio::test]
 #[serial]
 async fn a_passed_deadline_expires_the_claim_before_the_start() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, true).await;
     let (context, _peer) = context(pool.clone());
 
@@ -377,7 +379,7 @@ async fn a_passed_deadline_expires_the_claim_before_the_start() {
     assert!(matches!(started, Started::Stopped(StopReason::TaskExpired)));
     assert_eq!(live_row(&pool, task_id).await, None);
     let status: Option<String> =
-        sqlx::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .fetch_optional(&pool)
             .await
@@ -437,7 +439,7 @@ async fn a_start_that_cannot_reach_the_database_is_ownership_unconfirmed() {
 async fn a_start_after_the_claim_lease_ended_is_a_lost_claim_with_no_write() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_tasks SET claim_expires_at = NOW() - interval '1 second'
          WHERE id = $1",
     )
@@ -469,14 +471,14 @@ async fn a_refused_expiry_before_the_start_is_a_lost_claim() {
     let (context, _peer) = context(pool.clone());
     let run = facts(task_id, generation);
     let mut lock_holder = pool.begin().await.expect("begin the lock holder");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))")
+    sql::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))")
         .bind(task_id)
         .execute(&mut *lock_holder)
         .await
         .expect("take the advisory lock of the task");
     let driver = async {
         until_a_backend_waits_in(&pool, EXPIRY_FUNCTION).await;
-        sqlx::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
+        sql::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
             .bind(task_id)
             .bind(OTHER_WORKER_ID)
             .execute(&pool)
@@ -639,7 +641,7 @@ async fn the_first_runner_beat_names_the_worker_and_the_process_of_the_child() {
     let started = start_attempt(&context, &facts(task_id, generation)).await;
 
     assert!(matches!(started, Started::Running));
-    let beats: Vec<(String, String, String, i32)> = sqlx::query_as(
+    let beats: Vec<(String, String, String, i32)> = sql::query_as(
         "SELECT role, sender_id, hostname, pid FROM horsies_heartbeats WHERE task_id = $1",
     )
     .bind(task_id)
@@ -664,7 +666,7 @@ async fn the_first_runner_beat_names_the_worker_and_the_process_of_the_child() {
 async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_expired() {
     let pool = migrated_pool().await;
     let (task_id, _generation) = seed_claimed(&pool, true).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let applied = broker
         .expire_claimed_task_before_start(task_id, WORKER_ID, WriteDeadline::start_attempt())
@@ -677,7 +679,7 @@ async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_
 
     assert_eq!(applied, PrestartExpiry::Expired);
     assert_eq!(replayed, PrestartExpiry::Expired);
-    let (error_code, result): (Option<String>, Option<String>) = sqlx::query_as(
+    let (error_code, result): (Option<String>, Option<String>) = sql::query_as(
         "SELECT error_code, convert_from(result_payload, 'UTF8')
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -699,9 +701,9 @@ async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_
 #[serial]
 async fn a_refused_or_absent_expiry_is_not_an_expiry() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let (of_another_worker, _) = seed_claimed(&pool, true).await;
-    sqlx::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
+    sql::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
         .bind(of_another_worker)
         .bind(OTHER_WORKER_ID)
         .execute(&pool)

@@ -19,14 +19,15 @@ use std::process::{Child, Command, Stdio};
 
 use chrono::Utc;
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
+use crate::broker::pools::core_pool_for_test_url;
 use crate::db::{ConnectError, ConnectFailure, CorePool, MaskedUrl, DEFAULT_SOCKET_SETTINGS};
+use crate::test_support::migrated_database_url;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::recovery::owner_gone::OwnerGoneStep;
 use crate::worker::recovery::{owner_gone_step, UnheldOwners};
 use crate::worker::runner_beats::DispatchRunner;
@@ -345,8 +346,8 @@ impl Drop for Probe {
 // ---------------------------------------------------------------------------
 
 /// The backend that holds the liveness lock of `worker_id`, if any.
-async fn holder_backend(pool: &PgPool, worker_id: &str) -> Option<i32> {
-    sqlx::query_scalar(HOLDER_SQL)
+async fn holder_backend(pool: &TestPool, worker_id: &str) -> Option<i32> {
+    sql::query_scalar(HOLDER_SQL)
         .bind(worker_id)
         .fetch_optional(pool)
         .await
@@ -355,7 +356,7 @@ async fn holder_backend(pool: &PgPool, worker_id: &str) -> Option<i32> {
 
 /// Wait until a backend holds the liveness lock of `worker_id` (other than
 /// `not`, when given), and return it.
-async fn wait_for_holder(pool: &PgPool, worker_id: &str, not: Option<i32>) -> i32 {
+async fn wait_for_holder(pool: &TestPool, worker_id: &str, not: Option<i32>) -> i32 {
     let until = Instant::now() + WAIT;
     loop {
         match holder_backend(pool, worker_id).await {
@@ -371,8 +372,8 @@ async fn wait_for_holder(pool: &PgPool, worker_id: &str, not: Option<i32>) -> i3
 }
 
 /// End the session of backend `pid`.
-async fn terminate(pool: &PgPool, pid: i32) {
-    let ended: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+async fn terminate(pool: &TestPool, pid: i32) {
+    let ended: bool = sql::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(pid)
         .fetch_one(pool)
         .await
@@ -381,8 +382,8 @@ async fn terminate(pool: &PgPool, pid: i32) {
 }
 
 /// The committed generation of `worker_id`, when it has a liveness row.
-async fn committed_generation(pool: &PgPool, worker_id: &str) -> Option<i64> {
-    sqlx::query_scalar("SELECT generation FROM horsies_worker_liveness WHERE worker_id = $1")
+async fn committed_generation(pool: &TestPool, worker_id: &str) -> Option<i64> {
+    sql::query_scalar("SELECT generation FROM horsies_worker_liveness WHERE worker_id = $1")
         .bind(worker_id)
         .fetch_optional(pool)
         .await
@@ -392,7 +393,7 @@ async fn committed_generation(pool: &PgPool, worker_id: &str) -> Option<i64> {
 /// Wait until the liveness row of `worker_id` holds a committed generation
 /// other than `not` (when given), and return it. The lock appears in the
 /// lock table before the transaction that writes its generation commits.
-async fn wait_for_generation(pool: &PgPool, worker_id: &str, not: Option<i64>) -> i64 {
+async fn wait_for_generation(pool: &TestPool, worker_id: &str, not: Option<i64>) -> i64 {
     let until = Instant::now() + WAIT;
     loop {
         match committed_generation(pool, worker_id).await {
@@ -415,8 +416,8 @@ struct ConnectionGate {
 }
 
 impl ConnectionGate {
-    async fn open(pool: &PgPool, url: &str) -> ConnectionGate {
-        let database: String = sqlx::query_scalar("SELECT current_database()::text")
+    async fn open(pool: &TestPool, url: &str) -> ConnectionGate {
+        let database: String = sql::query_scalar("SELECT current_database()::text")
             .fetch_one(pool)
             .await
             .expect("read the test database name");
@@ -495,11 +496,11 @@ impl RowBlocker {
 }
 
 /// One RUNNING and one CLAIMED row of `worker_id`.
-async fn seed_rows(pool: &PgPool, worker_id: &str) -> (Uuid, Uuid) {
+async fn seed_rows(pool: &TestPool, worker_id: &str) -> (Uuid, Uuid) {
     let running = Uuid::new_v4();
     let claimed = Uuid::new_v4();
     for (sql, task_id) in [(SEED_RUNNING_SQL, running), (SEED_CLAIMED_SQL, claimed)] {
-        sqlx::query(sql)
+        sql::query(sql)
             .bind(task_id)
             .bind(worker_id)
             .execute(pool)
@@ -522,9 +523,9 @@ enum RowState {
     Absent,
 }
 
-async fn row_state(pool: &PgPool, task_id: Uuid) -> RowState {
+async fn row_state(pool: &TestPool, task_id: Uuid) -> RowState {
     let live: Option<String> =
-        sqlx::query_scalar("SELECT status::text FROM horsies_tasks WHERE id = $1")
+        sql::query_scalar("SELECT status::text FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_optional(pool)
             .await
@@ -532,7 +533,7 @@ async fn row_state(pool: &PgPool, task_id: Uuid) -> RowState {
     if let Some(status) = live {
         return RowState::Live(status);
     }
-    let moved: Option<(String, String)> = sqlx::query_as(
+    let moved: Option<(String, String)> = sql::query_as(
         "SELECT status::text, terminalization_kind::text FROM horsies_task_history \
          WHERE task_id = $1",
     )
@@ -632,7 +633,7 @@ async fn a_killed_worker_process_is_recovered_within_the_detection_time() {
     let _holder = wait_for_holder(&pool, &worker_id, None).await;
     let _generation = wait_for_generation(&pool, &worker_id, None).await;
     let (running, claimed) = seed_rows(&pool, &worker_id).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut memory = UnheldOwners::default();
 
     // A held lock is never read unheld, with no span at all.
@@ -679,7 +680,7 @@ async fn a_stalled_worker_that_keeps_its_lock_is_never_recovered() {
     let mut probe = Probe::start(&url, &worker_id, Duration::from_secs(60));
     let _holder = wait_for_holder(&pool, &worker_id, None).await;
     let (running, claimed) = seed_rows(&pool, &worker_id).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut memory = UnheldOwners::default();
 
     probe.stop();
@@ -715,10 +716,10 @@ async fn a_lock_lost_and_regained_within_the_bound_causes_no_recovery() {
     let mut probe = Probe::start(&url, &worker_id, bound);
     let first = wait_for_holder(&pool, &worker_id, None).await;
     let (running, claimed) = seed_rows(&pool, &worker_id).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut memory = UnheldOwners::default();
 
-    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+    let terminated: bool = sql::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(first)
         .fetch_one(&pool)
         .await
@@ -756,7 +757,7 @@ async fn a_lock_lost_past_the_bound_makes_the_worker_fail_closed() {
     let bound = Duration::from_secs(1);
     let mut probe = Probe::start(&url, &worker_id, bound);
     let holder = wait_for_holder(&pool, &worker_id, None).await;
-    let database: String = sqlx::query_scalar("SELECT current_database()::text")
+    let database: String = sql::query_scalar("SELECT current_database()::text")
         .fetch_one(&pool)
         .await
         .expect("read the test database name");
@@ -836,7 +837,7 @@ async fn two_losses_with_a_regain_between_two_reads_mark_no_owner_gone() {
     let first = wait_for_holder(&pool, &worker_id, None).await;
     let first_generation = wait_for_generation(&pool, &worker_id, None).await;
     let (running, claimed) = seed_rows(&pool, &worker_id).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut memory = UnheldOwners::default();
     let gate = ConnectionGate::open(&pool, &url).await;
     // This pass opens the connection of the core pool that the reads use
@@ -917,7 +918,7 @@ async fn a_single_loss_past_the_bound_marks_the_owner_gone() {
     gate.accept_new_connections().await;
     assert_eq!(code, Some(LIVENESS_LOCK_LOST_EXIT_CODE));
 
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut memory = UnheldOwners::default();
     let first_pass_at = Instant::now();
     let mut judged: u64 = 0;

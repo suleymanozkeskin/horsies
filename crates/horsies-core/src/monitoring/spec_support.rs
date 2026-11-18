@@ -13,18 +13,15 @@
 //! terminal time).
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{AttemptFailure, AttemptFailureKind};
 use crate::broker::PostgresBroker;
-use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::pages::HistoryWindow;
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::monitoring::resolve_monitoring_window;
-use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::test_support::TestDatabase;
 
 /// The worker that moves a row when the seed names none: the move fences on
@@ -43,38 +40,29 @@ const COMPLETED_RESULT: &str = r#"{"ok": true}"#;
 const FAILED_RESULT: &str = r#"{"err": {"error_code": "SEEDED"}}"#;
 
 /// A copy of the installed test template (`crate::test_support`) with
-/// history coverage and published readers, and a sqlx pool for the seeds and
-/// reads that still take one, for one test. [`SpecDatabase::drop`] removes
+/// history coverage and published readers, and a test pool for the seeds and
+/// reads, for one test. [`SpecDatabase::drop`] removes
 /// it; a test that panics before the drop leaves it to the drop at the
 /// shutdown of its runtime.
 pub(super) struct SpecDatabase {
-    pub(super) pool: PgPool,
+    pub(super) pool: TestPool,
     database: TestDatabase,
 }
 
 impl SpecDatabase {
     pub(super) async fn create() -> Self {
         let database = TestDatabase::create().await;
-        let pool = PgPoolOptions::new()
+        let pool = TestPoolOptions::new()
             .max_connections(5)
             .connect(database.url())
             .await
             .expect("connect to the test database");
-        let mut transaction = pool.begin().await.expect("open the coverage transaction");
-        let coverage =
-            ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
-                .await
-                .expect("cover the history partitions");
-        assert!(
-            matches!(coverage, CoverageOutcome::Ensured(_)),
-            "{coverage:?}"
-        );
-        transaction.commit().await.expect("commit the coverage");
+        crate::test_support::cover_partitions(database.url()).await;
         Self { pool, database }
     }
 
     pub(super) fn broker(&self) -> PostgresBroker {
-        PostgresBroker::from_pool(self.pool.clone(), crate::ClientFamily::Rust)
+        PostgresBroker::from_test_url(self.pool.url(), crate::ClientFamily::Rust)
     }
 
     /// The URL of this database, for a direct connection of the test.
@@ -191,8 +179,8 @@ impl LiveTask {
 
 /// Insert one live row. Every baseline column is named. A RUNNING row
 /// carries the pid and process name that its start writes.
-pub(super) async fn seed_live(pool: &PgPool, task: &LiveTask) {
-    sqlx::query(
+pub(super) async fn seed_live(pool: &TestPool, task: &LiveTask) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -274,7 +262,7 @@ fn assert_applied(outcome: &[TerminalizationOutcome], task_id: Uuid) {
 /// Seed `task` RUNNING under its worker, or under [`MOVING_WORKER`] when it
 /// names none, on its host, or on [`RUNNING_HOST`] when it names none, and
 /// return the worker that holds it.
-async fn seed_running(pool: &PgPool, task: &LiveTask) -> String {
+async fn seed_running(pool: &TestPool, task: &LiveTask) -> String {
     let worker = task
         .worker
         .clone()
@@ -294,7 +282,7 @@ async fn seed_running(pool: &PgPool, task: &LiveTask) -> String {
 }
 
 /// Insert the earlier attempt rows of `task_id`.
-async fn seed_attempts(pool: &PgPool, task_id: Uuid, attempts: &[(i32, bool, AttemptText)]) {
+async fn seed_attempts(pool: &TestPool, task_id: Uuid, attempts: &[(i32, bool, AttemptText)]) {
     for (attempt, will_retry, text) in attempts {
         seed_attempt(pool, task_id, *attempt, *will_retry, text).await;
     }
@@ -305,7 +293,7 @@ async fn seed_attempts(pool: &PgPool, task_id: Uuid, attempts: &[(i32, bool, Att
 /// worker first; a task with no worker runs under [`MOVING_WORKER`], and its
 /// history row then names no worker. A cancelled task is cancelled from
 /// PENDING.
-pub(super) async fn seed_terminal(pool: &PgPool, task: &LiveTask, ending: Ending) {
+pub(super) async fn seed_terminal(pool: &TestPool, task: &LiveTask, ending: Ending) {
     seed_terminal_with_attempts(pool, task, ending, &[]).await;
 }
 
@@ -314,7 +302,7 @@ pub(super) async fn seed_terminal(pool: &PgPool, task: &LiveTask, ending: Ending
 /// end of a completed or failed task writes attempt `retry_count + 1`
 /// itself. Each entry is `(attempt, will_retry, text)`.
 pub(super) async fn seed_terminal_with_attempts(
-    pool: &PgPool,
+    pool: &TestPool,
     task: &LiveTask,
     ending: Ending,
     attempts: &[(i32, bool, AttemptText)],
@@ -374,7 +362,7 @@ pub(super) async fn seed_terminal_with_attempts(
         Ending::Completed | Ending::Failed { .. } => task.worker.is_none(),
     };
     if moved_by_placeholder {
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_task_history SET last_claimed_worker_id = NULL WHERE task_id = $1",
         )
         .bind(task.id)
@@ -385,8 +373,12 @@ pub(super) async fn seed_terminal_with_attempts(
 }
 
 /// Store `error_code` on the history row of `task_id`.
-pub(super) async fn set_history_error_code(pool: &PgPool, task_id: Uuid, error_code: Option<&str>) {
-    sqlx::query("UPDATE horsies_task_history SET error_code = $2 WHERE task_id = $1")
+pub(super) async fn set_history_error_code(
+    pool: &TestPool,
+    task_id: Uuid,
+    error_code: Option<&str>,
+) {
+    sql::query("UPDATE horsies_task_history SET error_code = $2 WHERE task_id = $1")
         .bind(task_id)
         .bind(error_code)
         .execute(pool)
@@ -397,8 +389,8 @@ pub(super) async fn set_history_error_code(pool: &PgPool, task_id: Uuid, error_c
 /// Store `status` on the history row of `task_id`. The history table has no
 /// status CHECK, so a value that is not a task status can be stored, as
 /// Python's `stored_history_status`.
-pub(super) async fn set_history_status(pool: &PgPool, task_id: Uuid, status: &str) {
-    sqlx::query("UPDATE horsies_task_history SET status = $2 WHERE task_id = $1")
+pub(super) async fn set_history_status(pool: &TestPool, task_id: Uuid, status: &str) {
+    sql::query("UPDATE horsies_task_history SET status = $2 WHERE task_id = $1")
         .bind(task_id)
         .bind(status)
         .execute(pool)
@@ -407,7 +399,7 @@ pub(super) async fn set_history_status(pool: &PgPool, task_id: Uuid, status: &st
 }
 
 /// Fail one task per code, each under its own task name `{prefix}{index}`.
-pub(super) async fn seed_failures(pool: &PgPool, prefix: &str, error_codes: &[String]) {
+pub(super) async fn seed_failures(pool: &TestPool, prefix: &str, error_codes: &[String]) {
     for (index, error_code) in error_codes.iter().enumerate() {
         let task = LiveTask::pending(&format!("{prefix}{index}"));
         seed_terminal(pool, &task, Ending::failed(error_code)).await;
@@ -417,13 +409,13 @@ pub(super) async fn seed_failures(pool: &PgPool, prefix: &str, error_codes: &[St
 /// Date the history row of `task_id`: enqueued, started (or never started)
 /// and ended the given number of seconds ago.
 pub(super) async fn set_history_times(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     enqueued_seconds_ago: i64,
     started_seconds_ago: Option<i64>,
     terminal_seconds_ago: i64,
 ) {
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET enqueued_at = NOW() - make_interval(secs => $2),
              started_at = CASE WHEN $3::bigint IS NULL THEN NULL
@@ -451,13 +443,13 @@ pub(super) struct AttemptText {
 /// Insert attempt `attempt` of a live task: FAILED, started 50 s and
 /// finished 40 s ago. A later move folds it into the attempt snapshot.
 pub(super) async fn seed_attempt(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     attempt: i32,
     will_retry: bool,
     text: &AttemptText,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_task_attempts (
             task_id, attempt, outcome, will_retry, started_at, finished_at,
             error_code, error_message, failed_reason, worker_id,
@@ -505,8 +497,8 @@ impl RunSeed {
 }
 
 /// Insert one workflow run. Every baseline column is named.
-pub(super) async fn seed_run(pool: &PgPool, run: &RunSeed) {
-    sqlx::query(
+pub(super) async fn seed_run(pool: &TestPool, run: &RunSeed) {
+    sql::query(
         "INSERT INTO horsies_workflows (
             id, name, definition_key, status, on_error, output_task_index, success_policy,
             result, error, parent_workflow_id, parent_task_index, root_workflow_id, depth,
@@ -576,12 +568,12 @@ impl NodeSeed {
 /// named. A sub-workflow node carries `sub_workflow_params = 'NOT_GIVEN'`
 /// and a task node none (`horsies_workflow_tasks_sub_workflow_params_by_kind`;
 /// Python `tests/integration/monitoring_seeding.py:576-600`).
-pub(super) async fn seed_node(pool: &PgPool, node: &NodeSeed) {
+pub(super) async fn seed_node(pool: &TestPool, node: &NodeSeed) {
     let (is_subworkflow, task_id, child) = match node.kind {
         NodeKind::Task { task_id } => (false, task_id, None),
         NodeKind::SubWorkflow { child } => (true, None, child),
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
             downstream_subworkflow, sub_workflow_params,
             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,

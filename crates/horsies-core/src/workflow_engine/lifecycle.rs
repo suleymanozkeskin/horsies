@@ -633,7 +633,7 @@ mod resume_idempotency_tests {
     #[serial]
     async fn resume_of_a_running_workflow_writes_nothing() {
         let broker = PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
         broker.ensure_schema_initialized().await.expect("schema");
@@ -670,7 +670,7 @@ mod resume_idempotency_tests {
     #[serial]
     async fn resume_on_consistent_running_workflow_is_noop_false() {
         let broker = PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
         broker.ensure_schema_initialized().await.expect("schema");
@@ -703,7 +703,7 @@ mod resume_idempotency_tests {
     #[serial]
     async fn resume_fails_a_ready_node_whose_args_from_names_a_static_member() {
         let broker = PostgresBroker::from_pool(
-            crate::broker::enqueue_history_tests::migrated_pool().await,
+            crate::broker::enqueue_history_tests::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
         let pool = broker.pool().clone();
@@ -774,7 +774,7 @@ mod resume_idempotency_tests {
     #[serial]
     async fn p6_workflow_enqueue_lifecycle_resume_persists_never_eligible_facts() {
         let broker = PostgresBroker::from_pool(
-            crate::broker::enqueue_history_tests::migrated_pool().await,
+            crate::broker::enqueue_history_tests::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
         let pool = broker.pool().clone();
@@ -1036,7 +1036,7 @@ mod p7_lifecycle_tests {
     #[tokio::test]
     #[serial]
     async fn resume_recovery_is_restricted_to_the_resumed_workflow_tree() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let root_id = Uuid::new_v4();
         let child_id = Uuid::new_v4();
         let unrelated_id = Uuid::new_v4();
@@ -1075,7 +1075,7 @@ mod p7_lifecycle_tests {
     #[tokio::test]
     #[serial]
     async fn pause_relocates_claimed_backing_and_resume_mints_a_fresh_uuid7() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let old_task_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
@@ -1134,7 +1134,7 @@ mod p7_lifecycle_tests {
     #[tokio::test]
     #[serial]
     async fn paused_expiry_stores_structured_error_and_archives_backing_task() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "PAUSED", None).await;
@@ -1193,7 +1193,7 @@ mod p7_lifecycle_tests {
     #[tokio::test]
     #[serial]
     async fn expired_child_fails_its_parent_node_and_parent_workflow() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let parent_id = Uuid::new_v4();
         let child_id = Uuid::new_v4();
         seed_workflow(&pool, parent_id, "RUNNING", None).await;
@@ -1279,7 +1279,7 @@ mod p7_lifecycle_tests {
     #[tokio::test]
     #[serial]
     async fn paused_child_expiry_commits_before_poisoned_parent_recovery() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let parent_id = Uuid::new_v4();
         let child_id = Uuid::new_v4();
         seed_workflow(&pool, parent_id, "RUNNING", None).await;
@@ -1468,7 +1468,7 @@ mod cancel_lock_order_tests {
     #[serial]
     async fn cancel_matches_completion_lock_order_no_deadlock() {
         let broker = PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
         broker.ensure_schema_initialized().await.expect("schema");
@@ -1616,7 +1616,7 @@ mod cancel_tree_tests {
     #[tokio::test]
     #[serial]
     async fn a_tree_cancel_sets_completed_at_and_skips_nodes_with_completed_at() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let parent_id = Uuid::new_v4();
         let child_id = Uuid::new_v4();
         seed_workflow(&pool, parent_id, "RUNNING", None).await;
@@ -1646,7 +1646,7 @@ mod cancel_tree_tests {
     #[tokio::test]
     #[serial]
     async fn a_failed_descendant_cancel_rolls_back_the_whole_tree() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let parent_id = Uuid::new_v4();
         let child_id = Uuid::new_v4();
         seed_workflow(&pool, parent_id, "RUNNING", None).await;
@@ -1841,7 +1841,7 @@ mod client_family_tests {
     #[tokio::test]
     #[serial]
     async fn pause_resume_and_cancel_of_another_family_write_nothing() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO horsies_workflows (

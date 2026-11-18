@@ -23,13 +23,13 @@
 
 use chrono::Utc;
 use serial_test::serial;
-use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{send_error_from_enqueue, TaskSendErrorCode, TaskSendPayload};
+use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
 
 /// Enqueues of the transaction-pool test: enough statements to meet a
 /// prepared-statement collision if the broker used named statements.
@@ -96,17 +96,14 @@ impl PgbouncerUrls {
         let direct = template_url("HORSIES_TEST_DATABASE_URL_DIRECT", 15432);
         let database_name = format!("horsies_core_pgbouncer_{label}_{}", Uuid::new_v4().simple());
         let admin = with_database(&direct, "postgres");
-        let mut connection = PgConnection::connect(&admin)
+        let mut connection = TestConnection::connect(&admin)
             .await
             .expect("connect to the admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+        sql::query(&format!("CREATE DATABASE \"{database_name}\""))
             .execute(&mut connection)
             .await
             .expect("create the test database");
-        connection
-            .close()
-            .await
-            .expect("close the admin connection");
+        connection.close().await;
         Self {
             admin,
             direct: with_database(&direct, &database_name),
@@ -127,20 +124,17 @@ impl PgbouncerUrls {
     }
 
     async fn drop(self) {
-        let mut connection = PgConnection::connect(&self.admin)
+        let mut connection = TestConnection::connect(&self.admin)
             .await
             .expect("connect to the admin database");
-        sqlx::query(&format!(
+        sql::query(&format!(
             "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
             self.database_name
         ))
         .execute(&mut connection)
         .await
         .expect("drop the test database");
-        connection
-            .close()
-            .await
-            .expect("close the admin connection");
+        connection.close().await;
     }
 }
 
@@ -191,8 +185,8 @@ async fn enqueue_probe(
         .await
 }
 
-async fn direct_pool(url: &str) -> PgPool {
-    sqlx::postgres::PgPoolOptions::new()
+async fn direct_pool(url: &str) -> TestPool {
+    TestPoolOptions::new()
         .max_connections(1)
         .connect(url)
         .await
@@ -227,6 +221,8 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
         .await
         .expect("the session URL delivers a NOTIFY");
 
+    // The session connection of the broker's sqlx session pool: this block
+    // moves to the core session pool with the removal of the sqlx pools.
     let mut session = broker
         .session_pool()
         .acquire()
@@ -268,7 +264,7 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
     }
     let direct = direct_pool(&urls.direct).await;
     let stored: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = ANY($1::uuid[])")
+        sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = ANY($1::uuid[])")
             .bind(&task_ids)
             .fetch_one(&direct)
             .await
@@ -340,7 +336,7 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
 
     assert_eq!(enqueued, task_id);
     let direct = direct_pool(&urls.direct).await;
-    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+    let stored: i64 = sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&direct)
         .await
@@ -386,7 +382,7 @@ async fn a_statement_pooled_runtime_url_fails_the_send_as_not_retryable() {
     assert_eq!(send_error.code(), TaskSendErrorCode::EnqueueFailed);
     assert!(!send_error.retryable());
     let direct = direct_pool(&urls.direct).await;
-    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+    let stored: i64 = sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&direct)
         .await

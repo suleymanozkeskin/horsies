@@ -642,6 +642,7 @@ mod tests {
     use super::*;
     use crate::core::lifecycle::outcomes::ObservedForeignTerminalization;
     use crate::core::lifecycle::TerminalizationKind;
+    use crate::test_support::sql::TestPoolOptions;
 
     fn task() -> Uuid {
         Uuid::from_u128(7)
@@ -659,12 +660,11 @@ mod tests {
     async fn a_start_check_with_no_queue_sends_nothing() {
         // No server listens on port 1: a check that reached the pool would
         // fail instead of answering.
-        let pool = sqlx::postgres::PgPoolOptions::new()
+        let pool = TestPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(1))
-            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-            .expect("a lazy pool opens no connection");
-        let broker = PostgresBroker::from_pool(pool, crate::ClientFamily::Rust);
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         let check = QueueStartCheck {
             worker_id: "worker-1".to_owned(),
             queues: Vec::new(),

@@ -984,8 +984,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn a_scan_row_without_a_start_does_not_read() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let pool = crate::test_support::migrated_pool().await;
+        let core = crate::broker::pools::core_pool_for_test_url(pool.url());
         let rows = run_reserved(
             &core,
             StatementLog::Off,

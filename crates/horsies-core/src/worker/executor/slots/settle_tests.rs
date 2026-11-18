@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::scripted::{ok_envelope, task, timeout_ms, WORKER_ID};
@@ -22,6 +20,7 @@ use crate::core::history::archive::attempts::decode_attempt_snapshot;
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::task::error::TaskError;
 use crate::core::task::result::TaskResult;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
     CancelGraceMs, FailureDetail, IsolatedWork, ResultEnvelopeText, RunEnd, SharedWork, StopReason,
@@ -190,7 +189,7 @@ enum Held {
 /// A plain task row of `execution` on `queue`, held by [`WORKER_ID`].
 /// Returns the id and the claim generation.
 async fn seed(
-    pool: &PgPool,
+    pool: &TestPool,
     queue: &str,
     execution: ExecutionClass,
     held: Held,
@@ -245,7 +244,7 @@ async fn seed(
              ) RETURNING claimed_at"
         }
     };
-    let generation = sqlx::query_scalar(statement)
+    let generation = sql::query_scalar(statement)
         .bind(id)
         .bind(queue)
         .bind(task_options)
@@ -258,30 +257,30 @@ async fn seed(
     (id, generation)
 }
 
-async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read the live row")
 }
 
-async fn history_row(pool: &PgPool, task_id: Uuid) -> serde_json::Value {
-    sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+async fn history_row(pool: &TestPool, task_id: Uuid) -> serde_json::Value {
+    sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("read the history row")
 }
 
-async fn remove_task(pool: &PgPool, task_id: Uuid) {
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_task_attempts WHERE task_id = $1",
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
@@ -293,8 +292,11 @@ fn test_queue() -> String {
     format!("settle_{}", &Uuid::new_v4().simple().to_string()[..8])
 }
 
-fn writer(pool: PgPool) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust));
+fn writer(pool: TestPool) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
@@ -339,7 +341,7 @@ const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "
 #[tokio::test]
 #[serial]
 async fn a_reported_result_of_a_shared_run_completes_the_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -381,7 +383,7 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for (execution, placement, cancel, class_after) in [
         (
             ExecutionClass::SharedAsync,
@@ -439,7 +441,7 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
         assert_eq!(row["status"], "PENDING", "{execution} {placement:?}");
         assert_eq!(row["execution"], class_after, "{execution} {placement:?}");
         assert_eq!(row["retry_count"], 1, "{execution} {placement:?}");
-        let attempts: Vec<(bool, Option<String>)> = sqlx::query_as(
+        let attempts: Vec<(bool, Option<String>)> = sql::query_as(
             "SELECT will_retry, error_code FROM horsies_task_attempts WHERE task_id = $1",
         )
         .bind(task_id)
@@ -459,7 +461,7 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -503,7 +505,7 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
 #[tokio::test]
 #[serial]
 async fn a_loop_kill_fails_the_row_with_its_code() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for (code, retry, name) in [
         (
             LoopKillCode::TaskBlockedLoop,
@@ -578,8 +580,8 @@ enum Left {
 }
 
 /// The live attempt rows of a task: will_retry and error code.
-async fn live_attempts(pool: &PgPool, task_id: Uuid) -> Vec<(bool, Option<String>)> {
-    sqlx::query_as(
+async fn live_attempts(pool: &TestPool, task_id: Uuid) -> Vec<(bool, Option<String>)> {
+    sql::query_as(
         "SELECT will_retry, error_code FROM horsies_task_attempts
          WHERE task_id = $1 ORDER BY attempt",
     )
@@ -591,8 +593,8 @@ async fn live_attempts(pool: &PgPool, task_id: Uuid) -> Vec<(bool, Option<String
 
 /// The archived attempts of a task that moved to history: number,
 /// will_retry and error code.
-async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<(i32, bool, Option<String>)> {
-    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+async fn archived_attempts(pool: &TestPool, task_id: Uuid) -> Vec<(i32, bool, Option<String>)> {
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
         "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -621,7 +623,7 @@ async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<(i32, bool, Opti
 
 /// Seed a RUNNING `SHARED_ASYNC` row whose policy retries `retried_code`,
 /// settle `end` on it, and check what it left.
-async fn settle_a_shared_run(pool: &PgPool, retried_code: &str, end: AttemptEnd, left: &Left) {
+async fn settle_a_shared_run(pool: &TestPool, retried_code: &str, end: AttemptEnd, left: &Left) {
     let options = retrying(retried_code);
     let queue = test_queue();
     let (task_id, generation) = seed(
@@ -693,7 +695,7 @@ fn loop_kill(code: LoopKillCode, retry: RetryPlacement) -> AttemptEnd {
 #[tokio::test]
 #[serial]
 async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for (retried_code, end, left) in [
         (
             "TASK_BLOCKED_LOOP",
@@ -740,7 +742,7 @@ async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code()
 #[tokio::test]
 #[serial]
 async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
     let returned = || {
         AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
@@ -771,7 +773,7 @@ async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
 #[tokio::test]
 #[serial]
 async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -812,7 +814,7 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
 #[tokio::test]
 #[serial]
 async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -848,8 +850,8 @@ async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
 }
 
 /// The number of attempt rows of a task.
-async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+async fn attempt_count(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -864,7 +866,7 @@ async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
 #[tokio::test]
 #[serial]
 async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let ends = [
         AttemptEnd::Crashed {
             reason: FailureDetail::cut("the child was lost"),
@@ -923,7 +925,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
 #[tokio::test]
 #[serial]
 async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -963,7 +965,7 @@ async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
 /// A CLAIMED workflow task held by [`WORKER_ID`] with no workflow node
 /// linked to it. Returns the claimed task. A workflow task row has no
 /// command fingerprint (baseline `horsies_tasks_command_fingerprint_by_origin`).
-async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask {
+async fn seed_unlinked_workflow_task(pool: &TestPool, queue: &str) -> ClaimedTask {
     let (task_id, generation) = seed(
         pool,
         queue,
@@ -973,7 +975,7 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
         0,
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_tasks
          SET is_workflow_task = TRUE,
              command_fingerprint = NULL,
@@ -1005,7 +1007,7 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
 #[tokio::test]
 #[serial]
 async fn a_task_whose_node_is_not_linked_stays_claimed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
 
@@ -1028,11 +1030,10 @@ async fn a_task_whose_node_is_not_linked_stays_claimed() {
 /// No server listens on port 1, so every write fails with a retryable pool
 /// timeout after 100 ms.
 fn unreachable_writer() -> OutcomeWriter {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(100))
-        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-        .expect("a lazy pool opens no connection");
+        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
     writer(pool)
 }
 

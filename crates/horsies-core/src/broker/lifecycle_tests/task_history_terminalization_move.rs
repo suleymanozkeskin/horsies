@@ -5,6 +5,7 @@ use serial_test::serial;
 use super::support::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationKind, TerminalizationOutcome};
+use crate::test_support::sql;
 
 /// Python `TestAppliedCompletion::test_fused_completion_moves_the_row`: the
 /// fused completion moves the row to history with its result and the digest
@@ -46,7 +47,7 @@ async fn fused_completion_moves_the_row() {
     assert_eq!(history.result_payload.as_deref(), Some(result.as_bytes()));
     assert_eq!(history.last_claimed_worker_id.as_deref(), Some(WORKER));
     let result_digest: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT result_digest FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT result_digest FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await
@@ -173,7 +174,7 @@ async fn duplicate_identity_fails_closed() {
     assert!(live_row(&pool, task_id).await.is_some());
     assert_eq!(live_attempts(&pool, task_id).await, attempts_before);
     let history_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await

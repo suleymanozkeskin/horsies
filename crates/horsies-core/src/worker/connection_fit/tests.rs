@@ -13,11 +13,9 @@ use std::time::Duration;
 
 use serde_json::json;
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::*;
 use crate::broker::client_family::ClientFamily;
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::PoolProfile;
 use crate::core::config::bounded::BoundedU32;
 use crate::core::config::child_sizing::{
@@ -30,6 +28,9 @@ use crate::core::config::worker_profile::{
 };
 use crate::handle::HandleConnection;
 use crate::manifest::parse_producer_manifest;
+use crate::test_support::migrated_database_url;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPoolOptions};
 use crate::worker::children::{
     isolated_pool_config, shared_async_pool_config, shared_thread_pool_config, ChildLaunch,
     PoolFacts,
@@ -123,17 +124,16 @@ fn shared_thread_pool_of(profile: &WorkerProfile) -> u32 {
 /// A broker whose pool cannot connect: a read through it fails within
 /// 250 ms.
 fn unreachable_broker() -> PostgresBroker {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .acquire_timeout(Duration::from_millis(250))
-        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
-        .expect("a lazy pool of an unreachable server");
-    PostgresBroker::from_pool(pool, ClientFamily::Rust)
+        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none");
+    PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust)
 }
 
 /// The usable slots of the test server, read here and not through the code
 /// under test.
 async fn usable_slots_of_the_test_server() -> u32 {
-    let usable: i32 = sqlx::query_scalar(
+    let usable: i32 = sql::query_scalar(
         "SELECT current_setting('max_connections')::int
                 - current_setting('superuser_reserved_connections')::int
                 - COALESCE(current_setting('reserved_connections', true), '0')::int",
@@ -515,7 +515,7 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
         ("big".to_owned(), big),
         ("small".to_owned(), isolated_only(1)),
     ]);
-    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 
@@ -583,7 +583,7 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
     config.broker.pool_size = 1;
     config.broker.max_overflow = 0;
     config.worker_profiles = BTreeMap::from([("parent".to_owned(), profile)]);
-    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 
@@ -650,7 +650,7 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
         "horsies_session_pool_check",
     ));
     config.worker_profiles = BTreeMap::from([("session".to_owned(), profile)]);
-    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 
@@ -813,7 +813,7 @@ fn a_name_is_quoted_as_python_s_repr() {
 #[serial]
 async fn the_read_returns_max_connections_and_both_reserved_settings() {
     let pool = migrated_pool().await;
-    let (max_connections, superuser_reserved, reserved): (i32, i32, i32) = sqlx::query_as(
+    let (max_connections, superuser_reserved, reserved): (i32, i32, i32) = sql::query_as(
         "SELECT (SELECT setting::int FROM pg_settings WHERE name = 'max_connections'),
                 (SELECT setting::int FROM pg_settings
                   WHERE name = 'superuser_reserved_connections'),
@@ -823,7 +823,7 @@ async fn the_read_returns_max_connections_and_both_reserved_settings() {
     .fetch_one(&pool)
     .await
     .expect("read the settings of the test server");
-    let broker = PostgresBroker::from_pool(pool, ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
 
     let read = read_server_connection_limit(&broker)
         .await
@@ -846,17 +846,15 @@ async fn the_read_returns_max_connections_and_both_reserved_settings() {
 #[serial]
 async fn a_server_error_makes_the_limit_unreadable() {
     let url = migrated_database_url().await;
-    let missing = PgConnectOptions::from_str(&url)
-        .expect("the test database url parses")
-        .database(&format!(
-            "horsies_missing_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-    let pool = PgPoolOptions::new()
+    let missing = crate::test_support::with_database(
+        &url,
+        &format!("horsies_missing_{}", uuid::Uuid::new_v4().simple()),
+    );
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(10))
-        .connect_lazy_with(missing);
-    let broker = PostgresBroker::from_pool(pool, ClientFamily::Rust);
+        .connect_lazy(&missing);
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
 
     let read = read_server_connection_limit(&broker).await;
 
@@ -1241,7 +1239,7 @@ async fn profiles_that_fit_have_no_error() {
         need <= u64::from(usable),
         "the test server has {usable} usable slots, fewer than the {need} of one small worker"
     );
-    let broker = PostgresBroker::from_pool(migrated_pool().await, ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
 

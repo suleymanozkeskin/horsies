@@ -15,19 +15,16 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
 use super::{new_reaper_health, spawn_reaper};
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::commands::LeafRef;
-use crate::core::history::heartbeats::partitioning::{
-    create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
-};
+use crate::core::history::heartbeats::partitioning::hourly_leaf_ref;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::core::history::names::HEARTBEAT_CLASS_KEY;
-use crate::core::history::outcomes::LeafCreation;
+use crate::test_support::sql::{self, TestPool};
 
 /// Far enough back that no configured heartbeat horizon (2 to 48 hours)
 /// still counts the leaf as live (Python `_MINIMUM_AGE`).
@@ -45,11 +42,11 @@ const DROP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// The pool with the heartbeat class registered at the default horizon, as
 /// at worker start.
-async fn pool_at_worker_start() -> PgPool {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+async fn pool_at_worker_start() -> TestPool {
+    let pool = crate::test_support::migrated_pool().await;
     let retention = RetentionConfig::default();
     ensure_startup_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &crate::broker::pools::core_pool_for_test_url(pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         retention.history_leaf_horizon_days,
         retention.heartbeat_leaf_horizon_hours,
@@ -63,16 +60,16 @@ async fn pool_at_worker_start() -> PgPool {
 /// An hour at least [`MINIMUM_AGE_HOURS`] old whose leaf name the catalog
 /// has never held. The catalog keeps the rows of dropped leaves, so an hour
 /// it remembers would collide with that row instead of testing the drop.
-async fn unremembered_hour(pool: &PgPool) -> LeafRef {
+async fn unremembered_hour(pool: &TestPool) -> LeafRef {
     for step in 0..UNREMEMBERED_HOUR_SEARCH_LIMIT {
         let lower: DateTime<Utc> =
-            sqlx::query_scalar("SELECT date_trunc('hour', now()) - make_interval(hours => $1)")
+            sql::query_scalar("SELECT date_trunc('hour', now()) - make_interval(hours => $1)")
                 .bind(MINIMUM_AGE_HOURS + step)
                 .fetch_one(pool)
                 .await
                 .expect("database clock");
         let leaf = hourly_leaf_ref(lower).expect("hourly leaf reference");
-        let remembered: bool = sqlx::query_scalar(
+        let remembered: bool = sql::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM horsies_task_history_leaf_catalog WHERE leaf_name = $1
              )",
@@ -91,25 +88,24 @@ async fn unremembered_hour(pool: &PgPool) -> LeafRef {
     );
 }
 
-/// Create one heartbeat leaf through the shipped creation path.
-async fn plant_leaf(pool: &PgPool, leaf: &LeafRef) {
-    let command = CreateHourlyHeartbeatLeaf::new(leaf.clone()).expect("hourly leaf command");
-    let mut transaction = pool.begin().await.expect("begin leaf creation");
-    let outcome = create_hourly_heartbeat_leaf(&mut transaction, &command)
-        .await
-        .expect("create the leaf");
-    transaction.commit().await.expect("commit leaf creation");
+/// Create one heartbeat leaf through the shipped creation path
+/// (`horsies_create_heartbeat_leaf`, as the coverage pass calls it).
+async fn plant_leaf(pool: &TestPool, leaf: &LeafRef) {
+    let (outcome, leaf_name): (String, Option<String>) =
+        sql::query_as("SELECT outcome, leaf_name FROM horsies_create_heartbeat_leaf($1)")
+            .bind(leaf.bounds().lower())
+            .fetch_one(pool)
+            .await
+            .expect("create the leaf");
     assert!(
-        matches!(
-            outcome,
-            LeafCreation::Created { .. } | LeafCreation::AlreadyConformant { .. }
-        ),
-        "could not plant the leaf: {outcome:?}"
+        matches!(outcome.as_str(), "CREATED" | "ALREADY_CONFORMANT"),
+        "could not plant the leaf: {outcome}"
     );
+    assert_eq!(leaf_name.as_deref(), Some(leaf.leaf_name()));
 }
 
-async fn leaf_exists(pool: &PgPool, leaf: &LeafRef) -> bool {
-    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+async fn leaf_exists(pool: &TestPool, leaf: &LeafRef) -> bool {
+    sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(leaf.leaf_name())
         .fetch_one(pool)
         .await
@@ -117,12 +113,12 @@ async fn leaf_exists(pool: &PgPool, leaf: &LeafRef) -> bool {
 }
 
 /// Remove the leaf and its catalog row (Python `_forget_leaf`).
-async fn forget_leaf(pool: &PgPool, leaf: &LeafRef) {
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", leaf.leaf_name()))
+async fn forget_leaf(pool: &TestPool, leaf: &LeafRef) {
+    sql::query(&format!("DROP TABLE IF EXISTS {}", leaf.leaf_name()))
         .execute(pool)
         .await
         .expect("drop the leaf");
-    sqlx::query("DELETE FROM horsies_task_history_leaf_catalog WHERE leaf_name = $1")
+    sql::query("DELETE FROM horsies_task_history_leaf_catalog WHERE leaf_name = $1")
         .bind(leaf.leaf_name())
         .execute(pool)
         .await
@@ -157,7 +153,7 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
     // The reaper's broker has no sqlx connection: the drop runs on the core
     // pools.
     let reaper = spawn_reaper(
-        Arc::new(crate::test_support::broker_with_closed_sqlx_pools(&pool).await),
+        Arc::new(crate::test_support::broker_with_closed_sqlx_pools_on(pool.url()).await),
         crate::test_support::child_specs::no_child_specs(),
         maintenance_only_recovery(),
         RetentionConfig::default(),
@@ -191,7 +187,7 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
 #[serial]
 async fn the_planted_heartbeat_leaf_is_past_the_heartbeat_horizon() {
     let pool = pool_at_worker_start().await;
-    let horizon_hours: i16 = sqlx::query_scalar(
+    let horizon_hours: i16 = sql::query_scalar(
         "SELECT heartbeat_horizon_hours FROM horsies_retention_classes WHERE class_key = $1",
     )
     .bind(HEARTBEAT_CLASS_KEY)
@@ -201,7 +197,7 @@ async fn the_planted_heartbeat_leaf_is_past_the_heartbeat_horizon() {
     let leaf = unremembered_hour(&pool).await;
 
     let due: bool =
-        sqlx::query_scalar("SELECT $1 + make_interval(hours => $2) <= statement_timestamp()")
+        sql::query_scalar("SELECT $1 + make_interval(hours => $2) <= statement_timestamp()")
             .bind(leaf.bounds().upper())
             .bind(i32::from(horizon_hours))
             .fetch_one(&pool)

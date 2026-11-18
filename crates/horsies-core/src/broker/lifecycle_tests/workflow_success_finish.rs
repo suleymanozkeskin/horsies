@@ -14,13 +14,13 @@
 //! `worker::finalizing_tests`.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::FinishWorkflowSuccess;
 use crate::core::lifecycle::{PhaseTwoOwed, PhaseTwoStep, WorkflowSuccessOutcome};
 use crate::core::types::status::TaskStatus;
+use crate::test_support::sql::{self, TestPool};
 
 const QUEUE: &str = "lifecycle_workflow_success";
 const CHANNEL: &str = "task_queue_lifecycle_workflow_success";
@@ -35,7 +35,7 @@ const DIRECT_SQL: &str = "SELECT * FROM horsies_finish_workflow_success(
 /// A RUNNING row of `WORKER` with `retry_count`, `max_retries = 3`, in
 /// [`QUEUE`]. A workflow task gets a RUNNING node of a RUNNING workflow.
 /// Returns the task and, for a workflow task, its workflow.
-async fn seed(pool: &PgPool, retry_count: i32, origin: Origin) -> (Uuid, Option<Uuid>) {
+async fn seed(pool: &TestPool, retry_count: i32, origin: Origin) -> (Uuid, Option<Uuid>) {
     let task_id = seed_task(
         pool,
         &TaskSeed {
@@ -62,7 +62,7 @@ fn success(task_id: Uuid) -> FinishWorkflowSuccess {
     }
 }
 
-async fn cleanup(pool: &PgPool, task_id: Uuid, workflow_id: Option<Uuid>) {
+async fn cleanup(pool: &TestPool, task_id: Uuid, workflow_id: Option<Uuid>) {
     cleanup_tasks(pool, &[task_id]).await;
     let workflows: Vec<Uuid> = workflow_id.into_iter().collect();
     cleanup_workflows(pool, &workflows).await;
@@ -166,7 +166,7 @@ async fn the_success_moves_the_row_with_its_attempt_and_owes_phase_two() {
 async fn the_attempt_number_follows_the_retry_count() {
     let pool = pool().await;
     let (task_id, workflow_id) = seed(&pool, 2, Origin::WorkflowNode).await;
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_task_attempts (
              task_id, attempt, outcome, will_retry, started_at, finished_at,
              error_code, error_message, failed_reason, worker_id,
@@ -246,7 +246,7 @@ async fn a_refused_call_raises_and_writes_nothing() {
         let (task_id, workflow_id) = seed(&pool, 0, origin).await;
         let before = live_row(&pool, task_id).await;
 
-        let refused = sqlx::query(DIRECT_SQL)
+        let refused = sql::query(DIRECT_SQL)
             .bind(task_id)
             .bind(WORKER)
             .bind(result)
@@ -254,8 +254,8 @@ async fn a_refused_call_raises_and_writes_nothing() {
             .await;
 
         match refused {
-            Err(sqlx::Error::Database(error)) => {
-                assert_eq!(error.code().as_deref(), Some(sqlstate), "{call:?}");
+            Err(sql::Error::Database(error)) => {
+                assert_eq!(Some(error.code().code()), Some(sqlstate), "{call:?}");
                 assert!(
                     error.message().contains(message),
                     "{call:?}: {}",

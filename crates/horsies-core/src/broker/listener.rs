@@ -47,20 +47,20 @@ pub(crate) async fn notify_task_queue(
 mod tests {
     use std::time::Duration;
 
-    use sqlx::postgres::PgListener;
     use uuid::Uuid;
 
     use super::notify_task_queue;
     use crate::broker::core_rows::StatementLog;
+    use crate::test_support::sql::TestListener;
 
     #[tokio::test]
     async fn task_queue_notification_sends_uuid_as_text() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let core_pool = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let pool = crate::test_support::migrated_pool().await;
+        let core_pool = crate::broker::pools::core_pool_for_test_url(pool.url());
         let queue_name = format!("notify_{}", Uuid::new_v4().simple());
         let channel = format!("task_queue_{queue_name}");
         let task_id = Uuid::new_v4();
-        let mut listener = PgListener::connect_with(&pool).await.unwrap();
+        let mut listener = TestListener::connect_with(&pool).await.unwrap();
         listener.listen(&channel).await.unwrap();
 
         notify_task_queue(&core_pool, StatementLog::Off, &queue_name, task_id)

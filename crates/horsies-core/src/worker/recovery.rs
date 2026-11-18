@@ -3,8 +3,6 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(test)]
-use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -69,13 +67,18 @@ mod p7_maintenance_tests {
     use crate::core::history::periods::RetentionDays;
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::lifecycle::TerminalizationOutcome;
-    use crate::test_support::sqlx_terminal_writes as terminal_writes;
+    use crate::test_support::sql::{self, TestPool};
+    use crate::test_support::terminal_writes;
     use chrono::Timelike;
     use serial_test::serial;
     use uuid::Uuid;
 
-    async fn seed_terminal_workflow_with_pending(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
-        sqlx::query(
+    async fn seed_terminal_workflow_with_pending(
+        pool: &TestPool,
+        workflow_id: Uuid,
+        task_id: Uuid,
+    ) {
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
                 definition_key, depth, root_workflow_id,
@@ -88,7 +91,7 @@ mod p7_maintenance_tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                  id, task_name, queue_name, priority, input, task_options, execution,
                  retention_class_key, sent_at, created_at,
@@ -113,7 +116,7 @@ mod p7_maintenance_tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
@@ -141,7 +144,7 @@ mod p7_maintenance_tests {
             outcomes.as_slice(),
             [TerminalizationOutcome::Applied { .. }]
         ));
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflows
              SET status = 'COMPLETED', completed_at = NOW() - INTERVAL '48 hours',
                  created_at = NOW() - INTERVAL '48 hours',
@@ -157,13 +160,17 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn retention_owns_only_worker_state_and_workflow_rows() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let mut coverage = pool.begin().await.unwrap();
+        let pool = crate::test_support::migrated_pool().await;
+        // ensure_startup_coverage takes a sqlx connection: the pass runs on
+        // the sqlx pool of the same database.
+        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let mut coverage = sqlx_pool.begin().await.unwrap();
         let outcome = ensure_startup_coverage(coverage.as_mut(), 2, 2, &[], &StagedLoaderPublisher)
             .await
             .unwrap();
         assert!(matches!(outcome, StartupCoverageOutcome::Ready(_)));
         coverage.commit().await.unwrap();
+        sqlx_pool.close().await;
 
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
@@ -172,7 +179,7 @@ mod p7_maintenance_tests {
         seed_terminal_workflow_with_pending(&pool, workflow_id, task_id).await;
         // Every NOT NULL column of the baseline table is named: it has no
         // column defaults.
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_worker_states (
                 worker_id, snapshot_at, hostname, pid, processes,
                 max_claim_batch, max_claim_per_worker, queues,
@@ -189,7 +196,7 @@ mod p7_maintenance_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_heartbeats
                 (task_id, sender_id, role, sent_at, hostname, pid)
              VALUES ($1, $2, 'runner', NOW(), 'host', 1)",
@@ -204,12 +211,12 @@ mod p7_maintenance_tests {
         config.worker_state_retention_hours = Some(1);
         config.terminal_record_retention_hours = Some(1);
         run_retention_cleanup(
-            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
             &config,
         )
         .await;
 
-        let state: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        let state: (i64, i64, i64, i64, i64) = sql::query_as(
             "SELECT
                 (SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1),
                 (SELECT count(*) FROM horsies_workflows WHERE id = $2),
@@ -230,12 +237,12 @@ mod p7_maintenance_tests {
             "row retention deletes worker-state/workflow rows, workflow cascade owns pending evidence, and partitioned task/heartbeat facts remain",
         );
 
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
             .bind(heartbeat_task_id)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
@@ -245,7 +252,7 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn periodic_maintenance_publishes_all_health_and_contains_coverage_failure() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let mut recovery = RecoveryConfig::default();
         recovery.auto_requeue_stale_claimed = false;
         recovery.auto_fail_stale_running = false;
@@ -263,7 +270,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -308,10 +315,10 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn a_stale_claim_past_its_deadline_is_requeued_then_expired_in_one_pass() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let coverage =
             crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
-                &crate::broker::pools::core_pool_for_test_pool(&pool),
+                &crate::broker::pools::core_pool_for_test_url(pool.url()),
                 crate::broker::core_rows::StatementLog::Off,
                 2,
                 2,
@@ -324,7 +331,7 @@ mod p7_maintenance_tests {
             crate::core::history::maintenance::coverage::CoverageOutcome::Ensured(_)
         ));
         let task_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                  id, task_name, queue_name, priority, input, task_options, execution,
                  retention_class_key, sent_at, created_at,
@@ -361,7 +368,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -374,20 +381,20 @@ mod p7_maintenance_tests {
         .await;
 
         let live: Option<String> =
-            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
                 .bind(task_id)
                 .fetch_optional(&pool)
                 .await
                 .expect("read the live row");
         assert_eq!(live, None, "the expired task leaves the live table");
         let history: String =
-            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+            sql::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
                 .expect("read the history row");
         assert_eq!(history, "EXPIRED");
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
@@ -397,9 +404,9 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn periodic_maintenance_runs_non_phase2_workflow_recovery() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, definition_key, depth,
                  root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -422,7 +429,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -435,7 +442,7 @@ mod p7_maintenance_tests {
         .await;
 
         let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
@@ -446,7 +453,7 @@ mod p7_maintenance_tests {
         assert!(report["case4_orphaned_failed"].as_u64().unwrap() >= 1);
         assert_eq!(report["errors"], 0);
 
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -457,7 +464,11 @@ mod p7_maintenance_tests {
     #[serial]
     async fn periodic_maintenance_creates_ahead_prunes_both_partition_families_and_contains_a_blocker(
     ) {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
+        // The setup and cleanup transactions call history functions that
+        // take a sqlx connection: they run on the sqlx pool of the same
+        // database.
+        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut recovery = RecoveryConfig::default();
         recovery.auto_requeue_stale_claimed = false;
         recovery.auto_fail_stale_running = false;
@@ -475,7 +486,7 @@ mod p7_maintenance_tests {
 
         // Settle all pre-existing classes at the same horizons so the pass's
         // creation counts are attributable to the two classes introduced here.
-        let mut baseline = pool.begin().await.unwrap();
+        let mut baseline = sqlx_pool.begin().await.unwrap();
         let baseline_outcome = ensure_startup_coverage(
             baseline.as_mut(),
             retention.history_leaf_horizon_days,
@@ -488,7 +499,7 @@ mod p7_maintenance_tests {
         assert!(matches!(baseline_outcome, StartupCoverageOutcome::Ready(_)));
         baseline.commit().await.unwrap();
 
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = sqlx_pool.begin().await.unwrap();
         for period in [blocked_period, valid_period] {
             register_period_class(&mut setup, period).await.unwrap();
         }
@@ -614,7 +625,7 @@ mod p7_maintenance_tests {
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -651,7 +662,7 @@ mod p7_maintenance_tests {
         assert_eq!(phase2["failed"], 0);
         assert_eq!(phase2["over_attempt_bound"], 1);
 
-        let physical: (bool, bool, bool, i64) = sqlx::query_as(
+        let physical: (bool, bool, bool, i64) = sql::query_as(
             "SELECT
                  to_regclass($1) IS NOT NULL,
                  to_regclass($2) IS NULL,
@@ -676,7 +687,7 @@ mod p7_maintenance_tests {
                     .unwrap()
                     + chrono::Duration::days(i64::from(offset));
                 let leaf_name = daily_leaf_name(&parent, lower).unwrap();
-                let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                let exists: bool = sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
                     .bind(leaf_name)
                     .fetch_one(&pool)
                     .await
@@ -685,7 +696,7 @@ mod p7_maintenance_tests {
             }
         }
 
-        let mut cleanup = pool.begin().await.unwrap();
+        let mut cleanup = sqlx_pool.begin().await.unwrap();
         sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
             .bind(blocker_task_id)
             .execute(&mut *cleanup)
@@ -1797,9 +1808,10 @@ fn stale_running_thresholds(
 #[cfg(test)]
 pub(crate) mod on_test_pool {
     use super::{RecoveryBatch, StaleRunningThresholds, StatementLog, ThresholdMs};
+    use crate::test_support::sql::TestDatabaseUrl;
 
     pub(crate) async fn mark_stale_running_as_failed(
-        pool: &sqlx::PgPool,
+        pool: &impl TestDatabaseUrl,
         threshold_secs: f64,
         finalizing_threshold_secs: f64,
         scan_limit: i64,
@@ -1812,20 +1824,20 @@ pub(crate) mod on_test_pool {
             .ok()
             .and_then(RecoveryBatch::new)
             .expect("a test scan limit of 1 to 10000 rows");
-        let core = crate::broker::pools::core_pool_for_test_pool(pool);
+        let core = crate::broker::pools::core_pool_for_test_url(&pool.test_url());
         let recovered =
             super::mark_stale_running_as_failed(&core, StatementLog::Off, thresholds, batch).await;
         core.close();
         recovered
     }
 
-    /// [`super::requeue_stale_claimed`] on a core pool built from a test's
-    /// sqlx pool, with the threshold in seconds.
+    /// [`super::requeue_stale_claimed`] on a core pool on the database of a
+    /// test pool, with the threshold in seconds.
     pub(crate) async fn requeue_stale_claimed(
-        pool: &sqlx::PgPool,
+        pool: &impl TestDatabaseUrl,
         threshold_secs: f64,
     ) -> Result<u64, crate::broker::BrokerError> {
-        let core = crate::broker::pools::core_pool_for_test_pool(pool);
+        let core = crate::broker::pools::core_pool_for_test_url(&pool.test_url());
         let requeued =
             super::requeue_stale_claimed(&core, StatementLog::Off, threshold_of(threshold_secs))
                 .await;
@@ -1872,6 +1884,7 @@ impl OrphanSweepState {
 #[cfg(test)]
 mod orphan_audit_schedule_tests {
     use super::*;
+    use crate::test_support::sql;
 
     #[test]
     fn orphan_task_audit_uses_its_own_interval() {
@@ -2201,6 +2214,7 @@ mod tests {
         ensure_startup_coverage, StartupCoverageOutcome,
     };
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
+    use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use serial_test::serial;
     use uuid::Uuid;
 
@@ -2218,9 +2232,9 @@ mod tests {
     /// Delete every terminal workflow of the test database with no live
     /// backing task, of any age: the leftovers of other tests, so that the
     /// counts of a test see only its own workflows.
-    async fn drain_expired_workflows(pool: &PgPool) {
+    async fn drain_expired_workflows(pool: &TestPool) {
         for _ in 0..DRAIN_BATCH_LIMIT {
-            let deleted = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+            let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
                 .bind("0")
                 .bind(TEST_RETENTION_BATCH)
                 .execute(pool)
@@ -2239,11 +2253,9 @@ mod tests {
     /// the pass.
     #[tokio::test]
     async fn gate_runs_ungated_only_for_static_single_connection_capacity() {
-        let lazy = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy(&crate::test_support::server_url())
-            .unwrap();
+        let lazy = TestPoolOptions::new().connect_lazy(&crate::test_support::server_url());
 
-        let single = crate::broker::pools::session_core_pool_for_test_pool(&lazy, 1);
+        let single = crate::broker::pools::session_core_pool_for_test_url(lazy.url(), 1);
         let mut ran = false;
         let gated = run_under_gate(&single, StatementLog::Off, advisory_key_reaper(), async {
             ran = true;
@@ -2252,7 +2264,7 @@ mod tests {
         assert_eq!(gated, GatedPass::Ungated);
         assert!(ran, "an ungated pass runs");
 
-        let unavailable = crate::broker::pools::session_core_pool_for_test_pool(&lazy, 2);
+        let unavailable = crate::broker::pools::session_core_pool_for_test_url(lazy.url(), 2);
         unavailable.close();
         let mut ran = false;
         let gated = run_under_gate(
@@ -2272,16 +2284,16 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_gate_held_by_another_session_skips_the_pass() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let mut holder = pool.begin().await.expect("begin the holder");
-        let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        let taken: bool = sql::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(advisory_key_reaper())
-            .fetch_one(holder.as_mut())
+            .fetch_one(&mut *holder)
             .await
             .expect("take the gate");
         assert!(taken, "setup: the holder takes the gate");
 
-        let core = crate::broker::pools::session_core_pool_for_test_pool(&pool, 2);
+        let core = crate::broker::pools::session_core_pool_for_test_url(pool.url(), 2);
         let mut ran = false;
         let gated = run_under_gate(&core, StatementLog::Off, advisory_key_reaper(), async {
             ran = true;
@@ -2363,7 +2375,7 @@ mod tests {
             "the reserve takes the reaper gate",
         );
 
-        let failed: i64 = sqlx::query_scalar(
+        let failed: i64 = sql::query_scalar(
             "SELECT count(*) FROM horsies_task_history
              WHERE task_id = $1 AND status = 'FAILED' AND terminalization_kind = 'FAIL_STALE'",
         )
@@ -2373,16 +2385,19 @@ mod tests {
         .unwrap();
         assert_eq!(failed, 1, "the pass failed the stale RUNNING task");
 
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .execute(&seed)
             .await
             .unwrap();
     }
 
-    async fn test_pool() -> PgPool {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let mut coverage = pool.begin().await.expect("begin startup coverage");
+    async fn test_pool() -> TestPool {
+        let pool = crate::test_support::migrated_pool().await;
+        // ensure_startup_coverage takes a sqlx connection: the pass runs on
+        // the sqlx pool of the same database.
+        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let mut coverage = sqlx_pool.begin().await.expect("begin startup coverage");
         let outcome = ensure_startup_coverage(
             coverage.as_mut(),
             RetentionConfig::default().history_leaf_horizon_days,
@@ -2394,11 +2409,12 @@ mod tests {
         .expect("startup coverage");
         assert!(matches!(outcome, StartupCoverageOutcome::Ready(_)));
         coverage.commit().await.expect("commit startup coverage");
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'reaper_test'")
+        sqlx_pool.close().await;
+        sql::query("DELETE FROM horsies_tasks WHERE task_name = 'reaper_test'")
             .execute(&pool)
             .await
             .expect("clean live reaper fixtures");
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_name = 'reaper_test'")
+        sql::query("DELETE FROM horsies_task_history WHERE task_name = 'reaper_test'")
             .execute(&pool)
             .await
             .expect("clean archived reaper fixtures");
@@ -2407,7 +2423,7 @@ mod tests {
 
     /// Insert a RUNNING task whose runner heartbeat is already stale, with the
     /// given `finalizing_at` (NULL or a timestamp).
-    async fn insert_stale_running_task(pool: &PgPool, task_id: Uuid, finalizing_at_sql: &str) {
+    async fn insert_stale_running_task(pool: &TestPool, task_id: Uuid, finalizing_at_sql: &str) {
         let sql = format!(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
@@ -2429,11 +2445,11 @@ mod tests {
                 NOW(), FALSE, NULL, NULL
             )"
         );
-        sqlx::query(&sql).bind(task_id).execute(pool).await.unwrap();
+        sql::query(&sql).bind(task_id).execute(pool).await.unwrap();
     }
 
-    async fn task_status(pool: &PgPool, task_id: Uuid) -> String {
-        sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+    async fn task_status(pool: &TestPool, task_id: Uuid) -> String {
+        sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_one(pool)
             .await
@@ -2447,7 +2463,7 @@ mod tests {
     async fn stale_running_scan_is_bounded_by_limit() {
         let pool = test_pool().await;
         // Clean this test's namespace so only our stale tasks are in play.
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'reaper_test'")
+        sql::query("DELETE FROM horsies_tasks WHERE task_name = 'reaper_test'")
             .execute(&pool)
             .await
             .unwrap();
@@ -2468,7 +2484,7 @@ mod tests {
             "the bounded scan must process at most scan_limit tasks"
         );
 
-        let state: (i64, i64) = sqlx::query_as(
+        let state: (i64, i64) = sql::query_as(
             "SELECT
                  (SELECT count(*) FROM horsies_tasks WHERE id = ANY($1::uuid[])),
                  (SELECT count(*) FROM horsies_task_history
@@ -2482,12 +2498,12 @@ mod tests {
         assert_eq!(state, (1, 2));
 
         for id in &ids {
-            sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            sql::query("DELETE FROM horsies_tasks WHERE id = $1")
                 .bind(id)
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
                 .bind(id)
                 .execute(&pool)
                 .await
@@ -2518,7 +2534,7 @@ mod tests {
             "actively-finalizing task must be skipped by the reaper"
         );
 
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        sql::query("DELETE FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
@@ -2539,7 +2555,7 @@ mod tests {
             .await
             .unwrap();
         assert!(count >= 1, "the targeted stale row must be reclaimed");
-        let archived: (String, String) = sqlx::query_as(
+        let archived: (String, String) = sql::query_as(
             "SELECT status, terminalization_kind
              FROM horsies_task_history WHERE task_id = $1",
         )
@@ -2549,7 +2565,7 @@ mod tests {
         .unwrap();
         assert_eq!(archived, ("FAILED".to_owned(), "FAIL_STALE".to_owned()));
 
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
@@ -2572,7 +2588,7 @@ mod tests {
         let task_id = Uuid::new_v4();
 
         // Terminal + expired workflow.
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, definition_key, depth, root_workflow_id,
                 sent_at, created_at, started_at, updated_at, completed_at
@@ -2589,7 +2605,7 @@ mod tests {
         .unwrap();
 
         // A still-live (RUNNING) backing task row + its workflow_task linkage.
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at,
@@ -2614,7 +2630,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
@@ -2632,8 +2648,8 @@ mod tests {
         .await
         .unwrap();
 
-        let wt_count = |pool: PgPool, wf: Uuid| async move {
-            sqlx::query_scalar::<_, i64>(
+        let wt_count = |pool: TestPool, wf: Uuid| async move {
+            sql::query_scalar::<i64>(
                 "SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = $1",
             )
             .bind(wf)
@@ -2642,8 +2658,8 @@ mod tests {
             .unwrap()
         };
 
-        let wf_count = |pool: PgPool, wf: Uuid| async move {
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
+        let wf_count = |pool: TestPool, wf: Uuid| async move {
+            sql::query_scalar::<i64>("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
                 .bind(wf)
                 .fetch_one(&pool)
                 .await
@@ -2652,7 +2668,7 @@ mod tests {
 
         // hours = 0 → everything terminal+expired qualifies by age; only the
         // live-backing-task guard should hold the workflow (and linkage) back.
-        let deleted = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+        let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
             .bind("0")
             .bind(TEST_RETENTION_BATCH)
             .execute(&pool)
@@ -2688,7 +2704,7 @@ mod tests {
             outcomes.as_slice(),
             [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
         ));
-        let deleted = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+        let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
             .bind("0")
             .bind(TEST_RETENTION_BATCH)
             .execute(&pool)
@@ -2707,7 +2723,7 @@ mod tests {
             "workflow swept once all backing tasks terminal",
         );
 
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
@@ -2731,9 +2747,9 @@ mod tests {
         // the rows_affected assertions below see only this test's workflows.
         drain_expired_workflows(&pool).await;
 
-        let seed_workflow = |pool: PgPool, nodes: i64| async move {
+        let seed_workflow = |pool: TestPool, nodes: i64| async move {
             let wf_id = Uuid::new_v4();
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_workflows (
                     id, name, status, on_error, definition_key, depth, root_workflow_id,
                     sent_at, created_at, started_at, updated_at, completed_at
@@ -2749,7 +2765,7 @@ mod tests {
             .await
             .unwrap();
             for i in 0..nodes {
-                sqlx::query(
+                sql::query(
                     "INSERT INTO horsies_workflow_tasks (
                         downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                         priority, dependencies, allow_failed_deps, join_type, status,
@@ -2771,8 +2787,8 @@ mod tests {
             wf_id
         };
 
-        let count_workflows = |pool: PgPool| async move {
-            sqlx::query_scalar::<_, i64>(
+        let count_workflows = |pool: TestPool| async move {
+            sql::query_scalar::<i64>(
                 "SELECT COUNT(*) FROM horsies_workflows WHERE name = 'ret_budget_wf'",
             )
             .fetch_one(&pool)
@@ -2784,7 +2800,7 @@ mod tests {
         for _ in 0..4 {
             seed_workflow(pool.clone(), 3).await;
         }
-        let first = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+        let first = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
             .bind("0")
             .bind(6_i64)
             .execute(&pool)
@@ -2797,7 +2813,7 @@ mod tests {
         // The empty-batch drain loop removes the rest in one call (2 + 0-row
         // statements); short-batch semantics would have returned after the
         // first 2-row batch above. The seeded workflows are two hours old.
-        let total = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
+        let total = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
             .delete_expired_workflows(WorkflowRetentionPass {
                 retention_hours: NonZeroU32::new(1).expect("one hour is above zero"),
                 batch_size: NonZeroU32::new(6).expect("six nodes is above zero"),
@@ -2810,7 +2826,7 @@ mod tests {
 
         // Jumbo: 9 nodes against budget 4 → drains alone (position = 1 escape).
         let jumbo = seed_workflow(pool.clone(), 9).await;
-        let deleted = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+        let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
             .bind("0")
             .bind(4_i64)
             .execute(&pool)
@@ -2818,13 +2834,12 @@ mod tests {
             .unwrap()
             .rows_affected();
         assert_eq!(deleted, 1, "over-budget workflow must not starve");
-        let nodes_left: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = $1",
-        )
-        .bind(jumbo)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let nodes_left: i64 =
+            sql::query_scalar("SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = $1")
+                .bind(jumbo)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(nodes_left, 0, "jumbo's nodes leave with it");
     }
 
@@ -2842,7 +2857,7 @@ mod tests {
         let pool = test_pool().await;
 
         // Re-runnable after a failed run: drop any leftover seed rows.
-        sqlx::query("DELETE FROM horsies_workflows WHERE name = 'ret_explain_wf'")
+        sql::query("DELETE FROM horsies_workflows WHERE name = 'ret_explain_wf'")
             .execute(&pool)
             .await
             .unwrap();
@@ -2851,7 +2866,7 @@ mod tests {
         // recent terminal workflows (in-window). The recent population makes
         // the retention index's cutoff range decisively more selective — with
         // only eligible rows the planner's index pick is arbitrary.
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, definition_key, depth, root_workflow_id,
                 sent_at, created_at, started_at, updated_at, completed_at
@@ -2867,7 +2882,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, definition_key, depth, root_workflow_id,
                 sent_at, created_at, started_at, updated_at, completed_at
@@ -2881,7 +2896,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("ANALYZE horsies_workflows")
+        sql::query("ANALYZE horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
@@ -2891,11 +2906,11 @@ mod tests {
         // production-sized heap produces on its own. ANALYZE executes the
         // DELETE — the rollback reverts it.
         let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL enable_seqscan = off")
+        sql::query("SET LOCAL enable_seqscan = off")
             .execute(&mut *tx)
             .await
             .unwrap();
-        let plan_rows: Vec<(String,)> = sqlx::query_as(&format!(
+        let plan_rows: Vec<(String,)> = sql::query_as(&format!(
             "EXPLAIN (ANALYZE, BUFFERS) {DELETE_EXPIRED_WORKFLOWS_SQL}"
         ))
         .bind("240")
@@ -2919,7 +2934,7 @@ mod tests {
             "node rows must be purged set-wise in the statement; plan:\n{plan}",
         );
 
-        sqlx::query("DELETE FROM horsies_workflows WHERE name = 'ret_explain_wf'")
+        sql::query("DELETE FROM horsies_workflows WHERE name = 'ret_explain_wf'")
             .execute(&pool)
             .await
             .unwrap();
@@ -2930,7 +2945,7 @@ mod tests {
     /// A `reaper_test` task with every column of the baseline task row named.
     /// `stale_since` is how long ago it was claimed and started.
     async fn seed_baseline_task(
-        pool: &PgPool,
+        pool: &TestPool,
         task_id: Uuid,
         status: &str,
         is_workflow_task: bool,
@@ -2945,7 +2960,7 @@ mod tests {
             true => None,
             false => Some(1),
         };
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at,
@@ -3001,7 +3016,7 @@ mod tests {
         ] {
             seed_baseline_task(&pool, task_id, "CLAIMED", is_workflow_task, 0, None).await;
         }
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_heartbeats (task_id, role, sent_at, sender_id, hostname, pid)
              VALUES ($1, 'claimer', NOW(), 'worker-1', 'reaper-host', 4242)",
         )
@@ -3009,7 +3024,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("fresh claimer beat");
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET finalizing_at = NOW() - interval '1 hour', finalizing_by_worker_id = 'worker-1'
              WHERE id = $1",
@@ -3031,7 +3046,7 @@ mod tests {
             Option<chrono::DateTime<chrono::Utc>>,
             Option<String>,
             Option<chrono::DateTime<chrono::Utc>>,
-        ) = sqlx::query_as(
+        ) = sql::query_as(
             "SELECT claimed_at, claimed_by_worker_id, finalizing_at FROM horsies_tasks WHERE id = $1",
         )
         .bind(marked)
@@ -3039,7 +3054,7 @@ mod tests {
         .await
         .expect("requeued row");
         assert_eq!((claimed_at, owner, marker), (None, None, None));
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
             .bind(beating)
             .execute(&pool)
             .await
@@ -3076,7 +3091,7 @@ mod tests {
         // The shared test database can hold stale rows of other modules.
         assert!(processed >= 1, "processed {processed}");
         let row: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+            sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
@@ -3096,7 +3111,7 @@ mod tests {
         ] {
             assert!(row[cleared].is_null(), "a stale retry must clear {cleared}");
         }
-        let attempts: Vec<(i32, String, bool, Option<String>)> = sqlx::query_as(
+        let attempts: Vec<(i32, String, bool, Option<String>)> = sql::query_as(
             "SELECT attempt, outcome::text, will_retry, error_code
              FROM horsies_task_attempts WHERE task_id = $1",
         )
@@ -3113,7 +3128,7 @@ mod tests {
                 Some("WORKER_CRASHED".to_owned())
             )]
         );
-        sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
             .bind(task_id)
             .execute(&pool)
             .await

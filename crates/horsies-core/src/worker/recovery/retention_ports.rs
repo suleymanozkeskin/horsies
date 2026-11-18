@@ -11,7 +11,6 @@
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 use super::*;
@@ -26,7 +25,8 @@ use crate::core::history::partitions::manager::create_daily_leaf;
 use crate::core::history::partitions::publication::UnpublishedLoader;
 use crate::core::history::periods::RetentionDays;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::sqlx_terminal_writes as terminal_writes;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+use crate::test_support::terminal_writes;
 
 /// The row retention window of the Python tests.
 const RETENTION_HOURS: u32 = 24;
@@ -35,14 +35,14 @@ const RETENTION_HOURS: u32 = 24;
 /// a copy of the installed test template (`crate::test_support`) with a sqlx
 /// pool for the reaper pass.
 struct RetentionDatabase {
-    pool: PgPool,
+    pool: TestPool,
     database: crate::test_support::TestDatabase,
 }
 
 impl RetentionDatabase {
     async fn create() -> Self {
         let database = crate::test_support::TestDatabase::create().await;
-        let pool = PgPoolOptions::new()
+        let pool = TestPoolOptions::new()
             .max_connections(4)
             .connect(database.url())
             .await
@@ -62,7 +62,10 @@ fn period(days: i64) -> RetentionDays {
 
 /// A reaper pass that runs partition maintenance only: the recovery steps
 /// are off and row retention is not due.
-async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> ReaperHealthSnapshot {
+async fn run_maintenance_pass(
+    pool: &TestPool,
+    retention: &RetentionConfig,
+) -> ReaperHealthSnapshot {
     let mut recovery = RecoveryConfig::default();
     recovery.auto_requeue_stale_claimed = false;
     recovery.auto_fail_stale_running = false;
@@ -72,7 +75,7 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut next_partition_maintenance = tokio::time::Instant::now();
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
-        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         crate::test_support::child_specs::no_child_specs().as_ref(),
         &recovery,
         retention,
@@ -87,8 +90,18 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     snapshot
 }
 
-async fn database_today(pool: &PgPool) -> DateTime<Utc> {
-    let mut connection = pool.acquire().await.expect("acquire clock");
+/// A sqlx connection to the database of `pool`, for the history functions
+/// that take a sqlx connection (`database_now`, `register_period_class`,
+/// `create_daily_leaf`).
+async fn sqlx_connection(pool: &TestPool) -> sqlx::PgConnection {
+    use sqlx::Connection;
+    sqlx::PgConnection::connect(pool.url())
+        .await
+        .expect("connect a sqlx session to the retention database")
+}
+
+async fn database_today(pool: &TestPool) -> DateTime<Utc> {
+    let mut connection = sqlx_connection(pool).await;
     let now = database_now(&mut connection).await.expect("database now");
     now.date_naive()
         .and_hms_opt(0, 0, 0)
@@ -96,9 +109,12 @@ async fn database_today(pool: &PgPool) -> DateTime<Utc> {
         .and_utc()
 }
 
-async fn create_period_leaf(pool: &PgPool, days: RetentionDays, lower: DateTime<Utc>) -> LeafRef {
+async fn create_period_leaf(pool: &TestPool, days: RetentionDays, lower: DateTime<Utc>) -> LeafRef {
     let class_key = days.class_key();
-    let mut transaction = pool.begin().await.expect("begin leaf creation");
+    let mut connection = sqlx_connection(pool).await;
+    let mut transaction = sqlx::Connection::begin(&mut connection)
+        .await
+        .expect("begin leaf creation");
     let _ = register_period_class(&mut transaction, days)
         .await
         .expect("register the class");
@@ -127,16 +143,16 @@ async fn create_period_leaf(pool: &PgPool, days: RetentionDays, lower: DateTime<
     leaf
 }
 
-async fn relation_exists(pool: &PgPool, relation: &str) -> bool {
-    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+async fn relation_exists(pool: &TestPool, relation: &str) -> bool {
+    sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(relation)
         .fetch_one(pool)
         .await
         .expect("read relation presence")
 }
 
-async fn registered_classes(pool: &PgPool) -> Vec<String> {
-    sqlx::query_scalar("SELECT class_key FROM horsies_retention_classes ORDER BY class_key")
+async fn registered_classes(pool: &TestPool) -> Vec<String> {
+    sql::query_scalar("SELECT class_key FROM horsies_retention_classes ORDER BY class_key")
         .fetch_all(pool)
         .await
         .expect("read the class registry")
@@ -185,7 +201,7 @@ async fn the_pass_registers_a_declared_period() {
 
     let _ = run_maintenance_pass(&database.pool, &retention).await;
 
-    let stored: Option<i16> = sqlx::query_scalar(
+    let stored: Option<i16> = sql::query_scalar(
         "SELECT retention_days FROM horsies_retention_classes WHERE class_key = 'standard_11d'",
     )
     .fetch_optional(&database.pool)
@@ -218,8 +234,8 @@ async fn declaring_nothing_registers_nothing_extra() {
     database.drop().await;
 }
 
-async fn seed_worker_state(pool: &PgPool, worker_id: &str, age_hours: i32) {
-    sqlx::query(
+async fn seed_worker_state(pool: &TestPool, worker_id: &str, age_hours: i32) {
+    sql::query(
         "INSERT INTO horsies_worker_states (
              worker_id, snapshot_at, hostname, pid, processes,
              max_claim_batch, max_claim_per_worker, cluster_wide_cap,
@@ -256,13 +272,16 @@ async fn expired_worker_states_go_and_recent_ones_stay() {
     retention.terminal_record_retention_hours = None;
 
     run_retention_cleanup(
-        &crate::broker::PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(
+            database.pool.url(),
+            crate::ClientFamily::Rust,
+        ),
         &retention,
     )
     .await;
 
     let left: Vec<String> =
-        sqlx::query_scalar("SELECT worker_id FROM horsies_worker_states ORDER BY worker_id")
+        sql::query_scalar("SELECT worker_id FROM horsies_worker_states ORDER BY worker_id")
             .fetch_all(&database.pool)
             .await
             .expect("read worker states");
@@ -270,9 +289,9 @@ async fn expired_worker_states_go_and_recent_ones_stay() {
     database.drop().await;
 }
 
-async fn seed_workflow(pool: &PgPool, status: &str, age_hours: i32) -> Uuid {
+async fn seed_workflow(pool: &TestPool, status: &str, age_hours: i32) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, output_task_index,
              success_policy, result, error, parent_workflow_id, parent_task_index,
@@ -296,8 +315,8 @@ async fn seed_workflow(pool: &PgPool, status: &str, age_hours: i32) -> Uuid {
     workflow_id
 }
 
-async fn seed_node(pool: &PgPool, workflow_id: Uuid) {
-    sqlx::query(
+async fn seed_node(pool: &TestPool, workflow_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
@@ -337,12 +356,15 @@ async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
     retention.terminal_record_retention_hours = Some(RETENTION_HOURS);
 
     run_retention_cleanup(
-        &crate::broker::PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(
+            database.pool.url(),
+            crate::ClientFamily::Rust,
+        ),
         &retention,
     )
     .await;
 
-    let mut workflows: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM horsies_workflows")
+    let mut workflows: Vec<Uuid> = sql::query_scalar("SELECT id FROM horsies_workflows")
         .fetch_all(&database.pool)
         .await
         .expect("read workflows");
@@ -350,7 +372,7 @@ async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
     let mut expected = vec![old_running, recent_completed];
     expected.sort();
     assert_eq!(workflows, expected);
-    let nodes: Vec<Uuid> = sqlx::query_scalar("SELECT workflow_id FROM horsies_workflow_tasks")
+    let nodes: Vec<Uuid> = sql::query_scalar("SELECT workflow_id FROM horsies_workflow_tasks")
         .fetch_all(&database.pool)
         .await
         .expect("read workflow nodes");
@@ -360,9 +382,9 @@ async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
 
 /// A RUNNING plain task of `class_key`, claimed by `worker_id`. Every baseline
 /// column is named.
-async fn seed_running_task(pool: &PgPool, class_key: &str, worker_id: &str) -> Uuid {
+async fn seed_running_task(pool: &TestPool, class_key: &str, worker_id: &str) -> Uuid {
     let task_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at,
@@ -402,7 +424,7 @@ async fn seed_running_task(pool: &PgPool, class_key: &str, worker_id: &str) -> U
 async fn a_finished_row_lands_in_the_leaf_of_its_class() {
     let database = RetentionDatabase::create().await;
     let coverage = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         2,
@@ -432,7 +454,7 @@ async fn a_finished_row_lands_in_the_leaf_of_its_class() {
             ),
             "{outcomes:?}"
         );
-        let (leaf, terminal_at): (String, DateTime<Utc>) = sqlx::query_as(
+        let (leaf, terminal_at): (String, DateTime<Utc>) = sql::query_as(
             "SELECT tableoid::regclass::text, terminal_at
              FROM horsies_task_history WHERE task_id = $1",
         )
@@ -467,8 +489,10 @@ async fn a_delayed_send_stamps_the_mapped_period_class() {
     retention
         .queue_retention
         .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
-    let broker =
-        crate::broker::PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust);
+    let broker = crate::broker::PostgresBroker::from_test_url(
+        database.pool.url(),
+        crate::ClientFamily::Rust,
+    );
     let task_id = broker
         .enqueue(
             "port_delayed_send",
@@ -488,7 +512,7 @@ async fn a_delayed_send_stamps_the_mapped_period_class() {
         )
         .await
         .expect("delayed send");
-    let (class_key, delayed): (String, bool) = sqlx::query_as(
+    let (class_key, delayed): (String, bool) = sql::query_as(
         "SELECT retention_class_key, enqueued_at > NOW() FROM horsies_tasks WHERE id = $1",
     )
     .bind(task_id)

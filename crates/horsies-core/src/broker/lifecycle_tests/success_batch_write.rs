@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::Connection;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::{core_pool_for_test_pool, worker_core_pool_for_test_pool};
+use crate::broker::pools::{core_pool_for_test_url, worker_core_pool_for_test_url};
 use crate::core::lifecycle::{TerminalizationKind, TerminalizationOutcome};
 use crate::db::{CheckoutClass, StatementBound, Transience, TypedStatement};
+use crate::test_support::sql::{self, TestConnection};
 use crate::worker::finalize_batch::statement::complete_plain_successes;
 use crate::worker::finalize_batch::{BatchWriteError, PlainSuccess, SuccessBatch};
 
@@ -53,7 +53,7 @@ async fn each_row_gets_the_outcome_of_its_own_task_in_input_order() {
     )
     .await;
     let absent = Uuid::new_v4();
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
 
     let outcomes = complete_plain_successes(
         &core,
@@ -95,7 +95,7 @@ async fn a_replay_of_a_committed_batch_answers_already_applied() {
     let pool = pool().await;
     let first = seed_task(&pool, &TaskSeed::running()).await;
     let second = seed_task(&pool, &TaskSeed::running()).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let batch = batch_of(&[first, second]);
 
     let _written = complete_plain_successes(&core, StatementLog::Off, WORKER, &batch)
@@ -134,7 +134,7 @@ static REFUSED_BATCH_ARGUMENTS: TypedStatement = TypedStatement::new(
 #[serial]
 async fn a_server_refusal_keeps_the_transience_of_its_sqlstate() {
     let pool = pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
 
     for (statement, transience) in [
         (&RAISE_DEADLOCK, Transience::Transient),
@@ -170,11 +170,11 @@ async fn a_server_refusal_keeps_the_transience_of_its_sqlstate() {
 async fn a_batch_holds_its_connection_only_while_its_statement_runs() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
-    let core = Arc::new(worker_core_pool_for_test_pool(&pool, 5));
-    let mut holder = sqlx::PgConnection::connect_with(&database_options(&pool))
+    let core = Arc::new(worker_core_pool_for_test_url(pool.url(), 5));
+    let mut holder = TestConnection::connect(pool.url())
         .await
         .expect("connect the lock holder");
-    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1::text, 731))")
+    sql::query("SELECT pg_advisory_lock(hashtextextended($1::text, 731))")
         .bind(task_id)
         .execute(&mut holder)
         .await
@@ -199,7 +199,7 @@ async fn a_batch_holds_its_connection_only_while_its_statement_runs() {
     );
     assert!(!write.is_finished());
 
-    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1::text, 731))")
+    sql::query("SELECT pg_advisory_unlock(hashtextextended($1::text, 731))")
         .bind(task_id)
         .execute(&mut holder)
         .await

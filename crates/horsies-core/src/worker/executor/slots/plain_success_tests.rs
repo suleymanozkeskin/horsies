@@ -7,16 +7,14 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
-use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, WireProxy,
-};
+use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::db::{PoolSizing, Reserve, WORKER_RESERVED_CONNECTIONS};
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
@@ -60,8 +58,8 @@ fn claimed_now() -> ClaimedTask {
 }
 
 /// A RUNNING plain row of `owner` at the claim generation `claimed_at`.
-async fn seed_running(pool: &PgPool, task_id: Uuid, owner: &str, claimed_at: DateTime<Utc>) {
-    sqlx::query(
+async fn seed_running(pool: &TestPool, task_id: Uuid, owner: &str, claimed_at: DateTime<Utc>) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -90,16 +88,16 @@ async fn seed_running(pool: &PgPool, task_id: Uuid, owner: &str, claimed_at: Dat
     .expect("seed a RUNNING row");
 }
 
-async fn history_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
+async fn history_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read the history row")
 }
 
-async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status::text FROM horsies_tasks WHERE id = $1")
+async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status::text FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
@@ -117,13 +115,13 @@ fn reported_value() -> AttemptEnd {
 #[tokio::test]
 #[serial_test::serial]
 async fn plain_successes_settle_through_the_batcher() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let first = claimed_now();
     let second = claimed_now();
     seed_running(&pool, first.task_id, WORKER, first.claimed_at).await;
     seed_running(&pool, second.task_id, WORKER, second.claimed_at).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let writer = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     )));
 
@@ -148,11 +146,11 @@ async fn plain_successes_settle_through_the_batcher() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plain_success_on_a_row_this_claim_does_not_hold_writes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, OTHER_WORKER, claimed.claimed_at).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let writer = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     )));
 
@@ -193,8 +191,8 @@ fn writer_with_queue_room(broker: Arc<PostgresBroker>) -> OutcomeWriter {
 }
 
 /// A RUNNING workflow with no nodes yet.
-async fn seed_running_workflow(pool: &PgPool, workflow_id: Uuid) {
-    sqlx::query(
+async fn seed_running_workflow(pool: &TestPool, workflow_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -210,13 +208,13 @@ async fn seed_running_workflow(pool: &PgPool, workflow_id: Uuid) {
 /// A RUNNING workflow task of [`WORKER`] at `claimed_at`, linked to the
 /// RUNNING node `index` of `workflow_id`, with no dependencies.
 async fn seed_workflow_node_task(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     index: i32,
     task_id: Uuid,
     claimed_at: DateTime<Utc>,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -243,7 +241,7 @@ async fn seed_workflow_node_task(
     .execute(pool)
     .await
     .expect("seed a RUNNING workflow task");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow,
              id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
@@ -271,11 +269,10 @@ async fn seed_workflow_node_task(
 #[tokio::test]
 #[serial_test::serial]
 async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let writer = Arc::new(writer_with_queue_room(Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
-        crate::ClientFamily::Rust,
-    ))));
+    let pool = crate::test_support::migrated_pool().await;
+    let writer = Arc::new(writer_with_queue_room(Arc::new(
+        PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+    )));
     let mut plain = Vec::with_capacity(2 * BATCH_ROWS);
     for _ in 0..2 * BATCH_ROWS {
         let task = claimed_now();
@@ -322,7 +319,7 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
             Some("COMPLETED")
         );
     }
-    let node_statuses: Vec<String> = sqlx::query_scalar(
+    let node_statuses: Vec<String> = sql::query_scalar(
         "SELECT status::text FROM horsies_workflow_tasks
          WHERE workflow_id = $1 ORDER BY task_index",
     )
@@ -336,13 +333,13 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
         "DELETE FROM horsies_workflow_phase2_pending WHERE task_id = ANY($1)",
         "DELETE FROM horsies_task_history WHERE task_id = ANY($1)",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(&task_ids)
             .execute(&pool)
             .await
             .expect("remove the test rows");
     }
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
@@ -358,12 +355,12 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plain_success_settle_is_one_round_trip() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(
-        proxied.clone(),
+    let pool = crate::test_support::migrated_pool().await;
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
+    let writer = writer(Arc::new(PostgresBroker::from_test_url(
+        proxied.url(),
         crate::ClientFamily::Rust,
     )));
     let warm_up = claimed_now();
@@ -397,12 +394,12 @@ async fn a_plain_success_settle_is_one_round_trip() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_stop_for_a_node_not_linked_sends_no_statement() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(
-        proxied.clone(),
+    let pool = crate::test_support::migrated_pool().await;
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
+    let writer = writer(Arc::new(PostgresBroker::from_test_url(
+        proxied.url(),
         crate::ClientFamily::Rust,
     )));
     let task = ClaimedTask {

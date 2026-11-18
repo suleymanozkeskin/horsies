@@ -4,13 +4,13 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::core::lifecycle::{AfterFailure, AttemptWriteRefusal};
 use crate::db::StatementFailure;
+use crate::test_support::sql::{self, TestPool};
 
 const WORKER: &str = "attempt-writer";
 const QUEUE: &str = "attempt_writes";
@@ -23,7 +23,7 @@ struct Seeded {
 /// A RUNNING task held by `WORKER`, with every column of the baseline task
 /// row named.
 async fn seed_running(
-    pool: &PgPool,
+    pool: &TestPool,
     retry_count: i32,
     max_retries: i32,
     good_until: Option<DateTime<Utc>>,
@@ -38,7 +38,7 @@ async fn seed_running(
         true => None,
         false => Some(1),
     };
-    let claimed_at: DateTime<Utc> = sqlx::query_scalar(
+    let claimed_at: DateTime<Utc> = sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -100,18 +100,28 @@ fn failure(seeded: &Seeded, retry: RetryRequest) -> FinishFailedAttempt {
 /// The failed-attempt write (rule `REFUSE`) on a core pool on the test
 /// database.
 async fn write_failed_attempt(
-    pool: &PgPool,
+    pool: &TestPool,
     command: &FinishFailedAttempt,
 ) -> Result<FailedAttemptOutcome, BrokerError> {
-    finish_failed_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+    finish_failed_attempt(
+        &core_pool_for_test_url(pool.url()),
+        StatementLog::Off,
+        command,
+    )
+    .await
 }
 
 /// The workflow-success write on a core pool on the test database.
 async fn write_workflow_success(
-    pool: &PgPool,
+    pool: &TestPool,
     command: &FinishWorkflowSuccess,
 ) -> Result<WorkflowSuccessOutcome, BrokerError> {
-    finish_workflow_success(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+    finish_workflow_success(
+        &core_pool_for_test_url(pool.url()),
+        StatementLog::Off,
+        command,
+    )
+    .await
 }
 
 fn retry_after(retry_count: i32, delay_seconds: f64) -> RetryRequest {
@@ -122,24 +132,24 @@ fn retry_after(retry_count: i32, delay_seconds: f64) -> RetryRequest {
     }
 }
 
-async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read live row")
 }
 
-async fn history_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
+async fn history_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read history row")
 }
 
-async fn attempts(pool: &PgPool, task_id: Uuid) -> Vec<(i32, String, bool)> {
-    sqlx::query_as(
+async fn attempts(pool: &TestPool, task_id: Uuid) -> Vec<(i32, String, bool)> {
+    sql::query_as(
         "SELECT attempt, outcome::text, will_retry FROM horsies_task_attempts
          WHERE task_id = $1 ORDER BY attempt",
     )
@@ -149,25 +159,25 @@ async fn attempts(pool: &PgPool, task_id: Uuid) -> Vec<(i32, String, bool)> {
     .expect("read attempts")
 }
 
-async fn database_clock(pool: &PgPool) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT clock_timestamp()")
+async fn database_clock(pool: &TestPool) -> DateTime<Utc> {
+    sql::query_scalar("SELECT clock_timestamp()")
         .fetch_one(pool)
         .await
         .expect("database clock")
 }
 
-async fn cleanup(pool: &PgPool, task_id: Uuid) {
-    sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
+async fn cleanup(pool: &TestPool, task_id: Uuid) {
+    sql::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
         .bind(task_id)
         .execute(pool)
         .await
         .expect("delete attempts");
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .execute(pool)
         .await
         .expect("delete live row");
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .execute(pool)
         .await
@@ -180,7 +190,7 @@ async fn cleanup(pool: &PgPool, task_id: Uuid) {
 #[tokio::test]
 #[serial]
 async fn a_retry_writes_pending_and_an_attempt_that_will_retry() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 1, 3, None, false).await;
     let before = database_clock(&pool).await;
 
@@ -238,7 +248,7 @@ async fn a_retry_writes_pending_and_an_attempt_that_will_retry() {
 #[tokio::test]
 #[serial]
 async fn a_retry_at_or_after_good_until_is_the_terminal_failure() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let good_until = Utc::now() + Duration::seconds(10);
     let seeded = seed_running(&pool, 0, 3, Some(good_until), false).await;
 
@@ -266,7 +276,7 @@ async fn a_retry_at_or_after_good_until_is_the_terminal_failure() {
 #[tokio::test]
 #[serial]
 async fn a_plain_failure_moves_the_row_with_its_attempt() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, false).await;
 
     let outcome = write_failed_attempt(&pool, &failure(&seeded, RetryRequest::NoRetry))
@@ -302,7 +312,7 @@ async fn a_plain_failure_moves_the_row_with_its_attempt() {
 #[tokio::test]
 #[serial]
 async fn a_changed_retry_count_is_part_of_the_fence() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 1, 3, None, false).await;
     let before = live_row(&pool, seeded.task_id).await;
 
@@ -322,7 +332,7 @@ async fn a_changed_retry_count_is_part_of_the_fence() {
 #[tokio::test]
 #[serial]
 async fn a_stale_claim_generation_writes_no_failure() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, false).await;
     let before = live_row(&pool, seeded.task_id).await;
     let stale = Seeded {
@@ -346,7 +356,7 @@ async fn a_stale_claim_generation_writes_no_failure() {
 #[tokio::test]
 #[serial]
 async fn a_stale_claim_generation_writes_no_workflow_success() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, true).await;
     let before = live_row(&pool, seeded.task_id).await;
 
@@ -376,7 +386,7 @@ async fn a_stale_claim_generation_writes_no_workflow_success() {
 #[tokio::test]
 #[serial]
 async fn a_plain_task_success_through_the_workflow_writer_is_refused() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, false).await;
     let before = live_row(&pool, seeded.task_id).await;
 

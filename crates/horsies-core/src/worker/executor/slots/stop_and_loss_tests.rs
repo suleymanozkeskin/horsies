@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::scripted::{
@@ -24,6 +22,7 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
     CancelGraceMs, ChildAfterFrame, DispatchNumber, FailureDetail, IsolatedWork, ProcessId,
@@ -121,12 +120,14 @@ fn a_loss_whose_exit_was_not_seen_gives_no_verdict_for_any_cause() {
 /// after the acquire timeout and settle as a failed write, not as left to
 /// recovery.
 fn unreachable_writer() -> OutcomeWriter {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(1))
-        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-        .expect("a lazy pool opens no connection");
-    let broker = Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust));
+        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
@@ -177,9 +178,9 @@ async fn an_end_whose_exit_was_not_seen_is_left_to_recovery_with_no_write() {
 
 /// A RUNNING plain task held by [`WORKER_ID`] on queue `queue`. Returns the
 /// id and the claim generation.
-async fn seed_running(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>) {
+async fn seed_running(pool: &TestPool, queue: &str) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
-    let generation = sqlx::query_scalar(
+    let generation = sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -211,22 +212,22 @@ async fn seed_running(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>) {
     (id, generation)
 }
 
-async fn history_row(pool: &PgPool, task_id: Uuid) -> serde_json::Value {
-    sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+async fn history_row(pool: &TestPool, task_id: Uuid) -> serde_json::Value {
+    sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("read the history row")
 }
 
-async fn remove_task(pool: &PgPool, task_id: Uuid) {
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_task_attempts WHERE task_id = $1",
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
@@ -242,11 +243,11 @@ async fn remove_task(pool: &PgPool, task_id: Uuid) {
 #[tokio::test]
 #[serial]
 async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = format!("slots_{}", &Uuid::new_v4().simple().to_string()[..8]);
     let (task_id, generation) = seed_running(&pool, &queue).await;
-    let broker = Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
@@ -274,7 +275,7 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
         .await;
 
     assert_eq!(settled, Settlement::Written);
-    let live: Option<i64> = sqlx::query_scalar("SELECT 1::bigint FROM horsies_tasks WHERE id = $1")
+    let live: Option<i64> = sql::query_scalar("SELECT 1::bigint FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(&pool)
         .await

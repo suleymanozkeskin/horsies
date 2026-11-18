@@ -14,8 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::Worker;
@@ -23,6 +21,7 @@ use crate::broker::PostgresBroker;
 use crate::core::config::app::AppConfig;
 use crate::core::config::recovery::fail_closed_threshold_floor_ms;
 use crate::core::config::worker_profile::SelectedProfile;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::TestDatabase;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
@@ -70,9 +69,9 @@ CROSS JOIN LATERAL horsies_start_attempt(
 WHERE t.id = $1 AND t.status = 'CLAIMED'";
 
 /// A test database and a pool on it.
-async fn database() -> (TestDatabase, PgPool) {
+async fn database() -> (TestDatabase, TestPool) {
     let database = TestDatabase::create().await;
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .max_connections(4)
         .connect(database.url())
         .await
@@ -131,9 +130,9 @@ async fn worker_holding_one_task(config: AppConfig, pid_file: &Path, drain_secs:
 }
 
 /// One PENDING task on the default queue, with no retries.
-async fn insert_pending_task(pool: &PgPool) -> Uuid {
+async fn insert_pending_task(pool: &TestPool) -> Uuid {
     let task_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at,
@@ -163,10 +162,10 @@ async fn insert_pending_task(pool: &PgPool) -> Uuid {
 
 /// Wait until the worker claimed `task_id`, then write the start of its
 /// attempt as the child does ([`START_AS_THE_CHILD_SQL`]).
-async fn start_as_the_child(pool: &PgPool, task_id: Uuid) {
+async fn start_as_the_child(pool: &TestPool, task_id: Uuid) {
     let outcome = tokio::time::timeout(WAIT, async {
         loop {
-            let started: Option<String> = sqlx::query_scalar(START_AS_THE_CHILD_SQL)
+            let started: Option<String> = sql::query_scalar(START_AS_THE_CHILD_SQL)
                 .bind(task_id)
                 .bind(CHILD_BEAT_SENDER)
                 .fetch_optional(pool)
@@ -219,7 +218,7 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     start_as_the_child(&pool, task_id).await;
     let beats = tokio::time::timeout(WAIT, async {
         loop {
-            let beats: i64 = sqlx::query_scalar(
+            let beats: i64 = sql::query_scalar(
                 "SELECT count(*) FROM horsies_heartbeats
                  WHERE task_id = $1 AND role = 'runner' AND sender_id = $2",
             )
@@ -236,7 +235,7 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     })
     .await
     .expect("a runner beat of the worker lands for the held task");
-    let held: (Option<String>, i64) = sqlx::query_as(
+    let held: (Option<String>, i64) = sql::query_as(
         "SELECT (SELECT status::text FROM horsies_tasks WHERE id = $1),
                 (SELECT count(*) FROM horsies_task_history WHERE task_id = $1)",
     )
@@ -280,7 +279,7 @@ async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_los
              FOR EACH ROW WHEN (NEW.role = 'runner' AND NEW.sender_id <> '{CHILD_BEAT_SENDER}')
              EXECUTE FUNCTION test_refuse_runner_beat();"
     );
-    sqlx::raw_sql(&refusal)
+    sql::raw_sql(&refusal)
         .execute(&pool)
         .await
         .expect("install the refusal of the worker's runner beats");
@@ -350,7 +349,7 @@ async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_los
 #[serial_test::serial]
 async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
     let (database, pool) = database().await;
-    sqlx::raw_sql(
+    sql::raw_sql(
         "CREATE SEQUENCE test_attempt_write_tries;
          CREATE FUNCTION test_refuse_first_attempt_write() RETURNS trigger LANGUAGE plpgsql AS $body$
          BEGIN
@@ -399,7 +398,7 @@ async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
     let tries = || {
         let pool = pool.clone();
         async move {
-            sqlx::query_scalar::<_, i64>(
+            sql::query_scalar::<i64>(
                 "SELECT CASE WHEN is_called THEN last_value ELSE 0 END
                  FROM test_attempt_write_tries",
             )
@@ -423,7 +422,7 @@ async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
     drop(guard);
 
     let committed: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM test_committed_attempt_writes WHERE task_id = $1")
+        sql::query_scalar("SELECT count(*) FROM test_committed_attempt_writes WHERE task_id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await

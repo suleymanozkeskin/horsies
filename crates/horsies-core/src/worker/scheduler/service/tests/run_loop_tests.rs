@@ -4,6 +4,7 @@
 //! before the run, a tick that fails, a tick with no enabled schedule, and
 //! the start write's rows.
 
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::LogCapture;
 
 use super::*;
@@ -13,19 +14,18 @@ use super::*;
 const UNREACHABLE_URL: &str = "postgresql://horsies@127.0.0.1:1/unreachable";
 
 /// A lazy pool on [`UNREACHABLE_URL`]. It opens no connection.
-fn unreachable_pool() -> sqlx::PgPool {
-    sqlx::postgres::PgPoolOptions::new()
+fn unreachable_pool() -> TestPool {
+    TestPoolOptions::new()
         .acquire_timeout(Duration::from_millis(100))
         .connect_lazy(UNREACHABLE_URL)
-        .expect("a lazy pool opens no connection")
 }
 
 /// A started scheduler of `plan` on a broker whose database cannot be
 /// reached: each tick fails at its due read.
 fn unreachable_scheduler(plan: ActivePlan, stop: &SchedulerStop) -> ActiveScheduler {
     ActiveScheduler {
-        broker: Arc::new(PostgresBroker::from_pool(
-            unreachable_pool(),
+        broker: Arc::new(PostgresBroker::from_test_url(
+            unreachable_pool().url(),
             crate::ClientFamily::Rust,
         )),
         schedules: plan.schedules,
@@ -43,7 +43,7 @@ fn unreachable_scheduler(plan: ActivePlan, stop: &SchedulerStop) -> ActiveSchedu
 async fn a_tick_with_no_enabled_schedule_sends_no_statement() {
     let plan = active_plan(manifest_of_entries(vec![disabled_entry("paused_only")]));
     assert!(plan.schedules.is_empty());
-    let core = crate::broker::pools::core_pool_for_test_pool(&unreachable_pool());
+    let core = crate::broker::pools::core_pool_for_test_url(unreachable_pool().url());
     let mut cadence = ExistenceCheckCadence::new(plan.check_interval_seconds);
 
     let ticked = check_and_enqueue(
@@ -112,7 +112,7 @@ async fn a_stop_asked_for_before_the_run_ends_the_run_after_its_start() {
     let slot = database_time(&pool).await - chrono::Duration::seconds(1);
     state::test_rows::seed_state(&pool, &due.name, slot).await;
     let _digest =
-        sqlx::query("UPDATE horsies_schedule_state SET config_hash = $2 WHERE schedule_name = $1")
+        sql::query("UPDATE horsies_schedule_state SET config_hash = $2 WHERE schedule_name = $1")
             .bind(&due.name)
             .bind(compute_config_hash(&enabled(&due)).to_vec())
             .execute(&pool)
@@ -120,8 +120,8 @@ async fn a_stop_asked_for_before_the_run_ends_the_run_after_its_start() {
             .expect("store the digest of the due schedule");
     let stop = SchedulerStop::new();
     stop.request_stop();
-    let broker = Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     ));
     let service =
@@ -210,7 +210,7 @@ async fn a_failed_start_write_is_logged_and_the_start_goes_on() {
     let core = core_pool_of(&pool);
     let name = format!("start_write_failure_{}", Uuid::new_v4().simple());
     let plan = active_plan(manifest_for(&[interval_schedule_secs(&name, 60)]));
-    let _created = sqlx::raw_sql(&format!(
+    let _created = sql::raw_sql(&format!(
         "CREATE FUNCTION test_fail_start_write() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
              IF NEW.schedule_name = '{name}' THEN
@@ -234,7 +234,7 @@ async fn a_failed_start_write_is_logged_and_the_start_goes_on() {
         &plan.schedules,
     )
     .await;
-    let _dropped = sqlx::raw_sql(
+    let _dropped = sql::raw_sql(
         "DROP TRIGGER test_fail_start_write ON horsies_schedule_state;
          DROP FUNCTION test_fail_start_write();",
     )
@@ -257,7 +257,7 @@ async fn a_failed_start_write_is_logged_and_the_start_goes_on() {
 /// write follows it, and the tick's existence heal creates the rows.
 #[tokio::test]
 async fn a_failed_start_read_is_logged_and_writes_nothing() {
-    let core = crate::broker::pools::core_pool_for_test_pool(&unreachable_pool());
+    let core = crate::broker::pools::core_pool_for_test_url(unreachable_pool().url());
     let plan = active_plan(manifest_for(&[interval_schedule_secs("unread_start", 60)]));
     let capture = LogCapture::new();
     let _default = capture.set_default();

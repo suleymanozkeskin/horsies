@@ -524,9 +524,9 @@ pub fn spawn_worker_state_loop(
 
 #[cfg(test)]
 mod tests {
-    use sqlx::PgPool;
 
     use super::*;
+    use crate::test_support::sql::{self, TestPool};
     use crate::worker::children::SeatsPerChild;
     use crate::worker::executor::slots::{ChildLayout, PoolBoard, SlotService};
 
@@ -563,7 +563,7 @@ mod tests {
         use serde_json::json;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let health = new_reaper_health();
         let phase2 = json!({"applied": 2, "failed": 0});
@@ -573,8 +573,8 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(
-                pool.clone(),
+            Arc::new(crate::broker::PostgresBroker::from_test_url(
+                pool.url(),
                 crate::ClientFamily::Rust,
             )),
             worker_id.clone(),
@@ -602,7 +602,7 @@ mod tests {
                     value => Some(value.clone()),
                 };
                 loop {
-                    let snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+                    let snapshot: Option<serde_json::Value> = sql::query_scalar(
                         "SELECT recovery_config FROM horsies_worker_states
                          WHERE worker_id = $1 ORDER BY snapshot_at DESC LIMIT 1",
                     )
@@ -625,7 +625,7 @@ mod tests {
         .await;
         cancel.cancel();
         task.await.unwrap();
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
             .bind(&worker_id)
             .execute(&pool)
             .await
@@ -952,7 +952,7 @@ mod tests {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
@@ -961,8 +961,8 @@ mod tests {
         assert!(worker_config.queue_max_concurrency.is_empty());
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(
-                pool.clone(),
+            Arc::new(crate::broker::PostgresBroker::from_test_url(
+                pool.url(),
                 crate::ClientFamily::Rust,
             )),
             worker_id.clone(),
@@ -985,7 +985,7 @@ mod tests {
         );
         let written = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let row: Option<Columns> = sqlx::query_as(
+                let row: Option<Columns> = sql::query_as(
                     "SELECT queue_priorities, queue_max_concurrency, slots_down, class_capacity,
                             max_claim_per_worker
                      FROM horsies_worker_states WHERE worker_id = $1",
@@ -1003,7 +1003,7 @@ mod tests {
         .await;
         cancel.cancel();
         task.await.expect("the snapshot loop joins");
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
             .bind(&worker_id)
             .execute(&pool)
             .await
@@ -1046,8 +1046,8 @@ mod tests {
     }
 
     /// The snapshot rows of `worker_id`.
-    async fn snapshot_rows(pool: &PgPool, worker_id: &str) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1")
+    async fn snapshot_rows(pool: &TestPool, worker_id: &str) -> i64 {
+        sql::query_scalar("SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1")
             .bind(worker_id)
             .fetch_one(pool)
             .await
@@ -1068,13 +1068,13 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn a_failed_claimed_count_writes_no_snapshot() {
-        let migrated = crate::broker::terminalization_matrix::migrated_pool().await;
+        let migrated = crate::test_support::migrated_pool().await;
         // On the one connection of this pool a temporary `horsies_tasks`
         // without the counted columns hides the table of that name, so the
         // count fails; the snapshot table is untouched, so the insert alone
         // would succeed.
         let shadowed =
-            crate::broker::pools::unpinged_single_connection_core_pool(&migrated.connect_options());
+            crate::broker::pools::unpinged_single_connection_core_pool_for_url(migrated.url());
         {
             let mut connection = shadowed
                 .checkout(CheckoutClass::Batch)
@@ -1088,7 +1088,7 @@ mod tests {
                 .await
                 .expect("create the shadow table");
         }
-        let control = crate::broker::pools::core_pool_for_test_pool(&migrated);
+        let control = crate::broker::pools::core_pool_for_test_url(migrated.url());
         let control_worker = uuid::Uuid::new_v4().to_string();
         let failing_worker = uuid::Uuid::new_v4().to_string();
 
@@ -1107,7 +1107,7 @@ mod tests {
         let control_rows = snapshot_rows(&migrated, &control_worker).await;
         let written = snapshot_rows(&migrated, &failing_worker).await;
 
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
             .bind(vec![control_worker, failing_worker])
             .execute(&migrated)
             .await
@@ -1152,15 +1152,15 @@ mod tests {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(
-                pool.clone(),
+            Arc::new(crate::broker::PostgresBroker::from_test_url(
+                pool.url(),
                 crate::ClientFamily::Rust,
             )),
             worker_id.clone(),
@@ -1176,7 +1176,7 @@ mod tests {
         );
         let written = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let count: i64 = sqlx::query_scalar(
+                let count: i64 = sql::query_scalar(
                     "SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1",
                 )
                 .bind(&worker_id)
@@ -1192,7 +1192,7 @@ mod tests {
         .await;
         cancel.cancel();
         task.await.unwrap();
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
             .bind(&worker_id)
             .execute(&pool)
             .await

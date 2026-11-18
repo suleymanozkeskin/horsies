@@ -2,39 +2,56 @@
 
 use chrono::{Duration, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
-use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
+use crate::core::history::maintenance::coverage::{
+    ensure_partition_coverage_in_pool, CoverageOutcome,
+};
 use crate::core::history::periods::RetentionDays;
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+
+/// The sessions of the pools of [`migrated_pool`] and
+/// [`sqlx_migrated_pool`].
+const POOL_CONNECTIONS: u32 = 5;
 
 /// The database of the running test (`crate::test_support::database_of_this_test`),
-/// a copy of the installed test template, as a sqlx pool.
-pub(crate) async fn migrated_pool() -> PgPool {
+/// a copy of the installed test template, with no coverage pass.
+pub(crate) async fn migrated_pool() -> TestPool {
     let database = crate::test_support::database_of_this_test().await;
-    PgPoolOptions::new()
-        .max_connections(5)
+    TestPoolOptions::new()
+        .max_connections(POOL_CONNECTIONS)
         .connect(database.url())
         .await
         .expect("connect the database of this test")
 }
 
-async fn clear_enqueue_state(pool: &PgPool) {
-    sqlx::query("DELETE FROM horsies_key_reservations")
+/// [`migrated_pool`] as a sqlx pool, for the test modules that still hold
+/// one.
+pub(crate) async fn sqlx_migrated_pool() -> sqlx::PgPool {
+    let database = crate::test_support::database_of_this_test().await;
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(POOL_CONNECTIONS)
+        .connect(database.url())
+        .await
+        .expect("connect the database of this test")
+}
+
+async fn clear_enqueue_state(pool: &TestPool) {
+    sql::query("DELETE FROM horsies_key_reservations")
         .execute(pool)
         .await
         .expect("clear reservations");
-    sqlx::query("DELETE FROM horsies_tasks")
+    sql::query("DELETE FROM horsies_tasks")
         .execute(pool)
         .await
         .expect("clear tasks");
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct StoredFacts {
     task_id: Uuid,
     input: String,
@@ -48,8 +65,25 @@ struct StoredFacts {
     retain_rerun_input: Option<bool>,
 }
 
-async fn stored_facts(pool: &PgPool, task_id: Uuid) -> StoredFacts {
-    sqlx::query_as(
+impl sql::FromTestRow for StoredFacts {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            task_id: sql::named(row, "task_id")?,
+            input: sql::named(row, "input")?,
+            execution: sql::named(row, "execution")?,
+            rerun_of_task_id: sql::named(row, "rerun_of_task_id")?,
+            rerun_root_task_id: sql::named(row, "rerun_root_task_id")?,
+            command_fingerprint_version: sql::named(row, "command_fingerprint_version")?,
+            command_fingerprint_length: sql::named(row, "command_fingerprint_length")?,
+            retention_class_key: sql::named(row, "retention_class_key")?,
+            idempotency_key_digest_length: sql::named(row, "idempotency_key_digest_length")?,
+            retain_rerun_input: sql::named(row, "retain_rerun_input")?,
+        })
+    }
+}
+
+async fn stored_facts(pool: &TestPool, task_id: Uuid) -> StoredFacts {
+    sql::query_as(
         "SELECT id AS task_id, input, execution, rerun_of_task_id, rerun_root_task_id,
                 command_fingerprint_version,
                 octet_length(command_fingerprint) AS command_fingerprint_length,
@@ -106,7 +140,7 @@ async fn enqueue_keyed(
 async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let sent_at = Utc::now();
     let first_id = crate::core::history::identity::uuid7::mint_task_id().unwrap();
     let applied = enqueue_keyed(
@@ -132,7 +166,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
     assert_eq!(facts.retention_class_key.as_deref(), Some("standard_7d"));
     assert_eq!(facts.idempotency_key_digest_length, Some(32));
     assert_eq!(facts.retain_rerun_input, Some(true));
-    let reservation_window_seconds: i64 = sqlx::query_scalar(
+    let reservation_window_seconds: i64 = sql::query_scalar(
         "SELECT EXTRACT(EPOCH FROM reservation_window)::bigint
          FROM horsies_key_reservations WHERE task_id = $1::uuid",
     )
@@ -170,7 +204,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
         conflict,
         BrokerError::IdempotencyKeyConflict { .. }
     ));
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM horsies_tasks")
+    let count: i64 = sql::query_scalar("SELECT COUNT(*) FROM horsies_tasks")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -210,8 +244,8 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
 async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool_with_idempotency_reservation_window(
-        pool.clone(),
+    let broker = PostgresBroker::from_test_url_with_idempotency_reservation_window(
+        pool.url(),
         Some(Duration::hours(2)),
         crate::ClientFamily::Rust,
     )
@@ -260,7 +294,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     assert_eq!(rebound, task_id);
     let facts = stored_facts(&pool, task_id).await;
     assert_eq!(facts.idempotency_key_digest_length, Some(32));
-    let reservation_count: i64 = sqlx::query_scalar(
+    let reservation_count: i64 = sql::query_scalar(
         "SELECT COUNT(*) FROM horsies_key_reservations
          WHERE task_id = $1::uuid AND disposition = 'LIVE'",
     )
@@ -269,7 +303,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     .await
     .unwrap();
     assert_eq!(reservation_count, 1);
-    let configured_window_seconds: i64 = sqlx::query_scalar(
+    let configured_window_seconds: i64 = sql::query_scalar(
         "SELECT EXTRACT(EPOCH FROM reservation_window)::bigint
          FROM horsies_key_reservations WHERE task_id = $1::uuid",
     )
@@ -307,7 +341,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
         } if conflicting_task_id == task_id
     ));
     let reservations_after_key_conflict: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_key_reservations")
+        sql::query_scalar("SELECT COUNT(*) FROM horsies_key_reservations")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -337,7 +371,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
         .expect_err("mismatched task-ID binding must fail closed");
     assert!(matches!(mismatch, BrokerError::PayloadMismatch { .. }));
     let reservations_after_mismatch: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_key_reservations")
+        sql::query_scalar("SELECT COUNT(*) FROM horsies_key_reservations")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -355,23 +389,23 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
         ..Default::default()
     };
     let declared = config.registrable_periods();
-    let mut transaction = pool.begin().await.unwrap();
-    let coverage = ensure_partition_coverage(
-        &mut transaction,
+    let core = core_pool_for_test_url(pool.url());
+    let coverage = ensure_partition_coverage_in_pool(
+        &core,
+        StatementLog::Off,
         config.history_leaf_horizon_days,
         config.heartbeat_leaf_horizon_hours,
         &declared,
-        &StagedLoaderPublisher,
     )
     .await
     .expect("register configured classes");
+    core.close();
     assert!(
         matches!(coverage, CoverageOutcome::Ensured(_)),
         "{coverage:?}"
     );
-    transaction.commit().await.unwrap();
 
-    let registered: Vec<(String, String, Option<i16>)> = sqlx::query_as(
+    let registered: Vec<(String, String, Option<i16>)> = sql::query_as(
         "SELECT class_key, class_kind::text, retention_days
          FROM horsies_retention_classes
          WHERE class_key IN ('standard_2d', 'standard_7d')
@@ -402,8 +436,8 @@ async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
         (Duration::milliseconds(1_500), "window-1500ms"),
         (Duration::milliseconds(500), "window-500ms"),
     ] {
-        let broker = PostgresBroker::from_pool_with_idempotency_reservation_window(
-            pool.clone(),
+        let broker = PostgresBroker::from_test_url_with_idempotency_reservation_window(
+            pool.url(),
             Some(window),
             crate::ClientFamily::Rust,
         )
@@ -429,7 +463,7 @@ async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
             .await
             .expect("the keyed send is admitted");
         assert_eq!(sent, task_id, "{key}");
-        let stored_micros: i64 = sqlx::query_scalar(
+        let stored_micros: i64 = sql::query_scalar(
             "SELECT (EXTRACT(EPOCH FROM reservation_window) * 1000000)::bigint
              FROM horsies_key_reservations WHERE task_id = $1::uuid",
         )
@@ -446,8 +480,8 @@ async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
 async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool_with_enqueue_policy(
-        pool.clone(),
+    let broker = PostgresBroker::from_test_url_with_enqueue_policy(
+        pool.url(),
         true,
         None,
         crate::ClientFamily::Rust,
@@ -514,7 +548,7 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
 #[serial]
 async fn an_enqueue_outcome_outside_the_contract_panics_with_the_outcome_and_the_task() {
     let pool = migrated_pool().await;
-    sqlx::raw_sql(
+    sql::raw_sql(
         "CREATE OR REPLACE FUNCTION horsies_enqueue_task(
              p_task_id uuid, p_task_name text, p_queue_name text, p_priority integer,
              p_input text, p_task_options text, p_execution text, p_retention_class_key text,
@@ -531,7 +565,7 @@ async fn an_enqueue_outcome_outside_the_contract_panics_with_the_outcome_and_the
     .execute(&pool)
     .await
     .expect("replace the enqueue function");
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_id = Uuid::from_u128(0x1232);
 
     let sent = tokio::spawn(async move {

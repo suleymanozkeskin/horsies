@@ -1,5 +1,6 @@
 use super::*;
 use crate::scheduler_manifest::{parse_scheduler_manifest, ScheduleTaskOptions};
+use crate::test_support::sql::{self, TestPool};
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 use serial_test::serial;
@@ -82,8 +83,8 @@ async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() 
     use crate::broker::BrokerError;
 
     let pool = test_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         ClientFamily::Python,
     ));
     let name = format!("scheduler_family_{}", uuid::Uuid::new_v4().simple());
@@ -201,13 +202,13 @@ fn calculate_missed_runs_returns_empty_when_first_due_is_in_the_future() {
 }
 
 /// The main core pool on the test database of `pool`.
-fn core_pool_of(pool: &sqlx::PgPool) -> CorePool {
-    crate::broker::pools::core_pool_for_test_pool(pool)
+fn core_pool_of(pool: &TestPool) -> CorePool {
+    crate::broker::pools::core_pool_for_test_url(pool.url())
 }
 
 /// The database time, read in its own statement.
-async fn database_time(pool: &sqlx::PgPool) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT statement_timestamp()")
+async fn database_time(pool: &TestPool) -> DateTime<Utc> {
+    sql::query_scalar("SELECT statement_timestamp()")
         .fetch_one(pool)
         .await
         .expect("read the database time")
@@ -216,7 +217,7 @@ async fn database_time(pool: &sqlx::PgPool) -> DateTime<Utc> {
 /// Fire `schedule` once as a tick does: its row is due at `first_due`, and
 /// the due read ran at `database_now`.
 async fn fire_once(
-    pool: &sqlx::PgPool,
+    pool: &TestPool,
     schedule: &TestSchedule,
     first_due: DateTime<Utc>,
     database_now: DateTime<Utc>,
@@ -241,8 +242,8 @@ async fn fire_once(
 }
 
 /// The task rows of `task_name`.
-async fn task_count(pool: &sqlx::PgPool, task_name: &str) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+async fn task_count(pool: &TestPool, task_name: &str) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
         .bind(task_name)
         .fetch_one(pool)
         .await
@@ -250,8 +251,8 @@ async fn task_count(pool: &sqlx::PgPool, task_name: &str) -> i64 {
 }
 
 /// Delete the task rows of `task_name` and the state row of `schedule_name`.
-async fn cleanup(pool: &sqlx::PgPool, task_name: &str, schedule_name: &str) {
-    let _deleted = sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+async fn cleanup(pool: &TestPool, task_name: &str, schedule_name: &str) {
+    let _deleted = sql::query("DELETE FROM horsies_tasks WHERE task_name = $1")
         .bind(task_name)
         .execute(pool)
         .await
@@ -262,8 +263,8 @@ async fn cleanup(pool: &sqlx::PgPool, task_name: &str, schedule_name: &str) {
 /// A trigger that refuses every task row of `task_name` with SQLSTATE
 /// P0001: a database refusal of the fire that repeats on every try (as a
 /// CHECK violation of the slot rows). [`drop_slot_refusal`] removes it.
-async fn refuse_slot_rows(pool: &sqlx::PgPool, task_name: &str) {
-    let _created = sqlx::raw_sql(&format!(
+async fn refuse_slot_rows(pool: &TestPool, task_name: &str) {
+    let _created = sql::raw_sql(&format!(
         "CREATE FUNCTION test_refuse_slot_rows() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
              IF NEW.task_name = '{task_name}' THEN
@@ -279,8 +280,8 @@ async fn refuse_slot_rows(pool: &sqlx::PgPool, task_name: &str) {
     .expect("create the refusal trigger");
 }
 
-async fn drop_slot_refusal(pool: &sqlx::PgPool) {
-    let _dropped = sqlx::raw_sql(
+async fn drop_slot_refusal(pool: &TestPool) {
+    let _dropped = sql::raw_sql(
         "DROP TRIGGER test_refuse_slot_rows ON horsies_tasks;
          DROP FUNCTION test_refuse_slot_rows();",
     )
@@ -289,8 +290,8 @@ async fn drop_slot_refusal(pool: &sqlx::PgPool) {
     .expect("drop the refusal trigger");
 }
 
-async fn test_pool() -> sqlx::PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+async fn test_pool() -> TestPool {
+    crate::test_support::migrated_pool().await
 }
 
 /// One enabled schedule of a test manifest: an interval in whole seconds,
@@ -445,7 +446,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     fire_once(&pool, &schedule, slot, database_now)
         .await
         .expect("the fire");
-    let row: (String, String, i32, bool, String) = sqlx::query_as(
+    let row: (String, String, i32, bool, String) = sql::query_as(
         "SELECT id::text, retention_class_key,
                 octet_length(command_fingerprint), retain_rerun_input, input
          FROM horsies_tasks WHERE task_name = $1",
@@ -454,7 +455,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let slot_id: Uuid = sqlx::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
+    let slot_id: Uuid = sql::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
         .bind(&schedule.name)
         .bind(slot)
         .fetch_one(&pool)
@@ -506,7 +507,7 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     fire_once(&pool, &schedule, slot, database_now)
         .await
         .expect("the fire");
-    let (stored, max_retries, queue): (Option<String>, i32, String) = sqlx::query_as(
+    let (stored, max_retries, queue): (Option<String>, i32, String) = sql::query_as(
         "SELECT task_options, max_retries, queue_name FROM horsies_tasks WHERE task_name = $1",
     )
     .bind(&name)
@@ -563,13 +564,12 @@ async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
         fire_once(&pool, &schedule, slot, database_now)
             .await
             .expect("the fire");
-        let (stored, stored_class): (Option<String>, String) = sqlx::query_as(
-            "SELECT task_options, execution FROM horsies_tasks WHERE task_name = $1",
-        )
-        .bind(&name)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (stored, stored_class): (Option<String>, String) =
+            sql::query_as("SELECT task_options, execution FROM horsies_tasks WHERE task_name = $1")
+                .bind(&name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(stored, Some(options_text), "{stored_execution}");
         assert_eq!(stored_class, stored_execution);
         cleanup(&pool, &name, &name).await;
@@ -606,7 +606,7 @@ async fn a_single_late_tick_fires_the_stored_slot_and_anchors_the_next_run_to_it
     );
     assert_eq!(row.run_count, 1);
     let sent_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT sent_at FROM horsies_tasks WHERE task_name = $1")
+        sql::query_scalar("SELECT sent_at FROM horsies_tasks WHERE task_name = $1")
             .bind(task_name)
             .fetch_one(&pool)
             .await
@@ -643,7 +643,7 @@ async fn a_backlog_without_catch_up_fires_only_the_latest_due_slot() {
         "next_run must skip past the due read to the latest slot's successor",
     );
     assert!(row.next_run_at > now);
-    let slots: Vec<DateTime<Utc>> = sqlx::query_scalar(
+    let slots: Vec<DateTime<Utc>> = sql::query_scalar(
         "SELECT sent_at FROM horsies_tasks WHERE task_name = $1 ORDER BY sent_at",
     )
     .bind(task_name)

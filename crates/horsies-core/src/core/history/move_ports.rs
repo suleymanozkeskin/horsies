@@ -32,7 +32,7 @@ const FAILURE_RESULT: &str = "{\"Err\":{}}";
 const SUCCESS_RESULT: &str = "{\"Ok\":true}";
 
 async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+    crate::broker::terminalization_matrix::sqlx_migrated_pool().await
 }
 
 /// A RUNNING plain task claimed by `PORT_WORKER`. Every baseline column is

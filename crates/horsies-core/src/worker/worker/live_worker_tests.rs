@@ -9,6 +9,7 @@ use super::Worker;
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
+use crate::test_support::sql;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
@@ -34,7 +35,7 @@ const STOP_BOUND: Duration = Duration::from_secs(30);
 #[serial_test::serial]
 #[ignore = "waits on #678: the claim writes the removed claimed column"]
 async fn a_live_worker_answers_a_ping_and_lists_its_state() {
-    let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let url = crate::test_support::migrated_database_url().await;
     let app_config = AppConfig::for_database_url(url);
     let broker = Arc::new(
         PostgresBroker::connect_worker_with(&app_config.broker, crate::ClientFamily::Rust)
@@ -98,9 +99,9 @@ async fn a_live_worker_answers_a_ping_and_lists_its_state() {
         .await
         .expect("the worker stops within the bound")
         .expect("the worker task joins");
-    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(&worker_id)
-        .execute(broker.pool())
+        .execute(&crate::test_support::migrated_pool().await)
         .await
         .expect("delete the snapshots");
 

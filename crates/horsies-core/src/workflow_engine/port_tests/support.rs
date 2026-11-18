@@ -95,7 +95,7 @@ pub(super) fn poison_success_policy() -> serde_json::Value {
 /// The shared migrated database. A test on it must not leave a RUNNING
 /// workflow with stuck work, because other tests run global passes on it.
 pub(super) async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+    crate::broker::terminalization_matrix::sqlx_migrated_pool().await
 }
 
 /// Connections of one test pool.

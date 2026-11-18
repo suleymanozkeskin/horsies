@@ -1151,9 +1151,9 @@ mod fail_closed_tests;
 
 #[cfg(test)]
 mod tests {
-    use sqlx::PgPool;
 
     use super::*;
+    use crate::test_support::sql::{self, TestPool};
 
     #[test]
     fn held_dispatches_are_beaten_until_the_guard_drops() {
@@ -1431,13 +1431,13 @@ mod tests {
     /// A RUNNING row on the baseline schema, owned by `owner` at the claim
     /// generation `claimed_at`, with or without the finalizing marker.
     async fn seed_running_task(
-        pool: &PgPool,
+        pool: &TestPool,
         task_id: Uuid,
         owner: &str,
         claimed_at: DateTime<Utc>,
         finalizing: bool,
     ) {
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -1473,11 +1473,11 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn one_statement_beats_only_rows_that_pass_the_fence() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         // The heartbeat table has no default partition: the current hour
         // needs its leaf, as at worker start.
         crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool(
-            &crate::broker::pools::core_pool_for_test_pool(&pool),
+            &crate::broker::pools::core_pool_for_test_url(pool.url()),
             crate::broker::core_rows::StatementLog::Off,
             2,
             2,
@@ -1487,7 +1487,7 @@ mod tests {
         .expect("partition coverage");
         let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
         let claimed_at: DateTime<Utc> =
-            sqlx::query_scalar("SELECT date_trunc('milliseconds', now())")
+            sql::query_scalar("SELECT date_trunc('milliseconds', now())")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -1510,12 +1510,12 @@ mod tests {
             pid: 7,
         };
         let generations = vec![claimed_at; ids.len()];
-        let core_pool = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let core_pool = crate::broker::pools::core_pool_for_test_url(pool.url());
         let rows = write_beats(&core_pool, &sender, &ids, &generations)
             .await
             .unwrap();
         assert_eq!(rows, 1);
-        let beaten: Vec<Uuid> = sqlx::query_scalar(
+        let beaten: Vec<Uuid> = sql::query_scalar(
             "SELECT task_id FROM horsies_heartbeats
              WHERE role = 'runner' AND sender_id = 'beat-worker' AND task_id = ANY($1)",
         )
@@ -1524,12 +1524,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(beaten, vec![ids[0]]);
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
+        sql::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await

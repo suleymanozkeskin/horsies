@@ -241,7 +241,7 @@ async fn the_recovery_discovery_treats_each_node_status_by_the_enum() {
 #[tokio::test]
 #[serial]
 async fn the_nonterminal_node_index_holds_exactly_the_nonterminal_statuses() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let predicate: String = sqlx::query_scalar(
         "SELECT pg_get_expr(i.indpred, i.indrelid)
          FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid

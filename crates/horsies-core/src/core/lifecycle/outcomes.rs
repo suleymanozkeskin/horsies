@@ -1054,7 +1054,7 @@ mod tests {
     #[serial_test::serial]
     async fn a_non_integer_ordinality_is_refused() {
         let broker = crate::broker::PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
         let rows = broker

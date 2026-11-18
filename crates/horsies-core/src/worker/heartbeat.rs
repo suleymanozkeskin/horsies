@@ -196,20 +196,23 @@ async fn send_claimer_heartbeat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::sql::{self, TestPool};
     use chrono::{DateTime, Utc};
     use serial_test::serial;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
     const BEAT_WORKER: &str = "beat-worker";
 
     /// The shared test database, with heartbeat leaves for the current hours.
-    async fn covered_pool() -> PgPool {
+    async fn covered_pool() -> TestPool {
         use crate::core::history::heartbeats::partitioning::{
             ensure_heartbeat_coverage, EnsureHeartbeatCoverage,
         };
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let mut connection = pool.acquire().await.expect("acquire");
+        let pool = crate::test_support::migrated_pool().await;
+        // ensure_heartbeat_coverage takes a sqlx connection: it runs on the
+        // sqlx pool of the same database.
+        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let mut connection = sqlx_pool.acquire().await.expect("acquire");
         ensure_heartbeat_coverage(
             &mut connection,
             &EnsureHeartbeatCoverage::new(2).expect("coverage command"),
@@ -217,6 +220,7 @@ mod tests {
         .await
         .expect("heartbeat leaves");
         drop(connection);
+        sqlx_pool.close().await;
         pool
     }
 
@@ -228,7 +232,7 @@ mod tests {
     async fn the_claimer_beat_renews_the_lease_on_the_database_clock() {
         let pool = covered_pool().await;
         let task_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at,
@@ -255,28 +259,28 @@ mod tests {
         .await
         .expect("seed CLAIMED task");
 
-        let before: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let before: DateTime<Utc> = sql::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&pool)
             .await
             .expect("clock");
-        let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         send_claimer_heartbeat(&broker, BEAT_WORKER, "h", 1, 60_000, 180_000)
             .await
             .expect("beat and renew");
-        let after: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let after: DateTime<Utc> = sql::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&pool)
             .await
             .expect("clock");
 
         let expires: DateTime<Utc> =
-            sqlx::query_scalar("SELECT claim_expires_at FROM horsies_tasks WHERE id = $1")
+            sql::query_scalar("SELECT claim_expires_at FROM horsies_tasks WHERE id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
                 .expect("lease");
         assert!(before + chrono::Duration::seconds(60) <= expires);
         assert!(expires <= after + chrono::Duration::seconds(60));
-        let beats: i64 = sqlx::query_scalar(
+        let beats: i64 = sql::query_scalar(
             "SELECT COUNT(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'claimer'",
         )
         .bind(task_id)
@@ -285,12 +289,12 @@ mod tests {
         .expect("count beats");
         assert_eq!(beats, 1);
 
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
             .expect("delete beats");
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        sql::query("DELETE FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
@@ -298,8 +302,8 @@ mod tests {
     }
 
     /// Seconds from the database clock to the lease of `task_id`.
-    async fn lease_left_s(pool: &PgPool, task_id: Uuid) -> f64 {
-        sqlx::query_scalar(
+    async fn lease_left_s(pool: &TestPool, task_id: Uuid) -> f64 {
+        sql::query_scalar(
             "SELECT EXTRACT(EPOCH FROM claim_expires_at - NOW())::float8
              FROM horsies_tasks WHERE id = $1",
         )
@@ -326,7 +330,7 @@ mod tests {
             (other, "other-worker", 5.0),
         ];
         for (task_id, owner, age_s) in claims {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, input, task_options, execution,
                     retention_class_key, sent_at, created_at,
@@ -358,8 +362,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let beats = spawn_claimer_heartbeat(
-            Arc::new(PostgresBroker::from_pool(
-                pool.clone(),
+            Arc::new(PostgresBroker::from_test_url(
+                pool.url(),
                 crate::ClientFamily::Rust,
             )),
             BEAT_WORKER.to_owned(),
@@ -392,12 +396,12 @@ mod tests {
         );
 
         let ids = vec![young, old, other];
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await
             .expect("delete beats");
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
+        sql::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await

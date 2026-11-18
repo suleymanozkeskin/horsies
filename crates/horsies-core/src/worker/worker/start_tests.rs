@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +28,7 @@ use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::{AppConfig, WorkerResilienceConfig};
 use crate::db::{ChannelName, PayloadFilter};
+use crate::test_support::sql::{self, TestPoolOptions};
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
@@ -120,28 +120,25 @@ fn quiet_board() -> PoolBoard {
     })
 }
 
-/// A broker on a port where no server listens: each statement fails after
-/// 100 ms with a retryable pool timeout.
+/// A broker on a port where no server listens: each statement fails before
+/// it is sent, with a failure that may clear.
 fn unreachable_broker() -> Arc<PostgresBroker> {
-    let options = PgConnectOptions::new()
-        .host("127.0.0.1")
-        .port(1)
-        .username("horsies")
-        .database("horsies");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_millis(100))
-        .connect_lazy_with(options);
-    Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust))
+    Arc::new(PostgresBroker::from_test_url(
+        "postgresql://horsies@127.0.0.1:1/horsies",
+        crate::ClientFamily::Rust,
+    ))
 }
 
 /// Python `TestStartWithResilienceConfig::test_success_returns_immediately`.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_start_on_a_ready_database_starts_with_no_retry() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let worker = worker_on(
-        Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
+        Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
+            crate::ClientFamily::Rust,
+        )),
         resilience(60_000, 0),
     );
     let started = Instant::now();
@@ -183,19 +180,20 @@ async fn a_start_error_that_can_clear_is_retried_until_its_budget_ends() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_start_error_that_cannot_clear_is_returned_at_once() {
-    let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-    let missing = PgConnectOptions::from_str(&url)
-        .expect("the test database url parses")
-        .database(&format!(
-            "horsies_missing_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-    let pool = PgPoolOptions::new()
+    let url = crate::test_support::migrated_database_url().await;
+    let missing = crate::test_support::with_database(
+        &url,
+        &format!("horsies_missing_{}", uuid::Uuid::new_v4().simple()),
+    );
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(10))
-        .connect_lazy_with(missing);
+        .connect_lazy(&missing);
     let worker = worker_on(
-        Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
+        Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
+            crate::ClientFamily::Rust,
+        )),
         resilience(60_000, 0),
     );
     let started = Instant::now();
@@ -290,8 +288,8 @@ async fn send_burst(broker: &PostgresBroker, witness: &crate::db::WakeSubscripti
         .iter()
         .map(|queue| format!("pg_notify('task_queue_{queue}', 'wake')"))
         .collect();
-    sqlx::query(&format!("SELECT {}", notifies.join(", ")))
-        .execute(broker.pool())
+    sql::query(&format!("SELECT {}", notifies.join(", ")))
+        .execute(&crate::test_support::migrated_pool().await)
         .await
         .expect("send the burst");
     let witnessed = tokio::time::timeout(WAIT, witness.recv())
@@ -307,9 +305,9 @@ async fn send_burst(broker: &PostgresBroker, witness: &crate::db::WakeSubscripti
 #[tokio::test]
 #[serial_test::serial]
 async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
-    let session_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-        crate::broker::terminalization_matrix::migrated_pool().await,
+    let session_url = crate::test_support::migrated_database_url().await;
+    let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
+        crate::test_support::migrated_pool().await.url(),
         &session_url,
         crate::ClientFamily::Rust,
     ));

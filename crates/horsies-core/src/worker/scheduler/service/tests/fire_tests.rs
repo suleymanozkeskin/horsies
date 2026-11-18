@@ -4,21 +4,20 @@
 //! `horsies_fire_schedule` statement per due schedule, on the core pool the
 //! tick is given.
 
-use sqlx::PgPool;
-
 use super::*;
 use crate::db::{
     parse_connection_url, CheckoutClass, ConnectPlan, ConnectionAge, ConnectionEnvironment,
     IdlePing, PoolPlan, PoolRole, PoolSizing, Reserve, StatementProtocol, DEFAULT_SOCKET_SETTINGS,
 };
+use crate::test_support::sql::{self, TestPool, TestTransaction};
 use crate::test_support::LogCapture;
 
 const SCHEDULE_INTERVAL_SECONDS: u32 = 60;
 
 /// A core pool of one connection on the test database of `pool`, with no
 /// idle ping, no age limit and the given checkout wait.
-fn one_connection_pool(pool: &PgPool, checkout_wait: Duration) -> CorePool {
-    let url = crate::broker::pools::test_url_of(&pool.connect_options());
+fn one_connection_pool(pool: &TestPool, checkout_wait: Duration) -> CorePool {
+    let url = pool.url().to_owned();
     let environment = ConnectionEnvironment::isolated();
     let settings =
         parse_connection_url(&url, &environment).expect("the statement layer accepts a test URL");
@@ -70,16 +69,16 @@ async fn tick_on(
 }
 
 /// The database time cut to a whole second.
-async fn whole_second_database_time(pool: &PgPool) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT date_trunc('second', statement_timestamp())")
+async fn whole_second_database_time(pool: &TestPool) -> DateTime<Utc> {
+    sql::query_scalar("SELECT date_trunc('second', statement_timestamp())")
         .fetch_one(pool)
         .await
         .expect("read the database time")
 }
 
 /// The task id of a slot, from the database function that the fire uses.
-async fn slot_task_id(pool: &PgPool, schedule_name: &str, slot: DateTime<Utc>) -> Uuid {
-    sqlx::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
+async fn slot_task_id(pool: &TestPool, schedule_name: &str, slot: DateTime<Utc>) -> Uuid {
+    sql::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
         .bind(schedule_name)
         .bind(slot)
         .fetch_one(pool)
@@ -125,7 +124,7 @@ async fn a_due_slot_fires_and_records_its_run_at_the_database_time() {
     let last_run_at = row.last_run_at.expect("a recorded run has its time");
     assert!(before <= last_run_at && last_run_at <= after);
     let sent_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT sent_at FROM horsies_tasks WHERE id = $1")
+        sql::query_scalar("SELECT sent_at FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await
@@ -235,7 +234,7 @@ async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_
     fire().await.expect("the first fire");
     let task_id = slot_task_id(&pool, &schedule.name, slot).await;
     assert_eq!(task_count(&pool, &schedule.task_name).await, 1);
-    let _deleted = sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    let _deleted = sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
@@ -271,13 +270,13 @@ async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_
 /// Terminate the backend that waits for the state row lock that
 /// `transaction` holds. Each poll first drops the activity snapshot: inside
 /// one transaction, `pg_stat_activity` keeps the rows of its first read.
-async fn terminate_the_waiting_fire(transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
+async fn terminate_the_waiting_fire(transaction: &mut TestTransaction<'_>) {
     for _ in 0..100 {
-        let _cleared = sqlx::query("SELECT pg_stat_clear_snapshot()")
+        let _cleared = sql::query("SELECT pg_stat_clear_snapshot()")
             .execute(&mut **transaction)
             .await
             .expect("drop the activity snapshot");
-        let terminated: Vec<bool> = sqlx::query_scalar(
+        let terminated: Vec<bool> = sql::query_scalar(
             "SELECT pg_terminate_backend(a.pid)
              FROM pg_stat_activity AS a
              WHERE a.datname = current_database()
@@ -316,7 +315,7 @@ async fn a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fires_eac
 
     let mut holder = pool.begin().await.expect("begin the holder");
     let _held =
-        sqlx::query("SELECT 1 FROM horsies_schedule_state WHERE schedule_name = $1 FOR UPDATE")
+        sql::query("SELECT 1 FROM horsies_schedule_state WHERE schedule_name = $1 FOR UPDATE")
             .bind(&schedule.name)
             .execute(&mut *holder)
             .await
@@ -453,7 +452,7 @@ async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_on
     let schedules = vec![schedule.clone()];
     let commands = commands_for(&schedules);
     let core = core_pool_of(&pool);
-    let _created = sqlx::raw_sql(
+    let _created = sql::raw_sql(
         "CREATE FUNCTION test_fail_schedule_state() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN RAISE EXCEPTION 'injected state write failure'; END $$;
          CREATE TRIGGER test_fail_schedule_state BEFORE UPDATE ON horsies_schedule_state
@@ -464,7 +463,7 @@ async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_on
     .expect("create the state failure trigger");
 
     let failed = tick_on(&core, &schedules, &commands).await;
-    let _dropped = sqlx::raw_sql(
+    let _dropped = sql::raw_sql(
         "DROP TRIGGER test_fail_schedule_state ON horsies_schedule_state;
          DROP FUNCTION test_fail_schedule_state();",
     )
@@ -500,8 +499,8 @@ async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_on
 #[serial]
 async fn a_running_scheduler_fires_a_due_slot_and_stops() {
     let pool = test_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     ));
     let schedule = own_schedule("spawned");
@@ -518,7 +517,7 @@ async fn a_running_scheduler_fires_a_due_slot_and_stops() {
     })
     .await
     .expect("the start writes the state row");
-    let _due = sqlx::query(
+    let _due = sql::query(
         "UPDATE horsies_schedule_state
          SET next_run_at = date_trunc('second', NOW()) - interval '1 second'
          WHERE schedule_name = $1",
@@ -612,7 +611,7 @@ async fn the_slot_task_id_of_the_database_matches_its_vectors_and_layout() {
         slot_task_id(&pool, "daily", slot).await,
         slot_task_id(&pool, "daily", slot + chrono::Duration::microseconds(1)).await
     );
-    let other_zone: Uuid = sqlx::query_scalar(
+    let other_zone: Uuid = sql::query_scalar(
         "SELECT horsies_schedule_slot_task_id('daily', '2026-11-16 11:00:00+01'::timestamptz)",
     )
     .fetch_one(&pool)
@@ -631,16 +630,13 @@ async fn the_slot_task_id_refuses_a_slot_time_outside_the_uuid7_range() {
     let end = DateTime::from_timestamp_millis(1_i64 << 48).expect("2^48 ms is a valid time");
     let before_epoch = DateTime::<Utc>::UNIX_EPOCH - chrono::Duration::microseconds(1);
     for slot_time in [before_epoch, end] {
-        let refused = sqlx::query_scalar::<_, Uuid>("SELECT horsies_schedule_slot_task_id($1, $2)")
+        let refused = sql::query_scalar::<Uuid>("SELECT horsies_schedule_slot_task_id($1, $2)")
             .bind("daily")
             .bind(slot_time)
             .fetch_one(&pool)
             .await
             .expect_err("a slot time outside the range has no id");
-        let code = refused
-            .as_database_error()
-            .and_then(|error| error.code())
-            .map(|code| code.into_owned());
+        let code = refused.sqlstate().map(str::to_owned);
         assert_eq!(code.as_deref(), Some("22023"), "{slot_time}");
     }
     let last = slot_task_id(&pool, "daily", end - chrono::Duration::microseconds(1)).await;
@@ -746,7 +742,7 @@ async fn a_skip_that_fails_after_a_refused_fire_is_logged_and_leaves_the_row() {
     let database_now = whole_second_database_time(&pool).await;
     let slot = database_now - chrono::Duration::seconds(1);
     state::test_rows::seed_state(&pool, &schedule.name, slot).await;
-    let _created = sqlx::raw_sql(
+    let _created = sql::raw_sql(
         "CREATE FUNCTION test_fail_schedule_state() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN RAISE EXCEPTION 'injected state write failure'; END $$;
          CREATE TRIGGER test_fail_schedule_state BEFORE UPDATE ON horsies_schedule_state
@@ -759,7 +755,7 @@ async fn a_skip_that_fails_after_a_refused_fire_is_logged_and_leaves_the_row() {
     let _default = capture.set_default();
 
     let fired = fire_once(&pool, &schedule, slot, database_now).await;
-    let _dropped = sqlx::raw_sql(
+    let _dropped = sql::raw_sql(
         "DROP TRIGGER test_fail_schedule_state ON horsies_schedule_state;
          DROP FUNCTION test_fail_schedule_state();",
     )
