@@ -64,6 +64,7 @@ from horsies.core.worker.child_main import boot_app
 from horsies.core.worker.child_runner import (
     RunTheTask,
     _debug_imports_log,
+    _discard_inherited_broker,  # pyright: ignore[reportPrivateUsage]
     _run_task_entry,
     _serialization_error_response,
     attempt_elapsed_ms,
@@ -420,7 +421,8 @@ class TestChildBoot:
 
         _ = boot_app(_boot_init_frame('mymod:app', ()))
 
-        inherited_broker.discard_inherited_resources.assert_called_once_with()
+        # Dropped, not closed: the boot calls no method of the import-time broker.
+        assert inherited_broker.method_calls == []
         assert mocks['app']._broker is None
         mocks['app'].set_role.assert_called_once_with('worker')
 
@@ -633,6 +635,22 @@ def _start_with(
             orphan_self_heal=orphan_self_heal,
             start_check=start_check or start_always_allowed,
         )
+
+
+@pytest.mark.unit
+class TestDiscardInheritedBroker:
+    """``_discard_inherited_broker`` drops the broker that importing the app
+    built in the child."""
+
+    def test_without_a_broker_does_nothing(self) -> None:
+        app = Horsies(AppConfig(broker=PostgresConfig(
+            database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
+        )))
+        app._broker = None  # pyright: ignore[reportPrivateUsage]
+
+        _discard_inherited_broker(app)
+
+        assert app._broker is None  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.unit

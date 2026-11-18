@@ -31,10 +31,6 @@ from pydantic_core import PydanticCustomError
 from pydantic_core._pydantic_core import list_all_errors  # pyright: ignore[reportPrivateImportUsage]
 
 from horsies.core.app import Horsies
-from horsies.core.brokers.postgres import (
-    _operation_failed,  # pyright: ignore[reportPrivateUsage]
-)
-from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.codec.error_payload import MAX_EXCEPTION_CHAIN_LINKS, flatten_exception
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.codec.kwargs import decode_subworkflow_kwargs
@@ -494,18 +490,6 @@ class TestSubworkflowKwargs:
             decode_subworkflow_kwargs(_TypedSubworkflow, {'count': MARKER})
 
         assert MARKER not in str(caught.value)
-
-
-class TestBrokerErrorCause:
-    def test_a_validation_error_cause_is_stored_without_input(self) -> None:
-        error = _refusal(TypeAdapter(int), MARKER)
-
-        result = _operation_failed(BrokerErrorCode.WORKER_PING_FAILED, 'ping failed', error)
-
-        cause = result.err_value.exception
-        assert isinstance(cause, ValueValidationError)
-        assert MARKER not in str(cause)
-        assert result.err_value.retryable is False
 
 
 class TestDefinitionTimeOptions:

@@ -110,12 +110,11 @@ def _calls_of(call: MagicMock) -> int:
 
 @pytest.fixture
 def broker() -> Iterator[PostgresBroker]:
-    """A broker with a stand-in core handle; its sync runner stops at the end."""
+    """A broker with a stand-in core handle."""
     built = PostgresBroker(PostgresConfig(database_url=SecretStr(_URL)))
     stand_in: Any = MagicMock()
     built._core_handle = stand_in
     yield built
-    built._loop_runner.stop()
 
 
 def _raising(broker: PostgresBroker, method: str, refusal: CoreError) -> MagicMock:
@@ -262,13 +261,9 @@ class TestBrokerSchemaInstall:
 class TestBrokerClose:
     @pytest.mark.parametrize('form', ['close', 'close_async'])
     @pytest.mark.parametrize('refusal', _refusals())
-    def test_the_close_raises_the_refusal_and_stops_the_runner(
+    def test_the_close_raises_the_refusal(
         self, broker: PostgresBroker, form: str, refusal: CoreError,
     ) -> None:
-        runner = MagicMock()
-        runner._started = True
-        runner._thread = object()
-        broker._loop_runner = runner
         call = _raising(broker, form, refusal)
 
         match form:
@@ -278,7 +273,6 @@ class TestBrokerClose:
                 _assert_raises_once(refusal, call, lambda: asyncio.run(broker.close_async()))
             case _:
                 raise AssertionError(f'unknown form: {form}')
-        runner.stop.assert_called_once()
 
 
 class _LiveCheckHandle:

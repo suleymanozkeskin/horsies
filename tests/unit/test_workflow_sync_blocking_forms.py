@@ -7,7 +7,7 @@ mapping with their async forms. For each catalog outcome of the core's
 record, and for each refusal before the core call, the sync facade returns
 the outcome of its async form (``outcome_shape``), calls the blocking form
 of the core handle once (or not at all for a refusal), and never calls the
-broker's sync runner.
+awaitable form.
 """
 
 from __future__ import annotations
@@ -122,11 +122,9 @@ def _ok_envelope(value: int) -> str:
 @dataclass(frozen=True)
 class CoreAnswers:
     """A core handle whose blocking form ``method`` and its awaitable form
-    answer ``answer``: a record, or an exception that the call raises; and
-    the broker's sync runner, a mock."""
+    answer ``answer``: a record, or an exception that the call raises."""
 
     handle: MagicMock
-    runner: MagicMock
 
 
 def _answering(method: str, answer: object) -> CoreAnswers:
@@ -139,10 +137,8 @@ def _answering(method: str, answer: object) -> CoreAnswers:
             setattr(handle, method, MagicMock(return_value=answer))
             setattr(handle, f'{method}_async', AsyncMock(return_value=answer))
     broker = APP.get_broker()
-    runner = MagicMock()
     broker._core_handle = handle  # type: ignore[assignment]
-    broker._loop_runner = runner
-    return CoreAnswers(handle=handle, runner=runner)
+    return CoreAnswers(handle=handle)
 
 
 def _workflow_handle() -> WorkflowHandle[int]:
@@ -400,13 +396,13 @@ def test_a_sync_facade_gives_the_outcome_of_its_async_form(facade: str, answer: 
     answers = _answering(entry.blocking_form, entry.answers[answer])
 
     blocking = entry.blocking(_workflow_handle())
+    getattr(answers.handle, f'{entry.blocking_form}_async').assert_not_called()
     awaited = asyncio.run(_awaited(entry.awaited(_workflow_handle())))
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     getattr(answers.handle, entry.blocking_form).assert_called_once_with(
         *entry.arguments, **entry.keywords,
     )
-    answers.runner.call.assert_not_called()
 
 
 @pytest.mark.parametrize('facade', list(FACADES))
@@ -493,6 +489,7 @@ def test_start_workflow_gives_the_outcome_of_start_workflow_async(answer: str) -
             _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
         )
         blocking_request = request_class.call_args
+        answers.handle.start_workflow_async.assert_not_called()
         awaited = asyncio.run(
             start_workflow_async(
                 _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
@@ -505,7 +502,6 @@ def test_start_workflow_gives_the_outcome_of_start_workflow_async(answer: str) -
     assert blocking_request.kwargs['resend_on_transient_err'] is True
     assert blocking_request.kwargs['workflow_id'] == WORKFLOW_KEY
     answers.handle.start_workflow.assert_called_once_with(request_class.return_value)
-    answers.runner.call.assert_not_called()
 
 
 START_REFUSALS: Final[dict[str, Callable[[], tuple[WorkflowSpec[int], str]]]] = {

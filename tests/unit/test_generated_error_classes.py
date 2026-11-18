@@ -166,28 +166,16 @@ def test_no_cause_is_the_generated_class_without_fields() -> None:
     assert GeneratedNoCause() == GeneratedNoCause()
 
 
-def test_each_public_union_is_the_generated_union_plus_the_client_only_classes() -> None:
+def test_each_public_union_is_the_generated_union_and_its_client_only_classes() -> None:
     assert result_types.BrokerOperationError.__value__ == (
         broker_errors.BrokerCoreError
         | result_types.BrokerNotAttached
         | result_types.BrokerNoTypeAvailable
-        | result_types.BrokerEventLoopLimit
-        | result_types.BrokerLoopRunnerFailed
     )
-    assert result_types.BrokerEnqueueError.__value__ == (
-        broker_errors.BrokerCoreEnqueueError | result_types.BrokerEventLoopLimit
-    )
-    assert handle_types.HandleOperationError.__value__ == (
-        workflow_handle_errors.HandleCoreError
-        | handle_types.HandleLoopRunnerFailed
-        | handle_types.HandleEventLoopLimit
-    )
-    assert errors.MonitoringQueryError.__value__ == (
-        monitoring_errors.MonitoringQueryCoreError | errors.MonitoringQueryEventLoopLimit
-    )
-    assert task_actions.TaskActionError.__value__ == (
-        monitoring_errors.TaskActionCoreError | task_actions.TaskActionEventLoopLimit
-    )
+    assert result_types.BrokerEnqueueError.__value__ is broker_errors.BrokerCoreEnqueueError
+    assert handle_types.HandleOperationError.__value__ is workflow_handle_errors.HandleCoreError
+    assert errors.MonitoringQueryError.__value__ is monitoring_errors.MonitoringQueryCoreError
+    assert task_actions.TaskActionError.__value__ is monitoring_errors.TaskActionCoreError
 
 
 class SendClassShape(NamedTuple):
@@ -284,9 +272,5 @@ def test_the_retention_class_key_and_its_default_are_the_generated_ones() -> Non
     )
 
 
-def test_the_send_union_is_the_generated_union_plus_the_client_only_classes() -> None:
-    assert task_send_types.TaskSendError.__value__ == (
-        task_send_errors.TaskSendCoreError
-        | task_send_types.TaskSendEventLoopLimit
-        | task_send_types.TaskSendLoopRunnerFailed
-    )
+def test_the_send_union_is_the_generated_union() -> None:
+    assert task_send_types.TaskSendError.__value__ is task_send_errors.TaskSendCoreError

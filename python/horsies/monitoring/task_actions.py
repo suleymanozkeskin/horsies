@@ -31,8 +31,8 @@ exception; this module returns it as it is.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, assert_never
+from dataclasses import dataclass
+from typing import assert_never
 
 
 from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
@@ -51,28 +51,9 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 
 
-if TYPE_CHECKING:
-    from horsies.core.brokers.resources import EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
-class TaskActionEventLoopLimit:
-    """The broker holds resource sets for its limit of open event loops. Nothing ran.
-
-    ``loop_limit`` names the limit and the threads of the held loops. A
-    call from this loop returns the same error until one of the held loops
-    closes.
-    """
-
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.EVENT_LOOP_LIMIT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    task_id: uuid.UUID
-    loop_limit: EventLoopLimit
-
-
-type TaskActionError = TaskActionCoreError | TaskActionEventLoopLimit
-"""Every failure of a task action: one variant per ``TaskActionErrorCode``."""
+type TaskActionError = TaskActionCoreError
+"""Every failure of a task action: one variant per ``TaskActionErrorCode``,
+each a class of the core's catalog."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,8 +124,7 @@ async def cancel_task(
     and a CANCELLED row is reported as TASK_CANCELLED, so no result payload
     is written here. One ``horsies_cancel_task`` statement that the core
     runs on the broker's core handle; a cancel of the caller does not stop
-    it. ``TaskActionEventLoopLimit`` is not an answer of this action: it
-    uses no SQLAlchemy resource set.
+    it.
 
     Raises:
         ForkedAfterCoreStart, CoreStopped: the core of this process refuses

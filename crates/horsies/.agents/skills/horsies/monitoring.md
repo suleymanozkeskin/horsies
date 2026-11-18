@@ -135,9 +135,6 @@ Query builders:
 | `DbOperationFailed { retryable, .. }` | The database or the connect failed. `retryable` is the classification of the cause |
 | `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable |
 
-`MonitoringQueryErrorCode::EventLoopLimit` is Python's only; no variant
-has it.
-
 ## Task Cancel
 
 ```rust
@@ -182,8 +179,6 @@ and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
 | `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
 | `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed; `cause` is the `BrokerError`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
 | `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
-
-`TaskActionErrorCode::EventLoopLimit` is Python's only; no variant has it.
 
 There is no manual retry action. Re-execution is a rerun (see `tasks.md`).
 

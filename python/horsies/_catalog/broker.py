@@ -15,8 +15,7 @@ class BrokerErrorCode(str, Enum):
     (`python/horsies/core/brokers/result_types.py`). The nine operation codes from
     `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
     Python, `BrokerOperationFailed`. A client produces `NO_BROKER` and
-    `NO_TYPE_AVAILABLE`; only the Python client produces `EVENT_LOOP_LIMIT`,
-    `ASYNC_CONTEXT` and `LOOP_RUNNER_FAILED`.
+    `NO_TYPE_AVAILABLE`; only the Python client produces `ASYNC_CONTEXT`.
     """
 
     SCHEMA_INIT_FAILED = 'SCHEMA_INIT_FAILED'
@@ -64,20 +63,9 @@ class BrokerErrorCode(str, Enum):
     retry limit that cannot be stored; nothing was written.
     """
 
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event
-    loops, and this call ran on a new one. Nothing ran. Python client
-    only; removed before 0.8.0.
-    """
-
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
     """A sync facade was called on a thread that runs an event loop. Its wait
     would stall that loop, so nothing ran. Python client only.
-    """
-
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    """A sync facade could not run the call on the broker's sync runner.
-    Nothing ran. Python client only; removed before 0.8.0.
     """
 
     INVALID_INPUT = 'INVALID_INPUT'

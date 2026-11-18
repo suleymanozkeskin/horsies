@@ -55,7 +55,6 @@ from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import StoppedBeforeRunning
 from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
 from horsies.core.worker.thread_runner import PostgresThreadSeats, run_thread_seat_task
-from tests.broker_resources_support import listener_of
 from tests.fixtures.child_core import (
     TEST_CHILD_POOL,
     child_core_handle_for,
@@ -416,7 +415,7 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     deadlines.start()
     seats = ThreadSeats(2, table, PostgresThreadSeats(), lambda: RssMb(1.0))
     one_connection = ResolvedPool(min_size=0, max_size=1, check=False)
-    with child_core_handle_for(listener_of(broker).database_url, one_connection):
+    with child_core_handle_for(broker.config.effective_session_database_url, one_connection):
         assert seats.start().is_ok()
         try:
             table.add(blocker, blocker_work)

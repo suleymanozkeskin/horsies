@@ -16,6 +16,23 @@ use crate::core::WorkflowTaskStatus;
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::TestDatabase;
 
+impl sql::FromTestRow for StuckPendingRow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            workflow_id: sql::named(row, "workflow_id")?,
+            task_index: sql::named(row, "task_index")?,
+        })
+    }
+}
+
+impl sql::FromTestRow for StuckWorkflowRow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            workflow_id: sql::named(row, "workflow_id")?,
+        })
+    }
+}
+
 /// Connections of the pool on the owned database.
 const TEST_POOL_CONNECTIONS: u32 = 5;
 

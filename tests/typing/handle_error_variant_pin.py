@@ -6,8 +6,8 @@ not collect it (no ``test_`` prefix), and nothing calls its functions. Each
 line that pyright must refuse carries an ignore comment for its rule. The
 config makes an unneeded ignore comment an error, so a cause that
 ``raise ... from`` accepts without a match, a cause field that accepts
-``NoCause()``, a field on the wrong variant, or a status read that can
-return a loop limit fails the check. A handle id is a ``UUID``: a text goes through
+``NoCause()``, or an async status read that can return ``ASYNC_CONTEXT``
+fails the check. A handle id is a ``UUID``: a text goes through
 ``WorkflowHandle.for_id``, whose error is not a handle operation failure.
 """
 
@@ -18,9 +18,7 @@ import uuid
 from horsies import (
     HandleAsyncContext,
     HandleDbOperationFailed,
-    HandleEventLoopLimit,
     HandleInvalidWorkflowId,
-    HandleLoopRunnerFailed,
     HandleOperationError,
     HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
@@ -55,11 +53,6 @@ def causes_are_exceptions() -> None:
         workflow_id='id',
         exception=NoCause(),  # pyright: ignore[reportArgumentType]
     )
-    _ = HandleLoopRunnerFailed(
-        message='runner failed',
-        workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
-    )
 
 
 def chain_the_database_cause(failed: HandleDbOperationFailed) -> None:
@@ -78,28 +71,16 @@ def chain_the_matched_cause(error: HandleOperationError) -> None:
             raise RuntimeError(error.message) from cause
         case HandleResumeRecoveryFailed(exception=cause):
             raise RuntimeError(error.message) from cause
-        case HandleLoopRunnerFailed(exception=cause):
-            raise RuntimeError(error.message) from cause
-        case HandleWorkflowNotFound() | HandleEventLoopLimit() | HandleAsyncContext():
+        case HandleWorkflowNotFound() | HandleAsyncContext():
             raise RuntimeError(error.message)
 
 
-def loop_limit_only_on_the_loop_limit(
-    loop_limit: HandleEventLoopLimit,
-    async_context: HandleAsyncContext,
-) -> None:
-    _ = loop_limit.loop_limit
-    _ = async_context.loop_limit  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-
-
-async def status_read_has_no_loop_limit(
+async def async_status_read_has_no_async_context(
     handle: WorkflowHandle[int],
 ) -> None:
     result = await handle._status()
     if is_err(result):
         match result.err_value:
-            case HandleEventLoopLimit():  # pyright: ignore[reportUnnecessaryComparison]
-                pass
             case HandleAsyncContext():  # pyright: ignore[reportUnnecessaryComparison]
                 pass
             case _:

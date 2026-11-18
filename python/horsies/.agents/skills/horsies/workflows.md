@@ -251,8 +251,6 @@ match spec.start():
 | `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` |
 | `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | driver classification |
-| `WorkflowStartLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` | `False` |
-| `WorkflowStartEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` |
 
 ### WorkflowStartErrorCode
@@ -264,13 +262,11 @@ match spec.start():
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written — use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates |
-| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` called on a thread that runs an event loop; nothing was written — call `await spec.retry_start_async(err)` |
 
 ### Retry
 
-`retry_start()` / `retry_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. Best-effort idempotent by `workflow_id` (not payload-verified).
+`retry_start()` / `retry_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. Best-effort idempotent by `workflow_id` (not payload-verified).
 
 ### Auto-retry
 
@@ -383,8 +379,6 @@ Non-blocking single DB query. Returns `RESULT_NOT_READY` if the task hasn't comp
 | `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | driver classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
-| `LOOP_RUNNER_FAILED` | `HandleLoopRunnerFailed` | `exception: BaseException` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
-| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | `resume()` or `resume_workflow()` (and their sync and async forms) ran on a new event loop while the broker serves its limit of open event loops; nothing ran. The other handle methods run on the core and do not return it |
 | `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
 
 ```python
@@ -713,14 +707,12 @@ from horsies import (
     # Handle result types
     HandleResult, HandleOperationError, HandleErrorCode,
     HandleWorkflowNotFound, HandleDbOperationFailed, HandleStoredDataInvalid,
-    HandleResumeRecoveryFailed, HandleLoopRunnerFailed, HandleEventLoopLimit,
-    HandleAsyncContext,
+    HandleResumeRecoveryFailed, HandleAsyncContext,
     # Start result types
     WorkflowStartResult, WorkflowStartError, WorkflowStartErrorCode,
     WorkflowStartRetryable, WorkflowStartBrokerNotConfigured,
     WorkflowStartValidationFailed, WorkflowStartIdConflict,
-    WorkflowStartEnqueueFailed, WorkflowStartLoopRunnerFailed,
-    WorkflowStartEventLoopLimit, WorkflowStartAsyncContext,
+    WorkflowStartEnqueueFailed, WorkflowStartAsyncContext,
     # Result primitives
     Result, Ok, Err, is_ok, is_err,
 )

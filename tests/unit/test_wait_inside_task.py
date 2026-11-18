@@ -60,14 +60,13 @@ TIMEOUTS = pytest.mark.parametrize(
 @pytest.fixture
 def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect, and whose core handle records each
-    call it forwards. Stops the runner if a call started it."""
+    call it forwards."""
     app = Horsies(
         AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
     )
     broker = app.get_broker()
     broker._core_handle = MagicMock(wraps=broker._core_handle)
     yield app
-    broker._loop_runner.stop()
 
 
 @pytest.fixture
@@ -77,14 +76,10 @@ def task_process(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _assert_nothing_ran(broker: PostgresBroker) -> None:
-    """No core call ran, the sync runner never started, and no resource set
-    was built."""
+    """No core call ran."""
     core_handle = broker._core_handle
     assert isinstance(core_handle, MagicMock), 'the app fixture wraps the core handle'
     assert core_handle.mock_calls == []
-    assert broker._loop_runner._started is False
-    assert broker._loop_runner._thread is None
-    assert broker._loop_sets == ()
 
 
 def _handle(app: Horsies) -> TaskHandle[int]:

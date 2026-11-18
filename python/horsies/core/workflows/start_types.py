@@ -17,17 +17,13 @@ The retry methods ``WorkflowSpec.retry_start`` / ``retry_start_async`` take a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 from horsies._catalog.workflow_start import (
     WorkflowStartErrorCode as WorkflowStartErrorCode,
 )
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
-
-
-if TYPE_CHECKING:
-    from horsies.core.brokers.resources import EventLoopLimit
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,41 +95,6 @@ class WorkflowStartEnqueueFailed:
 
 
 @dataclass(slots=True, frozen=True)
-class WorkflowStartLoopRunnerFailed:
-    """Sync ``start()`` could not run the start on the broker's sync runner. Nothing ran.
-
-    ``exception`` is the ``LoopRunnerError``. A stopped runner does not start
-    again (``close()`` and ``close_async()`` stop it). ``retry_start_async(err)``
-    starts the workflow with the same id; the sync ``retry_start`` on a
-    stopped runner returns this error again.
-    """
-
-    code: ClassVar[WorkflowStartErrorCode] = WorkflowStartErrorCode.LOOP_RUNNER_FAILED
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    workflow_name: str
-    workflow_id: str
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class WorkflowStartEventLoopLimit:
-    """The broker holds resource sets for its limit of open event loops. Nothing was written.
-
-    The start ran on one more loop. ``loop_limit`` names the limit and the
-    threads of the held loops. A start from this loop returns the same error
-    until one of the held loops closes. The retry methods refuse this error.
-    """
-
-    code: ClassVar[WorkflowStartErrorCode] = WorkflowStartErrorCode.EVENT_LOOP_LIMIT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    workflow_name: str
-    workflow_id: str
-    loop_limit: EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
 class WorkflowStartAsyncContext:
     """Sync ``start()`` or ``retry_start()`` was called on a thread that runs an event loop.
 
@@ -154,15 +115,11 @@ type WorkflowStartError = (
     | WorkflowStartValidationFailed
     | WorkflowStartIdConflict
     | WorkflowStartEnqueueFailed
-    | WorkflowStartLoopRunnerFailed
-    | WorkflowStartEventLoopLimit
     | WorkflowStartAsyncContext
 )
 """Every failure of a workflow start: one variant per ``WorkflowStartErrorCode``."""
 
-type WorkflowStartRetryable = (
-    WorkflowStartEnqueueFailed | WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed
-)
+type WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext
 """The variants that the retry methods accept. Each carries the id of its start."""
 
 type WorkflowStartResult[T] = Result[T, WorkflowStartError]

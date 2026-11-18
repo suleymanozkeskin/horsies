@@ -29,10 +29,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
-from horsies.core.utils.db import uuid_column_value
 
 from tests.e2e.helpers.assertions import start_ok_in_thread, unwrap_send
-from tests.e2e.helpers.db import wait_for_all_terminal, wait_for_status
+from tests.e2e.helpers.db import uuid_of_column, wait_for_all_terminal, wait_for_status
 from tests.e2e.tasks import priority_binding as pb
 from tests.e2e.tasks.instance_priority_binding import app  # noqa: F401
 from tests.broker_resources_support import current_resources
@@ -80,7 +79,7 @@ async def _wait_for_task_row(
                 )
             ).fetchone()
             if row is not None:
-                return uuid_column_value(row[0], column='itest_task_rows.id')
+                return uuid_of_column(row[0], column='itest_task_rows.id')
         await asyncio.sleep(0.1)
     raise TimeoutError(f'task row {task_name!r} did not appear within {timeout_s}s')
 

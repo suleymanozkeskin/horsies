@@ -4,7 +4,7 @@
 A sync facade and its async form share one outcome mapping. For each catalog
 outcome of the answer that the facade reads, the sync facade returns the
 outcome of its async form (``outcome_shape``), calls the blocking form once,
-and never calls the broker's sync runner.
+and never calls the awaitable form.
 """
 
 from __future__ import annotations
@@ -44,10 +44,6 @@ from horsies._core import (
     WorkerStatesRecord,
 )
 from horsies.core.app import Horsies
-from horsies.core.brokers.postgres import (
-    _SyncSendEngineNotOpen,
-    _SyncSendEngineOpen,
-)
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
     BrokerInvalidInput,
@@ -63,9 +59,8 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskInfo, TaskResult
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
-from tests.broker_resources_support import resources_of
 from tests.sync_facade_support import outcome_shape
-from tests.unit.test_broker_postgres import _make_broker, _pinned
+from tests.unit.test_broker_postgres import _make_broker
 from tests.unit.test_broker_worker_reads_in_core import (
     _SLOTS_DOWN_RECORD,
     _record as _core_record,
@@ -220,11 +215,11 @@ def test_get_result_gives_the_outcome_of_get_result_async(answer: str) -> None:
     app = _app_reading(broker)
 
     blocking = app.get_result(TASK_ID, TIMEOUT_MS)
+    broker.get_raw_result_record_async.assert_not_called()
     awaited = asyncio.run(app.get_result_async(TASK_ID, TIMEOUT_MS))
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     broker.get_raw_result_record.assert_called_once_with(TASK_ID, TIMEOUT_MS)
-    broker.run_sync.assert_not_called()
 
 
 # =============================================================================
@@ -288,6 +283,7 @@ def test_get_task_info_gives_the_outcome_of_get_task_info_async(
     blocking = app.get_task_info(
         TASK_ID, include_result=include_result, include_attempts=True,
     )
+    broker.get_task_info_async.assert_not_called()
     awaited = asyncio.run(
         app.get_task_info_async(TASK_ID, include_result=include_result, include_attempts=True),
     )
@@ -299,7 +295,6 @@ def test_get_task_info_gives_the_outcome_of_get_task_info_async(
         include_failed_reason=False,
         include_attempts=True,
     )
-    broker.run_sync.assert_not_called()
 
 
 # =============================================================================
@@ -324,14 +319,12 @@ PING_ANSWERS: Final[dict[str, object]] = {
 }
 
 
-def _app_with_core_handle(handle: MagicMock) -> tuple[Horsies, MagicMock]:
-    """An app whose broker calls ``handle``, and the broker's runner, a mock."""
+def _app_with_core_handle(handle: MagicMock) -> Horsies:
+    """An app whose broker calls ``handle``."""
     app = _app()
     broker = app.get_broker()
-    runner = MagicMock()
     broker._core_handle = handle  # type: ignore[assignment]
-    broker._loop_runner = runner
-    return app, runner
+    return app
 
 
 def _answering(method: str, answer: object) -> MagicMock:
@@ -351,20 +344,20 @@ def _answering(method: str, answer: object) -> MagicMock:
 @pytest.mark.parametrize('answer', list(PING_ANSWERS))
 def test_ping_database_gives_the_outcome_of_ping_database_async(answer: str) -> None:
     handle = _answering('ping_database', PING_ANSWERS[answer])
-    app, runner = _app_with_core_handle(handle)
+    app = _app_with_core_handle(handle)
 
     blocking = app.ping_database()
+    handle.ping_database_async.assert_not_called()
     awaited = asyncio.run(app.ping_database_async())
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     handle.ping_database.assert_called_once_with()
-    runner.call.assert_not_called()
 
 
 def test_ping_database_refuses_another_code_as_its_async_form_does() -> None:
     """A failure code outside the ping's catalog is a defect in both forms."""
     handle = _answering('ping_database', _failure(BrokerErrorCode.CLEANUP_FAILED))
-    app, _ = _app_with_core_handle(handle)
+    app = _app_with_core_handle(handle)
 
     with pytest.raises(AssertionError, match='CLEANUP_FAILED') as blocking:
         app.ping_database()
@@ -378,55 +371,19 @@ def test_ping_database_refuses_another_code_as_its_async_form_does() -> None:
 # PostgresBroker.close: CoreHandle.close
 # =============================================================================
 
-DISPOSE_FAILED: Final = OSError('dispose failed')
-
 
 def _closing_broker(core_answer: object) -> Any:
-    """A broker with mocked resource sets whose core handle answers the
-    close with ``core_answer``: a record, or an exception that it raises."""
+    """A broker whose core handle answers the close with ``core_answer``: a
+    record, or an exception that it raises."""
     broker = _make_broker()
     broker._core_handle = _answering('close', core_answer)
     return broker
 
 
-def _with_closed_loop_set(broker: Any, dispose_error: BaseException | None) -> Any:
-    """Build a resource set on an event loop that then closes."""
-    match dispose_error:
-        case None:
-            pass
-        case error:
-            _pinned(broker).engine.dispose = AsyncMock(side_effect=error)
-    asyncio.run(resources_of(broker))
-    return broker
-
-
-def _with_sync_send_engine(broker: Any, dispose_error: BaseException | None) -> Any:
-    engine = MagicMock()
-    match dispose_error:
-        case None:
-            engine.dispose = MagicMock(return_value=None)
-        case error:
-            engine.dispose = MagicMock(side_effect=error)
-    broker._sync_send_engine = _SyncSendEngineOpen(engine=engine)
-    return broker
-
-
 CLOSE_CASES: Final[dict[str, Callable[[], Any]]] = {
-    'nothing_open': lambda: _closing_broker(MagicMock(spec=HandleClosed)),
+    'closed': lambda: _closing_broker(MagicMock(spec=HandleClosed)),
     'core_cannot_run_the_close': lambda: _closing_broker(
         CoreStartFailed('the core runtime could not start'),
-    ),
-    'a_set_of_a_closed_loop': lambda: _with_closed_loop_set(
-        _closing_broker(MagicMock(spec=HandleClosed)), None,
-    ),
-    'a_set_of_a_closed_loop_that_does_not_dispose': lambda: _with_closed_loop_set(
-        _closing_broker(MagicMock(spec=HandleClosed)), DISPOSE_FAILED,
-    ),
-    'a_sync_send_engine': lambda: _with_sync_send_engine(
-        _closing_broker(MagicMock(spec=HandleClosed)), None,
-    ),
-    'a_sync_send_engine_that_does_not_dispose': lambda: _with_sync_send_engine(
-        _closing_broker(MagicMock(spec=HandleClosed)), DISPOSE_FAILED,
     ),
 }
 
@@ -442,18 +399,15 @@ def test_close_gives_the_outcome_of_close_async(case: str) -> None:
     assert outcome_shape(blocking) == outcome_shape(awaited)
     blocking_broker._core_handle.close.assert_called_once_with()
     blocking_broker._core_handle.close_async.assert_not_called()
-    for broker in (blocking_broker, awaited_broker):
-        assert broker._loop_sets == ()
-        assert isinstance(broker._sync_send_engine, _SyncSendEngineNotOpen)
 
 
 def test_close_with_nothing_open_runs_no_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no resource set and no sync send engine, close runs no event loop."""
+    """close runs no event loop: the core's blocking close runs on this thread."""
     broker = _closing_broker(MagicMock(spec=HandleClosed))
 
     def no_event_loop(coroutine: Any) -> None:
         coroutine.close()
-        raise AssertionError('close ran an event loop with nothing to close on it')
+        raise AssertionError('close ran an event loop')
 
     monkeypatch.setattr('horsies.core.brokers.postgres.asyncio.run', no_event_loop)
 
@@ -649,16 +603,16 @@ def test_a_monitoring_facade_gives_the_outcome_of_its_async_form(
 ) -> None:
     entry = MONITORING_FACADES[facade]
     handle = _answering(entry.blocking_form, entry.answers[answer])
-    app, runner = _app_with_core_handle(handle)
+    app = _app_with_core_handle(handle)
 
     blocking = entry.blocking(app)
+    getattr(handle, f'{entry.blocking_form}_async').assert_not_called()
     awaited = asyncio.run(_awaited(entry.awaited(app)))
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     getattr(handle, entry.blocking_form).assert_called_once_with(
         *entry.arguments, **entry.keywords,
     )
-    runner.call.assert_not_called()
 
 
 @pytest.mark.parametrize('facade', list(MONITORING_FACADES))
@@ -666,7 +620,7 @@ def test_a_monitoring_facade_refuses_another_code_as_its_async_form_does(facade:
     """A failure code outside the facade's catalog is a defect in both forms."""
     entry = MONITORING_FACADES[facade]
     handle = _answering(entry.blocking_form, _failure(BrokerErrorCode.CLEANUP_FAILED))
-    app, _ = _app_with_core_handle(handle)
+    app = _app_with_core_handle(handle)
 
     with pytest.raises(AssertionError, match='CLEANUP_FAILED') as blocking:
         entry.blocking(app)
