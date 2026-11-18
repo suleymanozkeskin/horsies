@@ -7,6 +7,7 @@ database is checked to be unchanged.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from typing import Final, LiteralString
@@ -17,10 +18,10 @@ import pytest_asyncio
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from horsies._core import IdMintRefused, mint_task_id as core_mint_task_id
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.history.periods import RetentionDays, period_class_key
 from horsies.core.history.reads.publisher import (
     PUBLISHED_READER_SIGNATURES,
@@ -52,6 +53,15 @@ _OBJECT_COUNT_SQL: Final[LiteralString] = """
 
 def _migration() -> BaselineMigration:
     return load_baseline_migration()
+
+
+def mint_task_id() -> uuid.UUID:
+    """A new task id from the core's UUIDv7 source, as a send mints it."""
+    match core_mint_task_id():
+        case uuid.UUID() as task_id:
+            return task_id
+        case IdMintRefused(cause=cause):
+            pytest.fail(f'the core refused to mint a task id: {cause}')
 
 
 @pytest_asyncio.fixture
