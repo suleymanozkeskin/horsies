@@ -11,6 +11,11 @@
 //! (a contained refusal: the pass ran and names where it stopped), or
 //! `CoverageFailed` (the pass has no outcome). The Python client maps them to
 //! `CoverageEnsured`, `CoverageEnsureFailed`, and the error it raises today.
+//!
+//! The Python broker builds one frozen `InstallCoverage` from its app's
+//! retention config: the request of the coverage pass that the handle's
+//! schema install runs gated after its migrations
+//! (`CoreHandle.with_install_coverage`).
 
 use std::sync::Arc;
 
@@ -71,6 +76,41 @@ impl CoverageRequestArgument {
     }
 }
 
+/// The coverage request of a handle's schema install: the two horizons and
+/// the declared retention periods in whole days. The install runs it gated,
+/// as the worker start. A value that the Python client should have refused
+/// first raises `ValueError`: a declared period that is not 1 to 1825 whole
+/// days, or a horizon below two leaves or above the `smallint` range.
+#[pyclass(module = "horsies._core", name = "InstallCoverage", frozen)]
+pub struct InstallCoverageArgument {
+    request: CoverageRequest,
+}
+
+impl InstallCoverageArgument {
+    pub fn request(&self) -> CoverageRequest {
+        self.request.clone()
+    }
+}
+
+#[pymethods]
+impl InstallCoverageArgument {
+    #[new]
+    #[pyo3(signature = (*, history_horizon_days, heartbeat_horizon_hours, declared_period_days))]
+    fn new(
+        history_horizon_days: u32,
+        heartbeat_horizon_hours: u32,
+        declared_period_days: Vec<i64>,
+    ) -> PyResult<Self> {
+        let request = coverage_request(
+            history_horizon_days,
+            heartbeat_horizon_hours,
+            &declared_period_days,
+        )
+        .map_err(PyValueError::new_err)?;
+        Ok(Self { request })
+    }
+}
+
 /// The serialization of a pass: `GATED` or `PER_LEAF_LOCKS`. Pure.
 fn serialization_of(text: &str) -> Result<CoverageSerialization, String> {
     match text {
@@ -90,6 +130,24 @@ fn coverage_pass(
     serialization: &str,
 ) -> Result<CoveragePass, String> {
     let serialization = serialization_of(serialization)?;
+    let request = coverage_request(
+        history_horizon_days,
+        heartbeat_horizon_hours,
+        declared_period_days,
+    )?;
+    Ok(CoveragePass {
+        request,
+        serialization,
+    })
+}
+
+/// The checked request of the horizons and the declared periods in whole
+/// days, or the refusal as text. Pure.
+fn coverage_request(
+    history_horizon_days: u32,
+    heartbeat_horizon_hours: u32,
+    declared_period_days: &[i64],
+) -> Result<CoverageRequest, String> {
     let periods = declared_period_days
         .iter()
         .map(|days| {
@@ -99,12 +157,8 @@ fn coverage_pass(
                 .map_err(|refused| format!("declared period of {days} days: {refused}"))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let request = CoverageRequest::new(history_horizon_days, heartbeat_horizon_hours, &periods)
-        .map_err(|refused| refused.to_string())?;
-    Ok(CoveragePass {
-        request,
-        serialization,
-    })
+    CoverageRequest::new(history_horizon_days, heartbeat_horizon_hours, &periods)
+        .map_err(|refused| refused.to_string())
 }
 
 /// No history class has an end of coverage: only the forever class has
@@ -320,6 +374,25 @@ mod tests {
         );
         let refused = serialization_of("UNGATED").expect_err("another serialization");
         assert!(refused.contains("\"UNGATED\""), "{refused}");
+    }
+
+    /// An install request is the request of the same values, and refuses
+    /// the values that a pass refuses.
+    #[test]
+    fn an_install_request_is_the_request_of_its_values() {
+        let request = coverage_request(3, 6, &[7]).expect("values in range");
+        let seven_days = RetentionDays::parse_period(Duration::days(7)).expect("seven days");
+        assert_eq!(
+            request,
+            CoverageRequest::new(3, 6, &[seven_days]).expect("values in range")
+        );
+        let pass = coverage_pass(3, 6, &[7], "GATED").expect("values in range");
+        assert_eq!(pass.request, request);
+
+        let period = coverage_request(3, 6, &[0]).expect_err("a period of 0 days");
+        assert!(period.contains("declared period of 0 days"), "{period}");
+        assert!(coverage_request(1, 6, &[]).is_err(), "one history leaf");
+        assert!(coverage_request(3, 1, &[]).is_err(), "one heartbeat leaf");
     }
 
     #[test]

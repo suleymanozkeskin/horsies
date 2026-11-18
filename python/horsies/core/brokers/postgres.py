@@ -134,9 +134,14 @@ from horsies.core.brokers.result_types import (
     BrokerWaitInsideTask,
     RawResultRecord,
 )
-from horsies.core.manifest import schema_mode_of, to_producer_manifest
+from horsies.core.manifest import (
+    install_coverage_of,
+    schema_mode_of,
+    to_producer_manifest,
+)
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
@@ -1259,6 +1264,12 @@ class PostgresBroker:
       - Automatic task status tracking
       - Connection pooling and health monitoring
       - Operational monitoring (stale tasks, worker stats)
+
+    ``retention`` is the retention config of the app that sends through the
+    broker (``Horsies.get_broker`` passes ``AppConfig.retention``). The
+    schema install ends with the startup coverage pass of its classes and
+    horizons; with ``None`` the pass covers the classes of the default
+    ``RetentionConfig``.
     """
 
     _CORE_POOL_PROFILE: ClassVar[CorePoolProfile] = 'PRODUCER'
@@ -1271,6 +1282,7 @@ class PostgresBroker:
         assume_initialized: bool = False,
         run_schema_migrations: bool = True,
         idempotency_reservation_window: Optional[timedelta] = None,
+        retention: RetentionConfig | None = None,
     ):
         self.config = config
         # The keyed-enqueue reservation window, snapshotted onto every
@@ -1318,6 +1330,13 @@ class PostgresBroker:
         # It is built from the same config as the engines, so its pools have
         # their shape. Building it starts nothing: the first core operation
         # connects, and close_async closes its pools.
+        # The schema install of the handle ends with the coverage pass of the
+        # app's retention: the leaves of every class its sends can stamp.
+        match retention:
+            case None:
+                install_retention = RetentionConfig()
+            case RetentionConfig():
+                install_retention = retention
         self._core_handle = CoreHandle(
             dump_producer_manifest(
                 to_producer_manifest(
@@ -1330,7 +1349,7 @@ class PostgresBroker:
                 ),
             ),
             pool_profile=self._CORE_POOL_PROFILE,
-        )
+        ).with_install_coverage(install_coverage_of(install_retention))
         # The workflow operations of the core build each sub-workflow child
         # through this source, which runs the child's build_with.
         from horsies.core.workflows.child_spec_source import child_spec_source_of

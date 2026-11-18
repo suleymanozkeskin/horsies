@@ -26591,6 +26591,12 @@
       "default": "None",
       "kind": "KEYWORD_ONLY",
       "name": "idempotency_reservation_window"
+     },
+     {
+      "annotation": "None | horsies.RetentionConfig",
+      "default": "None",
+      "kind": "KEYWORD_ONLY",
+      "name": "retention"
      }
     ],
     "returns": "unannotated"

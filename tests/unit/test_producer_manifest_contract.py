@@ -46,12 +46,16 @@ from horsies._catalog.manifest import (
     dump_producer_manifest,
 )
 from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.history.identity.keys import (
     IDEMPOTENCY_WINDOW_MAX,
     validate_reservation_window,
 )
+import horsies.core.manifest as manifest_module
+from horsies._core import InstallCoverage
 from horsies.core.manifest import (
     core_database_url,
+    install_coverage_of,
     reservation_window_micros,
     schema_mode_of,
     tcp_keepalives_of,
@@ -489,3 +493,59 @@ def test_an_assume_initialized_manifest_dumps_its_mode() -> None:
     )
     document: object = json.loads(dump_producer_manifest(manifest))
     assert cast('dict[str, object]', document)['schema'] == 'ASSUME_INITIALIZED'
+
+
+# --- the install coverage request ---
+
+
+def _recorded_install_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+    retention: RetentionConfig,
+) -> list[dict[str, object]]:
+    """The keyword arguments of each ``InstallCoverage`` that
+    ``install_coverage_of(retention)`` builds."""
+    recorded: list[dict[str, object]] = []
+
+    def record(**arguments: object) -> object:
+        recorded.append(arguments)
+        return arguments
+
+    monkeypatch.setattr(manifest_module, 'InstallCoverage', record)
+    _ = install_coverage_of(retention)
+    return recorded
+
+
+def test_the_install_coverage_carries_the_horizons_and_every_sendable_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retention = RetentionConfig(
+        history_leaf_horizon_days=4,
+        heartbeat_leaf_horizon_hours=12,
+        retention_periods=(timedelta(days=7),),
+        queue_retention={'reports': timedelta(days=90), 'audit': None},
+    )
+    assert _recorded_install_coverage(monkeypatch, retention) == [
+        {
+            'history_horizon_days': 4,
+            'heartbeat_horizon_hours': 12,
+            'declared_period_days': [7, 30, 90],
+        }
+    ]
+
+
+def test_the_default_retention_covers_the_default_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _recorded_install_coverage(monkeypatch, RetentionConfig()) == [
+        {
+            'history_horizon_days': 3,
+            'heartbeat_horizon_hours': 6,
+            'declared_period_days': [30],
+        }
+    ]
+
+
+def test_the_core_accepts_the_install_coverage_of_a_validated_config() -> None:
+    retention = RetentionConfig(retention_periods=(timedelta(days=1825),))
+    assert isinstance(install_coverage_of(retention), InstallCoverage)
+
