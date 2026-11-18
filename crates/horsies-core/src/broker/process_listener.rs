@@ -641,6 +641,44 @@ mod tests {
         first.block_on(pool.close());
     }
 
+    /// Python `tests/integration/test_tcp_user_timeout.py::test_both_listener_connections_carry_the_timeout`
+    /// and `::test_the_monitoring_listener_carries_the_timeout`: the listener
+    /// of a broker built from a config connects to the session URL with the
+    /// socket settings of that config, a TCP user timeout that is not the
+    /// default included. The monitoring event stream subscribes on this
+    /// listener (`web::events`), and its plan sets the settings on the
+    /// connection (`ConnectPlan::load`).
+    #[tokio::test]
+    async fn the_listener_of_a_broker_takes_the_socket_settings_of_its_config() {
+        let session_url = "postgresql://horsies@127.0.0.1:2/horsies";
+        let mut config = crate::core::config::PostgresConfig::from_url(
+            "postgresql://horsies@127.0.0.1:1/horsies",
+        );
+        config.session_database_url = Some(session_url.to_owned());
+        config.tcp_user_timeout = crate::core::config::TcpUserTimeoutConfig::After {
+            milliseconds: crate::core::config::TcpUserTimeoutMs::try_from(12_345_u32)
+                .expect("12345 ms is in bounds"),
+        };
+
+        let broker = crate::broker::PostgresBroker::connect_with(&config)
+            .await
+            .expect("a connect opens no connection, so it needs no server");
+
+        let ListenerSource::SessionUrl {
+            session_url: listened,
+            socket,
+        } = &broker.listener().source
+        else {
+            panic!("a broker built from a config has a listener on its session URL");
+        };
+        assert_eq!(listened.0, session_url);
+        assert_eq!(*socket, config.socket_settings());
+        assert_eq!(
+            socket.tcp_user_timeout,
+            crate::db::TcpUserTimeout::After(Duration::from_millis(12_345))
+        );
+    }
+
     /// Other socket settings on the same URL get their own listener: one
     /// connection cannot carry two sets of socket settings.
     #[tokio::test]
