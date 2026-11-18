@@ -74,9 +74,10 @@ pub enum ParityCode {
     UpstreamFailed,
 }
 
-/// Two retries one second apart for the code `TRANSIENT`.
+/// Two retries one second apart for the code `TRANSIENT`, with jitter, as
+/// Python's `RetryPolicy.fixed` gives by default (`tests/parity/app.py`).
 fn retry_policy() -> RetryPolicy {
-    RetryPolicy::fixed(vec![1, 1], false).expect("a fixed policy of 1 s intervals is valid")
+    RetryPolicy::fixed(vec![1, 1], true).expect("a fixed policy of 1 s intervals is valid")
 }
 
 // ---- Isolated ----
