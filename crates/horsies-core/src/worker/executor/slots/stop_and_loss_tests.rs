@@ -24,6 +24,7 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
     CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ProcessId, RssReading, RunRef,
     SeatEnd, SharedResultFrame, TaskTimeoutMs,
@@ -136,12 +137,17 @@ fn unreachable_writer() -> OutcomeWriter {
 }
 
 /// Python `test_child_loss_exit_unknown.py::TestLossWithNoExitSeen` (the
-/// finalizer half): crash recovery writes nothing, and the row is left to
-/// stale recovery.
+/// finalizer half), and `test_task_timeout_order.py::TestNoExitSeen::test_no_retry_and_no_phase_2_without_the_exit`
+/// and `TestSlotAnsweredAfterTheDeadline::test_a_late_loss_with_no_exit_seen_writes_nothing`
+/// (the writer half, with the log line): crash recovery writes nothing, and
+/// the row is left to stale recovery. One line names the task and the pid
+/// of its child (Python logs it at `CRITICAL`; the core at warning).
 #[tokio::test]
 async fn an_end_whose_exit_was_not_seen_is_left_to_recovery_with_no_write() {
     let writer = unreachable_writer();
     let claimed = task(1, ExecutionClass::Isolated);
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
     let settled = tokio::time::timeout(
         Duration::from_millis(500),
         writer.settle(
@@ -154,6 +160,14 @@ async fn an_end_whose_exit_was_not_seen_is_left_to_recovery_with_no_write() {
     .await
     .expect("no statement is sent, so the settle does not wait for the pool");
     assert_eq!(settled, Settlement::LeftToRecovery);
+    let task_id = claimed.task_id.to_string();
+    let lines: Vec<CapturedEvent> = capture.lines_starting(
+        tracing::Level::WARN,
+        "the exit of the task's child was not seen",
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].field("task_id"), Some(task_id.as_str()));
+    assert_eq!(lines[0].field("pid"), Some("4242"));
 }
 
 // ---------------------------------------------------------------------------
