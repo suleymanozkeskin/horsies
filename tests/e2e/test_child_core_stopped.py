@@ -8,14 +8,19 @@ panic). The child never stays alive with a stopped core:
   as ``OWNERSHIP_UNCONFIRMED``, so the worker releases the claim with no
   attempt charged; then it ends itself with ``CORE_STOPPED_EXIT_CODE``, and
   the worker starts a new child, which runs the task.
-- After the body: the finalizing marker meets the stopped core; the child
-  ends itself with no report, the worker takes the crashed-child path
-  (``WORKER_CRASHED``), and the retry policy of the task applies.
+- After a body that finished: the finalizing marker meets the stopped core;
+  the child reports the result, the worker writes it, and the child ends
+  itself. The task keeps its result, with one run and one attempt.
+- A body that the refusal ended (a send of the body meets the stopped
+  core): the child ends itself with no report, the worker takes the
+  crashed-child path (``WORKER_CRASHED``), and the retry policy of the task
+  applies.
 """
 
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -43,6 +48,8 @@ POLL_INTERVAL_S: Final = 0.1
 AFTER_MARKER_S: Final = 1.0
 """The wait after the handler wrote its marker file and before the next
 send: the panic follows the write at once, so the core is stopped by then."""
+LOG_TIMEOUT_S: Final = 30.0
+"""The longest wait for a line in the log of the worker."""
 
 
 def _make_ready_check() -> Callable[[], bool]:
@@ -71,6 +78,15 @@ async def _ok_pid(handle: TaskHandle[int]) -> int:
     result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
     assert result.is_ok(), result
     return result.ok_value
+
+
+async def _wait_for_log_line(worker: subprocess.Popen[str], line: str) -> str:
+    """The log tail of ``worker`` once it holds ``line``."""
+    deadline = time.monotonic() + LOG_TIMEOUT_S
+    while line not in (log := worker_log_tail(worker)):
+        assert time.monotonic() < deadline, f'no log line {line!r}'
+        await asyncio.sleep(POLL_INTERVAL_S)
+    return log
 
 
 @pytest.mark.e2e
@@ -125,14 +141,72 @@ async def test_a_start_refused_by_a_stopped_core_is_released_and_a_new_child_run
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_core_that_stops_during_a_body_takes_the_crash_path_and_the_retry(
+async def test_a_body_that_finished_keeps_its_result_and_a_new_child_serves_next(
     core_stopped_broker: PostgresBroker,
     tmp_path: Path,
 ) -> None:
-    """The first run stops the core of its child while its body runs. The
-    finalizing marker after the body meets the stopped core: the child ends
-    with no report, the attempt fails with ``WORKER_CRASHED``, and the retry
-    policy runs the task again in a new child."""
+    """The core of the child stops while the body runs, and the body then
+    finishes. The finalizing marker after the body meets the stopped core:
+    the child reports the result, the worker writes it, and the child ends
+    with the core-stopped code. The task keeps the result of its one run,
+    with one attempt; the next task runs in a new child."""
+    session_factory = current_resources(core_stopped_broker).session_factory
+    runs = tmp_path / 'runs'
+    marker = tmp_path / 'panicked'
+
+    with run_worker(
+        INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ) as worker:
+        handle = unwrap_send(
+            await instance.stops_during_body.send_async(
+                runs_path=str(runs),
+                marker_path=str(marker),
+            ),
+        )
+        await wait_for_all_terminal(
+            session_factory, [handle.task_id], timeout_s=TERMINAL_TIMEOUT_S
+        )
+        stopped_child = await _ok_pid(handle)
+        await _wait_for_log_line(
+            worker,
+            f'child {stopped_child} ended itself with exit code {CORE_STOPPED_EXIT_CODE}',
+        )
+        after = unwrap_send(await instance.child_pid.send_async())
+        await wait_for_all_terminal(
+            session_factory, [after.task_id], timeout_s=TERMINAL_TIMEOUT_S
+        )
+        log = worker_log_tail(worker)
+
+    new_child = await _ok_pid(after)
+    async with session_factory() as session:
+        attempts = await read_attempts(session, str(handle.task_id))
+
+    assert runs.read_text(encoding='ascii').splitlines() == [str(stopped_child)]
+    assert int(marker.read_text(encoding='ascii')) == stopped_child
+    assert [
+        (attempt.outcome, attempt.error_code, attempt.will_retry, attempt.worker_pid)
+        for attempt in attempts
+    ] == [
+        ('COMPLETED', None, False, stopped_child),
+    ]
+    assert new_child != stopped_child
+    assert (
+        f'After the body of task {handle.task_id}: the core of this child stopped'
+    ) in log
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_body_that_the_stopped_core_interrupted_takes_the_crash_path_and_the_retry(
+    core_stopped_broker: PostgresBroker,
+    tmp_path: Path,
+) -> None:
+    """The first run stops the core of its child; a send of its body then
+    raises ``CoreStopped``, which ends the body. The child ends with no
+    report, the attempt fails with ``WORKER_CRASHED``, and the retry policy
+    runs the task again in a new child."""
     session_factory = current_resources(core_stopped_broker).session_factory
     first_run = tmp_path / 'first_run'
     marker = tmp_path / 'panicked'
@@ -143,7 +217,7 @@ async def test_a_core_that_stops_during_a_body_takes_the_crash_path_and_the_retr
         ready_check=_make_ready_check(),
     ) as worker:
         handle = unwrap_send(
-            await instance.stops_in_body.send_async(
+            await instance.interrupted_in_body.send_async(
                 first_run_path=str(first_run),
                 marker_path=str(marker),
             ),
@@ -167,5 +241,5 @@ async def test_a_core_that_stops_during_a_body_takes_the_crash_path_and_the_retr
         ('COMPLETED', None, False, retried_in),
     ]
     assert (
-        f'After the body of task {handle.task_id}: the core of this child stopped'
+        f'During the body of task {handle.task_id}: the core of this child stopped'
     ) in log

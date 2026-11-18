@@ -80,7 +80,11 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.worker.child_frames import PROTOCOL_NUMBERS, stored_refusal_of
 from horsies.core.worker.child_main import end_child_after_core_refusal
 from horsies.core.worker.run_return import (
+    BodyInterrupted,
     CoreStoppedBeforeStart,
+    MarkerDone,
+    MarkerEnd,
+    MarkerMetStoppedCore,
     ResultEnvelope,
     RunReturn,
     SetRunning,
@@ -1008,7 +1012,7 @@ def mark_run_finalizing(
     task_id: uuid.UUID,
     worker_id: str,
     claimed_at: datetime,
-) -> None:
+) -> MarkerEnd:
     """Write the finalizing marker of a run that set its row RUNNING and has
     ended, through the core handle of the child
     (``CoreChildHandle.mark_finalizing``), on the calling thread.
@@ -1021,11 +1025,14 @@ def mark_run_finalizing(
     core bounds the write by ``FINALIZING_MARKER_TIMEOUT_S``, and the call
     returns within ``LEFT_WORK_MARKER_BOUND_S``. The marker is best effort:
     a skipped or failed write is logged only (``log_finalizing_record``),
-    and so is a ``CoreError`` of the core boundary, except ``CoreStopped``
-    and ``ForkedAfterCoreStart``: they end the child at once
-    (``end_child_after_core_refusal``), with no report of the run, so the
-    worker takes the crashed-child path and the retry policy of the task
-    applies.
+    and so is a ``CoreError`` of the core boundary; each returns
+    ``MarkerDone``. Two refusals are not:
+
+    - ``CoreStopped`` returns ``MarkerMetStoppedCore``. The body finished,
+      so the child reports its result, and then ends itself.
+    - ``ForkedAfterCoreStart``: this process is a fork of the child. It
+      ends at once (``end_child_after_core_refusal``) and writes no frame.
+      Does not return.
 
     Raises:
         RuntimeError: the process built no core handle; a defect of the
@@ -1039,13 +1046,62 @@ def mark_run_finalizing(
             claimed_at=claimed_at,
         )
     except CoreError as exc:
-        match exc:
-            case CoreStopped() | ForkedAfterCoreStart():
-                end_child_after_core_refusal(exc, f'After the body of task {task_id}')
-            case _:
-                logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
-                return
+        return marker_refused(task_id, exc)
     log_finalizing_record(record)
+    return MarkerDone()
+
+
+def marker_refused(task_id: uuid.UUID, refused: CoreError) -> MarkerEnd:
+    """The end of a finalizing marker that raised ``refused``: a body
+    finished before it. ``CoreStopped`` gives ``MarkerMetStoppedCore``; a
+    fork of the child (``ForkedAfterCoreStart``) ends at once and does not
+    return; any other error is logged and gives ``MarkerDone``."""
+    match refused:
+        case CoreStopped():
+            return MarkerMetStoppedCore(refused)
+        case ForkedAfterCoreStart():
+            end_child_after_core_refusal(refused, f'After the body of task {task_id}')
+        case _:
+            logger.warning('Failed to mark task %s finalizing: %s', task_id, refused)
+            return MarkerDone()
+
+
+def encoded_body_end(
+    task_name: str,
+    task: Any,
+    out: TaskResult[Any, TaskError],
+) -> ResultEnvelope | BodyInterrupted:
+    """The end of a body whose task call returned ``out``.
+
+    ``BodyInterrupted``: a refusal of the core of this child ended the
+    body; its task error holds ``CoreStopped`` or ``ForkedAfterCoreStart``
+    as its exception. Any other outcome is encoded for the frame
+    (``_encode_task_outcome``), and an exception of the encode propagates.
+    """
+    match out.err:
+        case TaskError(exception=CoreStopped() | ForkedAfterCoreStart() as refusal):
+            return BodyInterrupted(refusal)
+        case _:
+            return _encode_task_outcome(task_name, task, out)
+
+
+def set_running_or_end_child(
+    task_id: str,
+    ran: ResultEnvelope | BodyInterrupted,
+) -> SetRunning:
+    """The return of a run whose body ran after its RUNNING update.
+
+    ``BodyInterrupted`` ends the child at once with no report
+    (``end_child_after_core_refusal``): the body has no result, so the
+    worker takes the crashed-child path (``WORKER_CRASHED``) and the retry
+    policy of the task applies. Does not return then."""
+    match ran:
+        case ResultEnvelope():
+            return SetRunning(ran)
+        case BodyInterrupted(refusal=refusal):
+            end_child_after_core_refusal(refusal, f'During the body of task {task_id}')
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def async_task_presence(app: Horsies) -> AsyncTaskPresence:
@@ -1563,7 +1619,9 @@ def _run_task_entry(
     Returns ``SetRunning`` with the result envelope when the run set its row
     RUNNING, and ``StoppedBeforeRunning`` with its reason when the ownership
     confirm ended it first (a lost claim, an expiry, a stopped workflow, a
-    failed RUNNING update).
+    failed RUNNING update). A body that a refusal of the core of the child
+    ended does not return: the child ends at once
+    (``set_running_or_end_child``).
 
     An ``async def`` task runs on ``task_loop``, the one loop of this child.
     A ``def`` task runs on this thread with no running event loop.
@@ -1612,7 +1670,8 @@ def _run_task_entry(
             )
         case _ as unreachable:
             assert_never(unreachable)
-    return SetRunning(
+    return set_running_or_end_child(
+        task_id,
         _run_isolated_after_running(
             task_name,
             input_json,
@@ -1629,10 +1688,11 @@ def _run_isolated_after_running(
     task_id: str,
     work: IsolatedWork,
     task_loop: TaskLoop,
-) -> ResultEnvelope:
+) -> ResultEnvelope | BodyInterrupted:
     """The steps of an isolated run after its RUNNING update: the stored
     options refusal, the resolve, the call and the result encode. Any
-    exception becomes ``TASK_EXCEPTION``."""
+    exception becomes ``TASK_EXCEPTION``. A body that a refusal of the core
+    ended gives ``BodyInterrupted`` (``encoded_body_end``)."""
     try:
         # Stored options that the worker cannot use fail the task before it
         # resolves the task, so no user code runs.
@@ -1661,7 +1721,7 @@ def _run_isolated_after_running(
             task._map_exception,
         )
         logger.info(f'Task execution completed: {task_name} ({task_id})')
-        return _encode_task_outcome(task_name, task, out)
+        return encoded_body_end(task_name, task, out)
 
     except BaseException as e:
         return _task_exception_response(task_name, e)

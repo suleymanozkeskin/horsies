@@ -839,10 +839,10 @@ async def test_finalizing_marker_rejects_stale_claim_generation(
     await session.commit()  # the child marker runs on its own connection
     _ = broker
 
-    mark_run_finalizing(uuid.UUID(task_id), OWNER_WORKER_ID, GEN_STALE)
+    _ = mark_run_finalizing(uuid.UUID(task_id), OWNER_WORKER_ID, GEN_STALE)
     assert await _get_finalizing_worker(session, task_id) is None
 
-    mark_run_finalizing(uuid.UUID(task_id), OWNER_WORKER_ID, GEN_CURRENT)
+    _ = mark_run_finalizing(uuid.UUID(task_id), OWNER_WORKER_ID, GEN_CURRENT)
     assert await _get_finalizing_worker(session, task_id) == OWNER_WORKER_ID
 
 

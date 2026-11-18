@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -35,7 +35,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.worker import child_runner, thread_runner
+from horsies.core.worker import child_main, child_runner, thread_runner
 from horsies.core.worker.child_frames import (
     ChildFrame,
     RssMb,
@@ -47,7 +47,7 @@ from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
 )
-from horsies.core.worker.run_return import CoreStoppedBeforeStart, ResultEnvelope
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, MarkerDone, ResultEnvelope
 from horsies.core.worker.shared_child import (
     SeatReturn,
     SetRunning,
@@ -95,6 +95,14 @@ def thread_raises() -> TaskResult[int, TaskError]:
     raise ValueError('bad input')
 
 
+@APP.task(
+    task_name='thread_core_stopped', execution=Execution.SHARED_THREAD, timeout_ms=1000
+)
+def thread_core_stopped() -> TaskResult[int, TaskError]:
+    """A core call of the body met the stopped core of the child."""
+    raise core.CoreStopped('log forwarder', 'planned panic')
+
+
 @APP.task(task_name='thread_never', execution=Execution.SHARED_THREAD, timeout_ms=1000)
 def thread_never() -> TaskResult[int, TaskError]:
     RAN.append('thread_never')
@@ -132,7 +140,7 @@ class _Steps:
 
     def __init__(self) -> None:
         self.confirm = MagicMock(return_value=None)
-        self.mark = MagicMock(return_value=None)
+        self.mark = MagicMock(return_value=MarkerDone())
 
 
 @pytest.fixture
@@ -259,6 +267,40 @@ def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
 
     error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+
+
+class _Exited(BaseException):
+    """Raised by the patched ``os._exit``, as the real one ends the process."""
+
+
+def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
+    steps: _Steps,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The refusal leaves the body through the exception mapping of the
+    task; the child ends before the run returns, so the worker takes the
+    crashed-child path."""
+    codes: list[int] = []
+
+    def record_exit(code: int) -> NoReturn:
+        codes.append(code)
+        raise _Exited(code)
+
+    monkeypatch.setattr(child_main.os, '_exit', record_exit)
+    monkeypatch.setattr(child_main.logging, 'shutdown', lambda: None)
+    frame = _frame('thread_core_stopped')
+
+    with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
+        with pytest.raises(_Exited):
+            thread_runner.run_thread_seat_task(frame, _seat_work(frame), StartAllowed)
+
+    assert codes == [child_main.CORE_STOPPED_EXIT_CODE]
+    assert (
+        f'During the body of task {TASK_ID}: the core of this child stopped after '
+        'a panic in a core background task (log forwarder; planned panic)'
+    ) in caplog.text
+    steps.mark.assert_not_called()
 
 
 def test_an_unknown_task_is_a_resolution_error(steps: _Steps) -> None:

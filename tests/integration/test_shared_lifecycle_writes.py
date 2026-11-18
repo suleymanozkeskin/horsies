@@ -126,7 +126,7 @@ async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
     )
     running = await _row(session, task_id)
     await session.commit()
-    await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
+    _ = await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
     marked = await _row(session, task_id)
 
     assert started is None

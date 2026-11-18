@@ -141,7 +141,7 @@ def _candidate_mark(
             report: dict[str, str] = {}
             for each in marks:
                 caplog.clear()
-                child_runner.mark_run_finalizing(
+                _ = child_runner.mark_run_finalizing(
                     uuid.UUID(each.task_id), each.worker_id, each.claimed_at
                 )
                 report[each.name] = _logged_outcome(caplog.records, each.task_id)

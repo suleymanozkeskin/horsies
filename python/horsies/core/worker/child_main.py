@@ -82,11 +82,15 @@ from horsies.core.worker.child_frames import (
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.run_return import (
+    CoreRefusal,
+    CoreStoppedAfterBody,
     CoreStoppedBeforeStart,
+    MarkerEnd,
     ResultEnvelope,
     RunReturn,
     SetRunning,
     StoppedBeforeRunning,
+    end_after_marker,
 )
 from horsies.core.worker.runtime import _read_current_rss_mb
 from horsies.core.worker.task_loop import (
@@ -137,8 +141,9 @@ BootFn = Callable[[core.InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
 # finalizing marker.
 RunTaskFn = Callable[[core.RunFrame, core.InitFrame, TaskLoop], RunReturn]
 # Writes the finalizing marker of an isolated run that set its row RUNNING
-# and has ended. Logs a failed write; nothing escapes.
-MarkFinalizingFn = Callable[[core.RunFrame], None]
+# and has ended. Logs a failed write; nothing escapes. Returns
+# ``MarkerMetStoppedCore`` when the core of the child stopped.
+MarkFinalizingFn = Callable[[core.RunFrame], MarkerEnd]
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,12 +177,6 @@ def _exit_protocol_mismatch(mismatch: core.ParentProtocolMismatch) -> NoReturn:
     )
     flush_output()
     os._exit(PROTOCOL_MISMATCH_EXIT_CODE)
-
-
-type CoreRefusal = core.CoreStopped | core.ForkedAfterCoreStart
-"""A refusal of the core of this process that no later call clears: the
-core stopped after a panic in one of its background tasks, or this process
-is a fork of the process where it started."""
 
 
 def core_refusal_text(refusal: CoreRefusal) -> str:
@@ -417,21 +416,33 @@ def bounded_end(task_name: str, end: RunEnd) -> RunEnd:
     match end:
         case ResultEnvelope():
             return bounded_envelope(task_name, end)
+        case CoreStoppedAfterBody(result=result, stopped=stopped):
+            return CoreStoppedAfterBody(
+                result=bounded_envelope(task_name, result),
+                stopped=stopped,
+            )
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return end
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def end_child_after_refused_start(end: SeatEnd, task_id: uuid.UUID) -> None:
-    """Call after the frame that reports ``end`` is written. A start that the
-    stopped core of the child refused (``CoreStoppedBeforeStart``) went out
-    as ``OWNERSHIP_UNCONFIRMED``, so the worker releases its claim with no
-    attempt charged; the child then ends itself
-    (``end_child_after_core_refusal``). Every other end returns."""
+def end_child_after_frame(end: SeatEnd, task_id: uuid.UUID) -> None:
+    """Call after the frame that reports ``end`` is written. An end that met
+    the stopped core of the child ends the child
+    (``end_child_after_core_refusal``):
+
+    - ``CoreStoppedBeforeStart`` went out as ``OWNERSHIP_UNCONFIRMED``, so
+      the worker releases its claim with no attempt charged.
+    - ``CoreStoppedAfterBody`` went out with the result of the body, so the
+      worker writes it as for any run.
+
+    Every other end returns."""
     match end:
         case CoreStoppedBeforeStart(stopped=stopped):
             end_child_after_core_refusal(stopped, f'At the start of task {task_id}')
+        case CoreStoppedAfterBody(stopped=stopped):
+            end_child_after_core_refusal(stopped, f'After the body of task {task_id}')
         case ResultEnvelope() | StoppedBeforeRunning() | SeatTimedOut():
             return
         case _ as unreachable:
@@ -551,9 +562,13 @@ def _report_run(
     A run that stopped before its RUNNING update (``StoppedBeforeRunning``)
     writes no marker and ran no task code, so it left no work. The result
     envelope is bounded here (``bounded_envelope``). A parent that is gone
-    ends the process (``_send_child_frame``). A start that the stopped core
-    of the child refused (``CoreStoppedBeforeStart``) ends the process once
-    its frame is written (``end_child_after_refused_start``).
+    ends the process (``_send_child_frame``).
+
+    The child ends itself once the frame of a run that met its stopped core
+    is written: a start that the core refused (``CoreStoppedBeforeStart``),
+    or a marker that met the stopped core after the body finished
+    (``MarkerMetStoppedCore``): the frame reports the result of the body,
+    and the worker writes it (``end_child_after_frame``).
     """
     match returned:
         case SetRunning(result=result):
@@ -564,21 +579,24 @@ def _report_run(
             assert_never(unreachable)
     match task_loop.report(), end:
         case NoTaskLoop() | LoopHoldsNoTask() as nothing_left, _:
-            _mark_when_set_running(frame, returned, mark_finalizing)
+            reported = _marked_end(frame, end, mark_finalizing)
             _send_child_frame(
                 sock,
                 ResultFrame(
                     task_id=frame.task_id,
-                    end=end,
+                    end=reported,
                     rss=_read_rss(),
                     task_loop=nothing_left,
                 ),
             )
-            end_child_after_refused_start(end, frame.task_id)
+            end_child_after_frame(reported, frame.task_id)
             return _AfterRun.SERVES
         case LoopHoldsTasks() as left, ResultEnvelope() as body_result:
             pass
-        case LoopHoldsTasks(), StoppedBeforeRunning() | CoreStoppedBeforeStart():
+        case (
+            LoopHoldsTasks(),
+            StoppedBeforeRunning() | CoreStoppedBeforeStart() | CoreStoppedAfterBody(),
+        ):
             raise AssertionError(
                 f'task {frame.task_id} stopped before running and left work on '
                 'the task loop',
@@ -591,11 +609,12 @@ def _report_run(
     )
     match _end_left_work_or_exit(task_loop, frame):
         case LeftWorkEnd() as left_end:
-            _mark_when_set_running(frame, returned, mark_finalizing)
+            marker = mark_finalizing(frame)
             _send_child_frame(
                 sock,
                 LeftWorkEndedFrame(task_id=frame.task_id, end=left_end, rss=_read_rss()),
             )
+            end_child_after_frame(end_after_marker(body_result, marker), frame.task_id)
         case LeftWorkStuck(still=still):
             _send_child_frame(
                 sock,
@@ -606,18 +625,25 @@ def _report_run(
     return _AfterRun.TO_RETIRE
 
 
-def _mark_when_set_running(
+def _marked_end(
     frame: core.RunFrame,
-    returned: RunReturn,
+    end: RunEnd,
     mark_finalizing: MarkFinalizingFn,
-) -> None:
-    """Write the finalizing marker of a run that set its row RUNNING. A run
-    that stopped before its RUNNING update has no marker."""
-    match returned:
-        case SetRunning():
-            mark_finalizing(frame)
+) -> RunEnd:
+    """The end that a run reports after its finalizing marker. A run whose
+    body finished (``ResultEnvelope``) writes the marker first; a marker
+    that met the stopped core of the child gives ``CoreStoppedAfterBody``
+    (``end_after_marker``). A run that stopped before its RUNNING update
+    writes no marker."""
+    match end:
+        case ResultEnvelope():
+            return end_after_marker(end, mark_finalizing(frame))
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
-            return
+            return end
+        case CoreStoppedAfterBody():
+            raise AssertionError(
+                f'task {frame.task_id} came to its marker with a marker written',
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1053,12 +1079,12 @@ def run_child_task(
     )
 
 
-def mark_child_task_finalizing(frame: core.RunFrame) -> None:
+def mark_child_task_finalizing(frame: core.RunFrame) -> MarkerEnd:
     """Write the finalizing marker of the isolated run of ``frame``, which
     set its row RUNNING and has ended (``child_runner.mark_run_finalizing``)."""
     from horsies.core.worker.child_runner import mark_run_finalizing
 
-    mark_run_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)
+    return mark_run_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)
 
 
 def production_runners() -> TaskRunners:

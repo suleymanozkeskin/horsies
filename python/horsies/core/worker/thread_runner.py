@@ -21,23 +21,26 @@ from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
-from horsies.core.worker.run_return import CoreStoppedBeforeStart, ResultEnvelope
-from horsies.core.worker.shared_child import (
-    SetRunning,
-    StoppedBeforeRunning,
+from horsies.core.worker.run_return import (
+    BodyInterrupted,
+    CoreStoppedBeforeStart,
+    MarkerEnd,
+    ResultEnvelope,
 )
+from horsies.core.worker.shared_child import StoppedBeforeRunning
 from horsies.core.worker.thread_child import ThreadSeatReturn
 from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartCheck,
     OnSharedThreadSeat,
     _confirm_until_not_resumed,
-    _encode_task_outcome,
     _prepare_task_call,
     _PreparedCall,
     _stored_timeout_refusal_response,
     _task_exception_response,
+    encoded_body_end,
     mark_run_finalizing,
+    set_running_or_end_child,
 )
 from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
 
@@ -58,10 +61,10 @@ class PostgresThreadSeats:
         ``run_thread_seat_task``."""
         return run_thread_seat_task(frame, work, start_check)
 
-    def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+    def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``; see
         ``mark_thread_seat_finalizing``."""
-        mark_thread_seat_finalizing(frame)
+        return mark_thread_seat_finalizing(frame)
 
 
 type _TaskCall = (
@@ -118,7 +121,9 @@ def run_thread_seat_task(
     ``WORKER_RESOLUTION_ERROR``. An exception of the body becomes
     ``TASK_EXCEPTION``. A deadline does not stop the body: the run table
     fixes the end at the return. The seat writes the marker after the
-    return (``mark_thread_seat_finalizing``).
+    return (``mark_thread_seat_finalizing``). A body that a refusal of the
+    core of the child ended does not return: the child ends at once
+    (``set_running_or_end_child``).
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
     ownership_result = _confirm_until_not_resumed(
@@ -130,7 +135,10 @@ def run_thread_seat_task(
     )
     match ownership_result:
         case None:
-            return SetRunning(_run_after_running(frame, work))
+            return set_running_or_end_child(
+                str(frame.task_id),
+                _run_after_running(frame, work),
+            )
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
         case DeadlineBeforeStart():
@@ -145,9 +153,14 @@ def run_thread_seat_task(
             assert_never(unreachable)
 
 
-def _run_after_running(frame: core.SharedRunFrame, work: ThreadSeatWork) -> ResultEnvelope:
+def _run_after_running(
+    frame: core.SharedRunFrame,
+    work: ThreadSeatWork,
+) -> ResultEnvelope | BodyInterrupted:
     """The steps of a run after its RUNNING update, as in
-    ``_run_task_entry``. Any exception becomes ``TASK_EXCEPTION``."""
+    ``_run_task_entry``. Any exception becomes ``TASK_EXCEPTION``. A body
+    that a refusal of the core ended gives ``BodyInterrupted``
+    (``encoded_body_end``)."""
     try:
         match work:
             case core.StoredOptionsRefused() as refused:
@@ -166,16 +179,17 @@ def _run_after_running(frame: core.SharedRunFrame, work: ThreadSeatWork) -> Resu
                 return prepared
         out = _thread_call_result(frame.task_name, task(*args, **kwargs))
         logger.info(f'Task execution completed: {frame.task_name} ({frame.task_id})')
-        return _encode_task_outcome(frame.task_name, task, out)
+        return encoded_body_end(frame.task_name, task, out)
     except BaseException as e:
         return _task_exception_response(frame.task_name, e)
 
 
-def mark_thread_seat_finalizing(frame: core.SharedRunFrame) -> None:
+def mark_thread_seat_finalizing(frame: core.SharedRunFrame) -> MarkerEnd:
     """Write the finalizing marker of a run whose task returned, through the
     core handle of the child, on the calling seat thread
     (``child_runner.mark_run_finalizing``): within the bound of the core.
-    A failed or skipped write is logged only; a core that stopped ends the
-    child at once (``mark_run_finalizing``).
+    A failed or skipped write is logged only. A core that stopped gives
+    ``MarkerMetStoppedCore``: the run reports its result, and the child
+    then ends itself (``mark_run_finalizing``).
     """
-    mark_run_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)
+    return mark_run_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)

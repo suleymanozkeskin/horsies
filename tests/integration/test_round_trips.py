@@ -382,7 +382,7 @@ async def test_a_shared_async_finalizing_marker_is_one_statement(
 
     async def act(case: Case) -> None:
         task_id, claimed_at = case
-        await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
+        _ = await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
 
     (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 
@@ -475,7 +475,7 @@ async def test_a_sync_finalizing_marker_is_one_statement(
 
     async def act(case: Case) -> None:
         task_id, claimed_at = case
-        mark_run_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
+        _ = mark_run_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
 
     (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 

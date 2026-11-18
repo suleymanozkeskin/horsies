@@ -28,7 +28,12 @@ from tests.dualrun.reference.worker_parent.worker import (
     slots as reference_slots,
     thread_runner as reference_thread_runner,
 )
-from horsies.core.worker.run_return import StopReason, StoppedBeforeRunning
+from horsies.core.worker.run_return import (
+    MarkerDone,
+    MarkerEnd,
+    StopReason,
+    StoppedBeforeRunning,
+)
 from horsies.core.worker.child_runner import _PRE_START_CONFIRM_ATTEMPTS
 
 pytestmark = [pytest.mark.unit]
@@ -462,9 +467,9 @@ class TestMissedStart:
         assert _confirm(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
-def _mark(handle: Any) -> None:
+def _mark(handle: Any) -> MarkerEnd:
     with patch.object(shared_lifecycle, '_get_child_core_handle', return_value=handle):
-        asyncio.run(
+        return asyncio.run(
             shared_lifecycle.mark_task_finalizing(
                 uuid.UUID(TASK_ID),
                 'worker-1',
@@ -481,7 +486,7 @@ class TestFinalizingMarker:
         caplog.set_level(logging.DEBUG, logger='horsies.worker')
         handle = _Handle(starts=[], markers=[_record(core.FinalizingMarked)])
 
-        _mark(handle)
+        assert _mark(handle) == MarkerDone()
 
         assert handle.calls == [
             (
@@ -498,7 +503,9 @@ class TestFinalizingMarker:
     ) -> None:
         caplog.set_level(logging.DEBUG, logger='horsies.worker')
 
-        _mark(_Handle(starts=[], markers=[_record(core.FinalizingNotHeld)]))
+        assert _mark(_Handle(starts=[], markers=[_record(core.FinalizingNotHeld)])) == (
+            MarkerDone()
+        )
 
         assert (
             f'Finalizing marker for task {TASK_ID} skipped: the claim changed'
@@ -541,7 +548,7 @@ class TestFinalizingMarker:
             'the queue is full',
         )
 
-        _mark(handle)
+        assert _mark(handle) == MarkerDone()
 
         assert f'Failed to mark task {TASK_ID} finalizing' in caplog.text
 

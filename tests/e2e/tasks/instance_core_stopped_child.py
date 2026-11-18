@@ -11,9 +11,12 @@ its core stops and every later core call raises ``CoreStopped``.
   panic, so the run ends first (its marker and its result frame) and the
   core stops while the child holds no task. The next start in that child
   meets the stopped core.
-- ``stops_in_body``: on its first run the core stops while the body runs; the
-  finalizing marker after the body meets the stopped core. Later runs return
-  their process id.
+- ``stops_during_body``: the core stops while the body runs, and the body
+  then finishes; the finalizing marker after the body meets the stopped
+  core. Each run appends its process id to a file.
+- ``interrupted_in_body``: on its first run the core stops while the body
+  runs, and a send of the body then meets the stopped core: the refusal
+  ends the body. Later runs return their process id.
 """
 
 # pyright: reportPrivateUsage=false
@@ -128,20 +131,43 @@ def child_pid() -> TaskResult[int, TaskError]:
     return TaskResult(ok=os.getpid())
 
 
+def _wait_for_the_stop() -> None:
+    """Wait for the core of this process to stop, at most ``STOP_WAIT_S``."""
+    deadline = time.monotonic() + STOP_WAIT_S
+    while core.core_state() != 'stopped' and time.monotonic() < deadline:
+        time.sleep(STOP_POLL_S)
+
+
 @app.task(
-    task_name='e2e_core_stops_in_body',
+    task_name='e2e_core_stops_during_body',
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
 )
-def stops_in_body(*, first_run_path: str, marker_path: str) -> TaskResult[int, TaskError]:
+def stops_during_body(*, runs_path: str, marker_path: str) -> TaskResult[int, TaskError]:
+    """Append the process id of the child to ``runs_path``, stop the core of
+    the child, wait for the stop, and return the process id. The retry
+    policy runs the task again if the run takes the crashed-child path, so
+    a second line in ``runs_path`` shows a second run."""
+    with open(runs_path, 'a', encoding='ascii') as runs:
+        runs.write(f'{os.getpid()}\n')
+    _stop_the_core(0.0, marker_path)
+    _wait_for_the_stop()
+    return TaskResult(ok=os.getpid())
+
+
+@app.task(
+    task_name='e2e_core_stops_and_interrupts_body',
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
+)
+def interrupted_in_body(*, first_run_path: str, marker_path: str) -> TaskResult[int, TaskError]:
     """The first run (no file at ``first_run_path``) writes that file, stops
-    the core of its child and waits for the stop, at most ``STOP_WAIT_S``.
-    Every run returns the process id of its child."""
+    the core of its child, waits for the stop, then sends ``child_pid``: the
+    send raises ``CoreStopped``, which ends the body. Every later run
+    returns the process id of its child."""
     if os.path.exists(first_run_path):
         return TaskResult(ok=os.getpid())
     with open(first_run_path, 'w', encoding='ascii') as first_run:
         first_run.write(str(os.getpid()))
     _stop_the_core(0.0, marker_path)
-    deadline = time.monotonic() + STOP_WAIT_S
-    while core.core_state() != 'stopped' and time.monotonic() < deadline:
-        time.sleep(STOP_POLL_S)
+    _wait_for_the_stop()
+    _ = child_pid.send()
     return TaskResult(ok=os.getpid())

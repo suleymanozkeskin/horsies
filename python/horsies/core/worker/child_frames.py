@@ -35,6 +35,7 @@ from horsies.core.models.boot_failure import (
     describe_boot_cause,
 )
 from horsies.core.worker.run_return import (
+    CoreStoppedAfterBody,
     CoreStoppedBeforeStart,
     ResultEnvelope,
     StoppedBeforeRunning,
@@ -195,11 +196,15 @@ type NoLeftWork = NoTaskLoop | LoopHoldsNoTask
 """After the task, no asyncio task that it started is on a task loop of the
 child: the child has no loop, or its loop holds no task."""
 
-type RunEnd = ResultEnvelope | StoppedBeforeRunning | CoreStoppedBeforeStart
+type RunEnd = (
+    ResultEnvelope | StoppedBeforeRunning | CoreStoppedBeforeStart | CoreStoppedAfterBody
+)
 """How a run ended: its result envelope, or a stop before its start. A
 start that the stopped core of the child refused (``CoreStoppedBeforeStart``)
-goes out as ``OWNERSHIP_UNCONFIRMED``; the child ends itself once its frame
-is written."""
+goes out as ``OWNERSHIP_UNCONFIRMED``; a body that finished before the
+finalizing marker met the stopped core (``CoreStoppedAfterBody``) goes out
+with its result. In both cases the child ends itself once its frame is
+written."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,6 +475,8 @@ def _run_end(end: RunEnd) -> core.TaskResult | core.StoppedBeforeRunning:
             return core.StoppedBeforeRunning(reason=reason)
         case CoreStoppedBeforeStart():
             return core.StoppedBeforeRunning(reason='OWNERSHIP_UNCONFIRMED')
+        case CoreStoppedAfterBody(result=result):
+            return _returned(result)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -478,7 +485,12 @@ def _seat_end(
     end: SeatEnd,
 ) -> core.TaskResult | core.StoppedBeforeRunning | Literal['TIMED_OUT']:
     match end:
-        case ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart():
+        case (
+            ResultEnvelope()
+            | StoppedBeforeRunning()
+            | CoreStoppedBeforeStart()
+            | CoreStoppedAfterBody()
+        ):
             return _run_end(end)
         case SeatTimedOut():
             return 'TIMED_OUT'
