@@ -205,19 +205,19 @@ pub enum RunPermit {
 
 /// Read the stored `task_options` of a claimed row.
 ///
-/// `None` and an empty text mean the row has no options, as the Python
-/// worker read (`read_stored_timeout`, `read_stored_retry_policy`) treats
-/// them.
+/// `None` (NULL) means the row has no options. An empty text is
+/// [`StoredOptions::Unreadable`]: no writer stores it (the send and the
+/// workflow node promotion refuse it), so it is corrupt data, and its
+/// reason is Python's (`stored task_options do not parse: JSON parse
+/// failed: the text is empty`). The Python worker read
+/// (`read_stored_timeout`, `read_stored_retry_policy`) reads both the same.
 pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
-    let text = match task_options {
-        None | Some("") => {
-            return StoredOptions::Readable {
-                timeout: StoredTimeout::NoTimeout,
-                cancel_grace: StoredCancelGrace::NotStored,
-                retry: StoredRetry::NoPolicy,
-            }
-        }
-        Some(text) => text,
+    let Some(text) = task_options else {
+        return StoredOptions::Readable {
+            timeout: StoredTimeout::NoTimeout,
+            cancel_grace: StoredCancelGrace::NotStored,
+            retry: StoredRetry::NoPolicy,
+        };
     };
     match options_members(text) {
         Err(reason) => StoredOptions::Unreadable { reason },
@@ -230,10 +230,10 @@ pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
     }
 }
 
-/// The members of a non-empty stored options text, each value kept raw, or
-/// the reason that the text is unreadable, with Python's text
-/// (`read_stored_timeout`): the text does not read by Python's `loads_json`
-/// rule, or it holds another JSON value than an object.
+/// The members of a stored options text, each value kept raw, or the reason
+/// that the text is unreadable, with Python's text (`read_stored_timeout`):
+/// the text does not read by Python's `loads_json` rule (an empty text
+/// included), or it holds another JSON value than an object.
 fn options_members(text: &str) -> Result<RawMembers<'_>, String> {
     match check_python_loads(text) {
         Err(refusal) => Err(format!(

@@ -1274,17 +1274,18 @@ def _node_error(task_index: int, stored: str | None) -> str | None:
     """The message of the error that a node's stored result holds.
 
     A node has no error column of its own: its stored result holds the
-    error. No result, a result with a value, and an error with no message
-    give None.
+    error. No result (NULL), a result with a value, and an error with no
+    message give None. No writer stores an empty text, so ``loads_json``
+    refuses it as corrupt data, as the core's ``node_error_from_result``
+    does.
 
     Raises:
-        HistoryContractError: the stored result is not a task result
-            envelope, or its error does not decode.
+        HistoryContractError: the stored result is not JSON (an empty text
+            included), is not a task result envelope, or its error does not
+            decode.
     """
     match stored:
-        case None | '':
-            # The read before the switch: loads_json then read NULL and an
-            # empty text as None. The core's read keeps that.
+        case None:
             return None
         case text:
             pass
