@@ -216,10 +216,8 @@ pub async fn cancel_workflow_action(app: &Horsies, workflow_id: Uuid) -> ActionO
 /// Where a resume of `app` builds each owed sub-workflow child: the
 /// workflow registry of `app`, with the definitions registered when the
 /// child builds.
-pub(crate) fn resume_children(app: &Horsies) -> core_monitoring::ResumeChildren {
-    let registry = Arc::clone(app.workflows());
-    let source: Arc<dyn ChildSpecSource> = registry;
-    core_monitoring::ResumeChildren::Client(source)
+pub(crate) fn resume_children(app: &Horsies) -> Arc<dyn ChildSpecSource> {
+    Arc::clone(app.workflows()) as Arc<dyn ChildSpecSource>
 }
 
 /// The connected broker of `app`'s read handle, for the monitoring read
@@ -290,9 +288,7 @@ mod tests {
     #[tokio::test]
     async fn a_resume_builds_children_from_the_app_s_definitions() {
         let app = app();
-        let source = match resume_children(&app) {
-            core_monitoring::ResumeChildren::Client(source) => source,
-        };
+        let source = resume_children(&app);
         let request = horsies_core::ChildSpecRequest {
             parent_workflow_id: Uuid::nil(),
             parent_workflow_name: "parent".to_owned(),

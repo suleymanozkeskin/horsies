@@ -18,9 +18,7 @@ use super::support::{
 use crate::broker::PostgresBroker;
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::engine::{on_workflow_task_complete_with, WorkflowTaskCompletion};
-use crate::workflow_engine::steps::{
-    node_finish_alone, ChildBuild, Dependents, NodeFinishDisposition,
-};
+use crate::workflow_engine::steps::{node_finish_alone, Dependents, NodeFinishDisposition};
 
 /// The queue of the node rows of these tests.
 const COMPLETION_QUEUE: &str = "port_completion_branch_q";
@@ -72,7 +70,7 @@ async fn phase_two_under_a_paused_workflow_writes_the_node_and_promotes_nothing(
     let completion = on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -135,7 +133,7 @@ async fn the_phase_two_of_on_workflow_task_complete_sends_no_capacity_wake() {
     let completion = on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await;
 

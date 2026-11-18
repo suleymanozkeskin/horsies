@@ -466,15 +466,6 @@ pub(crate) struct CommittedStep<D> {
     pub(crate) parent_advances: OwedParentAdvances,
 }
 
-/// Where the host build of a child gets the child's spec
-/// (`child_spec.rs`): a client that builds the child in its own language and
-/// sends the spec as data, with the class of each task queue.
-#[derive(Clone, Copy)]
-pub(crate) enum ChildBuild<'a> {
-    /// The client's child spec source.
-    Client(&'a dyn ChildSpecSource),
-}
-
 /// A parent advance failed at the level of `failed_child_workflow_id`. The
 /// levels before it committed; that level wrote nothing, or its outcome is
 /// unknown. `owed_after` are the advances still owed after it.
@@ -642,7 +633,7 @@ pub(crate) async fn cancel(
 pub(crate) async fn resume(
     broker: &PostgresBroker,
     workflow_id: Uuid,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<CommittedStep<ResumeDisposition>, WorkflowError> {
     Box::pin(run_in_transaction(
         broker,
@@ -704,7 +695,7 @@ pub(crate) async fn node_finish_in_transaction(
     broker: &PostgresBroker,
     task_id: Uuid,
     wake: bool,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<CommittedStep<NodeFinishDisposition>, WorkflowError> {
     let dependents_text = Dependents::Read.as_sql();
     Box::pin(run_in_transaction(
@@ -733,7 +724,7 @@ pub(crate) async fn phase2_recover(
     broker: &PostgresBroker,
     task_id: Uuid,
     attempt_bound: i32,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<CommittedStep<NodeFinishDisposition>, WorkflowError> {
     Box::pin(run_in_transaction(
         broker,
@@ -766,7 +757,7 @@ pub(crate) async fn advance_parents(
     broker: &PostgresBroker,
     class: CheckoutClass,
     owed: OwedParentAdvances,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<(), ParentAdvanceFailure> {
     let mut drive = ParentAdvanceDrive::new(&owed);
     while let Some(child_workflow_id) = drive.next()? {
@@ -793,7 +784,7 @@ async fn advance_parent(
     broker: &PostgresBroker,
     class: CheckoutClass,
     child_workflow_id: Uuid,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<OwedParentAdvances, WorkflowError> {
     let committed = Box::pin(run_in_transaction::<ChildFinishDisposition>(
         broker,
@@ -874,7 +865,7 @@ pub(crate) async fn run_in_transaction<D: StepDisposition>(
     broker: &PostgresBroker,
     class: CheckoutClass,
     statement: &BoundStatement<'_>,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<CommittedStep<D>, WorkflowError> {
     let (open, _write) = broker.core_pools_for_write()?;
     let mut connection = checkout(open.main(), class, statement.statement()).await?;

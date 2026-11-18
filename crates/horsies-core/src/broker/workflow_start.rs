@@ -20,7 +20,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::start_statement::{
     client_start_arguments, start_tree, StartArguments, StartOutcome,
 };
-use crate::workflow_engine::steps::{advance_parents, ChildBuild};
+use crate::workflow_engine::steps::advance_parents;
 
 /// Retries of a start with `resend_on_transient_err` after a retryable
 /// failure (Python `_START_RETRY_COUNT`).
@@ -148,8 +148,7 @@ impl PostgresBroker {
         self.ensure_client_family_for_write()
             .await
             .map_err(|error| ClientStartError::Start(WorkflowError::Broker(error)))?;
-        let build = ChildBuild::Client(source);
-        let started = start_tree(self, arguments, sent_at, build)
+        let started = start_tree(self, arguments, sent_at, source)
             .await
             .map_err(ClientStartError::Start)?;
         let outcome = match started.outcome {
@@ -165,7 +164,7 @@ impl PostgresBroker {
             },
         };
         if let Err(failure) =
-            advance_parents(self, CheckoutClass::Batch, started.parent_advances, build).await
+            advance_parents(self, CheckoutClass::Batch, started.parent_advances, source).await
         {
             tracing::error!(
                 workflow_id = %workflow_id,

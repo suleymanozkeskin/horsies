@@ -12,7 +12,7 @@ use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::steps::{
-    self, advance_parents, run_alone, CancelOutcome, ChildBuild, PauseOutcome, ResumeDisposition,
+    self, advance_parents, run_alone, CancelOutcome, PauseOutcome, ResumeDisposition,
     StepContractError,
 };
 
@@ -412,7 +412,7 @@ pub(crate) async fn resume_client_workflow(
     workflow_id: Uuid,
     source: &dyn ChildSpecSource,
 ) -> HandleResult<bool> {
-    Box::pin(resume_with(broker, workflow_id, ChildBuild::Client(source)))
+    Box::pin(resume_with(broker, workflow_id, source))
         .await
         .map_err(|failure| failure.into_handle_error(workflow_id))
 }
@@ -451,7 +451,7 @@ impl ResumeFailure {
 pub(crate) async fn resume_with(
     broker: &PostgresBroker,
     workflow_id: Uuid,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<bool, ResumeFailure> {
     admit_workflow_write(broker, workflow_id)
         .await
@@ -1199,7 +1199,7 @@ mod p7_lifecycle_tests {
         );
         let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
             &crate::broker::PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             parent_id,
         )
         .await
@@ -1316,7 +1316,7 @@ mod p7_lifecycle_tests {
 
         let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
             &crate::broker::PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             parent_id,
         )
         .await
