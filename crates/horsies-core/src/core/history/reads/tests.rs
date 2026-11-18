@@ -1060,6 +1060,9 @@ fn stored_ok(record: &crate::broker::RawResultRecord) -> serde_json::Value {
     envelope["ok"].clone()
 }
 
+/// Python `tests/integration/test_task_result_history_fallback.py::TestStagedResultReader::test_an_absence_from_a_stale_reader_is_confirmed_by_detail`:
+/// a result reader published before a leaf existed misses a row of that
+/// leaf; the detail reader finds the COMPLETED row and its result.
 #[tokio::test]
 #[serial]
 async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
@@ -1124,6 +1127,10 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
         .await
         .expect("the detail reader confirms the history row")
         .expect_found();
+    assert_eq!(
+        confirmed.status,
+        crate::core::types::status::TaskStatus::Completed
+    );
     assert_eq!(stored_ok(&confirmed), serde_json::json!(7));
     database.drop().await;
 }

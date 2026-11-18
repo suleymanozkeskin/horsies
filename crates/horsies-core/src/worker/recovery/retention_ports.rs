@@ -73,7 +73,7 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        &crate::test_support::child_specs::no_child_specs(),
+        crate::test_support::child_specs::no_child_specs().as_ref(),
         &recovery,
         retention,
         &health,
