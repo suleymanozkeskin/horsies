@@ -33,10 +33,13 @@ from tests.perf.counters import Counts, CounterProbe, install_extension
 from tests.perf.scenarios import (
     BatchScenario,
     Invocation,
+    PublicCall,
+    PublicCallScenario,
     Role,
     Scenario,
     SeedRows,
     SingleRowScenario,
+    StatementScenario,
     analyze,
     delete_seeded,
     seed_rows,
@@ -121,6 +124,7 @@ class RunResult:
 def run_scenario(
     engine: Engine,
     *,
+    dsn: str,
     scenario: Scenario,
     observations: int,
     block_size: int,
@@ -129,7 +133,11 @@ def run_scenario(
     demo_quiesced: bool,
     control: bool = False,
 ) -> RunResult:
-    """Measure both sides of one scenario and judge the difference."""
+    """Measure both sides of one scenario and judge the difference.
+
+    ``dsn`` is the database of ``engine``, in the form the library accepts:
+    the client of a public call scenario connects with it.
+    """
     baseline_rows = seed_rows(scenario.name, Role.BASELINE)
     candidate_rows = seed_rows(scenario.name, Role.CANDIDATE)
     ballast_rows = seed_rows(scenario.name, Role.BALLAST)
@@ -143,7 +151,7 @@ def run_scenario(
         autovacuum = server_setting(connection, 'autovacuum')
 
         for stale in (baseline_rows, candidate_rows):
-            scenario.cleanup(connection, stale)
+            _cleanup(scenario, connection, stale)
         delete_seeded(connection, ballast_rows)
         seed_terminal_ballast(
             connection,
@@ -152,26 +160,38 @@ def run_scenario(
             payload_bytes=200,
         )
         try:
-            baseline, candidate, plans = _measure_interleaved(
-                connection,
-                scenario=scenario,
-                baseline_rows=baseline_rows,
-                candidate_rows=candidate_rows,
-                observations=observations,
-                block_size=block_size,
-                control=control,
-            )
+            match scenario:
+                case SingleRowScenario() | BatchScenario():
+                    baseline, candidate, plans = _measure_interleaved(
+                        connection,
+                        scenario=scenario,
+                        baseline_rows=baseline_rows,
+                        candidate_rows=candidate_rows,
+                        observations=observations,
+                        block_size=block_size,
+                        control=control,
+                    )
+                case PublicCallScenario():
+                    baseline, candidate, plans = _measure_public_interleaved(
+                        connection,
+                        dsn=dsn,
+                        scenario=scenario,
+                        observations=observations,
+                        block_size=block_size,
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
         finally:
             # A statement failure leaves PostgreSQL's transaction aborted.
             # Roll it back before cleanup so the original error is not masked
             # by a second "current transaction is aborted" cleanup error.
             connection.rollback()
             for seeded in (baseline_rows, candidate_rows):
-                scenario.cleanup(connection, seeded)
+                _cleanup(scenario, connection, seeded)
             delete_seeded(connection, ballast_rows)
 
     match scenario:
-        case SingleRowScenario():
+        case SingleRowScenario() | PublicCallScenario():
             comparisons = [
                 compare(
                     baseline=baseline.samples_ms,
@@ -258,7 +278,7 @@ def run_scenario(
 def _measure_interleaved(
     connection: Connection,
     *,
-    scenario: Scenario,
+    scenario: StatementScenario,
     baseline_rows: SeedRows,
     candidate_rows: SeedRows,
     observations: int,
@@ -361,6 +381,67 @@ def _measure_interleaved(
     )
 
 
+def _measure_public_interleaved(
+    connection: Connection,
+    *,
+    dsn: str,
+    scenario: PublicCallScenario,
+    observations: int,
+    block_size: int,
+) -> tuple[Measurement, Measurement, None]:
+    """Alternate blocks of the public call between the two sides until both
+    are complete; the first block of each side is a warmup.
+
+    Both sides share one client, as both sides of a statement scenario share
+    one connection: the library's pool and its first connection are paid in
+    the warmup blocks. The rows the calls write stay until the cleanup of the
+    run. No plan is captured: the statements are the library's.
+    """
+    blocks = -(-observations // block_size)
+    samples: dict[Side, list[float]] = {Side.BASELINE: [], Side.CANDIDATE: []}
+    counts: dict[Side, list[Counts]] = {Side.BASELINE: [], Side.CANDIDATE: []}
+    analyze(connection)
+    probe = CounterProbe(connection)
+    client = scenario.open_call(dsn)
+    try:
+        for _warmup_side in (Side.BASELINE, Side.CANDIDATE):
+            _ = _run_public_block(client, block_size)
+        for _ in range(blocks):
+            for side in (Side.BASELINE, Side.CANDIDATE):
+                probe.begin()
+                # The probe's reads assign no transaction id. Ending their
+                # transaction leaves the harness session idle while the
+                # library writes on its own connections.
+                connection.commit()
+                samples[side] += _run_public_block(client, block_size)
+                counts[side].append(probe.finish(terminal_rows=0))
+                connection.commit()
+    finally:
+        client.close()
+    return (
+        Measurement(
+            samples_ms=samples[Side.BASELINE],
+            counts=_total(counts[Side.BASELINE]),
+        ),
+        Measurement(
+            samples_ms=samples[Side.CANDIDATE],
+            counts=_total(counts[Side.CANDIDATE]),
+        ),
+        None,
+    )
+
+
+def _run_public_block(client: PublicCall, block_size: int) -> list[float]:
+    """One block of public calls, each timed on its own. A call moves no task
+    row to history."""
+    samples: list[float] = []
+    for _ in range(block_size):
+        started = time.perf_counter_ns()
+        client.call()
+        samples.append((time.perf_counter_ns() - started) / 1_000_000)
+    return samples
+
+
 def _capture_plans(
     connection: Connection,
     scenario: SingleRowScenario,
@@ -459,7 +540,7 @@ def _explain(connection: Connection, invocation: Invocation) -> dict[str, Any]:
 
 def _run_block(
     connection: Connection,
-    scenario: Scenario,
+    scenario: StatementScenario,
     ids: Iterator[str],
     block_size: int,
     *,
@@ -553,7 +634,7 @@ def _total(blocks: list[Counts]) -> Counts:
 
 
 def _seed_block(
-    scenario: Scenario,
+    scenario: StatementScenario,
     connection: Connection,
     *,
     rows: SeedRows,
@@ -577,7 +658,7 @@ def _seed_block(
 
 
 def _seed_for(
-    scenario: Scenario,
+    scenario: StatementScenario,
     connection: Connection,
     *,
     rows: SeedRows,
@@ -586,9 +667,25 @@ def _seed_for(
     scenario.seed(connection, rows, count)
 
 
+def _cleanup(scenario: Scenario, connection: Connection, rows: SeedRows) -> None:
+    """Delete the rows that ``scenario`` wrote for one role, and commit."""
+    match scenario:
+        case SingleRowScenario() | BatchScenario():
+            scenario.cleanup(connection, rows)
+        case PublicCallScenario():
+            # The calls write rows with ids that the library mints; the
+            # cleanup finds them by the names the scenario owns, so it has
+            # no role.
+            scenario.cleanup(connection)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _payload_bytes(scenario: Scenario) -> int:
     match scenario:
         case SingleRowScenario(payload_bytes=payload_bytes):
+            return payload_bytes
+        case PublicCallScenario(payload_bytes=payload_bytes):
             return payload_bytes
         case BatchScenario():
             return 200
@@ -598,7 +695,7 @@ def _payload_bytes(scenario: Scenario) -> int:
 
 def _batch_size(scenario: Scenario) -> int | None:
     match scenario:
-        case SingleRowScenario():
+        case SingleRowScenario() | PublicCallScenario():
             return None
         case BatchScenario(batch_size=batch_size):
             return batch_size
@@ -609,6 +706,8 @@ def _batch_size(scenario: Scenario) -> int | None:
 def _comparison_label(scenario: Scenario, *, control: bool) -> str:
     """What the run actually compared, stated where a reader will see it."""
     match scenario:
+        case PublicCallScenario():
+            return 'public call against itself (harness control)'
         case _ if control:
             return 'existing statement against itself (harness control)'
         case SingleRowScenario(candidate=None) | BatchScenario(candidate=None):
@@ -632,8 +731,16 @@ def _contract_violations(
 
     Latency is sampled and has confidence intervals. These facts are counted,
     so they fail directly: an interval cannot make an extra commit or WAL
-    record less real.
+    record less real. A public call scenario has one implementation, which
+    both sides run, so it has no contract to break.
     """
+    match scenario:
+        case PublicCallScenario():
+            return ()
+        case SingleRowScenario() | BatchScenario():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     if control or scenario.candidate is None:
         return ()
 

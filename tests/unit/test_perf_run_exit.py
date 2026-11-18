@@ -22,20 +22,23 @@ import pytest
 from tests.perf import __main__ as perf_main
 from tests.perf.__main__ import (
     GATE_ENVIRONMENT,
+    _block_size_for,
     _control_disagreements,
     _exit_status,
     _gate_environment_violations,
+    _has_candidate,
     _minimum_observations,
     _observations_for,
     _select_scenarios,
 )
 from tests.perf.counters import Counts
-from tests.perf.scenarios import Scenario, SingleRowScenario
+from tests.perf.scenarios import PublicCallScenario, Scenario, SingleRowScenario
 from tests.perf.runner import (
     Conditions,
     Measurement,
     PlanEvidence,
     RunResult,
+    _comparison_label,
     _contract_violations,
 )
 from tests.perf.statistics import Budget, Verdict
@@ -60,6 +63,17 @@ _SCENARIO = SingleRowScenario(
     exact_client_statements_per_operation=1,
 )
 """A single-row scenario with no candidate side, one statement per operation."""
+
+_PUBLIC_CALL = PublicCallScenario(
+    name='run-exit-public-call',
+    description='a public call scenario built for these tests',
+    p50_budget=Budget(fraction=0.10, floor_ms=0.5),
+    p99_budget=Budget(fraction=0.15, floor_ms=1.5),
+    payload_bytes=200,
+    open_call=_never_run,
+    cleanup=_never_run,
+)
+"""A public call scenario: one implementation, which both sides run."""
 
 
 def _conditions(comparison: str, observations: int = 200) -> Conditions:
@@ -340,12 +354,24 @@ class TestGateEnvironment:
 class TestScenarioSelection:
     def test_candidates_contains_every_and_only_real_comparison(self) -> None:
         selected = _select_scenarios('candidates')
-        assert all(scenario.candidate is not None for scenario in selected)
+        assert all(_has_candidate(scenario) for scenario in selected)
         assert {scenario.name for scenario in selected} == {
             scenario.name
             for scenario in _select_scenarios('all')
-            if scenario.candidate is not None
+            if _has_candidate(scenario)
         }
+
+    def test_all_selects_the_public_operations_of_both_releases(self) -> None:
+        """The release comparison pairs these by name with the v0.7.0 harness."""
+        public = {
+            scenario.name
+            for scenario in _select_scenarios('all')
+            if isinstance(scenario, PublicCallScenario)
+        }
+        assert public == {'send', 'workflow-start'}
+
+    def test_a_public_call_scenario_is_never_a_candidate(self) -> None:
+        assert not _has_candidate(_PUBLIC_CALL)
 
     def test_a_selection_of_no_scenario_is_refused(
         self,
@@ -380,3 +406,59 @@ class TestObservationCount:
     def test_override_supports_an_inconclusive_retry(self) -> None:
         scenario = _SCENARIO
         assert _observations_for(scenario, 'gate', 20_000) == 20_000
+
+
+class TestPublicCallScenario:
+    """A public call scenario runs one call of the release on both sides."""
+
+    def test_a_gate_without_control_is_refused(self) -> None:
+        """The gate needs a second implementation; a public call has one.
+        The refusal comes before any connection: port 1 has no server."""
+        with pytest.raises(SystemExit) as raised:
+            perf_main.main(
+                [
+                    '--dsn',
+                    'postgresql://perf@127.0.0.1:1/unused',
+                    '--scenario',
+                    'send',
+                    '--scale',
+                    'gate',
+                    '--demo-quiesced',
+                ]
+            )
+        assert raised.value.code == 2
+
+    def test_the_comparison_is_labelled_a_control(self) -> None:
+        """The control count checks apply to it, with or without --control."""
+        assert 'control' in _comparison_label(_PUBLIC_CALL, control=False)
+        assert 'control' in _comparison_label(_PUBLIC_CALL, control=True)
+
+    def test_a_count_disagreement_between_its_sides_is_reported(self) -> None:
+        result = dataclasses.replace(
+            _control_result(_counts(), _counts(client_statements=201)),
+            conditions=_conditions(_comparison_label(_PUBLIC_CALL, control=False)),
+        )
+        report = _control_disagreements(result)
+        assert len(report) == 1
+        assert 'client statements 200 vs 201' in report[0]
+
+    def test_it_has_no_contract_of_a_real_comparison(self) -> None:
+        report = _contract_violations(
+            scenario=_PUBLIC_CALL,
+            conditions=_conditions('public call against itself (harness control)'),
+            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
+            candidate=Measurement(
+                samples_ms=[1.0],
+                counts=_counts(client_statements=400),
+            ),
+            plans=None,
+            control=False,
+        )
+        assert report == ()
+
+    def test_it_takes_the_single_row_observation_counts(self) -> None:
+        assert _minimum_observations(_PUBLIC_CALL, 'gate') == 10_000
+        assert _minimum_observations(_PUBLIC_CALL, 'smoke') == 200
+
+    def test_its_block_is_the_requested_size(self) -> None:
+        assert _block_size_for(_PUBLIC_CALL, 100) == 100

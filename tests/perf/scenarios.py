@@ -18,6 +18,12 @@ The candidate slot stays for a comparison of two implementations on one
 schema; a gate refuses a scenario without a candidate unless the run is a
 control run.
 
+A third shape calls a public operation of the library (``public_calls.py``)
+in place of a statement: the library sends its own statements, so the
+harness times the call and counts what the server recorded. The call is the
+same public API in each release, so the harness of each release measures the
+same work through its own product.
+
 Seeded rows carry ids of the column type: one UUIDv7 per scenario, role,
 kind of row and index (``seed_rows``). The ids of one role and kind share
 their leading digits, so a run finds and deletes its own rows by an id range
@@ -32,12 +38,19 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import TextClause
 
+from tests.perf.public_calls import (
+    INPUT_TEXT_BYTES,
+    SendCall,
+    WorkflowStartCall,
+    delete_sent_tasks,
+    delete_started_workflows,
+)
 from tests.perf.statistics import Budget
 
 WORKER_ID = 'perf-harness'
@@ -282,7 +295,53 @@ class BatchScenario:
     exact_write_transactions_per_operation: int = 1
 
 
-type Scenario = SingleRowScenario | BatchScenario
+class PublicCall(Protocol):
+    """A client of the library whose ``call`` runs one public operation."""
+
+    def call(self) -> None:
+        """Run the operation once.
+
+        Raises:
+            RuntimeError: the library returned an error. The run stops: a
+                measured operation must apply.
+        """
+        ...
+
+    def close(self) -> None:
+        """Release the connections of the client."""
+        ...
+
+
+type OpenPublicCall = Callable[[str], PublicCall]
+"""Builds the client of a scenario for a database URL. No I/O."""
+
+type PublicCleanup = Callable[[Connection], None]
+"""Deletes every row that the calls of a scenario wrote, and commits."""
+
+
+@dataclass(frozen=True, slots=True)
+class PublicCallScenario:
+    """One call of a public operation of the library per measured operation.
+
+    The library opens its own connections and sends its own statements, so no
+    plan is captured. Both sides of a run share one client and run the same
+    call: every run is a control run. ``payload_bytes`` is the length of the
+    text argument that one call sends.
+    """
+
+    name: str
+    description: str
+    p50_budget: Budget
+    p99_budget: Budget
+    payload_bytes: int
+    open_call: OpenPublicCall
+    cleanup: PublicCleanup
+
+
+type StatementScenario = SingleRowScenario | BatchScenario
+"""A scenario whose operation is one statement that the harness sends."""
+
+type Scenario = StatementScenario | PublicCallScenario
 
 
 def payload_of(size_bytes: int) -> str:
@@ -389,9 +448,38 @@ def analyze(connection: Connection) -> None:
     connection.commit()
 
 
-SCENARIOS: tuple[Scenario, ...] = ()
-"""The scenarios of this release: none until scenarios on public operations
-land."""
+PUBLIC_CALL_P50: Final = Budget(fraction=0.10, floor_ms=0.5)
+PUBLIC_CALL_P99: Final = Budget(fraction=0.15, floor_ms=1.5)
+
+SCENARIOS: tuple[Scenario, ...] = (
+    PublicCallScenario(
+        name='send',
+        description=(
+            'send of one task with one 200-byte text argument '
+            '(`send`), one PENDING task row per call'
+        ),
+        p50_budget=PUBLIC_CALL_P50,
+        p99_budget=PUBLIC_CALL_P99,
+        payload_bytes=INPUT_TEXT_BYTES,
+        open_call=SendCall,
+        cleanup=delete_sent_tasks,
+    ),
+    PublicCallScenario(
+        name='workflow-start',
+        description=(
+            'start of a one-node workflow whose node has one 200-byte text '
+            'argument (`WorkflowSpec.start`): the workflow row, the node row '
+            'and the task row of the node per call'
+        ),
+        p50_budget=PUBLIC_CALL_P50,
+        p99_budget=PUBLIC_CALL_P99,
+        payload_bytes=INPUT_TEXT_BYTES,
+        open_call=WorkflowStartCall,
+        cleanup=delete_started_workflows,
+    ),
+)
+"""The scenarios of this release: public operations that run on 0.7.0 and on
+this release with the same call."""
 
 
 def scenario_by_name(name: str) -> Scenario:
