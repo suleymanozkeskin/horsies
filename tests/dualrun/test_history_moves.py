@@ -11,9 +11,9 @@ Candidate side: the baseline, where each single write passes the row it
 locked to ``horsies_move_task_to_history(horsies_tasks, ...)``, each batch
 write calls ``horsies_move_tasks_to_history``, and each miss passes its kind
 and fence kind to the classifier of 0008. The function-call script
-(``tests/integration/baseline_function_calls.sql``) calls 15 terminal writes
-on a path that moves their rows: each moves one task, and the pending expiry
-moves two, so history holds 16 rows.
+(``crates/horsies-core/src/sql_tests/cases/baseline_function_calls.sql``)
+calls 15 terminal writes on a path that moves their rows: each moves one
+task, and the pending expiry moves two, so history holds 16 rows.
 """
 
 from __future__ import annotations

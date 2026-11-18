@@ -344,17 +344,22 @@ pub(super) fn send(frames: &[ChildFrame]) -> String {
     format!(r#"printf '{}' >&"$0"; "#, child_frames_text(frames))
 }
 
-/// Read the init frame and answer ready.
-pub(super) fn boot(init: &InitFrame) -> String {
+/// Read the init frame by its header and drop it. A slot sends the init
+/// frame of its pool with the process name of the slot
+/// (`booting::init_for_slot`), so the length of the frame depends on the
+/// slot.
+pub(crate) fn take_init() -> String {
+    read_frame()
+}
+
+/// Read the init frame that a slot sends for `_template`, by its header, and
+/// answer ready.
+pub(super) fn boot(_template: &InitFrame) -> String {
     let ready = ChildFrame::Ready(ReadyFrame {
         pid: ProcessId::new(1).unwrap(),
         rss: RssReading::Unreadable,
     });
-    format!(
-        "{}{}",
-        take(&ParentFrame::Init(init.clone())),
-        send(&[ready])
-    )
+    format!("{}{}", take_init(), send(&[ready]))
 }
 
 /// Read the stop frame and exit 0.
@@ -426,6 +431,45 @@ pub(crate) fn idle_child_of_any_kind() -> ChildCommand {
     shell(&format!("{}{}exit 3", boot_any_kind(), read_frame()))
 }
 
+/// A child of any kind that writes its pid to `pid_file`, boots, then
+/// serves nothing: it exits at the stop frame.
+pub(crate) fn idle_child_recording_pid(pid_file: &Path) -> ChildCommand {
+    shell(&format!(
+        "echo $$ > '{}'; {}{}exit 3",
+        pid_file.display(),
+        boot_any_kind(),
+        read_frame()
+    ))
+}
+
+/// Children of any kind whose ready frame reports an RSS by boot order: the
+/// n-th child to boot reports `readings[n - 1]`, a later child the last
+/// reading. Each then serves nothing: it exits at the stop frame. The boot
+/// order is kept in the folder `dir`, as [`ticket`] keeps it.
+///
+/// Panics: `readings` is empty (a defect of the test).
+pub(crate) fn idle_children_reporting_rss(dir: &Path, readings: &[RssReading]) -> ChildCommand {
+    let ready = |rss: RssReading| {
+        send(&[ChildFrame::Ready(ReadyFrame {
+            pid: ProcessId::new(1).unwrap(),
+            rss,
+        })])
+    };
+    let last = *readings.last().expect("at least one RSS reading");
+    let cases: String = readings
+        .iter()
+        .zip(1_usize..)
+        .map(|(rss, boot)| format!("{boot}) {};; ", ready(*rss)))
+        .collect();
+    shell(&format!(
+        r#"n=1; while ! mkdir "{}/ticket-$n" 2>/dev/null; do n=$((n + 1)); done; {}case $n in {cases}*) {};; esac; {}exit 3"#,
+        dir.display(),
+        read_frame(),
+        ready(last),
+        read_frame(),
+    ))
+}
+
 /// A child of any kind whose start hook fails: it reads its init frame and
 /// exits with the hook failure code (173).
 pub(crate) fn hook_failing_child_of_any_kind() -> ChildCommand {
@@ -478,12 +522,13 @@ pub(super) fn boot_failed(cause: ReportedBootCause, error_name: &str, detail: &s
     })
 }
 
-/// Read the init frame, report `failure` in place of the ready frame, and
-/// exit with the boot-failed code.
-pub(super) fn fail_boot(init: &InitFrame, failure: &ChildFrame) -> String {
+/// Read the init frame that a slot sends for `_template`, by its header,
+/// report `failure` in place of the ready frame, and exit with the
+/// boot-failed code.
+pub(super) fn fail_boot(_template: &InitFrame, failure: &ChildFrame) -> String {
     format!(
         "{}{}exit 75",
-        take(&ParentFrame::Init(init.clone())),
+        take_init(),
         send(std::slice::from_ref(failure))
     )
 }

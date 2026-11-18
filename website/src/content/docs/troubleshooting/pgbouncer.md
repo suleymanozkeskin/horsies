@@ -1,8 +1,8 @@
 ---
 title: PgBouncer Troubleshooting
 section: shared
-summary: Fix PgBouncer transaction pooling issues with Horsies and Syce, and size the PgBouncer pool for the workers.
-related: [../configuration/broker-config, ../configuration/remote-postgres, ../workers/worker-profiles, ../monitoring/syce-overview, ../tasks/errors]
+summary: Fix PgBouncer transaction pooling issues with Horsies, and size the PgBouncer pool for the workers.
+related: [../configuration/broker-config, ../configuration/remote-postgres, ../workers/worker-profiles, ../monitoring/web-ui-deployment, ../tasks/errors]
 tags: [troubleshooting, pgbouncer, planetscale, postgres]
 ---
 
@@ -157,7 +157,8 @@ LISTEN unavailable; falling back to polling
 
 Producer-side `handle.get()` and workflow waits can poll when notifications are
 unavailable. This keeps result retrieval working, but it is not worker dispatch
-support. Fix the session URL if workers or Syce need real-time notifications.
+support. Fix the session URL if workers or the web UI event stream need
+real-time notifications.
 
 ## Live Check: Notification Not Delivered
 
@@ -175,11 +176,11 @@ If the pooled URL is used without `pgbouncer_transaction_mode` set to true, oper
 may see prepared-statement or statement-cache errors from the pooler. Enable the
 flag, with the split URLs above.
 
-This disables psycopg prepared statements for Horsies runtime SQL. In Syce, pass
-`--pgbouncer-transaction-mode` to disable SQLx's PostgreSQL statement cache.
+This disables psycopg prepared statements for Horsies runtime SQL. For the
+standalone web UI, pass `--pgbouncer-transaction-mode` with both URLs:
 
 ```bash
-syce \
+horsies web \
   --database-url "$DATABASE_URL_POOLED" \
   --session-database-url "$DATABASE_URL_DIRECT" \
   --pgbouncer-transaction-mode

@@ -1,682 +1,445 @@
-#![allow(clippy::unwrap_used)]
+//! Layer 5: workflow data flow, `args_from` and the workflow context
+//! (Python `tests/e2e/test_layer5_workflow_dataflow.py`), and the strict
+//! node input of the old `wrapped_input_strict.rs`.
 
-//! Layer 5 e2e tests: workflow data flow (args_from, failure propagation).
-//!
-//! Mirrors Python's `tests/e2e/test_layer5_workflow_dataflow.py`.
-//!
-//! Run with:
-//!   cargo test -p horsies-test-worker --test layer5_workflow_dataflow -- --test-threads=1
-
+use std::collections::BTreeMap;
 use std::time::Duration;
 
+use horsies::{
+    HorsiesError, OutputlessResults, TaskNode, TaskOutcome, TypedNodeRef, WorkflowHandle,
+    WorkflowSpecBuilder,
+};
+use horsies_test_support::rows::{self, NodeRow};
+use horsies_test_worker::harness::{within, Suite};
+use horsies_test_worker::instance::{Instance, Profile};
+use horsies_test_worker::tasks::workflow;
+use serde::de::DeserializeOwned;
 use serial_test::serial;
-use sqlx::PgPool;
-use uuid::Uuid;
 
-use std::sync::Arc;
+const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
 
-use horsies::{Horsies, PostgresBroker, TaskResult, WorkflowHandle, WorkflowSpecBuilder};
-use horsies_test_support::{
-    db,
-    e2e::{
-        db_poll::wait_for_workflow_terminal,
-        worker::start_worker,
-        workflow::{get_workflow_task_status, wait_for_workflow_completion},
-    },
-    fixtures,
-};
-use horsies_test_worker::tasks::{
-    wf_ctx_reader, wf_ctx_sum, wf_double, wf_fail, wf_fail_int, wf_mixed, wf_produce_dict,
-    wf_produce_int, wf_read_dict, wf_slow_step, wf_step, wf_sum_two, DoubleInput, MixedInput,
-    ReadDictInput, SumTwoInput,
-};
+/// The longest wait for a workflow to end.
+const WORKFLOW_WAIT: Duration = Duration::from_secs(30);
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn ensure_tasks_registered() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let mut app = Horsies::new(fixtures::default_app_config()).unwrap();
-        horsies_test_worker::tasks::register(&mut app).unwrap();
-    });
+fn builder(name: &str) -> WorkflowSpecBuilder {
+    let mut builder = WorkflowSpecBuilder::new(name);
+    let _key = builder.definition_key(format!("tests.e2e.{name}.v1"));
+    builder
 }
 
-async fn pool() -> PgPool {
-    ensure_tasks_registered();
-    let p = db::create_pool().await;
-    db::run_migrations(&p).await;
-    p
+/// A node `id` that returns `value`.
+fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produce_int::Input> {
+    suite
+        .function(workflow::produce_int::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::produce_int::params::value(), value)
+        .expect("a produce input")
 }
 
-fn db_url() -> String {
-    db::db_url()
+/// A node `id` that doubles the result of `source`.
+fn double(
+    suite: &Suite,
+    id: &str,
+    source: TypedNodeRef<i64>,
+) -> TaskNode<i64, workflow::double::Input> {
+    suite
+        .function(workflow::double::handle)
+        .node()
+        .node_id(id)
+        .arg_from(workflow::double::params::input_result(), source)
 }
 
-async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> Uuid {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
-    let handle: WorkflowHandle<serde_json::Value> = app
-        .start(spec.clone())
+/// A node `id` that fails with `DELIBERATE_FAILURE`.
+fn fail(suite: &Suite, id: &str) -> TaskNode<i64, ()> {
+    suite.function(workflow::fail::handle).node().node_id(id)
+}
+
+async fn start<T: DeserializeOwned + 'static>(
+    suite: &Suite,
+    builder: WorkflowSpecBuilder,
+) -> WorkflowHandle<T> {
+    let spec = builder
+        .build()
+        .unwrap_or_else(|refused: HorsiesError| panic!("build the spec: {refused}"));
+    suite
+        .app
+        .start::<T>(&spec)
         .await
-        .unwrap_or_else(|e| panic!("app.start failed: {}", e));
-    handle.workflow_id().to_owned()
+        .unwrap_or_else(|refused| panic!("start the workflow: {refused}"))
 }
 
-/// Get the result JSON of a workflow task by index.
-async fn get_wf_task_result(pool: &PgPool, wf_id: &Uuid, task_index: i32) -> Option<String> {
-    sqlx::query_scalar(
-        "SELECT result FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
-    )
-    .bind(wf_id)
-    .bind(task_index)
-    .fetch_optional(pool)
-    .await
-    .unwrap()
-    .flatten()
+/// The output of a workflow that completed.
+async fn output<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
+    handle: &WorkflowHandle<T>,
+) -> T {
+    match handle
+        .get(within(WORKFLOW_WAIT))
+        .await
+        .expect("read the workflow")
+    {
+        TaskOutcome::Succeeded(value) => value,
+        TaskOutcome::Failed(error) => panic!("the workflow failed: {error:?}"),
+    }
 }
 
-// ---------------------------------------------------------------------------
-// T5.1: args_from single dependency (A produces 5 → B doubles to 10)
-// ---------------------------------------------------------------------------
+/// The nodes of a workflow once it ended with `status`.
+async fn ended_nodes<T>(suite: &Suite, handle: &WorkflowHandle<T>, status: &str) -> Vec<NodeRow> {
+    let client = suite.client().await;
+    let ended = rows::wait_for_workflow_end(&client, handle.workflow_id(), WORKFLOW_WAIT).await;
+    assert_eq!(ended, status, "the workflow status");
+    rows::workflow_nodes(&client, handle.workflow_id()).await
+}
 
+fn statuses(nodes: &[NodeRow]) -> Vec<&str> {
+    nodes.iter().map(|node| node.status.as_str()).collect()
+}
+
+/// Python: `test_layer5_workflow_dataflow.py::test_args_from_single_dependency`.
 #[tokio::test]
 #[serial]
 async fn test_args_from_single_dependency() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_args_from_single");
-    let a = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"value": 5}"#.to_owned()),
-    );
-    b.task(
-        wf_double::node()
-            .unwrap()
-            .node_id("b")
-            .arg_from(DoubleInput::field_input_result(), a),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    // B should have result 10 (5 * 2).
-    let b_result = get_wf_task_result(&pool, &wf_id, 1).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&b_result).unwrap();
-    assert!(tr.is_ok());
-    assert_eq!(tr.unwrap(), serde_json::json!(10));
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("args_from_single");
+    let a = spec.task(produce(&suite, "a", 5));
+    let b = spec.task(double(&suite, "b", a));
+    let _output = spec.output(b);
+    let handle = start::<i64>(&suite, spec).await;
+    assert_eq!(output(&handle).await, 10);
 }
 
-// ---------------------------------------------------------------------------
-// T5.2: args_from multiple dependencies (A=10, B=20 → C sums to 30)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_args_from_multiple_dependencies`.
 #[tokio::test]
 #[serial]
 async fn test_args_from_multiple_dependencies() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let mut spec = builder("args_from_multiple");
+    let a = spec.task(produce(&suite, "a", 3));
+    let b = spec.task(produce(&suite, "b", 4));
+    let sum = spec.task(
+        suite
+            .function(workflow::sum_two::handle)
+            .node()
+            .node_id("sum")
+            .arg_from(workflow::sum_two::params::first(), a)
+            .arg_from(workflow::sum_two::params::second(), b),
     );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_args_from_multi");
-    let a = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"value": 10}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"value": 20}"#.to_owned()),
-    );
-    b.task(
-        wf_sum_two::node()
-            .unwrap()
-            .node_id("c")
-            .arg_from(SumTwoInput::field_first(), a)
-            .arg_from(SumTwoInput::field_second(), bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    // C should have result 30 (10 + 20).
-    let c_result = get_wf_task_result(&pool, &wf_id, 2).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&c_result).unwrap();
-    assert!(tr.is_ok());
-    assert_eq!(tr.unwrap(), serde_json::json!(30));
+    let _output = spec.output(sum);
+    let handle = start::<i64>(&suite, spec).await;
+    assert_eq!(output(&handle).await, 7);
 }
 
-// ---------------------------------------------------------------------------
-// T5.5: Failed dep propagation via args_from
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_failed_propagation`. With
+/// `allow_failed_deps`, the node runs and reads the upstream failure.
 #[tokio::test]
 #[serial]
 async fn test_failed_propagation_via_args_from() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("failed_propagation");
+    let a = spec.task(fail(&suite, "a"));
+    let b = spec.task(double(&suite, "b", a).allow_failed_deps(true));
+    let _output = spec.output(b);
+    let handle = start::<i64>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(statuses(&nodes), vec!["FAILED", "FAILED"]);
+    assert!(
+        nodes[1].started_at.is_some(),
+        "the node ran with the failure"
     );
-
-    // A fails → B receives error via args_from (allow_failed_deps=true).
-    let mut b = WorkflowSpecBuilder::new("e2e_fail_propagation");
-    let a = b.task(
-        wf_fail_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code": "UPSTREAM_FAIL"}"#.to_owned()),
-    );
-    b.task(
-        wf_double::node()
-            .unwrap()
-            .node_id("b")
-            .arg_from(DoubleInput::field_input_result(), a)
-            .allow_failed_deps(true),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    // A is FAILED.
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "FAILED");
-    // B receives the error via args_from and propagates it → also FAILED.
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED");
+    let read = handle
+        .result_for::<i64, workflow::WfCode>(&horsies::NodeKey::new("b"))
+        .await
+        .expect("read node b");
+    match read {
+        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "DELIBERATE_FAILURE"),
+        TaskOutcome::Succeeded(value) => panic!("node b succeeded with {value}"),
+    }
 }
 
-// ---------------------------------------------------------------------------
-// T5.6: Skipped propagation (A fails → B skipped, no allow_failed_deps)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_skipped_propagation`.
+/// A node that allows failed dependencies reads a skipped upstream as
+/// `UPSTREAM_SKIPPED`.
 #[tokio::test]
 #[serial]
 async fn test_skipped_propagation() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("skipped_propagation");
+    let a = spec.task(fail(&suite, "a"));
+    let b = spec.task(double(&suite, "b", a));
+    let c = spec.task(
+        suite
+            .function(workflow::check_upstream_skipped::handle)
+            .node()
+            .node_id("c")
+            .arg_from(workflow::check_upstream_skipped::params::input_result(), b)
+            .allow_failed_deps(true),
     );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_skip_propagation");
-    let a = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code": "DELIBERATE"}"#.to_owned()),
+    let _output = spec.output(c);
+    let handle = start::<String>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(statuses(&nodes), vec!["FAILED", "SKIPPED", "COMPLETED"]);
+    let read = handle
+        .result_for::<String, workflow::WfCode>(&horsies::NodeKey::new("c"))
+        .await
+        .expect("read node c");
+    assert_eq!(
+        read,
+        TaskOutcome::Succeeded("received_upstream_skipped".to_owned())
     );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step": "B"}"#.to_owned())
-            .waits_for(a),
-        // allow_failed_deps defaults to false
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
-    assert_eq!(status, "FAILED");
-
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "FAILED");
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "SKIPPED");
 }
 
-// ---------------------------------------------------------------------------
-// T5.9: args_from transitive chain (A → B → C, each doubles)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_args_from_transitive_chain`.
 #[tokio::test]
 #[serial]
 async fn test_args_from_transitive_chain() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A produces 3, B doubles to 6, C doubles to 12.
-    let mut b = WorkflowSpecBuilder::new("e2e_transitive_chain");
-    let a = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"value": 3}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_double::node()
-            .unwrap()
-            .node_id("b")
-            .arg_from(DoubleInput::field_input_result(), a),
-    );
-    b.task(
-        wf_double::node()
-            .unwrap()
-            .node_id("c")
-            .arg_from(DoubleInput::field_input_result(), bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    // C should be 12 (3 * 2 * 2).
-    let c_result = get_wf_task_result(&pool, &wf_id, 2).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&c_result).unwrap();
-    assert!(tr.is_ok());
-    assert_eq!(tr.unwrap(), serde_json::json!(12));
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("transitive_chain");
+    let a = spec.task(produce(&suite, "a", 2));
+    let b = spec.task(double(&suite, "b", a));
+    let c = spec.task(double(&suite, "c", b));
+    let _output = spec.output(c);
+    let handle = start::<i64>(&suite, spec).await;
+    assert_eq!(output(&handle).await, 8);
 }
 
-// ---------------------------------------------------------------------------
-// T5.10: args_from failed dep skips downstream and fails workflow
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_args_from_failed_dep_skips_and_fails_workflow`.
 #[tokio::test]
 #[serial]
 async fn test_args_from_failed_dep_skips_and_fails() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A fails → B (args_from A, no allow_failed_deps) → SKIPPED
-    let mut b = WorkflowSpecBuilder::new("e2e_args_from_fail_skip");
-    let a = b.task(
-        wf_fail_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code": "FAIL_A"}"#.to_owned()),
-    );
-    b.task(
-        wf_double::node()
-            .unwrap()
-            .node_id("b")
-            .arg_from(DoubleInput::field_input_result(), a),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
-    assert_eq!(status, "FAILED");
-
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "FAILED");
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "SKIPPED");
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("failed_dep_skips");
+    let a = spec.task(fail(&suite, "a"));
+    let _b = spec.task(double(&suite, "b", a));
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(statuses(&nodes), vec!["FAILED", "SKIPPED"]);
+    assert!(nodes[1].started_at.is_none(), "the skipped node never ran");
 }
 
-// ---------------------------------------------------------------------------
-// T5.12: Dual injection same node (two args_from on one task)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_dual_injection_same_node`.
+/// One upstream reaches a node through `args_from` and through the context.
 #[tokio::test]
 #[serial]
 async fn test_dual_injection_same_node() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("dual_injection");
+    let a = spec.task(produce(&suite, "a", 5));
+    let reader = spec.task(
+        suite
+            .function(workflow::mixed_reader::handle)
+            .node()
+            .node_id("reader")
+            .arg_from(workflow::mixed_reader::params::from_args(), a)
+            .set(workflow::mixed_reader::params::ctx_source(), "a".to_owned())
+            .expect("a reader input")
+            .workflow_ctx_from([a]),
     );
-
-    // A=7, B=3 → C sums to 10.
-    let mut b = WorkflowSpecBuilder::new("e2e_dual_injection");
-    let a = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"value": 7}"#.to_owned()),
+    let _output = spec.output(reader);
+    let handle = start::<BTreeMap<String, i64>>(&suite, spec).await;
+    let value = output(&handle).await;
+    assert_eq!(
+        value,
+        BTreeMap::from([("from_args".to_owned(), 5), ("from_ctx".to_owned(), 5)])
     );
-    let bnode = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"value": 3}"#.to_owned()),
-    );
-    b.task(
-        wf_sum_two::node()
-            .unwrap()
-            .node_id("c")
-            .arg_from(SumTwoInput::field_first(), a)
-            .arg_from(SumTwoInput::field_second(), bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let c_result = get_wf_task_result(&pool, &wf_id, 2).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&c_result).unwrap();
-    assert!(tr.is_ok());
-    assert_eq!(tr.unwrap(), serde_json::json!(10));
 }
 
-// ---------------------------------------------------------------------------
-// T5.3: workflow_ctx single dependency
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_workflow_ctx_single_dependency`.
 #[tokio::test]
 #[serial]
 async fn test_workflow_ctx_single_dependency() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A produces 42 → B reads A's result via workflow_ctx.
-    let mut b = WorkflowSpecBuilder::new("e2e_ctx_single");
-    let a = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"value": 42}"#.to_owned()),
-    );
-    b.task(
-        wf_ctx_reader::node()
-            .unwrap()
-            .node_id("b")
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("ctx_single");
+    let a = spec.task(produce(&suite, "a", 7));
+    let reader = spec.task(
+        suite
+            .function(workflow::ctx_reader::handle)
+            .node()
+            .node_id("reader")
+            .set(workflow::ctx_reader::params::source(), "a".to_owned())
+            .expect("a reader input")
             .waits_for(a)
             .workflow_ctx_from([a]),
     );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    // B should have received context with A's result.
-    let b_result = get_wf_task_result(&pool, &wf_id, 1).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&b_result).unwrap();
-    assert!(tr.is_ok(), "B should succeed, got: {:?}", tr);
-
-    let output = tr.unwrap();
-    assert_eq!(
-        output.get("result_count").and_then(|v| v.as_i64()),
-        Some(1),
-        "should have 1 result in ctx"
-    );
-    // The result for node "a" should contain the value 42.
-    let results = output.get("results").unwrap().as_object().unwrap();
-    assert!(results.contains_key("a"), "ctx should contain node 'a'");
+    let _output = spec.output(reader);
+    let handle = start::<i64>(&suite, spec).await;
+    assert_eq!(output(&handle).await, 7);
 }
 
-// ---------------------------------------------------------------------------
-// T5.4: workflow_ctx multiple dependencies
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_workflow_ctx_multiple_dependencies`.
 #[tokio::test]
 #[serial]
 async fn test_workflow_ctx_multiple_dependencies() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let mut spec = builder("ctx_multiple");
+    let a = spec.task(produce(&suite, "a", 3));
+    let b = spec.task(produce(&suite, "b", 4));
+    let sum = spec.task(
+        suite
+            .function(workflow::ctx_sum::handle)
+            .node()
+            .node_id("sum")
+            .set(workflow::ctx_sum::params::first(), "a".to_owned())
+            .and_then(|node| node.set(workflow::ctx_sum::params::second(), "b".to_owned()))
+            .expect("a sum input")
+            .waits_for_all([a, b])
+            .workflow_ctx_from([a, b]),
     );
-
-    // A=10, B=20 → C sums via workflow_ctx.
-    let mut b = WorkflowSpecBuilder::new("e2e_ctx_multi");
-    let a = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"value": 10}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"value": 20}"#.to_owned()),
-    );
-    b.task(
-        wf_ctx_sum::node()
-            .unwrap()
-            .node_id("c")
-            .waits_for(a)
-            .waits_for(bnode)
-            .workflow_ctx_from([a, bnode]),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let c_result = get_wf_task_result(&pool, &wf_id, 2).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&c_result).unwrap();
-    assert!(tr.is_ok());
-    assert_eq!(
-        tr.unwrap(),
-        serde_json::json!(30),
-        "should sum 10 + 20 = 30"
-    );
+    let _output = spec.output(sum);
+    let handle = start::<i64>(&suite, spec).await;
+    assert_eq!(output(&handle).await, 7);
 }
 
-// ---------------------------------------------------------------------------
-// T5.8: Mixed args_from and workflow_ctx on same node
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_mixed_args_from_and_ctx`.
 #[tokio::test]
 #[serial]
 async fn test_mixed_args_from_and_ctx() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let mut spec = builder("mixed_args_ctx");
+    let a = spec.task(produce(&suite, "a", 10));
+    let b = spec.task(produce(&suite, "b", 20));
+    let reader = spec.task(
+        suite
+            .function(workflow::mixed_reader::handle)
+            .node()
+            .node_id("reader")
+            .arg_from(workflow::mixed_reader::params::from_args(), a)
+            .set(workflow::mixed_reader::params::ctx_source(), "b".to_owned())
+            .expect("a reader input")
+            .waits_for(b)
+            .workflow_ctx_from([b]),
     );
-
-    // A produces 5 → B receives both args_from(A) and workflow_ctx_from(A).
-    let mut b = WorkflowSpecBuilder::new("e2e_mixed");
-    let a = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"value": 5}"#.to_owned()),
-    );
-    b.task(
-        wf_mixed::node()
-            .unwrap()
-            .node_id("b")
-            .arg_from(MixedInput::field_input_result(), a)
-            .workflow_ctx_from([a]),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let b_result = get_wf_task_result(&pool, &wf_id, 1).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&b_result).unwrap();
-    assert!(tr.is_ok());
-
-    let output = tr.unwrap();
+    let _output = spec.output(reader);
+    let handle = start::<BTreeMap<String, i64>>(&suite, spec).await;
     assert_eq!(
-        output.get("has_args_from").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(output.get("has_ctx").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        output.get("args_from_value").and_then(|v| v.as_i64()),
-        Some(5)
+        output(&handle).await,
+        BTreeMap::from([("from_args".to_owned(), 10), ("from_ctx".to_owned(), 20)])
     );
 }
 
-// ---------------------------------------------------------------------------
-// T5.11: args_from dict serialization roundtrip
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_args_from_dict_serialization`.
 #[tokio::test]
 #[serial]
 async fn test_args_from_dict_serialization() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("dict_serialization");
+    let a = spec.task(
+        suite
+            .function(workflow::produce_dict::handle)
+            .node()
+            .node_id("a")
+            .set(workflow::produce_dict::params::value(), "hello".to_owned())
+            .expect("a dict input"),
     );
-
-    // A produces a nested dict → B receives it via args_from and adds a field.
-    let mut b = WorkflowSpecBuilder::new("e2e_dict_roundtrip");
-    let a = b.task(wf_produce_dict::node().unwrap().node_id("a"));
-    b.task(
-        wf_read_dict::node()
-            .unwrap()
+    let b = spec.task(
+        suite
+            .function(workflow::receive_dict::handle)
+            .node()
             .node_id("b")
-            .arg_from(ReadDictInput::field_input_result(), a),
+            .arg_from(workflow::receive_dict::params::input_result(), a),
     );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let b_result = get_wf_task_result(&pool, &wf_id, 1).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&b_result).unwrap();
-    assert!(tr.is_ok());
-
-    let output = tr.unwrap();
-    // Should have the original fields plus "received": true.
-    assert_eq!(output.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    let _output = spec.output(b);
+    let handle = start::<serde_json::Value>(&suite, spec).await;
     assert_eq!(
-        output
-            .get("scores")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len()),
-        Some(3)
+        output(&handle).await,
+        serde_json::json!({ "key": "hello", "count": 42, "nested": { "inner": true } })
     );
-    assert!(output.get("nested").is_some());
-    assert_eq!(output.get("received").and_then(|v| v.as_bool()), Some(true));
 }
 
-// ---------------------------------------------------------------------------
-// T5.7: Join=any + ctx gating — C must wait for ctx dep B even though A finishes first
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer5_workflow_dataflow.py::test_join_ctx_gating`. A
+/// node that joins on any dependency runs once one succeeded, and reads it
+/// from the context.
 #[tokio::test]
 #[serial]
 async fn test_join_ctx_gating() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let mut spec = builder("join_ctx_gating");
+    let a = spec.task(fail(&suite, "a"));
+    let b = spec.task(produce(&suite, "b", 9));
+    let reader = spec.task(
+        suite
+            .function(workflow::ctx_reader::handle)
+            .node()
+            .node_id("reader")
+            .set(workflow::ctx_reader::params::source(), "b".to_owned())
+            .expect("a reader input")
+            .waits_for_all([a, b])
+            .join_any()
+            .workflow_ctx_from([a, b]),
     );
-
-    // A (100ms fast), B (300ms slow). C has join=any + workflow_ctx_from=[B].
-    // A will complete first, but C must wait for B because it needs B's result in ctx.
-    let mut b = WorkflowSpecBuilder::new("e2e_join_ctx_gating");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step": "A", "delay_ms": 100}"#.to_owned()),
+    let _output = spec.output(reader);
+    let handle = start::<i64>(&suite, spec).await;
+    let client = suite.client().await;
+    let _ended = rows::wait_for_workflow_end(&client, handle.workflow_id(), WORKFLOW_WAIT).await;
+    let nodes = rows::workflow_nodes(&client, handle.workflow_id()).await;
+    assert_eq!(
+        nodes[2].status, "COMPLETED",
+        "the any-join node ran: {nodes:?}"
     );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step": "B", "delay_ms": 300}"#.to_owned()),
+    let read = handle
+        .result_for::<i64, workflow::WfCode>(&horsies::NodeKey::new("reader"))
+        .await
+        .expect("read the reader");
+    assert_eq!(read, TaskOutcome::Succeeded(9));
+}
+
+/// Old Rust `wrapped_input_strict.rs`: the result injected by `args_from`
+/// decodes into the strict input of the node, which refuses unknown keys.
+#[tokio::test]
+#[serial]
+async fn wrapped_input_args_from_deserializes_under_strict() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let mut spec = builder("wrapped_strict");
+    let a = spec.task(produce(&suite, "a", 6));
+    let b = spec.task(produce(&suite, "b", 1));
+    let sum = spec.task(
+        suite
+            .function(workflow::sum_two::handle)
+            .node()
+            .node_id("sum")
+            .arg_from(workflow::sum_two::params::first(), a)
+            .arg_from(workflow::sum_two::params::second(), b),
     );
-    b.task(
-        wf_ctx_reader::node()
-            .unwrap()
-            .node_id("c")
-            .waits_for(a)
-            .waits_for(bnode)
-            .workflow_ctx_from([bnode])
-            .join_any(),
-    );
-    let spec = b.build().unwrap();
+    let _output = spec.output(sum);
+    let handle = start::<i64>(&suite, spec).await;
+    assert_eq!(output(&handle).await, 7);
+}
 
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let tasks = horsies_test_support::e2e::workflow::get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 3);
-    for t in &tasks {
-        assert_eq!(t.status, "COMPLETED", "all tasks should complete");
-    }
-
-    let b_task = &tasks[1]; // B (slow, 300ms)
-    let c_task = &tasks[2]; // C (ctx reader, join=any)
-
-    // Critical invariant: C is not enqueued before B is terminal, even though
-    // join=any would normally fire when A completes first. Phase-2 marks B
-    // complete and enqueues C in one transaction, so PostgreSQL's stable
-    // NOW() may assign the two ordered writes the same timestamp.
+/// Old Rust `wrapped_input_strict.rs::wrapped_input_extra_kwarg_rejected_at_execution`.
+/// A node input with a key that the task's input does not have is refused
+/// when the spec is built, before anything is written.
+#[tokio::test]
+#[serial]
+async fn wrapped_input_extra_kwarg_is_refused_at_build() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let mut spec = builder("wrapped_extra_kwarg");
+    let refused = match suite
+        .function(workflow::produce_int::handle)
+        .node()
+        .node_id("a")
+        .input_json(r#"{"value": 1, "extra": 2}"#)
+    {
+        Err(refused) => refused,
+        Ok(node) => {
+            let _a = spec.task(node);
+            spec.build()
+                .expect_err("an input key that the task does not have")
+        }
+    };
     assert!(
-        c_task.started_at.unwrap() >= b_task.completed_at.unwrap(),
-        "C should start only after ctx dep B is terminal: \
-         C.started_at={:?}, B.completed_at={:?}",
-        c_task.started_at,
-        b_task.completed_at,
-    );
-
-    // Verify C actually received B's result via ctx.
-    let c_result = get_wf_task_result(&pool, &wf_id, 2).await.unwrap();
-    let tr: TaskResult<serde_json::Value> = serde_json::from_str(&c_result).unwrap();
-    assert!(tr.is_ok());
-
-    let output = tr.unwrap();
-    let results = output.get("results").and_then(|v| v.as_object()).unwrap();
-    assert!(
-        results.contains_key("b"),
-        "C's workflow context should contain node 'b' result, got keys: {:?}",
-        results.keys().collect::<Vec<_>>(),
+        refused.to_string().contains("extra"),
+        "the refusal names the key: {refused}"
     );
 }

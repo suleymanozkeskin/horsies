@@ -1274,14 +1274,22 @@ def _node_error(task_index: int, stored: str | None) -> str | None:
     """The message of the error that a node's stored result holds.
 
     A node has no error column of its own: its stored result holds the
-    error. No result, a result with a value, and an error with no message
-    give None.
+    error. No result (NULL), a result with a value, and an error with no
+    message give None. No writer stores an empty text, so ``loads_json``
+    refuses it as corrupt data, as the core's ``node_error_from_result``
+    does.
 
     Raises:
-        HistoryContractError: the stored result is not a task result
-            envelope, or its error does not decode.
+        HistoryContractError: the stored result is not JSON (an empty text
+            included), is not a task result envelope, or its error does not
+            decode.
     """
-    match loads_json(stored):
+    match stored:
+        case None:
+            return None
+        case text:
+            pass
+    match loads_json(text):
         case Err(cause):
             raise HistoryContractError(
                 f'workflow node {task_index}: the stored result is not JSON: {cause}'

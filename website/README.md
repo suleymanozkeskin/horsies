@@ -24,7 +24,7 @@ Documentation pages live in `src/content/docs/` as `.md` or `.mdx` files. Each f
 | `configuration/` | App, broker, recovery, retention, and remote Postgres configuration |
 | `workers/` | Worker architecture, concurrency, heartbeats and recovery, child process hooks |
 | `scheduling/` | Scheduler overview, patterns, configuration |
-| `monitoring/` | Web UI, Syce, broker methods, action semantics, worker health |
+| `monitoring/` | Web UI, broker methods, action semantics, worker health |
 | `operations/` | Deploying code changes, testing, atomic enqueue and topology, autovacuum tuning |
 | `guides/` | Async frameworks, starting a workflow once |
 | `migrations/` | Upgrade guide for each release that needs one |

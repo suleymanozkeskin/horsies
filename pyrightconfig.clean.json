@@ -78,14 +78,18 @@
     "tests/e2e/tasks/instance_left_work_marker.py",
     "python/horsies/core/baseline/migration.py",
     "tests/unit/test_baseline_migration.py",
-    "tests/integration/test_baseline_sql.py",
     "python/horsies/core/baseline/install.py",
     "tests/unit/test_baseline_install.py",
     "tests/integration/test_baseline_install.py",
     "tests/session_database.py",
     "tests/unit/test_history_catalog_derived.py",
     "tests/integration/test_history_forever_leaf.py",
-    "tests/dualrun"
+    "tests/dualrun",
+    "tests/public_api",
+    "tests/unit/test_public_api_compare.py",
+    "tests/unit/test_public_api_pyright_view.py",
+    "tests/unit/test_public_api_runner.py",
+    "tests/unit/test_public_api_snapshot.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

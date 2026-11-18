@@ -511,7 +511,10 @@ fn serialization_error<V>(message: String) -> StoredTaskError {
         error_code: horsies_core::TaskErrorCode::from(
             OperationalErrorCode::WorkerSerializationError,
         ),
-        data: Some(serde_json::Value::Object(data)),
+        data: Some(
+            horsies_core::JsonText::of(&serde_json::Value::Object(data))
+                .expect("an object of two text members writes as strict JSON"),
+        ),
         message: Some(message),
         kind: TaskErrorKind::Plain,
     }
@@ -782,6 +785,12 @@ mod tests {
         assert_serialization_error(&error);
         let map: BTreeMap<String, u32> = decode_input(b"{}").unwrap();
         assert!(map.is_empty());
+        let none: Option<BTreeMap<String, u32>> = decode_input(b"null").unwrap();
+        assert_eq!(none, None);
+        let empty: Option<BTreeMap<String, u32>> = decode_input(b"{}").unwrap();
+        assert_eq!(empty, Some(BTreeMap::new()));
+        assert_serialization_error(&decode_input::<Option<i32>>(b"{}").unwrap_err());
+        assert_serialization_error(&decode_input::<i32>(b"{}").unwrap_err());
     }
 
     /// A task with no parameters reads `{}` (a send, a workflow node) and
@@ -839,7 +848,7 @@ mod tests {
         );
         assert!(message.contains("Order"), "{message}");
         assert!(!text_of(&error).contains(MARKER));
-        let data = error.data.unwrap();
+        let data: serde_json::Value = error.data.unwrap().decode().unwrap();
         assert!(data["expected_type"].as_str().unwrap().contains("Order"));
         assert_eq!(data["validation_error"].as_str(), Some(message.as_str()));
     }
@@ -892,13 +901,63 @@ mod tests {
         }
     }
 
+    /// An array input is one input value: a task of a `Vec` input decodes
+    /// the whole array, not one value per element.
     #[test]
-    fn a_non_finite_float_is_refused() {
-        match body_result::<f64, ChargeCode>(Ok(f64::NAN)) {
-            TaskResult::Ok(_) => panic!("NaN was encoded"),
+    fn an_array_input_decodes_as_one_value() {
+        let decoded: Vec<i32> = decode_input(b"[1,2,3]").expect("an array input decodes");
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    /// The rules of a stored value hold at every depth of a returned value:
+    /// an engine key inside an array is refused, a value nested to the depth
+    /// bound is encoded, and a value one level deeper is refused.
+    #[test]
+    fn the_return_rules_hold_at_every_depth() {
+        for key in ["__h_task_result__", "__horsies_x", "__builtin_task_code__"] {
+            let value = json!({ "outer": [{ key: 1 }] });
+            match body_result::<serde_json::Value, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => panic!("the engine key {key} inside an array was encoded"),
+                TaskResult::Err(error) => assert_serialization_error(&error),
+            }
+        }
+        let nested = |depth: usize| {
+            let mut value = json!([1]);
+            for _ in 1..depth {
+                value = serde_json::Value::Array(vec![value]);
+            }
+            value
+        };
+        let bound = horsies_core::core::codec::MAX_VALUE_JSON_DEPTH;
+        match body_result::<serde_json::Value, ChargeCode>(Ok(nested(bound))) {
+            TaskResult::Ok(_) => {}
+            TaskResult::Err(error) => panic!("a value at the depth bound was refused: {error}"),
+        }
+        match body_result::<serde_json::Value, ChargeCode>(Ok(nested(bound + 1))) {
+            TaskResult::Ok(_) => panic!("a value past the depth bound was encoded"),
             TaskResult::Err(error) => {
                 assert_serialization_error(&error);
-                assert!(error.message.unwrap().contains("non-finite"));
+                let message = error.message.as_deref().unwrap_or_default();
+                assert!(message.contains("nested deeper than 200"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_finite_float_is_refused() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            match body_result::<f64, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => panic!("{value} was encoded"),
+                TaskResult::Err(error) => {
+                    assert_serialization_error(&error);
+                    assert!(error.message.unwrap().contains("non-finite"), "{value}");
+                }
+            }
+        }
+        for value in [3.5, f64::MAX] {
+            match body_result::<f64, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => {}
+                TaskResult::Err(error) => panic!("{value} was refused: {error}"),
             }
         }
     }
@@ -956,6 +1015,8 @@ mod tests {
                     .clone()
                     .unwrap()
                     .contains("does not read back"));
+                let data: serde_json::Value = error.data.as_ref().unwrap().decode().unwrap();
+                assert_eq!(data["expected_type"], std::any::type_name::<TextNumber>());
                 assert!(!text_of(&error).contains(MARKER));
             }
         }

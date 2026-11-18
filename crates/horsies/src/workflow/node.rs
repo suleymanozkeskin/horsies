@@ -323,7 +323,7 @@ pub(crate) fn decode_check<A: Serialize + DeserializeOwned + 'static>(
 /// Errors: that failure; a decoded value that does not encode as JSON (the
 /// value-free text of the encoder). The input text decoded, so it reads as
 /// a JSON value.
-fn unread_node_member<A: Serialize>(
+pub(crate) fn unread_node_member<A: Serialize>(
     bytes: &[u8],
     decoded: &A,
     compared: &[&str],

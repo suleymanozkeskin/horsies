@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, assert_never
 
+from horsies._catalog import monitoring_bounds
 from horsies._core import (
     MonitoringWindowRecord,
     WindowRefusedRecord,
@@ -23,11 +24,16 @@ from horsies._core import (
 )
 from horsies.core.history.reads.pages import HistoryWindow
 
-# The core's values (``MONITORING_WINDOW_DEFAULT`` and ``MONITORING_WINDOW_MAX``
-# of ``horsies_core::monitoring``), restated until the generated constants of
-# #1423 replace them.
-MONITORING_WINDOW_DEFAULT: Final = timedelta(hours=24)
-MONITORING_WINDOW_MAX: Final = timedelta(days=30)
+MONITORING_WINDOW_DEFAULT: Final = timedelta(
+    seconds=monitoring_bounds.MONITORING_WINDOW_DEFAULT_SECONDS,
+)
+"""The span of the window of a read that gives no bound (the core's
+``MONITORING_WINDOW_DEFAULT``)."""
+
+MONITORING_WINDOW_MAX: Final = timedelta(
+    seconds=monitoring_bounds.MONITORING_WINDOW_MAX_SECONDS,
+)
+"""The longest window; a longer one is refused (the core's ``MONITORING_WINDOW_MAX``)."""
 
 
 @dataclass(frozen=True, slots=True)
