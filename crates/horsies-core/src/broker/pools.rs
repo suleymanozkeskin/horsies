@@ -481,36 +481,6 @@ fn open_pool(
     ))
 }
 
-/// The URL of a test's sqlx connect options, in the form the statement
-/// layer reads: sqlx's own rendering (`ConnectOptions::to_url_lossy`)
-/// without its `statement-cache-capacity` parameter, which only sqlx reads.
-/// Test options set no option that the rendering drops (`application_name`,
-/// `options`).
-#[cfg(test)]
-pub(crate) fn test_url_of(options: &sqlx::postgres::PgConnectOptions) -> String {
-    use sqlx::ConnectOptions;
-
-    let mut url = options.to_url_lossy();
-    let kept: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(name, _)| *name != "statement-cache-capacity")
-        .map(|(name, value)| (name.into_owned(), value.into_owned()))
-        .collect();
-    url.set_query(None);
-    if !kept.is_empty() {
-        url.query_pairs_mut().extend_pairs(kept);
-    }
-    url.to_string()
-}
-
-/// The core handle on the database of a test's sqlx pool, for brokers that
-/// tests build from such a pool. The environment is isolated: test URLs
-/// carry their password.
-#[cfg(test)]
-pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
-    handle_for_test_url(&test_url_of(&pool.connect_options()))
-}
-
 /// The core handle (producer pools) on the test database of `url`, for
 /// brokers that tests build from the URL. The environment is isolated: test
 /// URLs carry their password.
@@ -522,15 +492,6 @@ pub(crate) fn handle_for_test_url(url: &str) -> CoreHandle {
         ConnectionEnvironment::isolated(),
     )
     .expect("the URL of a test database is accepted by the statement layer")
-}
-
-/// A main core pool on the database of a test's sqlx pool, for the free
-/// lifecycle writers that tests call with a pool of their own. The same pool
-/// as the main pool of [`handle_for_test_pool`]; connects to nothing until
-/// the first checkout.
-#[cfg(test)]
-pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
-    core_pool_for_test_url(&test_url_of(&pool.connect_options()))
 }
 
 /// A main core pool on the test database of `url`, for the free lifecycle
@@ -555,15 +516,6 @@ pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
     )
     .expect("the URL of a test pool is accepted by the statement layer");
     core_pool
-}
-
-/// A worker profile core pool of `size` connections on the database of a
-/// test's sqlx pool: it keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch
-/// checkouts, as the pool of a worker. Connects to nothing until the first
-/// checkout.
-#[cfg(test)]
-pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
-    worker_core_pool_for_test_url(&test_url_of(&pool.connect_options()), size)
 }
 
 /// A worker profile core pool of `size` connections on the test database of
@@ -592,14 +544,6 @@ pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
     core_pool
 }
 
-/// A session pool of `size` connections on the database of a test's sqlx
-/// pool: no reserve, statements prepared per connection, as the separate
-/// session pool of a broker. Connects to nothing until the first checkout.
-#[cfg(test)]
-pub(crate) fn session_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
-    session_core_pool_for_test_url(&test_url_of(&pool.connect_options()), size)
-}
-
 /// A session pool of `size` connections on the test database of `url`: no
 /// reserve, statements prepared per connection, as the separate session pool
 /// of a broker. Connects to nothing until the first checkout.
@@ -625,23 +569,15 @@ pub(crate) fn session_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
     core_pool
 }
 
-/// The checkout wait of [`unpinged_single_connection_core_pool`].
+/// The checkout wait of [`unpinged_single_connection_core_pool_for_url`].
 #[cfg(test)]
 const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
 
-/// A core pool of one connection on the URL of `options` that never pings a
-/// pooled connection at checkout (Python's worker pre-ping off) and never
-/// replaces it for its age, with the default socket settings. Once a
+/// A core pool of one connection on the test database of `url` that never
+/// pings a pooled connection at checkout (Python's worker pre-ping off) and
+/// never replaces it for its age, with the default socket settings. Once a
 /// statement is prepared on the connection, the statement is its only round
 /// trip. Connects to nothing until the first checkout.
-#[cfg(test)]
-pub(crate) fn unpinged_single_connection_core_pool(
-    options: &sqlx::postgres::PgConnectOptions,
-) -> CorePool {
-    unpinged_single_connection_core_pool_for_url(&test_url_of(options))
-}
-
-/// [`unpinged_single_connection_core_pool`] on the test database of `url`.
 #[cfg(test)]
 pub(crate) fn unpinged_single_connection_core_pool_for_url(url: &str) -> CorePool {
     let plan = PoolPlan {

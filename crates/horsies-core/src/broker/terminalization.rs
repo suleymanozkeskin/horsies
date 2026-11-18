@@ -14,7 +14,7 @@
 //!   work that did not happen is what the row-per-transition contract exists
 //!   to prevent.
 //!
-//! Three forms run a command:
+//! Two forms run a command:
 //! - [`terminalize`] runs the statement alone on a core pool, in autocommit:
 //!   the statement is its own transaction and its locks end with it. The
 //!   checkout is reserved work ([`CheckoutClass::Reserved`]): a lifecycle
@@ -22,17 +22,11 @@
 //! - [`terminalize_and_commit_if`] runs the statement in a transaction of
 //!   its own on a core pool, checked out as reserved work, and commits it
 //!   only when the caller's check accepts every outcome.
-//! - [`terminalize_in_tx`] runs the same SQL in the caller's sqlx
-//!   transaction. The functions never commit, so a coupled workflow-node
-//!   write belongs in the same transaction as the transition it proves.
-
-use sqlx::postgres::{PgArguments, PgRow};
-use sqlx::{Postgres, Transaction};
 
 use crate::broker::child_writes::{query_within, WriteDeadline};
 use crate::broker::core_rows::{roll_back, StatementLog};
 use crate::core::lifecycle::operations::function_name_of;
-use crate::core::lifecycle::outcomes::{decode_outcome_pg_row, decode_outcome_row};
+use crate::core::lifecycle::outcomes::decode_outcome_row;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType, Row,
@@ -322,80 +316,10 @@ async fn run_bound(
     Ok(rows)
 }
 
-/// The sqlx form of the command's statement, for [`terminalize_in_tx`].
-fn fetch_query(command: &TerminalizationCommand) -> sqlx::query::Query<'_, Postgres, PgArguments> {
-    let query = sqlx::query(statement_of(command).sql());
-    match command {
-        TerminalizationCommand::CompleteTaskFused {
-            task_id,
-            fence,
-            result_json,
-        } => query
-            .bind(task_id)
-            .bind(&fence.worker_id)
-            .bind(fence.claimed_at)
-            .bind(result_json),
-        TerminalizationCommand::ExpireOwnedClaim {
-            task_id,
-            fence,
-            result_json,
-            error_code,
-        } => query
-            .bind(task_id)
-            .bind(&fence.worker_id)
-            .bind(result_json)
-            .bind(error_code),
-        TerminalizationCommand::ExpirePendingTasks {
-            batch_size,
-            result_json,
-            error_code,
-        } => query
-            .bind(batch_size.get())
-            .bind(result_json)
-            .bind(error_code),
-        TerminalizationCommand::CancelOwnedOrphan { task_id, fence }
-        | TerminalizationCommand::AbandonOwnedNode { task_id, fence } => query
-            .bind(task_id)
-            .bind(&fence.worker_id)
-            .bind(fence.claimed_at),
-        TerminalizationCommand::CancelOrphanedTasks { batch_size } => query.bind(batch_size.get()),
-        TerminalizationCommand::AbandonOwnedNodes { fence }
-        | TerminalizationCommand::CancelOwnedNodes { fence } => query
-            .bind(fence.task_ids())
-            .bind(fence.generations())
-            .bind(fence.worker_id().to_owned()),
-        TerminalizationCommand::AbandonNodesOfPausedWorkflows { workflow_ids }
-        | TerminalizationCommand::CancelNodesOfCancelledWorkflow { workflow_ids } => {
-            query.bind(workflow_ids)
-        }
-        TerminalizationCommand::CancelOwnedNode {
-            task_id,
-            fence,
-            accepts_requeued_pending,
-        } => query
-            .bind(task_id)
-            .bind(&fence.worker_id)
-            .bind(fence.claimed_at)
-            .bind(accepts_requeued_pending),
-    }
-}
-
 fn decode_rows(rows: &[Row], operation: &str) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
     rows.iter()
         .map(|row| {
             decode_outcome_row(row)
-                .map_err(|e| BrokerError::TerminalizationContract(format!("{operation}: {e}")))
-        })
-        .collect()
-}
-
-fn decode_pg_rows(
-    rows: &[PgRow],
-    operation: &str,
-) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
-    rows.iter()
-        .map(|row| {
-            decode_outcome_pg_row(row)
                 .map_err(|e| BrokerError::TerminalizationContract(format!("{operation}: {e}")))
         })
         .collect()
@@ -681,30 +605,6 @@ fn decode_outcomes(
     let operation = function_name_of(command);
     let outcomes = enforce_cardinality(
         decode_rows(rows, operation)?,
-        cardinality_of(command),
-        operation,
-    )?;
-    for outcome in &outcomes {
-        log_terminalization_outcome(operation, outcome);
-    }
-    Ok(outcomes)
-}
-
-/// Execute a command inside the caller's transaction.
-///
-/// The functions never commit; a coupled workflow-node write belongs in the
-/// same transaction as the transition it proves.
-pub async fn terminalize_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    command: &TerminalizationCommand,
-) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
-    let operation = function_name_of(command);
-    let rows = fetch_query(command)
-        .fetch_all(tx.as_mut())
-        .await
-        .map_err(BrokerError::Database)?;
-    let outcomes = enforce_cardinality(
-        decode_pg_rows(&rows, operation)?,
         cardinality_of(command),
         operation,
     )?;
@@ -1083,17 +983,6 @@ mod catalog_tests {
     #[serial]
     async fn decoder_rejects_wrong_row_shape() {
         let pool = migrated_pool().await;
-        // The sqlx decoder reads a sqlx row: this half stays on sqlx until
-        // the sqlx terminalization path goes.
-        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-        let row = sqlx::query(WRONG_ROW_SHAPE.sql())
-            .fetch_one(&sqlx_pool)
-            .await
-            .expect("query");
-        sqlx_pool.close().await;
-        let err = decode_outcome_pg_row(&row).expect_err("a sqlx row of the wrong shape");
-        assert!(err.to_string().contains("row shape"), "{err}");
-
         let core = crate::broker::pools::core_pool_for_test_url(pool.url());
         let rows = core
             .query(

@@ -33,9 +33,6 @@
 //!   Python has no such connection; with the core listener's one connection
 //!   in place of Python's two, a worker opens as many connections as Python's.
 //!
-//! The broker's sqlx adapter pools, kept beside the core pools until the
-//! call sites move, are not terms: the layout above is the one they move to.
-//!
 //! Task code that sends opens the `task_send_pool` of its child kind in its
 //! child, for each event loop that it sends from. Whether it sends is known
 //! only at run time, so it is not compared; each error states it.

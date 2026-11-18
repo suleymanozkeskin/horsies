@@ -329,7 +329,7 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
 /// `AlreadyApplied` and runs phase 2.
 ///
 /// The proxy drops the reply to the next request of any connection. A broker
-/// opens its own core pool from the URL of its sqlx pool, so the first
+/// opens its own core pool from the URL of its test pool, so the first
 /// finalize runs on the broker whose main core pool the warm-up used: its one
 /// connection is open and the success statement is prepared on it, and the
 /// success write is the next request, with one reply (Python's

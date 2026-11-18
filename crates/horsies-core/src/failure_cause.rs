@@ -105,37 +105,6 @@ impl FailureCause {
             None => Self::Connection,
         }
     }
-
-    /// An error of the sqlx driver. Pure.
-    ///
-    /// - A database error with a SQLSTATE: [`FailureCause::Server`]. A
-    ///   database error without one breaks the PostgreSQL protocol:
-    ///   [`FailureCause::ContractViolation`].
-    /// - A lost or failed connection, a pool wait that timed out, a closed
-    ///   pool: [`FailureCause::Connection`].
-    /// - A configuration error: [`FailureCause::PreconditionFailed`].
-    /// - Every other driver error (`sqlx::Error` is non-exhaustive): a value
-    ///   or a row that does not encode or decode, a missing row, column or
-    ///   type, a migration error: [`FailureCause::ContractViolation`].
-    pub fn of_sqlx_error(error: &sqlx::Error) -> Self {
-        match error {
-            sqlx::Error::Database(database_error) => match database_error.code() {
-                Some(code) => Self::Server(ServerErrorFacts::new(
-                    SqlState::from_code(code.as_ref()),
-                    database_error.message().to_owned(),
-                )),
-                None => Self::ContractViolation,
-            },
-            sqlx::Error::Io(_)
-            | sqlx::Error::Tls(_)
-            | sqlx::Error::Protocol(_)
-            | sqlx::Error::PoolTimedOut
-            | sqlx::Error::PoolClosed
-            | sqlx::Error::WorkerCrashed => Self::Connection,
-            sqlx::Error::Configuration(_) => Self::PreconditionFailed,
-            _ => Self::ContractViolation,
-        }
-    }
 }
 
 impl ConnectError {
@@ -274,7 +243,6 @@ impl BrokerError {
     ///   [`FailureCause::PreconditionFailed`].
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::Statement(failure) => failure.failure_cause(),
             Self::InstallCoverage(error) => error.failure_cause(),
             Self::ConnectionFailed(_) | Self::ListenerClosed => FailureCause::Connection,
@@ -326,18 +294,15 @@ impl BrokerOperationSource {
 }
 
 impl HistoryError {
-    /// The cause of a history error. A leaf lock that is busy or not held
-    /// and an absent history parent are preconditions. Pure.
+    /// The cause of a history error. A leaf lock that is not held is a
+    /// precondition. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::Statement(failure) => failure.failure_cause(),
             Self::RowDecode(_) | Self::ArchiveDecode(_) | Self::Contract(_) => {
                 FailureCause::ContractViolation
             }
-            Self::LeafLockNotHeld | Self::LeafLockBusy { .. } | Self::HistoryParentAbsent(_) => {
-                FailureCause::PreconditionFailed
-            }
+            Self::LeafLockNotHeld => FailureCause::PreconditionFailed,
         }
     }
 }
@@ -359,7 +324,6 @@ impl WorkflowError {
     /// refused workflow value are preconditions. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::Broker(error) => error.failure_cause(),
             Self::ChildSpecSource(unavailable) => unavailable.failure_cause(),
             Self::Serialization(_) | Self::InvalidStatus(_) | Self::StepContract(_) => {
@@ -417,7 +381,6 @@ impl MonitoringQueryErrorSource {
     /// The cause of the error that a monitoring read met. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::History(error) => error.failure_cause(),
             Self::Broker(error) => error.failure_cause(),
         }
@@ -478,18 +441,6 @@ mod tests {
         assert_eq!(
             BrokerError::ListenerClosed.failure_cause(),
             FailureCause::Connection
-        );
-    }
-
-    #[test]
-    fn a_closed_sqlx_pool_is_a_connection_failure_and_a_missing_row_a_contract_violation() {
-        assert_eq!(
-            FailureCause::of_sqlx_error(&sqlx::Error::PoolClosed),
-            FailureCause::Connection
-        );
-        assert_eq!(
-            FailureCause::of_sqlx_error(&sqlx::Error::RowNotFound),
-            FailureCause::ContractViolation
         );
     }
 

@@ -361,10 +361,6 @@ pub enum PostgresConfigError {
          URL for session_database_url"
     )]
     SessionUrlIsTransactionPoolUrl,
-    /// The driver cannot parse a URL whose scheme passed. The value is the
-    /// driver's reason, which does not hold the URL.
-    #[error("database URL cannot be parsed: {0}")]
-    UnparseableUrl(String),
 }
 
 /// The scheme reported for a URL that has no `://`.

@@ -30,8 +30,8 @@ pub use operations::{
     EQUIVALENCE_CLASSES,
 };
 pub use outcomes::{
-    decode_outcome_pg_row, decode_outcome_row, GuardEvidence, GuardKind, ObservedTaskState,
-    ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome,
+    decode_outcome_row, GuardEvidence, GuardKind, ObservedTaskState, ObservedWorkflowTask,
+    OutcomeDecodeError, TerminalizationOutcome,
 };
 
 /// A command or fence could not be constructed from the given data.

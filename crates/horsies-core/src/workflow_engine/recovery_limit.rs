@@ -177,15 +177,9 @@ pub(crate) enum FailureClass {
 }
 
 impl CandidateFailure {
-    /// Classifies the failure with the core's retryable database rule (`is_retryable_sqlx_error`).
+    /// Classifies the failure with the broker's retryable rule ([`crate::broker::BrokerError::is_retryable`]).
     pub(crate) fn class(&self) -> FailureClass {
         match self {
-            Self::Error(WorkflowError::Database(error)) => {
-                match crate::broker::is_retryable_sqlx_error(error) {
-                    true => FailureClass::Transient,
-                    false => FailureClass::Persistent,
-                }
-            }
             Self::Error(WorkflowError::Broker(error)) => match error.is_retryable() {
                 true => FailureClass::Transient,
                 false => FailureClass::Persistent,
@@ -215,7 +209,6 @@ impl CandidateFailure {
     /// The stored error type: the variant name of the error, or `Panic`.
     pub(crate) fn error_type(&self) -> &'static str {
         match self {
-            Self::Error(WorkflowError::Database(_)) => "Database",
             Self::Error(WorkflowError::Broker(_)) => "Broker",
             Self::Error(WorkflowError::Serialization(_)) => "Serialization",
             Self::Error(WorkflowError::WorkflowNotFound { .. }) => "WorkflowNotFound",
@@ -775,22 +768,32 @@ mod tests {
     #[test]
     fn retryable_database_errors_are_transient() {
         for error in [
-            sqlx::Error::PoolTimedOut,
-            sqlx::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "connection reset",
-            )),
+            crate::broker::BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                statement: "recovery_candidate",
+                cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: std::time::Duration::from_secs(30),
+                }),
+            }),
+            crate::broker::BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                statement: "recovery_candidate",
+                cause: crate::db::NotSentCause::ConnectionClosed,
+            }),
         ] {
-            let failure = CandidateFailure::Error(WorkflowError::Database(error));
+            let failure = CandidateFailure::Error(WorkflowError::Broker(error));
             assert_eq!(failure.class(), FailureClass::Transient);
-            assert_eq!(failure.error_type(), "Database");
+            assert_eq!(failure.error_type(), "Broker");
         }
     }
 
     #[test]
     fn defects_and_other_errors_are_persistent() {
         let failures = [
-            CandidateFailure::Error(WorkflowError::Database(sqlx::Error::RowNotFound)),
+            CandidateFailure::Error(WorkflowError::Broker(
+                crate::broker::BrokerError::RowDecode(crate::broker::RowDecodeError::NoRow {
+                    statement: "recovery_candidate",
+                }),
+            )),
             validation("bad stored data"),
             CandidateFailure::Error(WorkflowError::InvalidStatus("BOGUS".to_owned())),
             CandidateFailure::Panic("index out of bounds".to_owned()),
@@ -947,7 +950,17 @@ mod tests {
                 counting(3),
                 workflow_id,
                 case,
-                &CandidateFailure::Error(WorkflowError::Database(sqlx::Error::PoolTimedOut))
+                &CandidateFailure::Error(WorkflowError::Broker(
+                    crate::broker::BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                        statement: "recovery_candidate",
+                        cause: crate::db::NotSentCause::Checkout(
+                            crate::db::CheckoutFailure::TimedOut {
+                                role: crate::db::PoolRole::Main,
+                                waited: std::time::Duration::from_secs(30),
+                            }
+                        ),
+                    })
+                ))
             )
             .await,
             FailureRecord::NotCounted

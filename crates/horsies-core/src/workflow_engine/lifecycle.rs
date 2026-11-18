@@ -94,8 +94,6 @@ fn paused_expiry_outcome(rows: Vec<Row>) -> Result<PausedExpiry, StepContractErr
 /// error's text ([`HandleOperation::failure_message`]).
 ///
 /// - No workflow has the id: `WORKFLOW_NOT_FOUND` ([`HandleOperationError::not_found`]).
-/// - A database error is retryable only when the core's retryable rule (`is_retryable_sqlx_error`) says
-///   so, as Python's `is_retryable_connection_error` (`core/models/workflow/handle.py:928`).
 /// - A stored value that does not parse (an unknown status, a stored JSON value) is `STORED_DATA_INVALID`,
 ///   not retryable: the same call gets the same answer (`core/models/workflow/handle_types.py:33-57`).
 /// - A failure of a step on the statement layer (`WorkflowError::Broker` with `BrokerError::Statement`) is
@@ -120,14 +118,14 @@ pub(crate) fn handle_operation_error(
         // interrupted one, or one that raised, is not. The Python client
         // raises the interrupt, or the exception of a start or a resume,
         // again to its caller before it reads this error.
-        WorkflowError::Database(_)
-        | WorkflowError::Broker(_)
-        | WorkflowError::ChildSpecSource(_) => HandleOperationError::DbOperationFailed {
-            message: operation.failure_message(workflow_id, &error),
-            retryable: error.is_retryable(),
-            workflow_id,
-            cause: error,
-        },
+        WorkflowError::Broker(_) | WorkflowError::ChildSpecSource(_) => {
+            HandleOperationError::DbOperationFailed {
+                message: operation.failure_message(workflow_id, &error),
+                retryable: error.is_retryable(),
+                workflow_id,
+                cause: error,
+            }
+        }
         WorkflowError::InvalidStatus(_) | WorkflowError::Serialization(_) => {
             HandleOperationError::StoredDataInvalid {
                 message: operation.failure_message(workflow_id, &error),
@@ -1699,14 +1697,28 @@ mod cancel_tree_tests {
         let workflow_id = Uuid::new_v4();
         let transient = handle_operation_error(
             HandleOperation::Status,
-            WorkflowError::Database(sqlx::Error::PoolTimedOut),
+            WorkflowError::Broker(crate::broker::BrokerError::Statement(
+                crate::db::StatementFailure::NotSent {
+                    statement: "workflow_status",
+                    cause: crate::db::NotSentCause::Checkout(
+                        crate::db::CheckoutFailure::TimedOut {
+                            role: crate::db::PoolRole::Main,
+                            waited: std::time::Duration::from_secs(30),
+                        },
+                    ),
+                },
+            )),
             workflow_id,
         );
         assert_eq!(transient.code(), HandleErrorCode::DbOperationFailed);
         assert!(transient.retryable());
         let persistent = handle_operation_error(
             HandleOperation::Status,
-            WorkflowError::Database(sqlx::Error::RowNotFound),
+            WorkflowError::Broker(crate::broker::BrokerError::RowDecode(
+                crate::broker::RowDecodeError::NoRow {
+                    statement: "workflow_status",
+                },
+            )),
             workflow_id,
         );
         assert_eq!(persistent.code(), HandleErrorCode::DbOperationFailed);

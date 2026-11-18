@@ -10,7 +10,6 @@ use std::ops::Range;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sqlx::FromRow;
 
 use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
 use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
@@ -106,7 +105,7 @@ pub struct WorkerStateSnapshot {
 
 /// A `horsies_worker_states` row as stored, before its JSON columns are read.
 /// [`StoredWorkerState::into_snapshot`] reads it.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub(crate) struct StoredWorkerState {
     pub(crate) worker_id: String,
     pub(crate) snapshot_at: DateTime<Utc>,
@@ -134,9 +133,8 @@ pub(crate) struct StoredWorkerState {
 /// A row of the worker list statement: a stored worker state and
 /// `read_at`, the `statement_timestamp()` of that statement. Every row of
 /// one list read has the same `read_at`.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub(crate) struct ListedWorkerStateRow {
-    #[sqlx(flatten)]
     pub(crate) stored: StoredWorkerState,
     pub(crate) read_at: DateTime<Utc>,
 }

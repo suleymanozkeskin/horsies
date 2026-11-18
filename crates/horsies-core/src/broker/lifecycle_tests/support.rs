@@ -1008,25 +1008,6 @@ pub(crate) async fn single_session_pool(url: &str) -> TestPool {
         .expect("open a single-session pool")
 }
 
-/// A sqlx pool of one connection that does not ping a connection at
-/// checkout, for the test modules that still hold a sqlx pool.
-pub(crate) async fn unpinged_single_connection_pool(
-    options: sqlx::postgres::PgConnectOptions,
-) -> sqlx::PgPool {
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .test_before_acquire(false)
-        .connect_with(options)
-        .await
-        .expect("open a single-connection pool")
-}
-
-/// The connect options of a sqlx pool, for the test modules that still hold
-/// one.
-pub(crate) fn database_options(pool: &sqlx::PgPool) -> sqlx::postgres::PgConnectOptions {
-    (*pool.connect_options()).clone()
-}
-
 /// Terminate the server side of a connection and wait until it is gone. The
 /// client side stays in its pool.
 pub(super) async fn terminate_backend(observer: &TestPool, pid: i32) {
@@ -1089,23 +1070,11 @@ pub(crate) struct WireProxy {
     accept_loop: tokio::task::JoinHandle<()>,
 }
 
-/// The server that a [`WireProxy`] relays to: a test database URL, or the
-/// connect options of a sqlx pool.
-pub(crate) trait UpstreamAddress {
-    /// The host and the port of the server.
-    fn host_and_port(&self) -> (String, u16);
-}
-
-impl UpstreamAddress for str {
-    fn host_and_port(&self) -> (String, u16) {
-        sql::endpoint_of(self)
-    }
-}
-
 impl WireProxy {
-    /// Listen on a free local port and relay to the server of `upstream`.
-    pub(crate) async fn start(upstream: &(impl UpstreamAddress + ?Sized)) -> Self {
-        let (upstream_host, upstream_port) = upstream.host_and_port();
+    /// Listen on a free local port and relay to the server of the test
+    /// database URL `upstream_url`.
+    pub(crate) async fn start(upstream_url: &str) -> Self {
+        let (upstream_host, upstream_port) = sql::endpoint_of(upstream_url);
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind the proxy");
@@ -1136,15 +1105,6 @@ impl WireProxy {
     /// proxy.
     pub(crate) fn url(&self, upstream_url: &str) -> String {
         sql::with_endpoint(upstream_url, "127.0.0.1", self.port)
-    }
-
-    /// Connect options that reach the database through this proxy, for the
-    /// test modules that still hold a sqlx pool.
-    pub(crate) fn options(
-        &self,
-        upstream: &sqlx::postgres::PgConnectOptions,
-    ) -> sqlx::postgres::PgConnectOptions {
-        upstream.clone().host("127.0.0.1").port(self.port)
     }
 
     /// Drop the reply to the next request that a client sends.
