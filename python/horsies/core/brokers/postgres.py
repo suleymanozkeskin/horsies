@@ -17,6 +17,7 @@ from typing import (
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 import psycopg
+from horsies._catalog import broker_bounds
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
     BrokerFailure,
@@ -821,10 +822,11 @@ async def _acquire_session_advisory_lock(
 
 # ---- Monitoring queries ----
 
-TASK_LIST_ROW_BOUND: Final = 10_000
+TASK_LIST_ROW_BOUND: Final = broker_bounds.TASK_LIST_ROW_BOUND
 """The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return: the
 row bound of ``horsies_list_stale_tasks`` and ``horsies_list_expired_tasks``
-(the core's ``TASK_LIST_BOUND``)."""
+(the core's ``TASK_LIST_BOUND``, generated into
+``horsies._catalog.broker_bounds``)."""
 
 MAX_STALE_THRESHOLD_MINUTES: Final = 525_600
 """The largest ``stale_threshold_minutes`` of ``get_stale_tasks``: one year

@@ -40,6 +40,10 @@ pub const MAX_TASK_PAGE_LIMIT: i64 = 200;
 pub const MAX_BREAKDOWN_LIMIT: i64 = 500;
 /// The most runs of one workflow runs list.
 pub const MAX_WORKFLOW_RUNS_LIMIT: i64 = 200;
+/// The most rows of the workflow names list and of the schedules list: the
+/// row bound (`c_row_bound`) of `horsies_monitoring_workflow_names` and
+/// `horsies_monitoring_schedules`. A longer list is cut at the bound.
+pub const LIST_ROW_BOUND: usize = 10_000;
 const ERROR_FACET_CAP: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -792,8 +796,8 @@ pub async fn get_task_detail(
 
 /// The distinct names of the root runs, for the run filter, in the database
 /// collation, read by `horsies_monitoring_workflow_names` in one statement.
-/// At most the function's bound of names (10,000): a longer list is cut,
-/// and the cut is logged as a warning.
+/// At most [`LIST_ROW_BOUND`] names: a longer list is cut, and the cut is
+/// logged as a warning.
 pub async fn list_workflow_names(broker: &PostgresBroker) -> MonitoringResult<Vec<String>> {
     let operation = "workflow names query";
     let statement = &MONITORING_WORKFLOW_NAMES;
@@ -890,8 +894,8 @@ pub async fn get_workflow_node(
 }
 
 /// Every schedule state, soonest next run first, then by name, read by
-/// `horsies_monitoring_schedules` in one statement. At most the function's
-/// bound of schedules (10,000): a longer list is cut, and the cut is logged
+/// `horsies_monitoring_schedules` in one statement. At most
+/// [`LIST_ROW_BOUND`] schedules: a longer list is cut, and the cut is logged
 /// as a warning.
 pub async fn list_schedules(broker: &PostgresBroker) -> MonitoringResult<Vec<ScheduleStateInfo>> {
     let operation = "schedule state query";
