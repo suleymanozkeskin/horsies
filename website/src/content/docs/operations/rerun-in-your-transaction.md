@@ -94,8 +94,8 @@ def describe(outcome: RerunOutcome) -> str:
 | Error | When |
 |-------|------|
 | `ValueError` | The retention class of `policy.retention` is not registered: add the period to `queue_retention` or `retention_periods` of the maintenance owner, and rerun after its next pass. Also: `caller_key` is not a valid idempotency key, or the id of the new task could not be minted |
-| `CorePreconditionFailed` (`horsies._core`) | The database was installed by the Rust client, or records no client. `subject` is `rerun_task`; `retryable` is `False` |
-| `CoreError` (`horsies._core`) | The core of this process cannot run: see [Calls That Run on the Core](/horsies/tasks/error-types/#calls-that-run-on-the-core) |
+| `CorePreconditionFailed` (`horsies`) | The database was installed by the Rust client, or records no client. `subject` is `rerun_task`; `retryable` is `False` |
+| `ForkedAfterCoreStart`, `CoreStopped` (`horsies`) | The core of this process cannot run: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals) |
 | A database error | A statement failed. It raises from the driver of `connection` |
 
 ### `RerunTask`
