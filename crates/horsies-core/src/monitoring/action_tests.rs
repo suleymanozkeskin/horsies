@@ -9,7 +9,7 @@ use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
 use crate::test_support::child_specs::TestChildSpecs;
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 use crate::{TaskStatus, WorkflowStatus};
 
 use super::*;

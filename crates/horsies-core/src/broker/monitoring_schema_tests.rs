@@ -7,7 +7,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::core::lifecycle::{TerminalizationKind, TerminalizationOutcome};
-use crate::test_support::terminal_writes;
+use crate::test_support::sqlx_terminal_writes as terminal_writes;
 
 use super::terminalization_matrix::migrated_pool;
 

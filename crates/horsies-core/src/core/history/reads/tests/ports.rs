@@ -14,7 +14,7 @@ use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::core::history::names::{TASK_DETAIL_FUNCTION, TASK_RESULT_FUNCTION};
 use crate::core::history::reads::publisher::rendered_reader_signatures;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 
 const PORT_WORKER: &str = "port-reads-worker";
 

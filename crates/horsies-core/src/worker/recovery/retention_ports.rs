@@ -26,7 +26,7 @@ use crate::core::history::partitions::manager::create_daily_leaf;
 use crate::core::history::partitions::publication::UnpublishedLoader;
 use crate::core::history::periods::RetentionDays;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::terminal_writes;
+use crate::test_support::sqlx_terminal_writes as terminal_writes;
 
 /// The row retention window of the Python tests.
 const RETENTION_HOURS: u32 = 24;

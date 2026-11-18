@@ -24,7 +24,7 @@ use crate::core::history::heartbeats::partitioning::{
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::periods::RetentionDays;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
-use crate::test_support::terminal_writes::{self, StaleFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, StaleFailure};
 
 const PORT_WORKER: &str = "port-move-worker";
 const CLASS_KEY: &str = "standard_30d";

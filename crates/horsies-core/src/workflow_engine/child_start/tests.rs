@@ -21,7 +21,7 @@ use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
-use crate::test_support::terminal_writes;
+use crate::test_support::sqlx_terminal_writes as terminal_writes;
 use crate::workflow_engine::child_spec::{ChildSpecRequest, ChildSpecSource};
 use crate::workflow_engine::lifecycle::{pause_workflow, resume_client_workflow};
 use crate::workflow_engine::start_statement::{merged_child_input, NodeInput};

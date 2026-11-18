@@ -1,10 +1,11 @@
-//! Terminal writes of test seeds, on a sqlx executor: a pool, or the
-//! connection of an open transaction (`transaction.as_mut()`).
+//! Terminal writes of test seeds, on a test statement target
+//! ([`crate::test_support::sql::Target`]): a pool, a session, or the session
+//! of an open transaction (`&mut *transaction`).
 //!
 //! Each function runs the baseline function that a run of the core calls for
 //! that end (`baseline/0004_lifecycle_functions.sql`), with no retry, and
 //! decodes the ten outcome columns of its row with the product decoder
-//! ([`decode_outcome_pg_row`]). A seed that needs a terminal row gets it
+//! ([`decode_outcome_row`]). A seed that needs a terminal row gets it
 //! here, through the write path of a real run, never through an insert of a
 //! terminal state.
 //!
@@ -23,17 +24,17 @@
 //! before is replaced.
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgRow;
-use sqlx::PgExecutor;
+use tokio_postgres::Row;
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{AttemptFailure, AttemptFailureKind};
-use crate::core::lifecycle::outcomes::decode_outcome_pg_row;
+use crate::core::lifecycle::outcomes::decode_outcome_row;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::sql::{self, Target};
 
 /// `horsies_complete_task_fused` with the capacity wake, as the worker's
 /// plain success. Parameters: task id, worker id, result.
-const COMPLETE_PLAIN_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+pub(super) const COMPLETE_PLAIN_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_complete_task_fused(
@@ -41,7 +42,8 @@ const COMPLETE_PLAIN_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, term
 
 /// `horsies_finish_workflow_success`, phase 1 of a workflow task's success.
 /// Parameters: task id, worker id, result.
-const COMPLETE_WORKFLOW_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+pub(super) const COMPLETE_WORKFLOW_TASK_SQL: &str =
+    "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_workflow_success(
@@ -49,7 +51,8 @@ const COMPLETE_WORKFLOW_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, t
 
 /// [`COMPLETE_WORKFLOW_TASK_SQL`] under the caller's claim generation.
 /// Parameters: task id, worker id, claim generation, result.
-const COMPLETE_WORKFLOW_TASK_AT_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+pub(super) const COMPLETE_WORKFLOW_TASK_AT_SQL: &str =
+    "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_workflow_success($1, $2, $3, $4)";
@@ -58,7 +61,7 @@ const COMPLETE_WORKFLOW_TASK_AT_SQL: &str = "SELECT task_id, ordinality, outcome
 /// `REFUSE` and with the capacity wake, as the worker's failure of a task
 /// whose child reported. Parameters: task id, worker id, result, error code,
 /// failed reason, attempt outcome, attempt message, attempt reason.
-const FAIL_RUNNING_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+pub(super) const FAIL_RUNNING_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_failed_attempt(
@@ -68,7 +71,8 @@ const FAIL_RUNNING_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, termin
 /// [`FAIL_RUNNING_TASK_SQL`] under the caller's claim generation.
 /// Parameters: task id, worker id, claim generation, result, error code,
 /// failed reason, attempt outcome, attempt message, attempt reason.
-const FAIL_RUNNING_TASK_AT_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+pub(super) const FAIL_RUNNING_TASK_AT_SQL: &str =
+    "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_failed_attempt(
@@ -78,7 +82,7 @@ const FAIL_RUNNING_TASK_AT_SQL: &str = "SELECT task_id, ordinality, outcome, ter
 /// writes the failure: the attempt message and reason are the failed reason.
 /// Parameters: task id, stale threshold (ms), finalizing threshold (ms),
 /// result, error code, failed reason.
-const FAIL_STALE_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+pub(super) const FAIL_STALE_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_stale_attempt(
@@ -86,7 +90,7 @@ const FAIL_STALE_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal
 
 /// `horsies_cancel_task`, the administrative cancel of one plain task.
 /// Parameters: task id, whether a RUNNING row may be cancelled.
-const CANCEL_LIVE_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+pub(super) const CANCEL_LIVE_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_cancel_task($1, $2)";
@@ -146,16 +150,16 @@ pub(crate) struct StaleFailure {
 ///
 /// When a row does not decode as an outcome.
 pub(crate) async fn complete_plain_task<'e>(
-    executor: impl PgExecutor<'e>,
+    target: impl Into<Target<'e>>,
     task_id: Uuid,
     worker_id: &str,
     result_json: &str,
-) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let rows = sqlx::query(COMPLETE_PLAIN_TASK_SQL)
+) -> Result<Vec<TerminalizationOutcome>, sql::Error> {
+    let rows = sql::query(COMPLETE_PLAIN_TASK_SQL)
         .bind(task_id)
         .bind(worker_id)
         .bind(result_json)
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     Ok(decoded("horsies_complete_task_fused", task_id, &rows))
 }
@@ -171,16 +175,16 @@ pub(crate) async fn complete_plain_task<'e>(
 ///
 /// When a row does not decode as an outcome.
 pub(crate) async fn complete_workflow_task<'e>(
-    executor: impl PgExecutor<'e>,
+    target: impl Into<Target<'e>>,
     task_id: Uuid,
     worker_id: &str,
     result_json: &str,
-) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let rows = sqlx::query(COMPLETE_WORKFLOW_TASK_SQL)
+) -> Result<Vec<TerminalizationOutcome>, sql::Error> {
+    let rows = sql::query(COMPLETE_WORKFLOW_TASK_SQL)
         .bind(task_id)
         .bind(worker_id)
         .bind(result_json)
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     Ok(decoded("horsies_finish_workflow_success", task_id, &rows))
 }
@@ -194,18 +198,18 @@ pub(crate) async fn complete_workflow_task<'e>(
 ///
 /// When a row does not decode as an outcome.
 pub(crate) async fn complete_workflow_task_at<'e>(
-    executor: impl PgExecutor<'e>,
+    target: impl Into<Target<'e>>,
     task_id: Uuid,
     worker_id: &str,
     claimed_at: DateTime<Utc>,
     result_json: &str,
-) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let rows = sqlx::query(COMPLETE_WORKFLOW_TASK_AT_SQL)
+) -> Result<Vec<TerminalizationOutcome>, sql::Error> {
+    let rows = sql::query(COMPLETE_WORKFLOW_TASK_AT_SQL)
         .bind(task_id)
         .bind(worker_id)
         .bind(claimed_at)
         .bind(result_json)
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     Ok(decoded("horsies_finish_workflow_success", task_id, &rows))
 }
@@ -220,12 +224,12 @@ pub(crate) async fn complete_workflow_task_at<'e>(
 ///
 /// When a row does not decode as an outcome.
 pub(crate) async fn fail_running_task<'e>(
-    executor: impl PgExecutor<'e>,
+    target: impl Into<Target<'e>>,
     task_id: Uuid,
     worker_id: &str,
     failure: &TerminalFailure,
-) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let rows = sqlx::query(FAIL_RUNNING_TASK_SQL)
+) -> Result<Vec<TerminalizationOutcome>, sql::Error> {
+    let rows = sql::query(FAIL_RUNNING_TASK_SQL)
         .bind(task_id)
         .bind(worker_id)
         .bind(failure.result_json.as_str())
@@ -234,7 +238,7 @@ pub(crate) async fn fail_running_task<'e>(
         .bind(attempt_outcome_of(failure))
         .bind(failure.attempt.error_message.as_deref())
         .bind(failure.attempt.failed_reason.as_deref())
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     Ok(decoded("horsies_finish_failed_attempt", task_id, &rows))
 }
@@ -247,13 +251,13 @@ pub(crate) async fn fail_running_task<'e>(
 ///
 /// When a row does not decode as an outcome.
 pub(crate) async fn fail_running_task_at<'e>(
-    executor: impl PgExecutor<'e>,
+    target: impl Into<Target<'e>>,
     task_id: Uuid,
     worker_id: &str,
     claimed_at: DateTime<Utc>,
     failure: &TerminalFailure,
-) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let rows = sqlx::query(FAIL_RUNNING_TASK_AT_SQL)
+) -> Result<Vec<TerminalizationOutcome>, sql::Error> {
+    let rows = sql::query(FAIL_RUNNING_TASK_AT_SQL)
         .bind(task_id)
         .bind(worker_id)
         .bind(claimed_at)
@@ -263,7 +267,7 @@ pub(crate) async fn fail_running_task_at<'e>(
         .bind(attempt_outcome_of(failure))
         .bind(failure.attempt.error_message.as_deref())
         .bind(failure.attempt.failed_reason.as_deref())
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     Ok(decoded("horsies_finish_failed_attempt", task_id, &rows))
 }
@@ -277,18 +281,18 @@ pub(crate) async fn fail_running_task_at<'e>(
 ///
 /// When a row does not decode as an outcome.
 pub(crate) async fn fail_stale_task<'e>(
-    executor: impl PgExecutor<'e>,
+    target: impl Into<Target<'e>>,
     task_id: Uuid,
     failure: &StaleFailure,
-) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let rows = sqlx::query(FAIL_STALE_TASK_SQL)
+) -> Result<Vec<TerminalizationOutcome>, sql::Error> {
+    let rows = sql::query(FAIL_STALE_TASK_SQL)
         .bind(task_id)
         .bind(failure.stale_after_ms)
         .bind(failure.finalizing_stale_after_ms)
         .bind(failure.result_json.as_str())
         .bind(failure.error_code.as_str())
         .bind(failure.failed_reason.as_str())
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     Ok(decoded("horsies_finish_stale_attempt", task_id, &rows))
 }
@@ -302,20 +306,20 @@ pub(crate) async fn fail_stale_task<'e>(
 ///
 /// When a row does not decode as an outcome.
 pub(crate) async fn cancel_live_task<'e>(
-    executor: impl PgExecutor<'e>,
+    target: impl Into<Target<'e>>,
     task_id: Uuid,
     include_running: bool,
-) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let rows = sqlx::query(CANCEL_LIVE_TASK_SQL)
+) -> Result<Vec<TerminalizationOutcome>, sql::Error> {
+    let rows = sql::query(CANCEL_LIVE_TASK_SQL)
         .bind(task_id)
         .bind(include_running)
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     Ok(decoded("horsies_cancel_task", task_id, &rows))
 }
 
 /// The `p_attempt_outcome` of the attempt row of `failure`.
-fn attempt_outcome_of(failure: &TerminalFailure) -> &'static str {
+pub(super) fn attempt_outcome_of(failure: &TerminalFailure) -> &'static str {
     match failure.attempt.kind {
         AttemptFailureKind::Failed => "FAILED",
         AttemptFailureKind::WorkerFailure => "WORKER_FAILURE",
@@ -323,10 +327,10 @@ fn attempt_outcome_of(failure: &TerminalFailure) -> &'static str {
 }
 
 /// The outcome of each row of `function` for `task_id`.
-fn decoded(function: &str, task_id: Uuid, rows: &[PgRow]) -> Vec<TerminalizationOutcome> {
+fn decoded(function: &str, task_id: Uuid, rows: &[Row]) -> Vec<TerminalizationOutcome> {
     rows.iter()
         .map(|row| {
-            decode_outcome_pg_row(row).unwrap_or_else(|error| {
+            decode_outcome_row(row).unwrap_or_else(|error| {
                 panic!("{function} for task {task_id} returned a row outside the contract: {error}")
             })
         })
