@@ -1,7 +1,7 @@
 ---
 title: Async Frameworks
 section: python
-summary: Own the broker in a FastAPI lifespan, call the async forms from coroutines, and stay inside the event-loop limit.
+summary: Own the broker in a FastAPI lifespan, and call the async forms from coroutines.
 related: [../configuration/broker-config, ../quick-start/getting-started, ../tasks/sending-tasks]
 tags: [guides, async, fastapi, asgi, broker, event-loop]
 ---
@@ -72,7 +72,7 @@ A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqu
 
 ### Use the Sync Forms Only in Plain `def` Endpoints
 
-FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. A sync send and a sync result read (`TaskHandle.get()`) call the core of the process on the endpoint's thread. A sync workflow start runs on the broker's own runner loop.
+FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. A sync send, a sync result read (`TaskHandle.get()`) and a sync workflow start call the core of the process on the endpoint's thread.
 
 ```python
 @api.post("/welcome-blocking/{address}")
@@ -84,15 +84,7 @@ def welcome_blocking(address: str) -> dict[str, str]:
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```
 
-Sends and result reads of both forms use the one core pool of the broker. A workflow start opens connections in the resource set of its loop: the server's event loop for the async form, the runner loop for the sync form. See [Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling).
-
-## The Event-Loop Limit
-
-A workflow start and a workflow resume use one broker resource set (pools and a listener) for each event loop that calls them. A broker serves at most 5 open caller loops, plus its own sync runner loop and, in a worker child, the task loop (`MAX_CALLER_EVENT_LOOPS = 5`). Sends and reads run on the core of the process and have no such limit.
-
-A workflow start or resume from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that call. Nothing runs. The error clears when one of the open loops closes.
-
-An ASGI server such as uvicorn runs one loop for each process, so a server stays far below the limit. The limit matters for code that creates loops itself, and for test runs. See [Event Loops](/horsies/configuration/broker-connections/#event-loops).
+Every call of both forms runs on the core of the process and uses the one core pool of the broker: the server's event loop and the threads of the thread pool share it. See [Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling) and [Event Loops](/horsies/configuration/broker-connections/#event-loops).
 
 ## Things to Avoid
 
@@ -107,14 +99,3 @@ broker.close()
 await broker.close_async()
 ```
 
-**Don't create an event loop for each workflow start.** Each open loop keeps its resource set. The sixth open loop gets `EVENT_LOOP_LIMIT`.
-
-<!-- check: skip elided -- shows a wrong form next to the right one -->
-```python
-# Wrong: each call leaves one more open loop
-loop = asyncio.new_event_loop()
-loop.run_until_complete(spec.start_async())
-
-# Correct: asyncio.run() closes its loop
-asyncio.run(spec.start_async())
-```

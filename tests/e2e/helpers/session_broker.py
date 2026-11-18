@@ -11,7 +11,7 @@ import os
 
 from horsies.core.brokers.postgres import PostgresBroker
 
-from tests.broker_resources_support import current_resources, listener_of
+from tests.broker_resources_support import current_resources
 
 
 async def initialize_session_broker(
@@ -19,11 +19,7 @@ async def initialize_session_broker(
     *,
     seed_history: bool = False,
 ) -> None:
-    """Initialize the schema and start the session loop's listener.
-
-    The broker keeps one resource set per event loop: session-loop tests use
-    this set and its listener, and each function-loop test gets its own set,
-    released at the next call after its loop closes.
+    """Initialize the schema, and seed the history coverage when asked.
 
     The PgBouncer-only lane has no default PostgreSQL service on port 5432.
     Its marked smoke test constructs and initializes a dedicated split-URL
@@ -33,8 +29,6 @@ async def initialize_session_broker(
         return
     schema = await brk.ensure_schema_initialized()
     assert schema.is_ok(), schema
-    listener = await listener_of(brk).start()
-    assert listener.is_ok(), listener
     if seed_history:
         from tests.integration.history_seeding import ensure_history_seedable
 

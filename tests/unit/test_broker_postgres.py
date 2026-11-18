@@ -1,8 +1,8 @@
 """Tests for PostgresBroker (python/horsies/core/brokers/postgres.py).
 
-Strategy: mock DB layer entirely (create_async_engine, async_sessionmaker,
-PostgresListener) to avoid real PostgreSQL. Tests verify logic, branching,
-error handling, and delegation patterns.
+Strategy: a double of the broker's core handle stands in for the core, so no
+test reaches PostgreSQL. Tests verify logic, branching, error handling, and
+delegation patterns.
 """
 
 from __future__ import annotations
@@ -59,7 +59,6 @@ from horsies._core import (
     PendingExpiryFailed,
 )
 from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SIGNED_64_BIT_MIN
-from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
@@ -91,29 +90,11 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
-from tests.broker_resources_support import (
-    pin_resources,
-    resources_of,
-)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _pinned(broker: Any) -> Any:
-    """The mocked resource set that ``_make_broker`` pinned for every loop."""
-    return broker._build_resources()
-
-
-def _listener_of(broker: Any) -> Any:
-    """The listener inside the pinned resource set."""
-    match _pinned(broker).listener:
-        case ListenerEnabled(listener=listener):
-            return listener
-        case ListenerDisabled():
-            raise AssertionError('broker has no listener')
 
 
 _CONNECTION_LOST = CoreConnectionError('task_info', 'connection lost', True)
@@ -139,38 +120,26 @@ _FAMILY_MISMATCH = CorePreconditionFailed(
 
 
 def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
-    """Create a PostgresBroker with fully mocked internals."""
+    """A PostgresBroker that counts as initialized; a test replaces its core
+    handle with a double. Building it does no I/O."""
     from horsies.core.models.broker import PostgresConfig
+    from horsies.core.brokers.postgres import PostgresBroker
 
-    with (
-        patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
-        patch('horsies.core.brokers.postgres.async_sessionmaker') as mock_sm,
-        patch('horsies.core.brokers.postgres.PostgresListener') as mock_listener_cls,
-    ):
-        mock_engine.return_value = MagicMock()
-        mock_engine.return_value.dispose = AsyncMock()
-        mock_engine.return_value.begin = MagicMock()
-
-        mock_session = AsyncMock()
-        mock_sm.return_value = MagicMock(return_value=mock_session)
-        # Make the session work as an async context manager
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-
-        mock_listener = AsyncMock()
-        mock_listener_cls.return_value = mock_listener
-
-        config = PostgresConfig(database_url=database_url)
-
-        from horsies.core.brokers.postgres import PostgresBroker
-
-        broker = PostgresBroker(config)
-        # Build the mocked set under the patches; every loop gets it.
-        pin_resources(broker, broker._build_resources())
-        # Mark as initialized to skip real DB setup
-        broker._initialized = True
-
+    broker = PostgresBroker(PostgresConfig(database_url=database_url))
+    # Mark as initialized to skip the schema install.
+    broker._initialized = True
     return broker
+
+
+def _recording_thread(threads: list[threading.Thread], answer: object) -> MagicMock:
+    """A blocking core call that records the thread it ran on and answers
+    ``answer``."""
+
+    def call(*_args: object, **_kwargs: object) -> object:
+        threads.append(threading.current_thread())
+        return answer
+
+    return MagicMock(side_effect=call)
 
 
 # ---------------------------------------------------------------------------
@@ -616,7 +585,10 @@ class TestEnqueueThroughCore:
 
     def test_the_blocking_form_sends_on_the_calling_thread(self) -> None:
         broker = self._broker_answering(MagicMock(spec=Enqueued, task_id=SEND_TASK_ID))
-        broker._loop_runner = MagicMock()
+        threads: list[threading.Thread] = []
+        broker._core_handle.enqueue = _recording_thread(
+            threads, MagicMock(spec=Enqueued, task_id=SEND_TASK_ID),
+        )
 
         result = broker.enqueue(
             'my_task',
@@ -629,7 +601,8 @@ class TestEnqueueThroughCore:
 
         assert result == Ok(SEND_TASK_ID)
         broker._core_handle.enqueue.assert_called_once()
-        broker._loop_runner.call.assert_not_called()
+        broker._core_handle.enqueue_async.assert_not_called()
+        assert threads == [threading.current_thread()]
 
 
 # ---------------------------------------------------------------------------
@@ -813,10 +786,10 @@ class TestGetRawResultRecordAsync:
 
     def test_the_blocking_form_runs_the_blocking_core_read(self) -> None:
         broker = _make_broker()
-        broker._loop_runner = MagicMock()
+        threads: list[threading.Thread] = []
         handle = MagicMock()
-        handle.raw_result_record = MagicMock(
-            return_value=MagicMock(spec=RawResultAbsent, task_id=RESULT_TASK_ID),
+        handle.raw_result_record = _recording_thread(
+            threads, MagicMock(spec=RawResultAbsent, task_id=RESULT_TASK_ID),
         )
         broker._core_handle = handle
 
@@ -824,7 +797,8 @@ class TestGetRawResultRecordAsync:
 
         assert result == Ok(None)
         handle.raw_result_record.assert_called_once_with(RESULT_TASK_ID, timeout_ms=5_000)
-        broker._loop_runner.call.assert_not_called()
+        handle.raw_result_record_async.assert_not_called()
+        assert threads == [threading.current_thread()]
 
 
 # ---------------------------------------------------------------------------
@@ -917,7 +891,6 @@ class TestPingWorkers:
             database_url='postgresql://u:p@localhost/db'
         )
         broker = PostgresBroker(config, assume_initialized=True)
-        assert isinstance((await resources_of(broker)).listener, ListenerDisabled)
 
         result = await broker.ping_workers_async(timeout_seconds=1.0)
 
@@ -1412,18 +1385,12 @@ class TestRequeueStaleClaimed:
 class TestSyncFacades:
     """The sync forms: the blocking core reads."""
 
-    # (test_get_result_delegates_to_loop_runner and
-    # test_get_result_loop_runner_exception_returns_broker_error_result
-    # removed: strict-serde phase 6 dropped ``broker.get_result``. Sync
-    # bridge coverage moved up to ``Horsies.get_result`` — see
-    # ``tests/unit/test_app_get_result.py``.)
-
     def test_get_task_info_runs_the_blocking_core_read(self) -> None:
-        """get_task_info() calls CoreHandle.task_info on this thread, not the runner."""
+        """get_task_info() calls CoreHandle.task_info on this thread."""
         broker = _make_broker()
-        broker._loop_runner = MagicMock()
+        threads: list[threading.Thread] = []
         handle = MagicMock()
-        handle.task_info = MagicMock(return_value=MagicMock(spec=TaskInfoNotFound))
+        handle.task_info = _recording_thread(threads, MagicMock(spec=TaskInfoNotFound))
         broker._core_handle = handle
 
         result = broker.get_task_info(
@@ -1439,7 +1406,8 @@ class TestSyncFacades:
             include_failed_reason=True,
             include_attempts=False,
         )
-        broker._loop_runner.call.assert_not_called()
+        handle.task_info_async.assert_not_called()
+        assert threads == [threading.current_thread()]
 
 
 # ---------------------------------------------------------------------------
@@ -1704,152 +1672,58 @@ class TestGetTaskInfoAsync:
 
 
 # ---------------------------------------------------------------------------
-# TestCloseAsync / TestClose
+# TestClose
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestCloseAsync:
-    """Tests for close_async: listener close then engine dispose."""
-
-    @pytest.mark.asyncio
-    async def test_close_async_closes_listener_then_disposes_engine(self) -> None:
-        """close_async should close listener first, then dispose engine, returning Ok(None)."""
-        broker = _make_broker()
-        call_order: list[str] = []
-
-        async def mock_listener_close() -> None:
-            call_order.append('listener_close')
-
-        async def mock_engine_dispose() -> None:
-            call_order.append('engine_dispose')
-
-        _listener_of(broker).close = mock_listener_close
-        _pinned(broker).engine.dispose = mock_engine_dispose
-        await resources_of(broker)  # build this loop's set
-
-        result = await broker.close_async()
-
-        assert is_ok(result)
-        assert result.ok_value is None
-        assert call_order == ['listener_close', 'engine_dispose']
-
-    @pytest.mark.asyncio
-    async def test_close_async_without_a_built_set_closes_nothing(self) -> None:
-        """A broker that never made a call holds no set, so close touches nothing."""
-        broker = _make_broker()
-
-        result = await broker.close_async()
-
-        assert is_ok(result)
-        _listener_of(broker).close.assert_not_awaited()
-        _pinned(broker).engine.dispose.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_close_async_stops_loop_runner_when_started_externally(self) -> None:
-        """close_async should stop LoopRunner if sync APIs had started it."""
-        broker = _make_broker()
-        broker._loop_runner = MagicMock()
-        broker._loop_runner._started = True
-        broker._loop_runner._thread = object()
-        broker._loop_runner.stop = MagicMock()
-
-        result = await broker.close_async()
-
-        assert is_ok(result)
-        broker._loop_runner.stop.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_close_async_does_not_stop_loop_runner_from_its_own_thread(
-        self,
-    ) -> None:
-        """close_async must not self-stop when running on loop-runner thread."""
-        broker = _make_broker()
-        broker._loop_runner = MagicMock()
-        broker._loop_runner._started = True
-        broker._loop_runner._thread = threading.current_thread()
-        broker._loop_runner.stop = MagicMock()
-
-        result = await broker.close_async()
-
-        assert is_ok(result)
-        broker._loop_runner.stop.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_close_async_stops_real_loop_runner_thread(self) -> None:
-        """Regression: close_async should stop a real LoopRunner started by sync APIs."""
-        broker = _make_broker()
-        runner = broker._loop_runner
-        assert runner._started is False
-
-        runner.start()
-        assert runner._started is True
-        assert runner._thread is not None and runner._thread.is_alive()
-
-        try:
-            result = await broker.close_async()
-            assert is_ok(result)
-            assert runner._started is False
-            assert runner._loop is None
-            assert runner._thread is None
-        finally:
-            # Safety net for test isolation in case assertions fail mid-test.
-            if runner._started:
-                runner.stop()
-
-
-@pytest.mark.unit
 class TestClose:
-    """close (sync): the core handle's blocking close on the calling thread,
-    then the stop of the sync runner. The outcomes equal close_async's
+    """close (sync): the core handle's blocking close on the calling thread.
+    The outcomes equal close_async's
     (``tests/unit/test_sync_facade_blocking_forms.py``)."""
 
     @staticmethod
-    def _broker_closing(close: MagicMock) -> tuple[Any, MagicMock]:
+    def _broker_closing(close: MagicMock) -> Any:
         broker = _make_broker()
         handle = MagicMock()
         handle.close = close
         broker._core_handle = handle
-        runner = MagicMock()
-        broker._loop_runner = runner
-        return broker, runner
+        return broker
 
-    def test_close_calls_the_blocking_core_close_and_stops_the_runner(self) -> None:
-        """close() calls CoreHandle.close on this thread, never the runner, then stops it."""
-        broker, runner = self._broker_closing(MagicMock(return_value=MagicMock(spec=HandleClosed)))
+    def test_close_calls_the_blocking_core_close(self) -> None:
+        """close() calls CoreHandle.close on this thread, never close_async."""
+        threads: list[threading.Thread] = []
+        broker = self._broker_closing(
+            _recording_thread(threads, MagicMock(spec=HandleClosed)),
+        )
 
         result = broker.close()
 
         assert result == Ok(None)
         broker._core_handle.close.assert_called_once_with()
         broker._core_handle.close_async.assert_not_called()
-        runner.call.assert_not_called()
-        runner.stop.assert_called_once()
+        assert threads == [threading.current_thread()]
 
-    def test_a_core_that_cannot_run_the_close_is_close_failed_and_stops_the_runner(
-        self,
-    ) -> None:
+    def test_a_core_that_cannot_run_the_close_is_close_failed(self) -> None:
         """A core boundary error of the blocking close is CLOSE_FAILED with the error."""
         refused = CoreStartFailed('the core runtime could not start')
-        broker, runner = self._broker_closing(MagicMock(side_effect=refused))
+        broker = self._broker_closing(MagicMock(side_effect=refused))
 
         result = broker.close()
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.CLOSE_FAILED
         assert result.err_value.exception is refused
-        runner.stop.assert_called_once()
 
-    def test_close_stops_runner_when_an_exception_propagates(self) -> None:
-        """An exception that is not a CoreError propagates; stop still runs."""
+    def test_an_exception_that_is_not_a_core_error_propagates(self) -> None:
+        """An exception that is not a CoreError propagates unchanged."""
         defect = RuntimeError('boom')
-        broker, runner = self._broker_closing(MagicMock(side_effect=defect))
+        broker = self._broker_closing(MagicMock(side_effect=defect))
 
         with pytest.raises(RuntimeError) as exc_info:
             broker.close()
 
         assert exc_info.value is defect
-        runner.stop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1936,38 +1810,6 @@ class TestEnsureSchemaInitialized:
 
         with pytest.raises(AssertionError, match='DB_PING_FAILED'):
             await broker.ensure_schema_initialized()
-
-
-@pytest.mark.unit
-class TestCloseAsyncErrorPaths:
-    """Regression tests for error handling in close_async."""
-
-    @pytest.mark.asyncio
-    async def test_close_async_attempts_both_on_first_failure(self) -> None:
-        """When listener.close raises, engine.dispose is still called and result is Err."""
-        broker = _make_broker()
-        dispose_called = False
-
-        async def failing_listener_close() -> None:
-            raise RuntimeError('listener boom')
-
-        async def tracking_engine_dispose() -> None:
-            nonlocal dispose_called
-            dispose_called = True
-
-        _listener_of(broker).close = failing_listener_close
-        _pinned(broker).engine.dispose = tracking_engine_dispose
-        await resources_of(broker)  # build this loop's set
-
-        result = await broker.close_async()
-
-        assert (
-            dispose_called
-        ), 'engine.dispose must be called even after listener.close fails'
-        assert is_err(result)
-        err = result.err_value
-        assert err.code == BrokerErrorCode.CLOSE_FAILED
-        assert err.exception is not None
 
 
 def _assert_refused_with_cause(

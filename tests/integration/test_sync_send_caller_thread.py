@@ -7,6 +7,7 @@ their own task id, and each send writes one row.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import uuid
 from collections.abc import Generator
@@ -40,7 +41,7 @@ THREAD_JOIN_BOUND_S: Final = 60.0
 def schema_ready() -> None:
     """Create the schema with a default broker, then close that broker."""
     broker = PostgresBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
-    initialized = broker.run_sync(broker.ensure_schema_initialized)
+    initialized = asyncio.run(broker.ensure_schema_initialized())
     closed = broker.close()
     assert initialized.is_ok(), initialized
     assert closed.is_ok(), closed

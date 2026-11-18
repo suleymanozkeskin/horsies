@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.start_types import (
@@ -25,9 +24,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartErrorCode,
-    WorkflowStartEventLoopLimit,
     WorkflowStartIdConflict,
-    WorkflowStartLoopRunnerFailed,
     WorkflowStartRetryable,
     WorkflowStartValidationFailed,
 )
@@ -51,16 +48,6 @@ def _every_variant(cause: BaseException) -> list[WorkflowStartError]:
         ),
         WorkflowStartEnqueueFailed(
             message=message, retryable=True, exception=cause, **ids,
-        ),
-        WorkflowStartLoopRunnerFailed(message=message, exception=cause, **ids),
-        WorkflowStartEventLoopLimit(
-            message=message,
-            loop_limit=EventLoopLimit(
-                limit=5,
-                held_thread_names=('MainThread',),
-                current_thread_name='worker-1',
-            ),
-            **ids,
         ),
         WorkflowStartAsyncContext(message=message, **ids),
     ]
@@ -86,7 +73,6 @@ class TestVariantCatalog:
         assert set(get_args(WorkflowStartRetryable.__value__)) == {
             WorkflowStartEnqueueFailed,
             WorkflowStartAsyncContext,
-            WorkflowStartLoopRunnerFailed,
         }
 
     @pytest.mark.parametrize(

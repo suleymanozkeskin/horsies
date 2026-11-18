@@ -529,10 +529,7 @@ class TestWorkflowStartErrors:
         timed_out = CoreCallTimedOut('CoreHandle.start_workflow', 1800, 'outcome_unknown')
         core_handle = MagicMock()
         core_handle.start_workflow = MagicMock(side_effect=timed_out)
-        with (
-            patch.object(broker, '_core_handle', core_handle),
-            patch.object(broker._loop_runner, 'call') as runner_call,
-        ):
+        with patch.object(broker, '_core_handle', core_handle):
             r = await asyncio.to_thread(start_workflow, spec, broker)
 
         assert is_err(r)
@@ -541,5 +538,6 @@ class TestWorkflowStartErrors:
         assert r.err_value.workflow_name == 'sync_fail_wf'
         assert r.err_value.workflow_id  # always populated
         assert 'CoreCallTimedOut' in r.err_value.message
-        runner_call.assert_not_called()
+        core_handle.start_workflow.assert_called_once()
+        core_handle.start_workflow_async.assert_not_called()
 

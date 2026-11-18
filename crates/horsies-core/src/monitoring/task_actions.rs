@@ -23,10 +23,6 @@ pub enum TaskActionErrorCode {
     TaskNotCancellable,
     TaskIsWorkflowTask,
     DbOperationFailed,
-    /// The broker already holds resource sets for its limit of open event
-    /// loops, and this call ran on a new one. Nothing changed. Python client
-    /// only; removed before 0.8.0.
-    EventLoopLimit,
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the cancel refused the task. Not retryable: a repeat gives the same
@@ -36,11 +32,9 @@ pub enum TaskActionErrorCode {
 }
 
 /// A refused or failed task action: one variant per class of Python's task
-/// action catalog that the core produces, each with the facts of its state.
-/// Python's `TaskActionEventLoopLimit` is a class of the Python client only,
-/// so it is not a variant. Each variant's doc is its Python class doc
-/// (`ErrorCatalog`). A variant with an `exception` carries its typed
-/// cause, which the client builds that exception from
+/// action catalog, each with the facts of its state. Each variant's doc is
+/// its Python class doc (`ErrorCatalog`). A variant with an `exception`
+/// carries its typed cause, which the client builds that exception from
 /// (`ErrorClassValues`).
 #[derive(
     Debug,

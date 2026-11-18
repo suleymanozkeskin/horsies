@@ -123,7 +123,7 @@ class PostgresConfig(BaseModel):
         description='Disable prepared statements for transaction-pooled PgBouncer URLs',
     )
     # The ping runs at checkout only for a connection that waited in the
-    # pool for longer than PRE_PING_AFTER_IDLE_S (register_idle_ping). A
+    # pool for longer than PRE_PING_AFTER_IDLE_S (the core's idle ping). A
     # connection that dies within that time of its check-in fails the next
     # statement on it, as one that dies after a ping does.
     pool_pre_ping: bool = Field(
@@ -149,11 +149,11 @@ class PostgresConfig(BaseModel):
         ),
     )
     # The producer defaults match SQLAlchemy's (5 + 10) for each pool. A
-    # producer can hold several pools of this size: one in the resource set
-    # of each event loop that calls the broker (two when
-    # session_database_url differs), and the sync send pool. See Connection
-    # Ceiling in the broker config docs. Raise them for producers that send
-    # at a high rate. A worker process sizes its own pool in its worker
+    # producer's broker holds one core pool of this size on database_url for
+    # every thread and event loop that calls it, and one more on
+    # session_database_url when that URL differs. See Connection Ceiling in
+    # the broker config docs. Raise them for producers that send at a high
+    # rate. A worker process sizes its own pool in its worker
     # profile (WorkerProfile.pool), and task code in a worker child opens
     # the task_send_pool of its child kind.
     # The pool values keep each SQLAlchemy meaning that the core can honor,

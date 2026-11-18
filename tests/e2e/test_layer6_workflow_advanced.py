@@ -7,7 +7,7 @@ Tests verify:
 - Recovery preserves results
 - Workflow task retries
 
-All tests use DB polling to avoid event loop conflicts with PostgresListener.
+All tests poll the database for the state they wait for.
 """
 
 from __future__ import annotations
@@ -22,9 +22,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult
 
 from horsies.core.types.result import is_ok
-from horsies.core.utils.db import uuid_column_value
 from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_in_thread, unwrap_send
-from tests.e2e.helpers.db import wait_for_status
+from tests.e2e.helpers.db import uuid_of_column, wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
     get_workflow_tasks,
@@ -878,10 +877,10 @@ async def test_workflow_recovers_after_worker_crash(
 
         assert raw_task_id_c is not None, 'C should have been enqueued (task_id set)'
         assert raw_task_id_d is not None, 'D should have been enqueued (task_id set)'
-        task_id_c = uuid_column_value(
+        task_id_c = uuid_of_column(
             raw_task_id_c, column='horsies_workflow_tasks.task_id',
         )
-        task_id_d = uuid_column_value(
+        task_id_d = uuid_of_column(
             raw_task_id_d, column='horsies_workflow_tasks.task_id',
         )
 

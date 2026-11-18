@@ -1,9 +1,7 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, os, threading, time
-from collections.abc import AsyncGenerator, Callable, Coroutine
-from dataclasses import dataclass
-from enum import Enum
+import asyncio, hashlib, contextlib, os, time
+from collections.abc import AsyncGenerator
 from typing import (
     Any,
     ClassVar,
@@ -65,31 +63,6 @@ from horsies._core import (
     StaleRunningScanFailed,
     StaleRunningScanFull,
 )
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    create_async_engine,
-    async_sessionmaker,
-)
-from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
-from horsies.core.brokers.listener import PostgresListener
-from horsies.core.brokers.resources import (
-    BrokerResources,
-    BuildForLoop,
-    EventLoopLimit,
-    LimitReached,
-    ListenerDisabled,
-    ListenerEnabled,
-    ListenerState,
-    LoopResources,
-    LoopRole,
-    SessionEngine,
-    SessionEngineSeparate,
-    SessionEngineShared,
-    UseExisting,
-    decide_for_loop,
-    split_closed_loops,
-)
 from horsies.core.brokers.enqueue_task import (
     SendKind,
 )
@@ -103,7 +76,6 @@ from horsies.core.brokers.result_types import (
     BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerErrorCode,
-    BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidJsonPayload,
@@ -129,6 +101,7 @@ from horsies.core.types.core_failure import (
     CoreCallRefusal,
     call_refusal_or_raise,
     core_error_retryable,
+    core_exception_retryable,
 )
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
@@ -137,7 +110,6 @@ from horsies.core.types.status import (
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, SerializationError, loads_json
-from horsies.core.codec.validation_errors import without_validation_input
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.models.class_coverage import ClassCoverage, ClassReport
 from horsies.core.models.health import (
@@ -150,29 +122,15 @@ from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     resolve_retention_class_key,
 )
-from horsies.core.history.maintenance.database import (
-    PartitionMaintenanceDatabase,
-)
-from horsies.core.defaults import PRE_PING_AFTER_IDLE_S
-from horsies.core.utils.db import (
-    is_retryable_connection_error,
-    SessionSettings,
-    register_identity_text_reads,
-    register_idle_ping,
-    register_session_settings,
-)
 from horsies.core.process_role import (
     ProcessRole,
     process_role,
     wait_inside_task_message,
 )
 from horsies.core.utils.loop_runner import (
-    LoopRunner,
     async_context_message,
     in_running_event_loop,
 )
-from horsies.core.utils.task_loop_registry import is_task_loop
-from horsies.core.utils.url import sqlalchemy_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
@@ -183,19 +141,16 @@ from horsies.core.logging import enable_statement_echo, get_logger
 def _operation_failed(
     code: BrokerOperationFailedCode,
     message: str,
-    exc: BaseException,
+    exc: CoreFailure | CoreCallRefusal,
 ) -> Err[BrokerOperationFailed]:
-    """Build a ``BrokerOperationFailed`` with retryable classification from the raw exception.
-
-    A pydantic ``ValidationError`` cause is stored in its form without input
-    values (``without_validation_input``).
-    """
+    """Build a ``BrokerOperationFailed`` for a core failure or a core
+    boundary error, retryable by ``core_exception_retryable``. Pure."""
     return Err(
         BrokerOperationFailed(
             code=code,
             message=message,
-            retryable=is_retryable_connection_error(exc),
-            exception=without_validation_input(exc),
+            retryable=core_exception_retryable(exc),
+            exception=exc,
         )
     )
 
@@ -208,10 +163,6 @@ def _schema_init_failed(exc: CoreFailure | CoreCallRefusal) -> Err[BrokerOperati
         f'Schema initialization failed: {exc}',
         exc,
     )
-
-
-_DRIVER_ERRORS: Final = (SQLAlchemyError, psycopg.Error, OSError)
-"""What a statement can raise when the database or the network fails."""
 
 
 def _parse_enqueue_json(
@@ -443,21 +394,22 @@ def _class_report_answer(
             assert_never(unreachable)
 
 
-def _close_answer(errors: list[BaseException]) -> BrokerResult[None]:
-    """The answer of a close for the failures of its steps. Pure.
+def _close_answer(refusal: CoreCallRefusal | None) -> BrokerResult[None]:
+    """The answer of a close. Pure.
 
-    No failure: ``Ok(None)``. Otherwise ``CLOSE_FAILED`` with the count and
-    the first failure, retryable by ``is_retryable_connection_error``.
+    ``None`` (the core handle closed): ``Ok(None)``. A core boundary error
+    of the close: ``CLOSE_FAILED`` with it, retryable by
+    ``core_exception_retryable``.
     """
-    match errors:
-        case [first, *_]:
+    match refusal:
+        case None:
+            return Ok(None)
+        case _:
             return _operation_failed(
                 BrokerErrorCode.CLOSE_FAILED,
-                f'Close failed ({len(errors)} error(s)): {first}',
-                first,
+                f'Close failed (1 error(s)): {refusal}',
+                refusal,
             )
-        case _:
-            return Ok(None)
 
 
 def _async_context_err(
@@ -465,7 +417,7 @@ def _async_context_err(
 ) -> Err[BrokerAsyncContext]:
     """Build the broker error for a sync facade called inside a running event loop.
 
-    Nothing ran, and the sync runner was not started.
+    Nothing ran.
     """
     return Err(
         BrokerAsyncContext(
@@ -486,12 +438,6 @@ def _wait_inside_task_err(
             message=wait_inside_task_message(f'{operation} for task {task_id}'),
         )
     )
-
-
-def _cancel_requested() -> bool:
-    """Whether the running task has a pending cancellation request."""
-    task = asyncio.current_task()
-    return task is not None and task.cancelling() > 0
 
 
 _SCHEMA_LOCK_POLL_INTERVAL_SECONDS = 0.025
@@ -537,34 +483,6 @@ type CorePoolProfile = Literal['PRODUCER', 'WORKER']
 """The pool profile of a broker's core handle. ``PRODUCER``: no reserve.
 ``WORKER``: the worker process; batch checkouts leave connections of the main
 core pool free for the per-task writes."""
-
-class SyncSendRoute(Enum):
-    """Where a sync ``enqueue`` writes its row."""
-
-    CALLER_THREAD = 'caller_thread'
-    """On the calling thread, through the broker's sync send engine."""
-    LOOP_RUNNER = 'loop_runner'
-    """On the sync runner's event loop, through ``enqueue_async``."""
-
-
-@dataclass(frozen=True, slots=True)
-class _SyncSendEngineNotOpen:
-    """No sync send ran yet, or the broker closed the engine."""
-
-
-@dataclass(frozen=True, slots=True)
-class _SyncSendEngineOpen:
-    engine: Engine
-
-
-@dataclass(frozen=True, slots=True)
-class _PythonResources:
-    """The Python-side resources that one close took from the broker: the
-    resource sets of the event loops, and the engine of the sync sends that
-    ran on the caller's thread."""
-
-    loop_sets: tuple[LoopResources, ...]
-    sync_send_engine: _SyncSendEngineNotOpen | _SyncSendEngineOpen
 
 
 def _task_info_core_error(
@@ -993,28 +911,6 @@ def _enqueue_result(outcome: CoreSendOutcome) -> Result[UUID, BrokerEnqueueError
             assert_never(unreachable)
 
 
-# Most open event loops, other than the broker's sync runner loop and a worker
-# child's task loop, that get their own resource set. pytest-asyncio keeps one event loop open per
-# fixture scope (session, package, module, class, function), so one test
-# run can hold five open loops on one thread. A loop beyond the limit gets
-# EVENT_LOOP_LIMIT instead of one more connection pool.
-MAX_CALLER_EVENT_LOOPS = 5
-
-# Bound on the release of a resource set whose event loop closed. The
-# release waits for no other party: it drops the closed loop's tasks without
-# awaiting them, and closes at most pool_size + max_overflow idle
-# connections per engine plus 2 listener connections. Each close is local
-# work: psycopg AsyncConnection.close() calls PQfinish, which sends
-# Terminate and returns. The bound fails closed on a close that is stuck.
-DEAD_LOOP_RELEASE_TIMEOUT = timedelta(seconds=5)
-
-# Bound on a close handed off to the open event loop that owns a resource
-# set. It covers the delay before a busy owner loop runs the close, plus the
-# cancel-and-await of the listener's dispatcher and health tasks. The
-# connection closes inside it are local work, as above.
-CLOSE_HANDOFF_TIMEOUT = timedelta(seconds=5)
-
-
 class PostgresBroker:
     """
     PostgreSQL-based task broker with LISTEN/NOTIFY for real-time updates.
@@ -1078,28 +974,14 @@ class PostgresBroker:
         self.logger = get_logger('broker')
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
-        self._assume_initialized = assume_initialized
-        # One resource set per open event loop (see select_resources). The
-        # tuple is immutable: each change replaces it under the lock.
-        self._loop_sets: tuple[LoopResources, ...] = ()
-        self._loop_sets_lock = threading.Lock()
-
         self._initialized = assume_initialized
-        # The engine of the sync sends on the caller's thread; close()
-        # disposes it when one is open.
-        self._sync_send_engine: _SyncSendEngineNotOpen | _SyncSendEngineOpen = (
-            _SyncSendEngineNotOpen()
-        )
-        self._sync_send_lock = threading.Lock()
         # True once this broker saw the staged result function. Only a
         # positive answer is kept: until a worker publishes the readers,
         # each result probe checks again.
         self._staged_result_reader_published = False
-        self._loop_runner = LoopRunner()  # for run_sync
         # The operations that run in the core use the pools of this handle.
-        # It is built from the same config as the engines, so its pools have
-        # their shape. Building it starts nothing: the first core operation
-        # connects, and close_async closes its pools.
+        # Building it starts nothing: the first core operation connects, and
+        # close_async closes its pools.
         # The schema install of the handle ends with the coverage pass of the
         # app's retention: the leaves of every class its sends can stamp.
         match retention:
@@ -1143,321 +1025,6 @@ class PostgresBroker:
         else:
             self.logger.info('PostgresBroker initialized')
 
-    def _build_resources(self) -> BrokerResources:
-        """Build one set of loop-bound resources. No I/O: engines and the
-        listener connect on first use.
-        """
-        engine = create_async_engine(
-            sqlalchemy_url(self.config.database_url.get_secret_value()),
-            **self._runtime_engine_config(),
-        )
-        register_identity_text_reads(engine)
-        register_session_settings(engine, self._runtime_session_settings())
-        self._register_pre_ping(engine)
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
-        session_url = self.config.effective_session_database_url
-        session_engine: SessionEngine
-        if session_url == self.config.database_url.get_secret_value():
-            session_engine = SessionEngineShared()
-            session_async_engine = engine
-        else:
-            session_async_engine = create_async_engine(
-                sqlalchemy_url(session_url), **self._session_engine_config()
-            )
-            # The session URL must keep session state (LISTEN, session
-            # advisory locks), so it keeps session settings too.
-            register_session_settings(session_async_engine, SessionSettings.KEPT)
-            self._register_pre_ping(session_async_engine)
-            session_engine = SessionEngineSeparate(engine=session_async_engine)
-        partition_maintenance = PartitionMaintenanceDatabase(
-            session_async_engine,
-            connection_capacity=self.config.pool_size + self.config.max_overflow,
-        )
-
-        listener: ListenerState
-        match self._assume_initialized:
-            case True:
-                listener = ListenerDisabled()
-            case False:
-                listener = ListenerEnabled(
-                    listener=PostgresListener(
-                        session_url,
-                        tcp_user_timeout_ms=self.config.tcp_user_timeout_ms,
-                    ),
-                )
-        return BrokerResources(
-            engine=engine,
-            session_factory=session_factory,
-            session_engine=session_engine,
-            partition_maintenance=partition_maintenance,
-            listener=listener,
-        )
-
-    async def select_resources(self) -> Result[BrokerResources, EventLoopLimit]:
-        """Return the resource set for the running event loop.
-
-        Call once at a public entry point and pass the value to helpers.
-        Each open event loop gets its own set, built on its first call
-        without I/O (engines and the listener connect on first use). The
-        broker's sync runner loop, and in a worker child the task loop,
-        always get a set. Other loops get one up to
-        ``MAX_CALLER_EVENT_LOOPS``; a loop beyond that gets
-        ``Err(EventLoopLimit)`` and nothing runs.
-
-        Each call also releases the sets of loops that closed, each bounded
-        by ``DEAD_LOOP_RELEASE_TIMEOUT``. A failed release is logged at
-        WARNING and does not fail the call.
-        """
-        selected = self._resources_for_loop(
-            asyncio.get_running_loop(), threading.current_thread().name,
-        )
-        closed_loop_sets = self._take_closed_loop_sets()
-        if closed_loop_sets:
-            await asyncio.gather(
-                *(self._release_closed_loop_set(entry) for entry in closed_loop_sets),
-            )
-        return selected
-
-    def _resources_for_loop(
-        self, loop: asyncio.AbstractEventLoop, thread_name: str,
-    ) -> Result[BrokerResources, EventLoopLimit]:
-        """Find or build the set for ``loop``. No I/O; it never releases a set."""
-        role = self._loop_role(loop)
-        with self._loop_sets_lock:
-            decision = decide_for_loop(
-                self._loop_sets, loop, thread_name, role, MAX_CALLER_EVENT_LOOPS,
-            )
-            match decision:
-                case UseExisting(resources=resources):
-                    return Ok(resources)
-                case LimitReached(loop_limit=loop_limit):
-                    return Err(loop_limit)
-                case BuildForLoop():
-                    resources = self._build_resources()
-                    entry = LoopResources(
-                        loop=loop, thread_name=thread_name, role=role,
-                        resources=resources,
-                    )
-                    self._loop_sets = (*self._loop_sets, entry)
-                    return Ok(resources)
-
-    def _loop_role(self, loop: asyncio.AbstractEventLoop) -> LoopRole:
-        """The sync runner loop of this broker, a task loop, or a caller loop."""
-        match (self._loop_runner.runs_on(loop), is_task_loop(loop)):
-            case (True, _):
-                return LoopRole.SYNC_RUNNER
-            case (False, True):
-                return LoopRole.TASK_LOOP
-            case (False, False):
-                return LoopRole.CALLER
-
-    def _take_closed_loop_sets(self) -> tuple[LoopResources, ...]:
-        """Remove and return the entries whose event loop is closed."""
-        with self._loop_sets_lock:
-            by_state = split_closed_loops(self._loop_sets)
-            self._loop_sets = by_state.open_loops
-        return by_state.closed_loops
-
-    async def _release_closed_loop_set(self, entry: LoopResources) -> None:
-        """Release the set of a closed event loop. Total: failures are logged."""
-        for error in await self._release_with_bound(entry):
-            self.logger.warning(
-                'Release of the resource set of the closed event loop of '
-                'thread %r failed: %s: %s',
-                entry.thread_name, type(error).__name__, error,
-            )
-
-    async def _release_with_bound(self, entry: LoopResources) -> list[BaseException]:
-        """Release a closed loop's set on the running loop, bounded by
-        ``DEAD_LOOP_RELEASE_TIMEOUT``. Returns the failures; raises none.
-
-        A connection that a task of the closed loop still held stays
-        checked out; garbage collection closes it.
-        """
-        bound = DEAD_LOOP_RELEASE_TIMEOUT.total_seconds()
-        try:
-            return await asyncio.wait_for(
-                self._release_resource_set(entry.resources), timeout=bound,
-            )
-        except TimeoutError:
-            return [
-                TimeoutError(
-                    'release of the resource set of the closed event loop of '
-                    f'thread {entry.thread_name!r} did not finish within {bound} s',
-                ),
-            ]
-
-    async def _release_resource_set(
-        self, resources: BrokerResources,
-    ) -> list[BaseException]:
-        """Release a set whose event loop is closed, on the running loop.
-
-        Returns the failures; raises none.
-        """
-        errors: list[BaseException] = []
-        match resources.listener:
-            case ListenerEnabled(listener=listener):
-                try:
-                    await listener.release_after_owner_loop_closed()
-                except Exception as exc:
-                    errors.append(exc)
-            case ListenerDisabled():
-                pass
-        errors.extend(await self._dispose_engines(resources))
-        return errors
-
-    async def _close_resource_set(
-        self, resources: BrokerResources,
-    ) -> list[BaseException]:
-        """Close a set on its own event loop. Returns the failures; raises none."""
-        errors: list[BaseException] = []
-        match resources.listener:
-            case ListenerEnabled(listener=listener):
-                try:
-                    await listener.close()
-                except Exception as exc:
-                    errors.append(exc)
-            case ListenerDisabled():
-                pass
-        errors.extend(await self._dispose_engines(resources))
-        return errors
-
-    async def _dispose_engines(self, resources: BrokerResources) -> list[BaseException]:
-        """Dispose the set's engines, which closes their idle connections.
-
-        Returns the failures; raises none.
-        """
-        errors: list[BaseException] = []
-        try:
-            await resources.engine.dispose()
-        except Exception as exc:
-            errors.append(exc)
-        match resources.session_engine:
-            case SessionEngineSeparate(engine=session_engine):
-                try:
-                    await session_engine.dispose()
-                except Exception as exc:
-                    errors.append(exc)
-            case SessionEngineShared():
-                pass
-        return errors
-
-    async def _close_loop_set(
-        self, entry: LoopResources, current_loop: asyncio.AbstractEventLoop,
-    ) -> list[BaseException]:
-        """Close one set by the rule for its loop. Returns the failures."""
-        match entry.loop:
-            case owner_loop if owner_loop is current_loop:
-                return await self._close_resource_set(entry.resources)
-            case owner_loop if owner_loop.is_closed():
-                return await self._release_with_bound(entry)
-            case _:
-                return await self._hand_off_close(entry)
-
-    async def _hand_off_close(self, entry: LoopResources) -> list[BaseException]:
-        """Close a set on its own open event loop, from another loop.
-
-        Waits at most ``CLOSE_HANDOFF_TIMEOUT``. On timeout the close stays
-        scheduled on the owner loop and runs if that loop runs again; the
-        timeout is returned as a failure that names the owner thread.
-        Returns the failures; raises none except the caller's cancellation.
-        """
-        close_coroutine = self._close_resource_set(entry.resources)
-        try:
-            future = asyncio.run_coroutine_threadsafe(close_coroutine, entry.loop)
-        except RuntimeError:
-            # The owner loop closed after the close rule was chosen.
-            close_coroutine.close()
-            return await self._release_with_bound(entry)
-        bound = CLOSE_HANDOFF_TIMEOUT.total_seconds()
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(asyncio.wrap_future(future)), timeout=bound,
-            )
-        except TimeoutError:
-            return [
-                TimeoutError(
-                    'close of the resource set of the event loop on thread '
-                    f'{entry.thread_name!r} did not finish within {bound} s; '
-                    'the close stays scheduled on that loop',
-                ),
-            ]
-        except asyncio.CancelledError:
-            if _cancel_requested():
-                raise
-            return [
-                RuntimeError(
-                    'close of the resource set of the event loop on thread '
-                    f'{entry.thread_name!r} was cancelled on that loop',
-                ),
-            ]
-
-    def run_sync[**P, T](
-        self,
-        coro_fn: Callable[P, Coroutine[Any, Any, T]],
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> T:
-        """Run ``coro_fn`` on this broker's sync runner and block until it returns.
-
-        No sync facade of the package calls it: each one calls a blocking
-        form of the core on the calling thread. It blocks the calling
-        thread, so it must not run inside an event loop: a call from a thread
-        that runs an event loop is a defect of the caller.
-
-        Raises:
-            AssertionError: the calling thread runs an event loop. Nothing
-                ran, and the runner was not started.
-            LoopRunnerError: the runner is stopped, its thread did not
-                start, or scheduling onto its loop failed. Nothing ran.
-            Exception: the coroutine's own exception, unchanged.
-        """
-        if in_running_event_loop():
-            raise AssertionError(
-                f'PostgresBroker.run_sync({coro_fn.__name__}) was called on '
-                f'thread {threading.current_thread().name!r}, which runs an '
-                'event loop; run_sync blocks its thread, so it must not run '
-                'there',
-            )
-        return self._loop_runner.call(coro_fn, *args, **kwargs)
-
-    def _runtime_session_settings(self) -> SessionSettings:
-        """Whether runtime-pool connections keep session settings."""
-        match self.config.pgbouncer_transaction_mode:
-            case True:
-                return SessionSettings.NOT_KEPT
-            case False:
-                return SessionSettings.KEPT
-
-    def _base_engine_config(self) -> dict[str, Any]:
-        return self.config.sqlalchemy_engine_kwargs()
-
-    def _runtime_engine_config(self) -> dict[str, Any]:
-        engine_cfg = self._base_engine_config()
-        connect_args = self.config.pooled_connect_args
-        if connect_args:
-            # TCP keepalives, tcp_user_timeout, and the PgBouncer
-            # prepared-statement knob, built from the typed fields on
-            # PostgresConfig.
-            engine_cfg['connect_args'] = connect_args
-        return engine_cfg
-
-    def _session_engine_config(self) -> dict[str, Any]:
-        engine_cfg = self._base_engine_config()
-        engine_cfg['connect_args'] = self.config.tcp_connect_args()
-        return engine_cfg
-
-    def _register_pre_ping(self, engine: AsyncEngine | Engine) -> None:
-        """With ``pool_pre_ping`` on, ping a pooled connection of ``engine``
-        at checkout when it waited in the pool for longer than
-        ``PRE_PING_AFTER_IDLE_S``. No I/O at registration."""
-        match self.config.pool_pre_ping:
-            case True:
-                register_idle_ping(engine, PRE_PING_AFTER_IDLE_S)
-            case False:
-                pass
-
     @property
     def app(self) -> 'Horsies | None':
         """Get the attached Horsies app instance (if any)."""
@@ -1467,26 +1034,6 @@ class PostgresBroker:
     def app(self, value: 'Horsies | None') -> None:
         """Set the Horsies app instance."""
         self._app = value
-
-    def discard_inherited_resources(self) -> None:
-        """Drop the pools a forked child inherited, without closing them.
-
-        The parent process owns the inherited connections, so the child must
-        not use or close them: each engine of each set is disposed with
-        ``close=False``. Listener connections are dropped with the broker;
-        psycopg closes a connection on garbage collection only in the
-        process that opened it. It takes no lock: a lock that a parent
-        thread held at fork time stays held in the child.
-        """
-        loop_sets = self._loop_sets
-        self._loop_sets = ()
-        for entry in loop_sets:
-            entry.resources.engine.sync_engine.dispose(close=False)
-            match entry.resources.session_engine:
-                case SessionEngineSeparate(engine=session_engine):
-                    session_engine.sync_engine.dispose(close=False)
-                case SessionEngineShared():
-                    pass
 
     def _schema_advisory_key(self) -> int:
         """
@@ -1579,7 +1126,7 @@ class PostgresBroker:
 
     async def ensure_schema_initialized(
         self,
-    ) -> Result[None, BrokerOperationFailed | BrokerEventLoopLimit]:
+    ) -> Result[None, BrokerOperationFailed]:
         """Install the schema, or check it, once per broker. Writes.
 
         Safe to call many times and from many processes: the core guards the
@@ -1591,10 +1138,8 @@ class PostgresBroker:
         install failed (``exception`` is the core's ``CoreFailure``), for
         example a database of the other client family or one this build
         cannot install into (not retryable), or the core of this process
-        cannot run the call (``exception`` is the ``CoreCallRefusal``). The
-        install runs on the core pools, so ``BrokerEventLoopLimit`` is no
-        longer a failure exit. A cancel of the caller does not stop the
-        install. Raises ``ForkedAfterCoreStart`` and ``CoreStopped``
+        cannot run the call (``exception`` is the ``CoreCallRefusal``). A
+        cancel of the caller does not stop the install. Raises ``ForkedAfterCoreStart`` and ``CoreStopped``
         (``call_refusal_or_raise``).
         """
         try:
@@ -1881,87 +1426,24 @@ class PostgresBroker:
                 assert_never(unreachable)
 
     async def close_async(self) -> BrokerResult[None]:
-        """Close every resource set and the core handle's pools, then stop
-        the sync runner if it was started.
+        """Close the core handle's pools.
 
-        Each set closes on its own event loop: the running loop's set
-        directly, the set of a closed loop by release, and the set of
-        another open loop by a hand-off bounded by ``CLOSE_HANDOFF_TIMEOUT``.
         The core handle's writes in flight end within the core's close
         bound; a handle that never connected closes without starting the
-        core. The broker stays usable: a later async call builds a new set
-        for its loop, and a later core operation opens new core pools.
+        core. The broker stays usable: a later core operation opens new core
+        pools.
 
-        Raises ``ForkedAfterCoreStart`` and ``CoreStopped`` from the core
-        handle's close, after the resource sets closed and the sync runner
-        stopped.
+        Returns ``Ok(None)``, or ``CLOSE_FAILED`` with the ``CoreCallRefusal``
+        when the core of this process cannot run the close (it did not
+        start, or the loop has too many calls in flight). Raises
+        ``ForkedAfterCoreStart`` and ``CoreStopped`` from the core handle's
+        close.
         """
-        errors = await self._close_python_resources(self._take_python_resources())
         try:
             _ = await self._core_handle.close_async()
         except CoreError as exc:
-            # The core of this process cannot run the close: it did not
-            # start, or the loop has too many calls in flight.
-            errors.append(call_refusal_or_raise(exc))
-        finally:
-            errors.extend(await self._stop_loop_runner_off_its_thread())
-        return _close_answer(errors)
-
-    async def _stop_loop_runner_off_its_thread(self) -> list[BaseException]:
-        """Stop the sync runner when sync APIs started it and this call does
-        not run on the runner's own thread. Returns the stop's failure, or
-        no failure.
-
-        ``stop()`` joins the runner thread (up to 2 s), so it runs on a
-        worker thread and this loop keeps running during the join.
-        """
-        loop_thread = self._loop_runner._thread  # pyright: ignore[reportPrivateUsage]
-        if (
-            self._loop_runner._started  # pyright: ignore[reportPrivateUsage]
-            and loop_thread is not None
-            and threading.current_thread() is not loop_thread
-        ):
-            try:
-                await asyncio.to_thread(self._loop_runner.stop)
-            except Exception as exc:
-                return [exc]
-        return []
-
-    def _take_python_resources(self) -> _PythonResources:
-        """Take the resource sets and the sync send engine from the broker, so
-        that no later call uses them. No I/O."""
-        with self._loop_sets_lock:
-            loop_sets = self._loop_sets
-            self._loop_sets = ()
-        with self._sync_send_lock:
-            sync_send_engine = self._sync_send_engine
-            self._sync_send_engine = _SyncSendEngineNotOpen()
-        return _PythonResources(loop_sets=loop_sets, sync_send_engine=sync_send_engine)
-
-    async def _close_python_resources(self, taken: _PythonResources) -> list[BaseException]:
-        """Close the taken resource sets, each by the rule for its loop, and
-        dispose the taken sync send engine, on the running loop.
-
-        Returns the failures; raises none except the caller's cancellation.
-        """
-        current_loop = asyncio.get_running_loop()
-        per_set_errors = await asyncio.gather(
-            *(self._close_loop_set(entry, current_loop) for entry in taken.loop_sets),
-        )
-        errors: list[BaseException] = [
-            error for set_errors in per_set_errors for error in set_errors
-        ]
-        match taken.sync_send_engine:
-            case _SyncSendEngineOpen(engine=engine):
-                try:
-                    await asyncio.to_thread(engine.dispose)
-                except _DRIVER_ERRORS as exc:
-                    errors.append(exc)
-            case _SyncSendEngineNotOpen():
-                pass
-            case _ as unreachable:
-                assert_never(unreachable)
-        return errors
+            return _close_answer(call_refusal_or_raise(exc))
+        return _close_answer(None)
 
     # ------------- Operational & Monitoring Methods -------------
 
@@ -2830,42 +2312,27 @@ class PostgresBroker:
     def close(self) -> BrokerResult[None]:
         """The blocking form of ``close_async``: the core handle's close
         (``CoreHandle.close``) on the calling thread, with the GIL released.
-        Then it stops the sync runner, which does not start again.
 
-        Resource sets and a sync send engine that earlier calls opened close
-        by the rules of ``close_async``, on an event loop that this call runs
-        for them; with none, no event loop runs. The core handle's writes in
-        flight end within the core's close bound; a handle that never
-        connected closes without starting the core. A raised signal handler
-        (Ctrl+C) leaves the close; the core's close runs on to its end.
+        The core handle's writes in flight end within the core's close
+        bound; a handle that never connected closes without starting the
+        core. A raised signal handler (Ctrl+C) leaves the close; the core's
+        close runs on to its end.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and closes nothing: no resource set closes and the sync runner keeps
-        its state. Use ``await close_async()`` there.
+        Returns ``Ok(None)``, or ``CLOSE_FAILED`` with the ``CoreCallRefusal``
+        when the core of this process cannot run the close, or the close did
+        not end within the core's bound. On a thread that runs an event loop
+        it returns ``Err(ASYNC_CONTEXT)`` and closes nothing; use ``await
+        close_async()`` there.
 
         Raises ``ForkedAfterCoreStart`` and ``CoreStopped`` from the core
-        handle's close, after the resource sets closed and the sync runner
-        stopped.
+        handle's close.
         """
         if in_running_event_loop():
             return _async_context_err(
                 'PostgresBroker.close()', 'broker.close_async()',
             )
         try:
-            taken = self._take_python_resources()
-            match taken:
-                case _PythonResources(loop_sets=(), sync_send_engine=_SyncSendEngineNotOpen()):
-                    errors: list[BaseException] = []
-                case _PythonResources():
-                    errors = asyncio.run(self._close_python_resources(taken))
-            try:
-                _ = self._core_handle.close()
-            except CoreError as exc:
-                # As in close_async: the core of this process cannot run the
-                # close, or the close did not end within the core's bound.
-                errors.append(call_refusal_or_raise(exc))
-            return _close_answer(errors)
-        finally:
-            self._loop_runner.stop()
-
-
+            _ = self._core_handle.close()
+        except CoreError as exc:
+            return _close_answer(call_refusal_or_raise(exc))
+        return _close_answer(None)

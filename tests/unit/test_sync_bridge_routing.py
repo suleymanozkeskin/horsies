@@ -1,13 +1,13 @@
 """Sync workflow facades call the core's blocking forms on the calling thread.
 
-None of them calls the broker's sync runner (``run_sync``): the blocking form
-runs the core operation on the calling thread, with the GIL released. The
-outcome of each form is tested in
-``tests/unit/test_workflow_sync_blocking_forms.py``.
+The blocking form runs the core operation on the calling thread, with the
+GIL released; no facade calls the awaitable form. The outcome of each form
+is tested in ``tests/unit/test_workflow_sync_blocking_forms.py``.
 """
 
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -18,7 +18,6 @@ from pydantic import SecretStr
 
 import horsies._core as core
 from horsies.core.app import Horsies
-from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
@@ -26,7 +25,6 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_ok
-from horsies.core.utils.loop_runner import LoopRunnerError
 from horsies.core.workflows.lifecycle import (
     pause_workflow_sync,
     resume_workflow_sync,
@@ -44,10 +42,21 @@ def _record(record_class: type) -> MagicMock:
     return record
 
 
+def _on_this_thread(threads: list[threading.Thread], answer: object) -> MagicMock:
+    """A blocking core call that records the thread it ran on and answers
+    ``answer``."""
+
+    def call(*_args: object, **_kwargs: object) -> object:
+        threads.append(threading.current_thread())
+        return answer
+
+    return MagicMock(side_effect=call)
+
+
 @pytest.mark.unit
 class TestSyncWorkflowFacadesCallTheBlockingForms:
     """Each sync workflow facade calls its blocking form of the core handle
-    once, and never ``broker.run_sync``."""
+    once, on the calling thread, and never the awaitable form."""
 
     def test_start_workflow(self) -> None:
         app = Horsies(AppConfig(
@@ -62,15 +71,13 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
         spec = app.workflow('routing.flow', [node], output=node, definition_key='routing.flow.v1')
         broker = app.get_broker()
+        threads: list[threading.Thread] = []
         handle = MagicMock()
-        handle.start_workflow.return_value = _record(core.WorkflowStarted)
+        handle.start_workflow = _on_this_thread(threads, _record(core.WorkflowStarted))
         broker._core_handle = handle  # pyright: ignore[reportPrivateUsage]
         sent_at = datetime(2026, 10, 27, tzinfo=timezone.utc)
 
-        with (
-            patch.object(broker, 'run_sync') as run_sync,
-            patch('horsies._core.WorkflowStartRequest') as request_class,
-        ):
+        with patch('horsies._core.WorkflowStartRequest') as request_class:
             result = start_workflow(
                 spec, broker, WORKFLOW_ID, sent_at, resend_on_transient_err=True,
             )
@@ -78,33 +85,42 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         assert is_ok(result)
         handle.start_workflow.assert_called_once_with(request_class.return_value)
         handle.start_workflow_async.assert_not_called()
-        run_sync.assert_not_called()
+        assert threads == [threading.current_thread()]
 
     def test_pause_workflow_sync(self) -> None:
+        threads: list[threading.Thread] = []
         broker = MagicMock()
-        broker._core_handle.pause_workflow.return_value = _record(core.WorkflowPaused)
+        broker._core_handle.pause_workflow = _on_this_thread(
+            threads, _record(core.WorkflowPaused),
+        )
 
         result = pause_workflow_sync(broker, WORKFLOW_KEY)
 
         assert is_ok(result)
         broker._core_handle.pause_workflow.assert_called_once_with(WORKFLOW_KEY)
-        broker.run_sync.assert_not_called()
+        broker._core_handle.pause_workflow_async.assert_not_called()
+        assert threads == [threading.current_thread()]
 
     def test_resume_workflow_sync(self) -> None:
+        threads: list[threading.Thread] = []
         broker = MagicMock()
-        broker._core_handle.resume_workflow.return_value = _record(core.WorkflowResumed)
+        broker._core_handle.resume_workflow = _on_this_thread(
+            threads, _record(core.WorkflowResumed),
+        )
 
         result = resume_workflow_sync(broker, WORKFLOW_KEY)
 
         assert is_ok(result)
         broker._core_handle.resume_workflow.assert_called_once_with(WORKFLOW_KEY)
-        broker.run_sync.assert_not_called()
+        broker._core_handle.resume_workflow_async.assert_not_called()
+        assert threads == [threading.current_thread()]
 
     def test_handle_wrap_strategy(self) -> None:
+        threads: list[threading.Thread] = []
         broker = MagicMock()
         read = MagicMock(spec=core.WorkflowStatusRead)
         read.status = 'RUNNING'
-        broker._core_handle.workflow_status.return_value = read
+        broker._core_handle.workflow_status = _on_this_thread(threads, read)
         handle: WorkflowHandle[Any] = WorkflowHandle(
             workflow_id=WORKFLOW_KEY, broker=broker,
         )
@@ -113,11 +129,15 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
 
         assert is_ok(result)
         broker._core_handle.workflow_status.assert_called_once_with(WORKFLOW_KEY)
-        broker.run_sync.assert_not_called()
+        broker._core_handle.workflow_status_async.assert_not_called()
+        assert threads == [threading.current_thread()]
 
     def test_handle_fold_strategy(self) -> None:
+        threads: list[threading.Thread] = []
         broker = MagicMock()
-        broker._core_handle.wait_workflow_result.return_value = _record(core.WaitTimedOut)
+        broker._core_handle.wait_workflow_result = _on_this_thread(
+            threads, _record(core.WaitTimedOut),
+        )
         handle: WorkflowHandle[Any] = WorkflowHandle(
             workflow_id=WORKFLOW_KEY, broker=broker,
         )
@@ -128,48 +148,6 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         broker._core_handle.wait_workflow_result.assert_called_once_with(
             WORKFLOW_KEY, timeout_ms=5,
         )
-        broker.run_sync.assert_not_called()
+        broker._core_handle.wait_workflow_result_async.assert_not_called()
+        assert threads == [threading.current_thread()]
 
-
-async def _double(value: int) -> int:
-    return value * 2
-
-
-async def _raise_value_error(message: str) -> int:
-    raise ValueError(message)
-
-
-def _real_broker() -> PostgresBroker:
-    return PostgresBroker(
-        PostgresConfig(database_url=SecretStr('postgresql://u:p@localhost/db')),
-    )
-
-
-@pytest.mark.unit
-class TestRunSync:
-    """``PostgresBroker.run_sync`` runs a coroutine on the broker's runner."""
-
-    def test_returns_the_coroutine_value(self) -> None:
-        broker = _real_broker()
-        try:
-            assert broker.run_sync(_double, 21) == 42
-        finally:
-            closed = broker.close()
-            assert is_ok(closed), closed
-
-    def test_propagates_the_coroutine_exception(self) -> None:
-        broker = _real_broker()
-        try:
-            with pytest.raises(ValueError, match='boom'):
-                broker.run_sync(_raise_value_error, 'boom')
-        finally:
-            closed = broker.close()
-            assert is_ok(closed), closed
-
-    def test_raises_loop_runner_error_after_close(self) -> None:
-        broker = _real_broker()
-        closed = broker.close()
-        assert is_ok(closed), closed
-
-        with pytest.raises(LoopRunnerError, match='stopped'):
-            broker.run_sync(_double, 1)

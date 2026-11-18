@@ -397,10 +397,9 @@ pool max_size (the pool of the worker process)
   + task-code database connections
 ```
 
-Task code that sends through the app opens the app's broker in its child: a
-pool of the `task_send_pool` of its child kind for each event loop it sends
-from (the broker's runner loop for sync tasks, the child's task loop for async
-tasks). `horsies check --live` compares the number without task-code
+Task code that sends through the app opens the app's broker in its child: one
+core pool of the `task_send_pool` of its child kind, for every thread and event
+loop of the child. `horsies check --live` compares the number without task-code
 connections for each worker profile with `max_connections` less the reserved
 slots and reports `HRS-219`; the error states the task-send term with one
 sending loop per child. A worker logs the same comparison at boot, as a

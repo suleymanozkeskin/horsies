@@ -185,9 +185,6 @@ mod tests {
                 message,
                 workflow_id,
             },
-            HandleErrorCode::LoopRunnerFailed | HandleErrorCode::EventLoopLimit => {
-                unreachable!("{code} is a code of the Python client only")
-            }
         }
     }
 

@@ -1,16 +1,15 @@
 # pyright: reportPrivateUsage=false
 """Sync facades return ASYNC_CONTEXT on a thread that runs an event loop.
 
-A sync facade blocks its calling thread until its call ends: the core's
-blocking form, or the broker's sync runner for the facades that still use
-it. On a thread that runs an event loop, that wait stalls the loop, so each
-facade returns the ASYNC_CONTEXT member of its own catalog first: no core
-call runs, the runner thread does not start and no resource set is built.
+A sync facade blocks its calling thread until the core's blocking form
+ends. On a thread that runs an event loop, that wait stalls the loop, so
+each facade returns the ASYNC_CONTEXT member of its own catalog first: no
+core call runs.
 
 The broker is real and its URL is unreachable; a mock that records the calls
 wraps its core handle. The guard returns before any I/O, so no database is
-needed. With a guard removed, the call goes to the core or to the runner and
-fails on the connection, so the code and nothing-ran assertions fail.
+needed. With a guard removed, the call goes to the core and fails on the
+connection, so the code and nothing-ran assertions fail.
 """
 
 from __future__ import annotations
@@ -78,14 +77,13 @@ TASK_ID = '0b6f2f0e-6c1d-7f7a-9a52-3d2b1c0e9f82'
 @pytest.fixture
 def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect, and whose core handle records each
-    call it forwards. Stops the runner if a call started it."""
+    call it forwards."""
     app = Horsies(AppConfig(broker=PostgresConfig(
         database_url=SecretStr(UNREACHABLE_URL),
     )))
     broker = app.get_broker()
     broker._core_handle = MagicMock(wraps=broker._core_handle)
     yield app
-    broker._loop_runner.stop()
 
 
 def _inside_loop[T](call: Callable[[], T]) -> T:
@@ -98,14 +96,10 @@ def _inside_loop[T](call: Callable[[], T]) -> T:
 
 
 def _assert_nothing_ran(broker: PostgresBroker) -> None:
-    """No core call ran, the sync runner never started, and no resource set
-    was built."""
+    """No core call ran."""
     core_handle = broker._core_handle
     assert isinstance(core_handle, MagicMock), 'the app fixture wraps the core handle'
     assert core_handle.mock_calls == []
-    assert broker._loop_runner._started is False
-    assert broker._loop_runner._thread is None
-    assert broker._loop_sets == ()
 
 
 # =============================================================================
@@ -146,21 +140,16 @@ def test_broker_facade_returns_async_context(app: Horsies, name: str) -> None:
     _assert_nothing_ran(broker)
 
 
-def test_broker_close_returns_async_context_and_keeps_the_runner(
-    app: Horsies,
-) -> None:
-    """The guard runs before the try/finally, so the runner is not stopped."""
+def test_broker_close_returns_async_context(app: Horsies) -> None:
+    """The guard runs before the core close, so nothing closes."""
     broker = app.get_broker()
-    broker._loop_runner.start()
 
     result = _inside_loop(broker.close)
 
     assert is_err(result)
     assert result.err_value.code is BrokerErrorCode.ASYNC_CONTEXT
     assert 'close_async' in result.err_value.message
-    assert broker._loop_runner._started is True
-    assert broker._loop_runner._closed is False
-    assert broker._loop_sets == ()
+    _assert_nothing_ran(broker)
 
 
 APP_CALLS: dict[str, Callable[[Horsies], Any]] = {
@@ -441,16 +430,6 @@ def test_live_check_inside_loop_reports_its_own_code(app: Horsies) -> None:
 
 
 # =============================================================================
-# close_async stops the sync runner off the caller's loop
-# =============================================================================
-
-
-# =============================================================================
-# run_sync: a call from a thread that runs an event loop is a defect
-# =============================================================================
-
-
-# =============================================================================
 # Every blocking call site: a CoreError of the blocking form is the site's
 # catalog error; every other exception propagates unchanged
 # =============================================================================
@@ -606,8 +585,8 @@ def _core_error_failure(result: object) -> tuple[object, BaseException | None]:
 
 @pytest.mark.parametrize('site', list(BLOCKING_SITES))
 def test_blocking_call_site_propagates_a_defect(app: Horsies, site: str) -> None:
-    """An exception that is not a CoreError propagates unchanged; the runner
-    is not called."""
+    """An exception that is not a CoreError propagates unchanged; the
+    awaitable form is not called."""
     broker = app.get_broker()
     blocking_site = BLOCKING_SITES[site]
     defect = TypeError('stub defect')
@@ -615,14 +594,13 @@ def test_blocking_call_site_propagates_a_defect(app: Horsies, site: str) -> None
 
     with (
         patch.object(broker, '_core_handle', handle),
-        patch.object(broker, 'run_sync') as run_sync,
         pytest.raises(TypeError) as exc_info,
     ):
         blocking_site.call(app, broker)
 
     assert exc_info.value is defect
     getattr(handle, blocking_site.blocking_form).assert_called_once()
-    run_sync.assert_not_called()
+    getattr(handle, f'{blocking_site.blocking_form}_async').assert_not_called()
 
 
 @pytest.mark.parametrize('site', list(BLOCKING_SITES))
@@ -637,10 +615,7 @@ def test_blocking_call_site_returns_its_code_for_a_core_error(
     timed_out = CoreCallTimedOut(f'CoreHandle.{blocking_site.blocking_form}', 1800, 'no_change')
     handle = _core_handle_raising(blocking_site, timed_out)
 
-    with (
-        patch.object(broker, '_core_handle', handle),
-        patch.object(broker, 'run_sync') as run_sync,
-    ):
+    with patch.object(broker, '_core_handle', handle):
         result = blocking_site.call(app, broker)
 
     code, exception = _core_error_failure(result)
@@ -652,7 +627,7 @@ def test_blocking_call_site_returns_its_code_for_a_core_error(
         case raised:
             assert raised is timed_out
     getattr(handle, blocking_site.blocking_form).assert_called_once()
-    run_sync.assert_not_called()
+    getattr(handle, f'{blocking_site.blocking_form}_async').assert_not_called()
 
 
 # =============================================================================

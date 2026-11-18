@@ -33,11 +33,6 @@ pub enum HandleErrorCode {
     /// `resume` resumed the workflow, and the recovery pass for its tree, which runs after that, failed.
     /// The workflow is RUNNING. Not retryable.
     ResumeRecoveryFailed,
-    /// Internal polling/event-loop runner failed.
-    LoopRunnerFailed,
-    /// The broker already holds resource sets for its limit of open event loops, and this call ran on a
-    /// new one. Nothing ran. Python client only; removed before 0.8.0.
-    EventLoopLimit,
     /// A sync or blocking handle method was called on a thread that runs an event loop or a tokio
     /// runtime. Its wait would stall that loop, so nothing ran.
     AsyncContext,
@@ -113,8 +108,6 @@ impl std::fmt::Display for HandleErrorCode {
             Self::DbOperationFailed => write!(f, "DB_OPERATION_FAILED"),
             Self::StoredDataInvalid => write!(f, "STORED_DATA_INVALID"),
             Self::ResumeRecoveryFailed => write!(f, "RESUME_RECOVERY_FAILED"),
-            Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
-            Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
             Self::AsyncContext => write!(f, "ASYNC_CONTEXT"),
         }
     }
@@ -126,9 +119,7 @@ impl std::fmt::Display for HandleErrorCode {
 /// Carried inside `Err(...)` of a [`HandleResult`]. Each variant's doc is
 /// its Python class doc (`ErrorCatalog`).
 ///
-/// The classes that only the Python client produces are not variants:
-/// `HandleLoopRunnerFailed` and `HandleEventLoopLimit`. A variant without
-/// `cause` has the precondition cause of its state
+/// A variant without `cause` has the precondition cause of its state
 /// ([`Self::failure_cause`]); a variant without `retryable` never clears.
 /// A variant with an `exception` carries its typed cause, the
 /// [`WorkflowError`], which the client builds that exception from

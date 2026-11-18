@@ -43,21 +43,19 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | ------ | ------- |
 | `enqueue_async()` | `Result[uuid.UUID, BrokerEnqueueError]` |
 | `enqueue()` | `Result[uuid.UUID, BrokerEnqueueError \| BrokerSyncCallError]` |
-| `ensure_schema_initialized()` | `Result[None, BrokerOperationFailed \| BrokerEventLoopLimit]` |
+| `ensure_schema_initialized()` | `Result[None, BrokerOperationFailed]` |
 
 `enqueue()` and `enqueue_async()` require `sent_at`, the call time of the send, which the row stores. A send that repeats a task id is the same send when the stored command fingerprint and `sent_at` equal its own, and answers with that task id; otherwise it is `PAYLOAD_MISMATCH`. A resend therefore passes the `sent_at` of the first send.
 
 They also require `send_kind` (`from horsies import SendKind`): `SendKind.FIRST` for the first send of a task id, `SendKind.REPEAT` for a resend. A repeat reads the task history first, so a resend of a task that finished answers with its task id, or `PAYLOAD_MISMATCH`, and the task does not run again. A first send does not read history.
 
-`BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`. `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`: the failures that the sync form adds, where nothing ran. Both are exported from `horsies`.
+`BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput`. `BrokerSyncCallError` is `BrokerAsyncContext`: the failure that the sync form adds, where nothing ran. Both are exported from `horsies`.
 
 ### Calls That Run on the Core
 
 These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ensure_schema_initialized()`, `get_task_info()`, `get_task_info_async()`, `get_raw_result_record()`, `get_raw_result_record_async()`, `ping_database_async()`, `ping_workers_async()`, and the task sends (`send()`, `send_async()`, `schedule()`, `schedule_async()` and the four retry methods). The core has one set of pools per broker, for every thread and event loop.
 
-- They do not return `EVENT_LOOP_LIMIT`.
-- The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They do not return `LOOP_RUNNER_FAILED`. They still return `ASYNC_CONTEXT` on a thread that runs an event loop.
-- `BrokerEnqueueError`, `BrokerSyncCallError`, `TaskSendError` and the return type of `ensure_schema_initialized()` keep the two variants, so an exhaustive `match` names them.
+- The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They return `ASYNC_CONTEXT` on a thread that runs an event loop.
 
 When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. Import the core errors from `horsies`:
 
@@ -75,7 +73,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 
 - Every call that runs on the core raises them. No call returns them as a result, and no result type has a variant for them.
 - This covers the task sends and the four retry methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
-- Nothing ran. `close()` and `close_async()` raise them after the resource sets of the broker closed and its sync runner stopped.
+- Nothing ran. `close()` and `close_async()` raise them from the close of the core handle.
 - In a worker child, the child ends itself at its next core call and the worker replaces it. The child exits with code 80; its last log line names the cause.
   - At the start of a task, before task code ran: the worker releases the claim with no attempt charged, and a new child runs the task.
   - After a body that finished: the child reports the result first, and the worker writes it as for any task. The task keeps its result, with no second run.
@@ -115,9 +113,7 @@ When the core ran the call and the call failed, `exception` is the core's class 
 | `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | Varies |
 | `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | Varies |
 | `NO_BROKER` | Operation needs a broker, but none is configured | No |
-| `EVENT_LOOP_LIMIT` | Not returned by a broker method: the broker's calls run on the core ([Calls That Run on the Core](#calls-that-run-on-the-core)). The workflow start and the workflow resume return their own `EVENT_LOOP_LIMIT` | No |
 | `ASYNC_CONTEXT` | A sync method (`app.get_result()`, `app.ping_database()`, `broker.close()`, ...) was called on a thread that runs an event loop; nothing ran. Call the `*_async` form | No |
-| `LOOP_RUNNER_FAILED` | A sync method of the app (`app.get_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `app.get_class_coverage()`, `app.get_class_report()`) or `broker.close()` could not run the call on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran. `close()` and `close_async()` stop the runner, and a stopped runner does not start again: call the `*_async` form or use a new broker. `broker.enqueue()`, `broker.get_task_info()` and `broker.get_raw_result_record()` do not use the runner | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON or not a JSON object, a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields), an `execution` that is not an `Execution` value, or a `cancel_grace_ms` that does not fit the class (100 to 10,000 ms for `SHARED_ASYNC`, absent or null for the others). The message names each failing field. Nothing was written | No |
@@ -140,9 +136,7 @@ When the core ran the call and the call failed, `exception` is the core's class 
 | `BrokerInvalidJsonPayload` | `INVALID_JSON_PAYLOAD` | `exception` | `False` | The stored data is unchanged |
 | `BrokerInvalidTaskOptions` | `INVALID_TASK_OPTIONS` | `exception` | `False` | Nothing was written |
 | `BrokerInvalidInput` | `INVALID_INPUT` | `exception` | `False` | Nothing was written |
-| `BrokerEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit` | `False` | Nothing ran |
 | `BrokerAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
-| `BrokerLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception` | `False` | Nothing ran |
 | `BrokerListenerDisabled` | `LISTENER_DISABLED` | – | `False` | Nothing ran |
 | `BrokerWaitInsideTask` | `WAIT_INSIDE_TASK` | – | `False` | Nothing ran |
 
@@ -150,9 +144,8 @@ When the core ran the call and the call failed, `exception` is the core's class 
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
 | `retryable` | `bool` | The classification of the cause where the variant has a cause from the database or the core: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `False` on every other variant |
-| `exception` | `BaseException` on `BrokerOperationFailed` and `BrokerLoopRunnerFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
+| `exception` | `BaseException` on `BrokerOperationFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
-| `loop_limit` | `EventLoopLimit` | The limit and the threads of the held event loops |
 
 The repr of a variant shows its class name and its other fields. `message` and `exception` are not in the repr.
 
@@ -203,8 +196,6 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `TaskSendPayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` |
 | `TaskSendPayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` |
 | `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` |
-| `TaskSendEventLoopLimit` | `EVENT_LOOP_LIMIT` | `message` |
-| `TaskSendLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `task_id`, `payload`, `message`, `exception` |
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -212,7 +203,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
 | `retryable` | `bool` | The core's classification of the cause: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls` |
-| `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception. On `TaskSendLoopRunnerFailed` it is `BaseException`: always the `LoopRunnerError` |
+| `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Bytes of the UTF-8 text of the serialized input |
 | `limit_bytes` | `int` | The configured `payload.reject_bytes` |
@@ -239,13 +230,13 @@ def log_enqueue_failure(err: TaskSendEnqueueFailed) -> None:
 
 For a validation failure, the cause names the field, the message and the type, not the value. Text from your own validators is kept as written ([Validation Failure Text](#validation-failure-text)).
 
-`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict | TaskSendLoopRunnerFailed`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These four variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a retry reads the task history).
+`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These three variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a retry reads the task history).
 
 ## Workflow Start Errors (WorkflowStartResult)
 
 `spec.start()`, `start_async()`, `retry_start()` and `retry_start_async()` return `WorkflowStartResult[WorkflowHandle[T]]` = `Result[WorkflowHandle[T], WorkflowStartError]`. `WorkflowStartError` is a union with one frozen variant per code; the variants and their fields are on the [Workflow API](/horsies/concepts/workflows/workflow-api/) page.
 
-The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAILED` (`WorkflowStartRetryable`).
+The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartRetryable`).
 
 ## Workflow Handle Errors (HandleResult)
 

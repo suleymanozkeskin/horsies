@@ -12,9 +12,8 @@ class TaskSendErrorCode(str, Enum):
     """Categorized task send failure codes.
 
     The members are Python's, in Python's order
-    (`python/horsies/core/models/task_send_types.py`). `EVENT_LOOP_LIMIT`
-    and `LOOP_RUNNER_FAILED` are produced by the Python client only;
-    [`TaskSendError`] has no variant for them.
+    (`python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
+    one variant per member.
     """
 
     SEND_SUPPRESSED = 'SEND_SUPPRESSED'
@@ -52,16 +51,4 @@ class TaskSendErrorCode(str, Enum):
     """Serialized payload exceeded `payload.reject_bytes`; nothing was
     written. Non-retryable — shrink the payload (pass a reference to
     external storage) or raise the configured limit.
-    """
-
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event
-    loops, and this send ran on a new one; nothing was written. The retry
-    methods refuse it. Python client only; removed before 0.8.0.
-    """
-
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    """A sync send or schedule could not run the enqueue on the broker's sync
-    runner: the runner is stopped, its thread did not start, or scheduling
-    failed. Nothing was written. Python client only; removed before 0.8.0.
     """

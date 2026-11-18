@@ -112,7 +112,7 @@ class TestWorkflowHandle:
 
         assert result.unwrap_err().error_code is RetrievalCode.INVALID_INPUT
         assert message in (result.unwrap_err().message or '')
-        broker.select_resources.assert_not_called()
+        assert broker._core_handle.mock_calls == []
 
 
 class TestBrokerAndApp:
@@ -121,15 +121,15 @@ class TestBrokerAndApp:
         self, timeout_ms: Any, message: str, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         broker = PostgresBroker(PostgresConfig(database_url=_UNREACHABLE_URL))
-        select_resources = MagicMock()
-        monkeypatch.setattr(broker, 'select_resources', select_resources)
+        core_handle = MagicMock()
+        monkeypatch.setattr(broker, '_core_handle', core_handle)
 
         result = asyncio.run(broker.get_raw_result_record_async('task-1', timeout_ms))
 
         refused = result.unwrap_err()
         assert isinstance(refused, BrokerInvalidInput)
         assert message in refused.message
-        select_resources.assert_not_called()
+        assert core_handle.mock_calls == []
 
     @pytest.mark.parametrize('method', ['get_result_async', 'get_raw_result_async'])
     def test_app_returns_the_broker_refusal(self, method: str) -> None:

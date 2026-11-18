@@ -320,7 +320,7 @@ class TestPauseSyncWrapper:
         broker._core_handle.pause_workflow.assert_called_once_with(
             uuid.UUID(PAUSE_WORKFLOW_ID),
         )
-        broker.run_sync.assert_not_called()
+        broker._core_handle.pause_workflow_async.assert_not_called()
 
     def test_core_boundary_error_returns_err(self) -> None:
         """A CoreError of the blocking call -> Err(HandleDbOperationFailed)."""
@@ -366,7 +366,7 @@ class TestResumeSyncWrapper:
         broker._core_handle.resume_workflow.assert_called_once_with(
             uuid.UUID(PAUSE_WORKFLOW_ID),
         )
-        broker.run_sync.assert_not_called()
+        broker._core_handle.resume_workflow_async.assert_not_called()
 
     def test_core_boundary_error_returns_err(self) -> None:
         """A CoreError of the blocking call -> Err(HandleDbOperationFailed)."""

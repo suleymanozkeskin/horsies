@@ -78,7 +78,7 @@ class TestWrapStrategy:
         assert error.retryable is True
         assert error.workflow_id == WORKFLOW_ID
         assert error.exception is refused
-        broker.run_sync.assert_not_called()
+        getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
     @pytest.mark.parametrize('name', list(WRAP_METHODS))
     def test_an_unexpected_exception_propagates(self, name: str) -> None:
@@ -129,7 +129,7 @@ class TestFoldStrategy:
         error = result.unwrap_err()
         assert error.error_code == OperationalErrorCode.BROKER_ERROR
         assert 'TooManyPendingCalls' in (error.message or '')
-        broker.run_sync.assert_not_called()
+        getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
     @pytest.mark.parametrize('name', list(FOLD_METHODS))
     def test_an_unexpected_exception_propagates(self, name: str) -> None:

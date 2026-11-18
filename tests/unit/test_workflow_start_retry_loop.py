@@ -214,4 +214,4 @@ class TestSyncWrapperForwarding:
         broker._core_handle.start_workflow.assert_called_once_with(
             request_class.return_value,
         )
-        broker.run_sync.assert_not_called()
+        broker._core_handle.start_workflow_async.assert_not_called()

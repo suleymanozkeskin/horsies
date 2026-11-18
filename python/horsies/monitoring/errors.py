@@ -12,9 +12,6 @@ on data, not on exceptions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
-
 from horsies._catalog.monitoring import (
     MonitoringQueryErrorCode as MonitoringQueryErrorCode,
 )
@@ -26,26 +23,8 @@ from horsies._catalog.monitoring_errors import (
 from horsies.core.types.result import Result
 
 
-if TYPE_CHECKING:
-    from horsies.core.brokers.resources import EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
-class MonitoringQueryEventLoopLimit:
-    """The broker holds resource sets for its limit of open event loops. Nothing ran.
-
-    ``loop_limit`` names the limit and the threads of the held loops. A
-    query from this loop returns the same error until one of the held
-    loops closes.
-    """
-
-    code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.EVENT_LOOP_LIMIT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    loop_limit: EventLoopLimit
-
-
-type MonitoringQueryError = MonitoringQueryCoreError | MonitoringQueryEventLoopLimit
-"""Every failure of a monitoring query: one variant per ``MonitoringQueryErrorCode``."""
+type MonitoringQueryError = MonitoringQueryCoreError
+"""Every failure of a monitoring query: one variant per ``MonitoringQueryErrorCode``,
+each a class of the core's catalog."""
 
 type MonitoringResult[T] = Result[T, MonitoringQueryError]

@@ -18,8 +18,10 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.schedule import ScheduleConfig  # noqa: F401 - needed for AppConfig.model_rebuild()
-from horsies.core.utils.db import register_identity_text_reads
-from tests.broker_resources_support import current_resources
+from tests.broker_resources_support import (
+    current_resources,
+    read_uuid_columns_as_text,
+)
 from tests.session_database import suite_database_url
 
 # Rebuild AppConfig to resolve forward references
@@ -61,7 +63,7 @@ def db_url() -> str:
 async def engine(db_url: str) -> AsyncGenerator[AsyncEngine, None]:
     """SQLAlchemy async engine (session-scoped)."""
     eng = create_async_engine(sqlalchemy_url(db_url), echo=False)
-    register_identity_text_reads(eng)
+    read_uuid_columns_as_text(eng)
     yield eng
     await eng.dispose()
 

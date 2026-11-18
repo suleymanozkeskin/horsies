@@ -19,12 +19,6 @@ class MonitoringQueryErrorCode(str, Enum):
     driver classification of the cause.
     """
 
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event
-    loops, and this call ran on a new one. Nothing ran. Python client
-    only; removed before 0.8.0.
-    """
-
     HISTORY_CONTRACT_VIOLATION = 'HISTORY_CONTRACT_VIOLATION'
     """Stored history data does not decode: a status that is not a task
     status, an attempt snapshot or archive envelope that does not decode.
@@ -46,12 +40,6 @@ class TaskActionErrorCode(str, Enum):
     TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
 
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event
-    loops, and this call ran on a new one. Nothing changed. Python client
-    only; removed before 0.8.0.
-    """
 
     STORED_DATA_INVALID = 'STORED_DATA_INVALID'
     """Stored task data does not parse: a history status that is not a task
