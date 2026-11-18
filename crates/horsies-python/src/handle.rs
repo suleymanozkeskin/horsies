@@ -693,9 +693,11 @@ impl CoreHandle {
     }
 
     /// Cancel one plain task (`horsies_cancel_task`): `TaskCancelledRecord`,
-    /// `CancelRefusedWorkflowTask`, `CancelRefusedStatus`, `CancelTaskAbsent`,
-    /// `CancelFailed`, or `CancelStoredDataInvalid`. A RUNNING task is
-    /// cancelled only with `include_running`. Writes, in one statement.
+    /// or a generated `TaskActionCoreError` class (`TaskActionNotFound`,
+    /// `TaskActionNotCancellable`, `TaskActionWorkflowTask`,
+    /// `TaskActionDbOperationFailed` or `TaskActionStoredDataInvalid`). A
+    /// RUNNING task is cancelled only with `include_running`. Writes, in one
+    /// statement.
     /// Awaitable only: its caller, `horsies.monitoring.task_actions.cancel_task`,
     /// is a coroutine. An outcome that contradicts the function raises
     /// `PanicException`.

@@ -25,17 +25,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, assert_never, cast
 
+from horsies._catalog.lifecycle_errors import OutcomeDecodeError as OutcomeDecodeError
+
 from ..types.status import TaskStatus
 from .operations import TerminalizationKind
-
-
-class OutcomeDecodeError(Exception):
-    """The returned row does not satisfy the wire contract.
-
-    Never raised for a task outcome — only when the database returned
-    something this code cannot interpret, which means one side is running
-    against a contract the other does not implement.
-    """
 
 
 class GuardKind(Enum):

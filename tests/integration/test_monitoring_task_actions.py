@@ -434,7 +434,12 @@ class TestCancelTaskSucceeds:
         refused = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(refused)
-        assert isinstance(refused.err_value, TaskActionNotCancellable)
+        assert type(refused.err_value) is TaskActionNotCancellable
+        assert refused.err_value == TaskActionNotCancellable(
+            message=f'Task {uuid.UUID(task.id)} cannot be cancelled from status RUNNING.',
+            task_id=uuid.UUID(task.id),
+            current_status=TaskStatus.RUNNING,
+        )
         assert refused.err_value.current_status is TaskStatus.RUNNING
         assert (await read_task(session, task.id)).status == 'RUNNING'
 
@@ -504,7 +509,10 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, missing_id)
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotFound)
+        assert type(result.err_value) is TaskActionNotFound
+        assert result.err_value == TaskActionNotFound(
+            message=f'Task {missing_id} does not exist.', task_id=missing_id,
+        )
         assert result.err_value.code is TaskActionErrorCode.TASK_NOT_FOUND
         assert result.err_value.task_id == missing_id
         assert result.err_value.retryable is False
@@ -518,7 +526,15 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskActionWorkflowTask)
+        assert type(result.err_value) is TaskActionWorkflowTask
+        assert result.err_value == TaskActionWorkflowTask(
+            message=(
+                f'Task {uuid.UUID(task.id)} belongs to a workflow; '
+                'use the workflow actions instead.'
+            ),
+            task_id=uuid.UUID(task.id),
+            current_status=TaskStatus.PENDING,
+        )
         assert result.err_value.current_status is TaskStatus.PENDING
         assert (await read_task(session, task.id)).status == 'PENDING'
 
@@ -540,7 +556,14 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotCancellable)
+        assert type(result.err_value) is TaskActionNotCancellable
+        assert result.err_value == TaskActionNotCancellable(
+            message=(
+                f'Task {uuid.UUID(task.id)} cannot be cancelled from status {status.value}.'
+            ),
+            task_id=uuid.UUID(task.id),
+            current_status=status,
+        )
         assert result.err_value.current_status is status
 
     async def test_second_cancel_is_a_conflict_not_a_second_effect(
@@ -572,9 +595,17 @@ class TestCancelTaskRefuses:
         error = result.err_value
         assert isinstance(error, TaskActionStoredDataInvalid)
         assert isinstance(error.exception, OutcomeDecodeError)
+        assert type(error.exception) is OutcomeDecodeError
         assert error.task_id == uuid.UUID(task.id)
         assert error.retryable is False
         assert "'NOT_KNOWN'" in error.message
+        # Python's texts: the message holds the decode error's text, and the
+        # exception's text is that text.
+        decode_text = str(error.exception)
+        assert decode_text.startswith('terminalization outcome decode failed: ')
+        assert "'NOT_KNOWN'" in decode_text
+        assert error.exception.args == (decode_text,)
+        assert error.message == f'Task cancel failed: stored data does not parse: {decode_text}'
         assert (await read_task(session, task.id)).status == 'FAILED'
 
 
@@ -764,11 +795,21 @@ class TestDatabaseFailure:
     async def test_cancel_reports_a_retryable_db_failure(
         self, unreachable_broker: PostgresBroker
     ) -> None:
-        result = await cancel_task(unreachable_broker, uuid.uuid4())
+        task_id = uuid.uuid4()
+        result = await cancel_task(unreachable_broker, task_id)
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, TaskActionDbOperationFailed)
+        assert type(error) is TaskActionDbOperationFailed
         assert error.retryable is True
+        assert error.task_id == task_id
         assert isinstance(error.exception, CoreConnectionError)
         assert error.exception.retryable is True
+        # Python's texts: the message holds the cause's text, and the
+        # exception is that text with the subject of the cancel.
+        assert error.message.startswith('Task cancel failed: ')
+        cause_text = error.message.removeprefix('Task cancel failed: ')
+        assert cause_text != ''
+        assert error.exception.subject == 'cancel_task'
+        assert error.exception.message == cause_text
+        assert str(error.exception) == f'cancel_task: {cause_text}'

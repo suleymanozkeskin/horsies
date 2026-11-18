@@ -3,7 +3,7 @@
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 use crate::surface::{
     Constructor, ExceptionBody, ModuleSurface, ParameterKind, StubClass, StubException,
-    StubFunction, StubParameter, StubProperty, StubStaticMethod, TypeText,
+    StubFunction, StubImport, StubParameter, StubProperty, StubStaticMethod, TypeText,
 };
 
 /// The file name of the stubs, inside the package folder.
@@ -16,6 +16,7 @@ pub fn render_core_stub(surface: &ModuleSurface) -> String {
     text.push_str(
         "import asyncio\nimport datetime\nimport uuid\nfrom collections.abc import Callable\nfrom typing import Literal, final\n",
     );
+    text.push_str(&render_imports(surface.imports));
     for exception in surface.exceptions {
         text.push_str("\n\n");
         text.push_str(&render_exception(exception));
@@ -29,6 +30,24 @@ pub fn render_core_stub(surface: &ModuleSurface) -> String {
         text.push_str(&render_function(function, ""));
     }
     text
+}
+
+/// The package imports, after a blank line; nothing when there are none.
+fn render_imports(imports: &[StubImport]) -> String {
+    match imports.is_empty() {
+        true => String::new(),
+        false => {
+            let mut text = String::from("\n");
+            for import in imports {
+                text.push_str(&format!(
+                    "from {} import {}\n",
+                    import.module,
+                    import.names.join(", ")
+                ));
+            }
+            text
+        }
+    }
 }
 
 /// An exception class: its doc, then, for a class with attributes, its
@@ -223,6 +242,22 @@ mod tests {
              def __init__(self, subject: str) -> None: ...\n    @property\n    \
              def subject(self) -> str: ...\n"
         );
+    }
+
+    #[test]
+    fn the_package_imports_follow_the_standard_library_after_a_blank_line() {
+        assert_eq!(render_imports(&[]), "");
+        assert_eq!(
+            render_imports(&[StubImport {
+                module: "horsies._catalog.monitoring_errors",
+                names: &["TaskActionCoreError", "TaskActionNotFound"],
+            }]),
+            "\nfrom horsies._catalog.monitoring_errors import TaskActionCoreError, TaskActionNotFound\n"
+        );
+        let stub = render_core_stub(&CORE_MODULE);
+        assert!(stub.contains(
+            "from typing import Literal, final\n\nfrom horsies._catalog.monitoring_errors import TaskActionCoreError\n"
+        ));
     }
 
     #[test]

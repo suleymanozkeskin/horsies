@@ -21,8 +21,23 @@
 //! Adding an error enum: derive `ErrorCatalog` on it, add it to
 //! [`ERROR_CATALOGS`], and name its per-operation unions in
 //! [`ERROR_UNIONS`].
+//!
+//! A client builds the class of a value from [`ErrorClassValues`]
+//! (`#[derive(horsies_core_derive::ErrorClassValues)]`): the values of the
+//! instance slots, by name, in the class's order. The `exception` slot is
+//! built from the variant's typed cause (`#[error_slot(cause)]`, an
+//! [`ExceptionCause`]), so the exception keeps the cause's own text.
+//!
+//! [`EXCEPTION_CLASSES`] are the exception classes that the core defines
+//! for its clients (for example `OutcomeDecodeError`): `Exception`
+//! subclasses whose one argument is their message.
 
+use uuid::Uuid;
+
+use crate::broker::BrokerError;
 use crate::catalog::{CodeCatalog, CodeEnum};
+use crate::core::lifecycle::OutcomeDecodeError;
+use crate::failure_cause::FailureCause;
 use crate::monitoring::{MonitoringQueryError, TaskActionError};
 use crate::{BrokerOperationError, BrokerOperationFailedCode, HandleOperationError};
 
@@ -117,6 +132,130 @@ pub trait ErrorEnum: 'static {
     /// The Python class of this value's variant.
     fn python_class(&self) -> &'static str;
 }
+
+/// An error enum whose instance slot values the derive generates
+/// (`#[derive(horsies_core_derive::ErrorClassValues)]`). Each variant with
+/// an `exception` slot carries its typed cause.
+pub trait ErrorClassValues: ErrorEnum {
+    /// The values of the instance slots of this value's class
+    /// ([`ErrorEnum::python_class`]), by name, in the class's slot order:
+    /// the `code` field of a `Literal` subset, the fields, then
+    /// `exception`. The class values (`code` of one member, `retryable`
+    /// of a class that never clears) are not instance slots. Pure.
+    fn slot_values(&self) -> Vec<SlotValue<'_>>;
+}
+
+/// The value of one instance slot of a generated class, with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotValue<'a> {
+    pub name: &'static str,
+    pub value: SlotData<'a>,
+}
+
+/// The value of an instance slot, by the Python type of the slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotData<'a> {
+    /// `str`.
+    Str(&'a str),
+    /// `bool`.
+    Bool(bool),
+    /// `uuid.UUID`.
+    Uuid(Uuid),
+    /// `str` holding the text of the UUID.
+    UuidText(Uuid),
+    /// A member of a code catalog: the Python enum class of `catalog`,
+    /// called with the wire value `value`.
+    CodeMember {
+        catalog: CodeCatalog,
+        value: &'static str,
+    },
+    /// The `exception` slot.
+    Exception(ExceptionValue),
+}
+
+impl<'a> SlotData<'a> {
+    /// The member of `code` in its catalog. Pure.
+    pub fn member<C: CodeEnum>(code: &C) -> Self {
+        Self::CodeMember {
+            catalog: C::CATALOG,
+            value: code.wire_value(),
+        }
+    }
+}
+
+/// The exception that a client builds from a typed cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExceptionValue {
+    /// The core's exception class of `cause` (Python: the `CoreFailure`
+    /// leaf classes of `horsies._core`), with the operation that failed as
+    /// its subject. `text` is the cause's own text; for a server error the
+    /// class carries the server's primary message instead.
+    CoreFailure {
+        text: String,
+        retryable: bool,
+        cause: FailureCause,
+    },
+    /// An instance of a generated exception class with `text` as its one
+    /// argument.
+    Generated { class: ExceptionClass, text: String },
+}
+
+/// The typed cause of a variant with an `exception` slot: the value that
+/// the client builds the exception from.
+pub trait ExceptionCause {
+    /// The exception of this cause. Pure.
+    fn exception_value(&self) -> ExceptionValue;
+}
+
+/// A broker error is the core's class of its cause, with its text and its
+/// retry rule.
+impl ExceptionCause for BrokerError {
+    fn exception_value(&self) -> ExceptionValue {
+        ExceptionValue::CoreFailure {
+            text: self.to_string(),
+            retryable: self.is_retryable(),
+            cause: self.failure_cause(),
+        }
+    }
+}
+
+/// A row outside the wire contract is an `OutcomeDecodeError` with the
+/// error's text.
+impl ExceptionCause for OutcomeDecodeError {
+    fn exception_value(&self) -> ExceptionValue {
+        ExceptionValue::Generated {
+            class: OUTCOME_DECODE_ERROR,
+            text: self.to_string(),
+        }
+    }
+}
+
+/// An exception class of the core for its clients: an `Exception` subclass
+/// whose one argument is its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExceptionClass {
+    /// The module under `horsies._catalog` that holds the class.
+    pub python_module: &'static str,
+    pub python_class: &'static str,
+    /// The class doc.
+    pub doc: &'static str,
+}
+
+/// A row that the database returned does not satisfy the wire contract
+/// (Python `horsies.core.lifecycle.outcomes.OutcomeDecodeError`;
+/// [`OutcomeDecodeError`] in the core).
+pub const OUTCOME_DECODE_ERROR: ExceptionClass = ExceptionClass {
+    python_module: "lifecycle_errors",
+    python_class: "OutcomeDecodeError",
+    doc: "The returned row does not satisfy the wire contract.\n\n\
+          Never raised for a task outcome — only when the database returned\n\
+          something this code cannot interpret, which means one side is running\n\
+          against a contract the other does not implement.",
+};
+
+/// Every exception class of the core for the Python package, in render
+/// order.
+pub const EXCEPTION_CLASSES: &[ExceptionClass] = &[OUTCOME_DECODE_ERROR];
 
 /// A union of some classes of one catalog: the failures of one operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,5 +514,264 @@ mod tests {
             refused.error_code(),
             crate::monitoring::TaskActionErrorCode::TaskNotCancellable
         );
+    }
+
+    /// A server error of the driver that carries a SQLSTATE and a primary
+    /// message, as the server sends it.
+    #[derive(Debug)]
+    struct ServerError {
+        code: &'static str,
+        message: &'static str,
+    }
+
+    impl std::fmt::Display for ServerError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.message)
+        }
+    }
+
+    impl std::error::Error for ServerError {}
+
+    impl sqlx::error::DatabaseError for ServerError {
+        fn message(&self) -> &str {
+            self.message
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.code))
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    const TASK: Uuid = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
+
+    /// The instance slots of `class`, by name, in order. The class values
+    /// (`code` of one member, `retryable` of a class that never clears)
+    /// are not instance slots.
+    fn instance_slot_names(class: &ErrorClass) -> Vec<&'static str> {
+        class
+            .slots
+            .iter()
+            .filter_map(|slot| match slot {
+                ErrorSlot::CodeMember { .. } | ErrorSlot::NeverRetryable => None,
+                ErrorSlot::CodeSubset { .. } => Some("code"),
+                ErrorSlot::Field { name, .. } => Some(*name),
+                ErrorSlot::Exception { .. } => Some("exception"),
+            })
+            .collect()
+    }
+
+    /// One value of each variant of the task action catalog.
+    fn every_task_action_error() -> Vec<TaskActionError> {
+        vec![
+            TaskActionError::NotFound {
+                message: format!("Task {TASK} does not exist."),
+                task_id: TASK,
+            },
+            TaskActionError::NotCancellable {
+                message: format!("Task {TASK} cannot be cancelled from status COMPLETED."),
+                task_id: TASK,
+                current_status: crate::TaskStatus::Completed,
+            },
+            TaskActionError::WorkflowTask {
+                message: format!(
+                    "Task {TASK} belongs to a workflow; use the workflow actions instead."
+                ),
+                task_id: TASK,
+                current_status: crate::TaskStatus::Pending,
+            },
+            TaskActionError::cancel_failed(
+                TASK,
+                BrokerError::ConnectionFailed("refused".to_owned()),
+            ),
+            TaskActionError::StoredDataInvalid {
+                message: "Task cancel failed: stored data does not parse: \
+                          terminalization outcome decode failed: observed_status NOT_KNOWN"
+                    .to_owned(),
+                task_id: TASK,
+                cause: OutcomeDecodeError("observed_status NOT_KNOWN".to_owned()),
+            },
+        ]
+    }
+
+    /// The values of each task action name the instance slots of its class,
+    /// in the class's order, and the values cover every class.
+    #[test]
+    fn the_values_of_each_task_action_name_the_instance_slots_of_its_class() {
+        let catalog = <TaskActionError as ErrorEnum>::ERROR_CATALOG;
+        let errors = every_task_action_error();
+        for error in &errors {
+            let class = catalog
+                .classes
+                .iter()
+                .find(|class| class.python_class == error.python_class())
+                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+            let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
+            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+        }
+        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let classes: HashSet<&str> = catalog
+            .classes
+            .iter()
+            .map(|class| class.python_class)
+            .collect();
+        assert_eq!(covered, classes);
+    }
+
+    /// A refusal gives its message, its task and its status as a member of
+    /// the status catalog.
+    #[test]
+    fn a_refusal_gives_its_message_its_task_and_its_status_as_a_member() {
+        let refused = TaskActionError::NotCancellable {
+            message: "refused".to_owned(),
+            task_id: TASK,
+            current_status: crate::TaskStatus::Completed,
+        };
+        assert_eq!(
+            refused.slot_values(),
+            vec![
+                SlotValue {
+                    name: "message",
+                    value: SlotData::Str("refused"),
+                },
+                SlotValue {
+                    name: "task_id",
+                    value: SlotData::Uuid(TASK),
+                },
+                SlotValue {
+                    name: "current_status",
+                    value: SlotData::CodeMember {
+                        catalog: <crate::TaskStatus as CodeEnum>::CATALOG,
+                        value: "COMPLETED",
+                    },
+                },
+            ]
+        );
+    }
+
+    /// Python's `TaskActionDbOperationFailed` of a cancel that met a broker
+    /// error: the message holds the error's text, and the exception is the
+    /// core's class of each cause with the same text and the error's retry
+    /// rule.
+    #[test]
+    fn a_database_failure_builds_its_exception_from_its_cause_for_each_cause() {
+        let cases = [
+            (
+                BrokerError::Database(sqlx::Error::Database(Box::new(ServerError {
+                    code: "57014",
+                    message: "canceling statement due to statement timeout",
+                }))),
+                FailureCause::Server(crate::ServerErrorFacts::of_code(
+                    "57014",
+                    "canceling statement due to statement timeout".to_owned(),
+                )),
+                true,
+            ),
+            (
+                BrokerError::ConnectionFailed("connection refused".to_owned()),
+                FailureCause::Connection,
+                true,
+            ),
+            (
+                BrokerError::ClaimContract("ordinality 3 has no answer".to_owned()),
+                FailureCause::ContractViolation,
+                false,
+            ),
+            (
+                BrokerError::InvalidIdempotencyReservationWindow("0 s".to_owned()),
+                FailureCause::PreconditionFailed,
+                false,
+            ),
+        ];
+        for (cause, expected_cause, expected_retryable) in cases {
+            let text = cause.to_string();
+            let failed = TaskActionError::cancel_failed(TASK, cause);
+            let message = format!("Task cancel failed: {text}");
+            assert_eq!(failed.message(), message);
+            assert_eq!(failed.retryable(), expected_retryable, "{text}");
+            assert_eq!(failed.failure_cause(), expected_cause, "{text}");
+            assert_eq!(
+                failed.slot_values(),
+                vec![
+                    SlotValue {
+                        name: "message",
+                        value: SlotData::Str(&message),
+                    },
+                    SlotValue {
+                        name: "retryable",
+                        value: SlotData::Bool(expected_retryable),
+                    },
+                    SlotValue {
+                        name: "task_id",
+                        value: SlotData::Uuid(TASK),
+                    },
+                    SlotValue {
+                        name: "exception",
+                        value: SlotData::Exception(ExceptionValue::CoreFailure {
+                            text: text.clone(),
+                            retryable: expected_retryable,
+                            cause: expected_cause.clone(),
+                        }),
+                    },
+                ],
+                "{text}"
+            );
+        }
+    }
+
+    /// Python's `TaskActionStoredDataInvalid`: the exception is
+    /// `OutcomeDecodeError` with the decode error's text.
+    #[test]
+    fn stored_data_that_does_not_parse_builds_an_outcome_decode_error() {
+        let cause = OutcomeDecodeError("observed_status NOT_KNOWN".to_owned());
+        assert_eq!(
+            cause.exception_value(),
+            ExceptionValue::Generated {
+                class: OUTCOME_DECODE_ERROR,
+                text: "terminalization outcome decode failed: observed_status NOT_KNOWN".to_owned(),
+            }
+        );
+        let invalid = every_task_action_error()
+            .into_iter()
+            .find(|error| matches!(error, TaskActionError::StoredDataInvalid { .. }))
+            .expect("the list holds the stored data refusal");
+        assert_eq!(
+            invalid.slot_values().last(),
+            Some(&SlotValue {
+                name: "exception",
+                value: SlotData::Exception(cause.exception_value()),
+            })
+        );
+        assert_eq!(invalid.failure_cause(), FailureCause::ContractViolation);
+        assert!(!invalid.retryable());
+    }
+
+    /// The exception classes are Python's: `OutcomeDecodeError` with its
+    /// doc, and no two classes share a name.
+    #[test]
+    fn the_exception_classes_are_named_once_with_python_s_doc() {
+        let names: HashSet<&str> = EXCEPTION_CLASSES
+            .iter()
+            .map(|class| class.python_class)
+            .collect();
+        assert_eq!(names.len(), EXCEPTION_CLASSES.len());
+        assert!(OUTCOME_DECODE_ERROR
+            .doc
+            .starts_with("The returned row does not satisfy the wire contract.\n\nNever raised"));
     }
 }

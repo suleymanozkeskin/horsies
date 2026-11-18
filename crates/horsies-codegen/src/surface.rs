@@ -103,9 +103,19 @@ pub struct StubStaticMethod {
     pub function: StubFunction,
 }
 
+/// A `from <module> import <names>` line of the stub: classes of the
+/// package that the annotations name, for example the generated error
+/// classes that an operation returns.
+#[derive(Clone, Copy, Debug)]
+pub struct StubImport {
+    pub module: &'static str,
+    pub names: &'static [&'static str],
+}
+
 /// The whole module.
 #[derive(Clone, Copy, Debug)]
 pub struct ModuleSurface {
+    pub imports: &'static [StubImport],
     pub exceptions: &'static [StubException],
     pub classes: &'static [StubClass],
     pub static_methods: &'static [StubStaticMethod],
@@ -433,8 +443,9 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const ENSURE_PARTITION_COVERAGE_OUTCOME: &str =
     "CoverageEnsuredRecord | CoverageEnsureFailedRecord | CoverageFailed";
 const PRUNE_EXPIRED_PARTITIONS_OUTCOME: &str = "PrunePassRecord | PruneFailed";
-const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
-     CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
+/// A refused or failed cancel is a generated class of
+/// `horsies._catalog.monitoring_errors`, built in Rust.
+const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | TaskActionCoreError";
 const EXPIRE_PENDING_TASKS_OUTCOME: &str =
     "PendingExpiryDrained | PendingExpiryBoundReached | PendingExpiryFailed";
 const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
@@ -2098,58 +2109,6 @@ const RECORD_CLASSES: &[StubClass] = &[
                 annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
             },
         ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelRefusedWorkflowTask",
-        doc: "The task belongs to a workflow, live or finished. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            StubProperty {
-                name: "current_status",
-                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
-            },
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelRefusedStatus",
-        doc: "The task's status does not admit the cancel: a terminal status (an earlier cancel\nincluded), or RUNNING without the opt-in. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            StubProperty {
-                name: "current_status",
-                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
-            },
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelTaskAbsent",
-        doc: "Neither the live table nor history holds the task. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelFailed",
-        doc: "The connect, the client family check or the statement failed. The statement wrote\nnothing, or it committed and its reply was lost.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelStoredDataInvalid",
-        doc: "Stored task data does not parse. The cancel refused the task; nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
         methods: &[],
     },
     StubClass {
@@ -3904,7 +3863,14 @@ const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
     },
 }];
 
+/// The generated classes of `horsies._catalog` that the annotations name.
+const IMPORTS: &[StubImport] = &[StubImport {
+    module: "horsies._catalog.monitoring_errors",
+    names: &["TaskActionCoreError"],
+}];
+
 pub const CORE_MODULE: ModuleSurface = ModuleSurface {
+    imports: IMPORTS,
     exceptions: EXCEPTIONS,
     classes: &CLASSES,
     static_methods: STATIC_METHODS,

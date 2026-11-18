@@ -6,7 +6,8 @@ core's records (`horsies_core::error_catalog`). The old modules re-export
 them. This test pins, for each class, that the public name is the
 generated class, and that its fields (with their `repr` flags), its `code`
 class value and its `retryable` class value are the ones of the
-hand-written class that it replaced.
+hand-written class that it replaced. It also pins the generated exception
+class ``OutcomeDecodeError`` to the shape of the class that it replaced.
 """
 
 from __future__ import annotations
@@ -16,9 +17,15 @@ from typing import Final, NamedTuple
 
 import pytest
 
-from horsies._catalog import broker_errors, monitoring_errors, workflow_handle_errors
+from horsies._catalog import (
+    broker_errors,
+    lifecycle_errors,
+    monitoring_errors,
+    workflow_handle_errors,
+)
 from horsies._catalog.error_detail import NoCause as GeneratedNoCause
 from horsies.core.brokers import result_types
+from horsies.core.lifecycle import outcomes
 from horsies.core.models.workflow import handle_types
 from horsies.core.types import error_detail
 from horsies.monitoring import errors, task_actions
@@ -89,6 +96,33 @@ class TestGeneratedErrorClass:
 
         assert params.frozen is True
         assert '__slots__' in vars(shape.generated)
+
+
+class TestOutcomeDecodeError:
+    """The class that the lifecycle decoders raise and that
+    ``TaskActionStoredDataInvalid.exception`` holds: a plain ``Exception``
+    subclass whose one argument is its message."""
+
+    def test_the_public_name_is_the_generated_class(self) -> None:
+        assert outcomes.OutcomeDecodeError is lifecycle_errors.OutcomeDecodeError
+
+    def test_it_is_an_exception_subclass_and_no_dataclass(self) -> None:
+        generated = lifecycle_errors.OutcomeDecodeError
+
+        assert generated.__bases__ == (Exception,)
+        assert not dataclasses.is_dataclass(generated)
+
+    def test_its_text_and_its_args_are_its_message(self) -> None:
+        error = lifecycle_errors.OutcomeDecodeError('row 3 has no kind')
+
+        assert str(error) == 'row 3 has no kind'
+        assert error.args == ('row 3 has no kind',)
+
+    def test_it_keeps_python_s_doc(self) -> None:
+        doc = lifecycle_errors.OutcomeDecodeError.__doc__
+
+        assert doc is not None
+        assert doc.startswith('The returned row does not satisfy the wire contract.')
 
 
 def test_no_cause_is_the_generated_class_without_fields() -> None:

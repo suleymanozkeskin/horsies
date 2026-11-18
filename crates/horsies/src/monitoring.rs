@@ -168,12 +168,7 @@ pub async fn cancel_task(
     refuse_in_a_fork(format_args!("Task cancel of task {task_id}"));
     match app.reads_handle().broker().await {
         Ok(broker) => core_monitoring::cancel_task(&broker, task_id, include_running).await,
-        Err(error) => Err(TaskActionError::DbOperationFailed {
-            message: format!("Task cancel failed: {error}"),
-            retryable: error.is_retryable(),
-            task_id,
-            cause: error.failure_cause(),
-        }),
+        Err(error) => Err(TaskActionError::cancel_failed(task_id, error)),
     }
 }
 

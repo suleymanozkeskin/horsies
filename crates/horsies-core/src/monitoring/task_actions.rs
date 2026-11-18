@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::broker::{BrokerError, CancelAnswer, CancelTaskError, PostgresBroker};
+use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::types::status::TaskStatus;
 use crate::failure_cause::FailureCause;
 
@@ -35,8 +36,15 @@ pub enum TaskActionErrorCode {
 /// action catalog that the core produces, each with the facts of its state.
 /// Python's `TaskActionEventLoopLimit` is a class of the Python client only,
 /// so it is not a variant. Each variant's doc is its Python class doc
-/// (`ErrorCatalog`).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, horsies_core_derive::ErrorCatalog)]
+/// (`ErrorCatalog`). A variant with an `exception` carries its typed
+/// cause, which the client builds that exception from
+/// (`ErrorClassValues`).
+#[derive(
+    Debug,
+    thiserror::Error,
+    horsies_core_derive::ErrorCatalog,
+    horsies_core_derive::ErrorClassValues,
+)]
 #[error_catalog(
     module = "monitoring_errors",
     code = "TaskActionErrorCode",
@@ -116,8 +124,10 @@ pub enum TaskActionError {
         retryable: bool,
         #[error_slot(python = "Uuid")]
         task_id: Uuid,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// The failed connect, client family check or statement.
+        #[error_slot(cause)]
+        #[source]
+        cause: BrokerError,
     },
     /// Stored task data does not parse. Nothing changed: the cancel refused the task.
     ///
@@ -136,10 +146,26 @@ pub enum TaskActionError {
         message: String,
         #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        /// The outcome row that does not decode.
+        #[error_slot(cause)]
+        #[source]
+        cause: OutcomeDecodeError,
     },
 }
 
 impl TaskActionError {
+    /// The cancel of `task_id` met `cause`: a failed connect, client family
+    /// check or statement. Nothing was written, or the statement's outcome
+    /// is unknown. `retryable` is the cause's retry rule. Pure.
+    pub fn cancel_failed(task_id: Uuid, cause: BrokerError) -> Self {
+        Self::DbOperationFailed {
+            message: format!("Task cancel failed: {cause}"),
+            retryable: cause.is_retryable(),
+            task_id,
+            cause,
+        }
+    }
+
     /// The catalog code of the variant. Pure.
     pub fn code(&self) -> TaskActionErrorCode {
         crate::error_catalog::ErrorEnum::error_code(self)
@@ -184,7 +210,7 @@ impl TaskActionError {
     /// precondition that does not hold. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::DbOperationFailed { cause, .. } => cause.clone(),
+            Self::DbOperationFailed { cause, .. } => cause.failure_cause(),
             Self::StoredDataInvalid { .. } => FailureCause::ContractViolation,
             Self::NotFound { .. } | Self::NotCancellable { .. } | Self::WorkflowTask { .. } => {
                 FailureCause::PreconditionFailed
@@ -193,6 +219,8 @@ impl TaskActionError {
     }
 }
 
+/// A task that the cancel moved to CANCELLED: `was_status` is the status
+/// it left.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCancelled {
     pub task_id: Uuid,
@@ -224,26 +252,13 @@ fn state_conflict(task_id: Uuid, current_status: TaskStatus) -> TaskActionError 
     }
 }
 
-/// A failed connect, client family check or statement: nothing was
-/// written, or the statement's outcome is unknown.
-fn broker_failure(task_id: Uuid, error: &BrokerError) -> TaskActionError {
-    TaskActionError::DbOperationFailed {
-        message: format!("Task cancel failed: {error}"),
-        retryable: error.is_retryable(),
-        task_id,
-        cause: error.failure_cause(),
-    }
-}
-
 /// Stored data that does not parse. Nothing changed: the cancel refused the
 /// task.
-fn stored_data_invalid(task_id: Uuid, detail: impl Into<String>) -> TaskActionError {
+fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionError {
     TaskActionError::StoredDataInvalid {
-        message: format!(
-            "Task cancel failed: stored data does not parse: {}",
-            detail.into()
-        ),
+        message: format!("Task cancel failed: stored data does not parse: {cause}"),
         task_id,
+        cause,
     }
 }
 
@@ -274,9 +289,70 @@ pub async fn cancel_task(
             Err(state_conflict(task_id, current_status))
         }
         Ok(CancelAnswer::TaskAbsent) => Err(not_found(task_id)),
-        Err(CancelTaskError::Broker(error)) => Err(broker_failure(task_id, &error)),
-        Err(CancelTaskError::StoredDataInvalid(error)) => {
-            Err(stored_data_invalid(task_id, error.to_string()))
-        }
+        Err(CancelTaskError::Broker(error)) => Err(TaskActionError::cancel_failed(task_id, error)),
+        Err(CancelTaskError::StoredDataInvalid(error)) => Err(stored_data_invalid(task_id, error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TASK: Uuid = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
+
+    /// Python's texts of the refusals
+    /// (`tests/dualrun/reference/cancel_caller.py::cancel_answer`), each
+    /// with the task id in its text form.
+    #[test]
+    fn each_refusal_has_python_s_message() {
+        assert_eq!(
+            not_found(TASK).message(),
+            "Task 3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607 does not exist."
+        );
+        assert_eq!(
+            workflow_bound(TASK, TaskStatus::Failed).message(),
+            "Task 3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607 belongs to a workflow; \
+             use the workflow actions instead."
+        );
+        assert_eq!(
+            state_conflict(TASK, TaskStatus::Cancelled).message(),
+            "Task 3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607 cannot be cancelled from status CANCELLED."
+        );
+    }
+
+    /// Python's texts of the failures
+    /// (`tests/dualrun/reference/cancel_caller.py::db_err` and
+    /// `::stored_data_err`): the cause's text after the action.
+    #[test]
+    fn each_failure_has_python_s_message_and_keeps_its_cause() {
+        let failed = TaskActionError::cancel_failed(
+            TASK,
+            BrokerError::ConnectionFailed("connection refused".to_owned()),
+        );
+        assert_eq!(
+            failed.message(),
+            "Task cancel failed: connection failed: connection refused"
+        );
+        assert!(failed.retryable());
+        assert_eq!(failed.failure_cause(), FailureCause::Connection);
+        assert!(matches!(
+            failed,
+            TaskActionError::DbOperationFailed {
+                cause: BrokerError::ConnectionFailed(_),
+                ..
+            }
+        ));
+
+        let invalid = stored_data_invalid(
+            TASK,
+            OutcomeDecodeError("observed_status NOT_KNOWN".to_owned()),
+        );
+        assert_eq!(
+            invalid.message(),
+            "Task cancel failed: stored data does not parse: \
+             terminalization outcome decode failed: observed_status NOT_KNOWN"
+        );
+        assert!(!invalid.retryable());
+        assert_eq!(invalid.failure_cause(), FailureCause::ContractViolation);
     }
 }

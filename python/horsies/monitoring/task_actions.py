@@ -22,7 +22,10 @@ request through the rerun contract, with new identity and lineage.
 ``cancel_task`` returns ``Result[TaskCancelled, TaskActionError]``. The
 error side is ``TaskActionError``: a union with one frozen variant per
 ``TaskActionErrorCode`` member. Every variant has ``code``, ``message``,
-``retryable`` and ``task_id``. Callers match on the variant.
+``retryable`` and ``task_id``. Callers match on the variant. The core
+builds the variant of a refused or failed cancel (the generated classes of
+``horsies._catalog.monitoring_errors``) with its message and its
+exception; this module returns it as it is.
 """
 
 from __future__ import annotations
@@ -42,17 +45,8 @@ from horsies._catalog.monitoring_errors import (
     TaskActionStoredDataInvalid as TaskActionStoredDataInvalid,
     TaskActionWorkflowTask as TaskActionWorkflowTask,
 )
-from horsies._core import (
-    CancelFailed,
-    CancelRefusedStatus,
-    CancelRefusedWorkflowTask,
-    CancelStoredDataInvalid,
-    CancelTaskAbsent,
-    CoreError,
-    TaskCancelledRecord,
-)
+from horsies._core import CoreError, TaskCancelledRecord
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.types.core_failure import call_refusal_or_raise, core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
@@ -98,55 +92,13 @@ CANCEL_TASK_SQL = text("""
     SELECT * FROM horsies_cancel_task(CAST(:task_id AS uuid), :include_running)
 """)
 
-def _not_found(task_id: uuid.UUID) -> Err[TaskActionNotFound]:
-    """The row does not exist — retention may have removed it."""
-    return Err(
-        TaskActionNotFound(
-            message=f'Task {task_id} does not exist.',
-            task_id=task_id,
-        )
-    )
-
-
-def _workflow_bound(
-    task_id: uuid.UUID, current_status: TaskStatus,
-) -> Err[TaskActionWorkflowTask]:
-    """Workflow-bound rows are driven by the workflow primitives only."""
-    return Err(
-        TaskActionWorkflowTask(
-            message=(
-                f'Task {task_id} belongs to a workflow; use the workflow '
-                f'actions instead.'
-            ),
-            task_id=task_id,
-            current_status=current_status,
-        )
-    )
-
-
-def _not_cancellable(
-    task_id: uuid.UUID, current_status: TaskStatus,
-) -> Err[TaskActionNotCancellable]:
-    """The row exists but its status does not admit the cancel."""
-    return Err(
-        TaskActionNotCancellable(
-            message=(
-                f'Task {task_id} cannot be cancelled from status '
-                f'{current_status.value}.'
-            ),
-            task_id=task_id,
-            current_status=current_status,
-        )
-    )
-
-
 def _db_err(
     task_id: uuid.UUID,
     message: str,
     retryable: bool,
     exc: BaseException,
 ) -> Err[TaskActionDbOperationFailed]:
-    """The cancel statement failed, or the core could not run it."""
+    """The core of this process could not run the cancel."""
     return Err(
         TaskActionDbOperationFailed(
             message=f'Task cancel failed: {message}',
@@ -158,39 +110,26 @@ def _db_err(
 
 
 def _cancel_answer(
-    task_id: uuid.UUID,
-    outcome: TaskCancelledRecord
-    | CancelRefusedWorkflowTask
-    | CancelRefusedStatus
-    | CancelTaskAbsent
-    | CancelFailed
-    | CancelStoredDataInvalid,
+    outcome: TaskCancelledRecord | TaskActionCoreError,
 ) -> Result[TaskCancelled, TaskActionError]:
-    """The answer of the cancel to its caller, from the core's record. Pure.
+    """The answer of the cancel to its caller. Pure.
 
-    A finished task is refused as it was when it was live: a workflow task
-    with the workflow-bound refusal, a plain task as not cancellable from
-    its terminal status (an earlier cancel included).
+    A refused or failed cancel is the core's error class, returned as it
+    is. A finished task is refused as it was when it was live: a workflow
+    task with the workflow-bound refusal, a plain task as not cancellable
+    from its terminal status (an earlier cancel included).
     """
     match outcome:
-        case TaskCancelledRecord(was_status=was_status):
+        case TaskCancelledRecord(task_id=task_id, was_status=was_status):
             return Ok(TaskCancelled(task_id=task_id, was_status=TaskStatus(was_status)))
-        case CancelRefusedWorkflowTask(current_status=status):
-            return _workflow_bound(task_id, TaskStatus(status))
-        case CancelRefusedStatus(current_status=status):
-            return _not_cancellable(task_id, TaskStatus(status))
-        case CancelTaskAbsent():
-            return _not_found(task_id)
-        case CancelFailed(message=message, retryable=retryable, exception=exception):
-            return _db_err(task_id, message, retryable, exception)
-        case CancelStoredDataInvalid(message=message):
-            return Err(
-                TaskActionStoredDataInvalid(
-                    message=f'Task cancel failed: stored data does not parse: {message}',
-                    task_id=task_id,
-                    exception=OutcomeDecodeError(message),
-                )
-            )
+        case (
+            TaskActionNotFound()
+            | TaskActionNotCancellable()
+            | TaskActionWorkflowTask()
+            | TaskActionDbOperationFailed()
+            | TaskActionStoredDataInvalid()
+        ):
+            return Err(outcome)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -230,4 +169,4 @@ async def cancel_task(
     except CoreError as exc:
         refusal = call_refusal_or_raise(exc)
         return _db_err(task_id, str(refusal), core_error_retryable(refusal), refusal)
-    return _cancel_answer(task_id, outcome)
+    return _cancel_answer(outcome)
