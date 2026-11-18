@@ -9,6 +9,7 @@ test connects.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import time
@@ -38,6 +39,8 @@ from horsies._core import (
     SchedulerTickFailed,
 )
 from horsies.core.app import Horsies
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
+from horsies.core.codec.json_io import SerializationError
 from horsies.core.errors import ConfigurationError, ErrorCode, RegistryError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -53,7 +56,7 @@ from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
 from horsies.core.scheduler.manifest import to_scheduler_manifest
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import PreparedSchedule, prepare_schedules
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Err, Ok
 
 _DATABASE_URL = 'postgresql://user:pass@localhost/db'
 _REPORT_TASK = 'reports.nightly'
@@ -229,6 +232,84 @@ class TestToSchedulerManifest:
         assert nightly['activation']['send']['task_options']['kind'] == 'ENCODED'
         assert paused == {'name': 'paused', 'activation': {'kind': 'DISABLED'}}
 
+    @pytest.mark.asyncio
+    async def test_the_send_of_a_schedule_holds_the_texts_that_a_plain_send_stores(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The options text and the input text of each slot are those that a
+        plain send of the task with the same kwargs gives the broker."""
+        app = _app(_nightly())
+        send_broker = MagicMock()
+        send_broker.enqueue_async = AsyncMock(return_value=Ok('sent-task'))
+        monkeypatch.setattr(app, 'get_broker', lambda: send_broker)
+
+        send = _enabled(_manifest(app).schedules[0]).send
+        sent = await app.tasks[_REPORT_TASK].send_async(day='monday', limit=5)
+
+        assert isinstance(sent, Ok)
+        send_kwargs = send_broker.enqueue_async.await_args.kwargs
+        assert send_kwargs['task_options'] is not None
+        assert send.task_options == ScheduleTaskOptionsEncoded(json=send_kwargs['task_options'])
+        assert send.input_json == send_kwargs['input_json']
+        assert send_kwargs['good_until'] is None
+
+
+# =============================================================================
+# Options that do not encode
+# =============================================================================
+
+
+_OPTIONS_TASK = 'reports.options'
+
+
+def _register_options_task(app: Horsies) -> str | None:
+    @app.task(_OPTIONS_TASK, timeout_ms=30_000)
+    def options_task(*, value: int) -> TaskResult[int, TaskError]:
+        return TaskResult(ok=value)
+
+    return options_task.task_options_json
+
+
+@pytest.mark.unit
+class TestOptionsThatDoNotEncode:
+    """The decorator encodes the options once; a failure refuses the schedule at start."""
+
+    def test_the_schedule_is_refused_at_start_with_subject_and_cause(self) -> None:
+        schedule = TaskSchedule(
+            name='every_minute',
+            task_name=_OPTIONS_TASK,
+            pattern=IntervalSchedule(seconds=60),
+            kwargs={'value': 1},
+        )
+        schedule_config = ScheduleConfig(schedules=[schedule])
+        app = Horsies(
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+                schedule=schedule_config,
+            ),
+        )
+
+        with patch(
+            'horsies.core.task_decorator.serialize_task_options',
+            return_value=Err(SerializationError('int too large for JSON')),
+        ):
+            with pytest.raises(ValueError) as definition_error:
+                _ = _register_options_task(app)
+
+        assert _OPTIONS_TASK in str(definition_error.value)
+        assert 'int too large for JSON' in str(definition_error.value)
+        assert _OPTIONS_TASK not in app.tasks
+
+        prepared = prepare_schedules(app, schedule_config)
+
+        assert isinstance(prepared, Err)
+        start_error = prepared.err_value[0]
+        assert isinstance(start_error, RegistryError)
+        assert start_error.code == ErrorCode.TASK_NOT_REGISTERED
+        assert _OPTIONS_TASK in start_error.message
+        assert any('every_minute' in note for note in start_error.notes)
+
 
 # =============================================================================
 # The facade on CoreScheduler
@@ -276,6 +357,37 @@ def _scheduler(*schedules: TaskSchedule) -> tuple[Scheduler, MagicMock]:
     broker.close_async = AsyncMock(return_value=Ok(None))
     setattr(app, 'get_broker', MagicMock(return_value=broker))
     return Scheduler(app), broker
+
+
+@pytest.mark.unit
+class TestInit:
+    def test_an_app_without_a_schedule_config_is_refused(self) -> None:
+        app = Horsies(
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=PostgresConfig(database_url=SecretStr(_DATABASE_URL)),
+            ),
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            Scheduler(app)
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'schedule configuration' in error.message
+        assert error.help_text is not None
+
+    def test_a_valid_config_builds_nothing_before_the_start(
+        self, core_double: _CoreDouble,
+    ) -> None:
+        scheduler, _broker = _scheduler(_nightly())
+
+        assert scheduler.schedule_config is scheduler.app.config.schedule
+        assert scheduler.broker is None
+        assert core_double.built == []
+        get_broker = scheduler.app.get_broker
+        assert isinstance(get_broker, MagicMock)
+        get_broker.assert_not_called()
 
 
 @pytest.mark.unit
@@ -357,6 +469,33 @@ class TestStart:
             'payload_text': '{"day":"monday","limit":5}',
         }
         assert len(core_double.built) == 1
+
+    async def test_the_task_modules_are_imported_before_the_schedules_are_prepared(
+        self, core_double: _CoreDouble,
+    ) -> None:
+        """The import fills the task registry that the prepare reads; the
+        core scheduler is built after both."""
+        scheduler, broker = _scheduler(_nightly())
+        steps: list[str] = []
+
+        def import_task_modules() -> None:
+            steps.append('import')
+
+        def prepare(app: Horsies, schedule_config: ScheduleConfig) -> object:
+            steps.append('prepare')
+            assert core_double.built == []
+            return prepare_schedules(app, schedule_config)
+
+        with (
+            patch.object(scheduler, '_preload_task_modules', side_effect=import_task_modules),
+            patch('horsies.core.scheduler.service.prepare_schedules', side_effect=prepare),
+        ):
+            await scheduler.start()
+
+        assert steps == ['import', 'prepare']
+        core = core_double.only()
+        assert core.handle is broker._core_handle
+        core.start_async.assert_awaited_once_with()
 
 
 @pytest.mark.unit
@@ -451,3 +590,41 @@ class TestRunForeverAndStop:
 
         assert core_double.built == []
         broker.close_async.assert_not_awaited()
+
+    async def test_a_stop_without_a_build_reaches_the_core_scheduler_of_a_later_start(
+        self, core_double: _CoreDouble,
+    ) -> None:
+        scheduler, broker = _scheduler(_nightly())
+
+        await scheduler.stop()
+        await scheduler.start()
+
+        core_double.only().request_stop.assert_called_once_with()
+        broker.close_async.assert_not_awaited()
+
+    async def test_a_failed_broker_close_is_logged_and_the_stop_returns(
+        self, core_double: _CoreDouble, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        scheduler, broker = _scheduler(_nightly())
+        broker.close_async = AsyncMock(
+            return_value=Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLOSE_FAILED,
+                    message='close failed',
+                    retryable=False,
+                    exception=ConnectionError('close failed'),
+                ),
+            ),
+        )
+        await scheduler.start()
+
+        with caplog.at_level(logging.ERROR, logger='horsies.scheduler'):
+            await scheduler.stop()
+
+        core_double.only().request_stop.assert_called_once_with()
+        broker.close_async.assert_awaited_once_with()
+        assert any(
+            record.levelno == logging.ERROR
+            and 'Broker close failed: close failed' in record.getMessage()
+            for record in caplog.records
+        )

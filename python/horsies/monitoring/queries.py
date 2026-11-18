@@ -3,8 +3,9 @@
 Every query takes the broker and returns a ``MonitoringResult``. Each runs
 in the core, on the broker's core handle (``horsies._core``): the core sends
 the one statement of the read's 0007 function in autocommit, and the query
-validates the JSON text of the core's model into the response model. The
-error side has two states that a read gives:
+validates the JSON text of the core's model into the response model with
+``validate_core_model_json`` of the codec. The error side has two states
+that a read gives:
 
 * ``MonitoringQueryDbOperationFailed``: a database failure that the core
   reports, or a core boundary error of the call (``CoreCallRefusal``).
@@ -58,6 +59,7 @@ from horsies._core import (
     WorkflowRunsQuery as CoreWorkflowRunsQuery,
 )
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.codec.json_io import validate_core_model_json
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.models.tasks import (
     ContractCode,
@@ -133,9 +135,12 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
 _INT4_MIN: Final = -(2**31)
 _INT4_MAX: Final = 2**31 - 1
 
-# The models of the reads whose JSON is a list or an optional model.
+# The response type of each read, for ``validate_core_model_json``.
 _STATUS_COUNTS: Final = TypeAdapter(list[StatusCount])
+_FACETS: Final = TypeAdapter(Facets)
 _BREAKDOWN: Final = TypeAdapter(Breakdown)
+_TASK_LIST_PAGE: Final = TypeAdapter(TaskListPage)
+_TASK_DETAIL: Final = TypeAdapter(TaskDetail)
 _WORKFLOW_NAMES: Final = TypeAdapter(list[str])
 _WORKFLOW_RUNS: Final = TypeAdapter(list[WorkflowRunSummary])
 _WORKFLOW_RUN: Final[TypeAdapter[WorkflowRunDetail | None]] = TypeAdapter(
@@ -309,7 +314,7 @@ async def task_stats(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_STATUS_COUNTS.validate_json(text))
+            return Ok(validate_core_model_json(_STATUS_COUNTS, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.task_stats', outcome)
 
@@ -355,7 +360,7 @@ async def task_facets(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(Facets.model_validate_json(text))
+            return Ok(validate_core_model_json(_FACETS, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.task_facets', outcome)
 
@@ -411,7 +416,7 @@ async def task_breakdown(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_BREAKDOWN.validate_json(text))
+            return Ok(validate_core_model_json(_BREAKDOWN, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.task_breakdown', outcome)
 
@@ -479,7 +484,7 @@ async def list_tasks(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(TaskListPage.model_validate_json(text))
+            return Ok(validate_core_model_json(_TASK_LIST_PAGE, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_tasks', outcome)
 
@@ -519,7 +524,7 @@ async def get_task_detail(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(TaskDetail.model_validate_json(text))
+            return Ok(validate_core_model_json(_TASK_DETAIL, text))
         case TaskDetailAbsent(task_id=absent_id, reason=reason):
             return Ok(TaskDetailNotFound(task_id=absent_id, reason=TaskAbsenceReason(reason)))
         case MonitoringFailed():
@@ -551,7 +556,7 @@ async def list_workflow_names(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_NAMES.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_NAMES, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_workflow_names', outcome)
 
@@ -583,7 +588,7 @@ async def list_workflow_runs(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_RUNS.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_RUNS, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_workflow_runs', outcome)
 
@@ -618,7 +623,7 @@ async def get_workflow_run(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_RUN.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_RUN, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.get_workflow_run', outcome)
 
@@ -666,7 +671,7 @@ async def get_workflow_node(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_NODE.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_NODE, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.get_workflow_node', outcome)
 
@@ -697,6 +702,6 @@ async def list_schedules(
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_SCHEDULES.validate_json(text))
+            return Ok(validate_core_model_json(_SCHEDULES, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_schedules', outcome)

@@ -9,12 +9,18 @@ so non-JSON-native values fail closed instead of being silently coerced
 No class-tag serialization lives here — typed Python values are encoded via
 ``codec/typed.py`` (``encode_value`` / ``encode_task_result`` / ...) into a
 plain JSON-native shape first, then handed to ``dumps_json``.
+
+``validate_core_model_json`` reads the JSON text that the core
+(``horsies._core``) writes from its model of a monitoring read into the
+Pydantic type of that read.
 """
 
 from __future__ import annotations
 
 import json
 from typing import Dict, Final, List, Union
+
+from pydantic import TypeAdapter
 
 from horsies.core.codec.json_value import (
     JSON_TEXT_TOO_DEEP,
@@ -170,3 +176,25 @@ def loads_json_bytes(payload: bytes) -> SerdeResult[Json]:
             f'JSON parse failed: payload is not UTF-8 at byte {exc.start}'
         ))
     return loads_json(text)
+
+
+def validate_core_model_json[T](adapter: TypeAdapter[T], text: str) -> T:
+    """Validate the JSON text of a core model into the type of ``adapter``.
+
+    The core (``horsies._core``) writes ``text`` from its own model of a
+    monitoring read. The monitoring reads validate that text only here, so
+    the codec holds their one parse site.
+
+    This is ``adapter.validate_json(text)`` in the adapter's own mode. A
+    ``TypeAdapter`` of a ``BaseModel`` uses the validator of the model, so the
+    value and the error are those of ``Model.model_validate_json(text)``.
+
+    It does not run the hooks of ``loads_json``. Use it only for text that the
+    core writes, never for task input or a stored payload. Pure: no I/O.
+
+    Raises:
+        pydantic.ValidationError: the text does not match the type. The core
+            and the Python type disagree, which is a defect. The monitoring
+            reads do not catch it.
+    """
+    return adapter.validate_json(text)

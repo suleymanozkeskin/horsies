@@ -1553,6 +1553,56 @@ async fn a_release_that_frees_no_lock_is_ownership_lost() {
     database.drop().await;
 }
 
+/// Python `test_broker_postgres.py::TestPostgresBrokerPgBouncerWiring::test_schema_lock_cancellation_releases_and_closes`:
+/// a lock session dropped while it may hold the lock (an install whose
+/// caller left) discards its connection. The server ends that session and
+/// its lock, so another session takes the lock.
+#[tokio::test]
+#[serial]
+async fn a_dropped_lock_session_frees_the_lock_with_its_session() {
+    let database = MigrationTestDatabase::create().await;
+    let handle = core_handle(database.database.url());
+    let open = handle
+        .pools()
+        .expect("the statement layer accepts the test URL");
+    let lock = test_lock();
+    let session = LockSession::acquire(open.pools().session_work(), lock, StatementLog::Off)
+        .await
+        .expect("a free lock is taken");
+    let taken_by_another_session = || async {
+        database
+            .client()
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&lock.key])
+            .await
+            .expect("try the lock from another session")
+            .get::<_, bool>(0)
+    };
+    assert!(
+        !taken_by_another_session().await,
+        "the lock session holds the lock"
+    );
+
+    drop(session);
+
+    let mut freed = false;
+    for _ in 0..250 {
+        if taken_by_another_session().await {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(freed, "the lock is free once the dropped session ends");
+    let _unlocked = database
+        .client()
+        .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+        .await
+        .expect("release the lock of the test session");
+    drop(open);
+    let _closed = handle.close().await;
+    database.drop().await;
+}
+
 /// A deadlock runs the whole install again: the first two runs meet one,
 /// the third installs.
 #[tokio::test]

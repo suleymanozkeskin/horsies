@@ -275,6 +275,42 @@ mod raw_result_probe_tests {
         assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
     }
 
+    /// Python `test_broker_postgres.py::TestPythonRawResultRead::test_live_row_with_a_terminal_status_returns_record_with_none_payload`:
+    /// a live row holds no result, so each terminal status read from it is a
+    /// record with no result.
+    #[test]
+    fn a_live_row_with_a_terminal_status_is_a_record_with_no_result() {
+        for status in [
+            crate::core::TaskStatus::Completed,
+            crate::core::TaskStatus::Failed,
+            crate::core::TaskStatus::Expired,
+            crate::core::TaskStatus::Cancelled,
+        ] {
+            let Ok(RawResultProbe::Record(record)) =
+                raw_result_from_live(TASK_ID, "result.task".to_owned(), &status.to_string())
+            else {
+                panic!("a live {status} row is a record");
+            };
+            assert_eq!(record.task_id, TASK_ID);
+            assert_eq!(record.task_name, "result.task");
+            assert_eq!(record.status, status);
+            assert_eq!(record.raw_result, None, "{status}");
+        }
+    }
+
+    /// Python `test_broker_postgres.py::TestPythonRawResultRead::test_an_empty_stored_result_text_is_invalid_json_payload`:
+    /// an empty stored result is not JSON and is not "no result".
+    #[test]
+    fn an_empty_stored_result_is_invalid_json_payload() {
+        let Err(refused) =
+            raw_result_from_history_result(TASK_ID, history("COMPLETED", stored("")))
+        else {
+            panic!("an empty stored result is refused");
+        };
+        assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert!(!refused.retryable());
+    }
+
     #[test]
     fn a_live_row_waits_until_its_status_is_terminal() {
         assert!(matches!(

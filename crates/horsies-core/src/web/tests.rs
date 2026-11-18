@@ -332,6 +332,32 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
     assert_eq!(json(response).await["code"], SCHEMA_UNKNOWN);
 }
 
+/// Python `tests/unit/test_web_auth.py::TestActGuard::test_rejects_a_wrong_intent_value`:
+/// an intent header with another value is refused as a missing intent, before
+/// the schema gate.
+#[tokio::test]
+async fn an_action_with_another_intent_value_is_refused() {
+    let unknown = status(SchemaState::Unknown, None);
+    let wrong_intent = Request::builder()
+        .method(Method::POST)
+        .uri("/api/tasks/not-a-uuid/cancel")
+        .header(INTENT_HEADER, "read")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .expect("action request");
+
+    let response = test_router(Arc::new(AllowAll), unknown, true)
+        .oneshot(wrong_intent)
+        .await
+        .expect("the router answers");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json(response).await,
+        serde_json::json!({"detail": "Missing X-Horsies-Intent: action header."})
+    );
+}
+
 #[tokio::test]
 async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     let router = test_router(
