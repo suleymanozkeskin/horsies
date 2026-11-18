@@ -497,10 +497,10 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Claim the task before running (required by ownership check)
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -509,7 +509,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                input_json=kwargs_json,
+                input_json=input_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
                 work=RunTheTask(),
@@ -567,10 +567,10 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Claim the task before running (required by ownership check)
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -579,7 +579,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                input_json=kwargs_json,
+                input_json=input_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
                 work=RunTheTask(),
@@ -640,10 +640,10 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Claim the task before running (required by ownership check)
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -652,7 +652,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                input_json=kwargs_json,
+                input_json=input_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
                 work=RunTheTask(),
@@ -918,13 +918,13 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Inject ctx data into kwargs to simulate the engine path
-        original_kwargs = loads_json(kwargs_json).unwrap()
+        original_kwargs = loads_json(input_json).unwrap()
         assert isinstance(original_kwargs, dict)
         original_kwargs['__h_workflow_ctx__'] = {
             'workflow_id': handle.workflow_id,

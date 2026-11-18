@@ -35,15 +35,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 @dataclass(frozen=True, slots=True)
 class Send:
     task_id: UUID
-    kwargs_json: str | None
+    input_json: str | None
     sent_at: datetime
 
 
-def make_send(kwargs_json: str | None = '{"x":1}') -> Send:
+def make_send(input_json: str | None = '{"x":1}') -> Send:
     sent_at = datetime.now(timezone.utc)
     return Send(
         task_id=mint_task_id(),
-        kwargs_json=kwargs_json,
+        input_json=input_json,
         sent_at=sent_at,
     )
 
@@ -53,7 +53,7 @@ async def enqueue(broker: PostgresBroker, send: Send) -> BrokerResult[str]:
         'cutover.enqueue',
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        input_json=send.kwargs_json,
+        input_json=send.input_json,
         sent_at=send.sent_at,
     )
 
@@ -127,7 +127,7 @@ class TestConvertedStatement:
         assert is_ok(first)
         tampered = Send(
             task_id=send.task_id,
-            kwargs_json='{"x":2}',
+            input_json='{"x":2}',
             sent_at=send.sent_at,
         )
         conflicted = await enqueue(broker, tampered)
@@ -142,7 +142,7 @@ async def enqueue_keyed(
         'cutover.enqueue',
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        input_json=send.kwargs_json,
+        input_json=send.input_json,
         sent_at=send.sent_at,
         idempotency_key=key,
     )
@@ -186,7 +186,7 @@ class TestKeyedEnqueue:
         assert is_ok(committed)
         resend = Send(
             task_id=mint_task_id(),
-            kwargs_json=first.kwargs_json,
+            input_json=first.input_json,
             sent_at=first.sent_at,
         )
         replayed = await enqueue_keyed(broker, resend, key)
@@ -234,7 +234,7 @@ class TestKeyedEnqueue:
 
         fresh = Send(
             task_id=mint_task_id(),
-            kwargs_json=existing.kwargs_json,
+            input_json=existing.input_json,
             sent_at=existing.sent_at,
         )
         retried = await enqueue_keyed(broker, fresh, key)
@@ -286,12 +286,12 @@ class TestKeyedEnqueue:
     async def test_key_binding_verifies_the_canonical_command_fingerprint(
         self, broker: PostgresBroker
     ) -> None:
-        existing = make_send(kwargs_json='{"x":1}')
+        existing = make_send(input_json='{"x":1}')
         assert is_ok(await enqueue(broker, existing))
         key = f'fingerprint-key-{uuid4()}'
         tampered = Send(
             task_id=existing.task_id,
-            kwargs_json='{"x":2}',
+            input_json='{"x":2}',
             sent_at=existing.sent_at,
         )
 
@@ -323,7 +323,7 @@ class TestKeyedEnqueue:
         key = f'order-batch-{uuid4()}'
         committed = await enqueue_keyed(broker, first, key)
         assert is_ok(committed)
-        different = make_send(kwargs_json='{"x":99}')
+        different = make_send(input_json='{"x":99}')
         conflicted = await enqueue_keyed(broker, different, key)
         assert is_err(conflicted)
         match conflicted.err_value:

@@ -2320,8 +2320,8 @@ class TestSubworkflowKwargsTypedSerde:
         )
         row = res.fetchone()
         assert row is not None
-        kwargs_json = row[0]
-        parsed = loads_json(kwargs_json).unwrap()
+        input_json = row[0]
+        parsed = loads_json(input_json).unwrap()
         assert isinstance(parsed, dict)
         # The Pydantic model is dumped under its declared shape.
         assert parsed == {

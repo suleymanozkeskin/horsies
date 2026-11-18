@@ -97,7 +97,7 @@ def _send(
     sent_at: datetime,
     kind: SendKind,
     *,
-    kwargs_json: str = _COMMAND,
+    input_json: str = _COMMAND,
     idempotency_key: str | None = None,
     enqueued_at: datetime | None = None,
     enqueue_delay_seconds: int | None = None,
@@ -107,7 +107,7 @@ def _send(
         task_name=task_name,
         queue_name='default',
         priority=50,
-        input_json=kwargs_json,
+        input_json=input_json,
         sent_at=sent_at,
         enqueued_at=enqueued_at,
         enqueue_delay_seconds=enqueue_delay_seconds,
@@ -170,14 +170,14 @@ def _seed(connection: Connection) -> _Seed:
         name: str,
         kind: SendKind = first,
         *,
-        kwargs_json: str = _COMMAND,
+        input_json: str = _COMMAND,
         idempotency_key: str | None = None,
         enqueued_at: datetime | None = None,
         enqueue_delay_seconds: int | None = None,
     ) -> _Send:
         return _send(
             name, name, ids[name], sent_at, kind,
-            kwargs_json=kwargs_json,
+            input_json=input_json,
             idempotency_key=idempotency_key,
             enqueued_at=enqueued_at,
             enqueue_delay_seconds=enqueue_delay_seconds,
@@ -222,14 +222,14 @@ def _seed(connection: Connection) -> _Seed:
         ),
         _send(
             'keyed.conflict', 'enqueue.keyed', ids['enqueue.keyed_conflict'], sent_at, first,
-            kwargs_json=_OTHER_COMMAND, idempotency_key='key-1',
+            input_json=_OTHER_COMMAND, idempotency_key='key-1',
         ),
         _send('keyed.other_key', 'enqueue.keyed', keyed, sent_at, first, idempotency_key='key-5'),
         replace(at('enqueue.bind', idempotency_key='key-3'), case='bind.key'),
         _send('workflow.unkeyed', 'enqueue.workflow', workflow_id, sent_at, first),
         at('history.first'),
         at('history.repeat', repeat),
-        at('history.repeat_other', repeat, kwargs_json=_OTHER_COMMAND),
+        at('history.repeat_other', repeat, input_json=_OTHER_COMMAND),
     )
     names_by_id = {task_id: name for name, task_id in ids.items()} | {
         workflow_id: 'enqueue.workflow'
