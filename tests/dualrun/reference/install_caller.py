@@ -18,12 +18,23 @@ runs, so a producer leaves the leaves of the current UTC day and of the
 lookahead with or without a worker. The reference runs the Python pass of
 the worker start before the switch (``ensure_startup_coverage_in_database``
 on the resource set's partition maintenance database) after the Python
-install, with the default retention config: the request of a broker that
-no app configures.
+install, with the retention config of the broker: its app's, or the default
+retention config for a broker that no app configures.
+
+One install per broker: after the Python install, the broker gets a core
+handle that runs no schema step (``OBSERVE_ONLY``). The core operations of
+the broker (the workflow engine, the monitoring reads) would otherwise
+install again through their handle at their first call, with the core's
+coverage pass, after whatever the test wrote between the two calls. The
+core run installs once, in ``ensure_schema_initialized``.
 """
 
 from __future__ import annotations
 
+from typing import cast
+
+from horsies._catalog.manifest import dump_producer_manifest
+from horsies._core import CoreHandle
 from horsies.core.brokers.postgres import (
     PostgresBroker,
     _loop_limit_err,
@@ -38,8 +49,10 @@ from horsies.core.brokers.result_types import (
 from horsies.core.history.maintenance.coverage import (
     ensure_startup_coverage_in_database,
 )
+from horsies.core.manifest import to_producer_manifest
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, Result
+from tests.dualrun.operations.rebinding import TripwireCoreHandle
 
 
 async def ensure_initialized(self: PostgresBroker) -> None:
@@ -61,20 +74,57 @@ async def ensure_initialized(self: PostgresBroker) -> None:
     await self._run_with_schema_engine(resources, self._maybe_run_schema_init)
     match self.run_schema_migrations:
         case True:
-            await cover_after_install(resources)
+            await cover_after_install(resources, self._install_retention)
+            await observe_only_core_handle(self)
         case False:
             pass
     self._initialized = True
 
 
-async def cover_after_install(resources: BrokerResources) -> None:
+async def observe_only_core_handle(self: PostgresBroker) -> None:
+    """Put a core handle that runs no schema step in the place of the
+    broker's handle, and close the old one.
+
+    The new handle has the manifest of the old one with the schema mode
+    ``OBSERVE_ONLY`` (a listener, no install), the broker's child spec
+    source, and the wrapper of the old one: a handle that the Python run's
+    tripwires wrap is wrapped again with the same tripped methods. Raises
+    what ``close_async`` of the old handle raises.
+    """
+    from horsies.core.workflows.child_spec_source import child_spec_source_of
+
+    manifest = dump_producer_manifest(
+        to_producer_manifest(
+            self.config,
+            schema='OBSERVE_ONLY',
+            idempotency_reservation_window=self.idempotency_reservation_window,
+        ),
+    )
+    # In the Python run the broker's handle may be a TripwireCoreHandle that
+    # stands in for a CoreHandle; the casts name that.
+    match cast(object, self._core_handle):
+        case TripwireCoreHandle() as wrapped:
+            replaced = cast(CoreHandle, wrapped.native_handle)
+            observing = type(replaced)(manifest, pool_profile=self._CORE_POOL_PROFILE)
+            observing.register_child_spec_source(child_spec_source_of(self))
+            self._core_handle = cast(CoreHandle, TripwireCoreHandle(observing, wrapped._tripped))
+        case _:
+            replaced = self._core_handle
+            observing = type(replaced)(manifest, pool_profile=self._CORE_POOL_PROFILE)
+            observing.register_child_spec_source(child_spec_source_of(self))
+            self._core_handle = observing
+    _ = await replaced.close_async()
+
+
+async def cover_after_install(
+    resources: BrokerResources, retention: RetentionConfig
+) -> None:
     """The startup coverage pass at the end of the install: the worker
-    start's pass with the default retention config.
+    start's pass with the broker's retention config.
 
     The outcome is discarded, as the core install logs a contained refusal
     and ends. Raises what the pass raises for a pass with no outcome.
     """
-    retention = RetentionConfig()
     _ = await ensure_startup_coverage_in_database(
         resources.partition_maintenance,
         history_horizon_days=retention.history_leaf_horizon_days,
