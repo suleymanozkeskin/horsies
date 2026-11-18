@@ -38,6 +38,7 @@ from horsies._core import CoreError, SchemaStatusRecord
 from horsies.core.baseline.migration import BASELINE_VERSION
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import get_logger
+from horsies.core.types.core_failure import call_refusal_or_raise
 
 logger = get_logger('web')
 
@@ -175,13 +176,17 @@ class SchemaProbe:
 
         A read fails when the core cannot connect or read (the core answers
         ``UNKNOWN`` and logs the cause at WARNING), or when the core of this
-        process cannot run the call (``CoreError``; the warning log here
-        names it). Neither is a verdict about the schema.
+        process cannot run the call (``CoreCallRefusal``; the warning log
+        here names it). Neither is a verdict about the schema.
+
+        Raises ``ForkedAfterCoreStart`` and ``CoreStopped``: states of the
+        process, never a failed read (``call_refusal_or_raise``).
         """
         try:
             record = await self._broker._core_handle.schema_status_async()  # pyright: ignore[reportPrivateUsage]
         except CoreError as exc:
-            logger.warning(f'Schema version probe failed: {type(exc).__name__}: {exc}')
+            refusal = call_refusal_or_raise(exc)
+            logger.warning(f'Schema version probe failed: {type(refusal).__name__}: {refusal}')
             return None
         return schema_status_of(record)
 

@@ -184,7 +184,7 @@ To give task bodies a value that each child builds, use `provide` in `main`: eve
 | `ChildCommandRefused { cause }` | The command that starts this binary in child mode cannot be built. Nothing started |
 | `ProfileRefused { refusals }` | The profile set fails its checks, or the start names a profile that the app does not define. Nothing started |
 | `ConnectionSettingsRefused { cause }` | The connection settings fail the broker config check. Nothing started |
-| `RuntimeUnavailable(..)` | The process runtime of the core cannot run the worker. Nothing started |
+| `RuntimeUnavailable(RuntimeStartFailed)` | The operating system refused the threads of the core's process runtime. Nothing started; a later run tries the start again. In a fork, `run_worker` panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals) |
 | `BootFailed { cause, message }` | The start failed; the worker claimed nothing. `cause` is a `WorkerBootCause` |
 | `Failed { cause, message }` | The worker was ready, then failed; its running tasks drained first. `cause` is a `WorkerFailCause` |
 

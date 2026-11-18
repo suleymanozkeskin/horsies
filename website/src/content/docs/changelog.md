@@ -43,10 +43,9 @@ before you upgrade a 0.7 deployment.
   returns its failure code with the core error as `exception`:
   `TooManyPendingCalls` (65,536 calls in flight on one event loop) and
   `CoreCallTimedOut` (a sync call over 30 minutes) are retryable;
-  `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not. A
-  send raises `CoreStopped` and `ForkedAfterCoreStart` instead (see below).
-  Only a workflow start and a workflow resume keep a resource set per event
-  loop. The sync send pool is gone.
+  `CoreStartFailed` is not. `CoreStopped` and `ForkedAfterCoreStart` are
+  raised instead (see below). Only a workflow start and a workflow resume
+  keep a resource set per event loop. The sync send pool is gone.
 
 - **The `exception` of a database failure is the core's class of the
   cause.** Where a call ran on the core and failed, the `exception` field of
@@ -68,14 +67,21 @@ before you upgrade a 0.7 deployment.
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
 
-- **A send raises `ForkedAfterCoreStart` and `CoreStopped`.** Both are
-  states of the process: the core refuses every later call in it. The four
-  sends, `retry_send`, `retry_schedule` and their async forms, and
-  `PostgresBroker.enqueue` and `enqueue_async` raise them; none returns them
-  as `ENQUEUE_FAILED`. The send result types do not change. For a fork, use
-  the `spawn` or `forkserver` start method, or fork before the parent's
-  first call that runs on the core. For a stopped core (a core background
-  task panicked), restart the process.
+- **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
+  Both are states of the process: the core refuses every later call in it.
+  Every call that runs on the core raises them, in its sync and async
+  forms: the sends and their retry methods, `PostgresBroker.enqueue`, the
+  task, result and health reads, the broker's task lists and recovery
+  passes, `ensure_schema_initialized`, `close`, `check(live=True)`, the
+  workflow start, `WorkflowHandle`, `pause_workflow` and `resume_workflow`,
+  the reads and `cancel_task` of `horsies.monitoring`, and the schema probe
+  of `horsies web`. No call returns them as a result: they are no longer
+  the `exception` of `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`,
+  `MONITORING_QUERY_FAILED`, `DB_OPERATION_FAILED` or another failure
+  code. The result types do not change. For a fork, use the `spawn` or
+  `forkserver` start method, or fork before the parent's first call that
+  runs on the core. `CoreStopped` means that a background task of the core
+  panicked, a defect in horsies: restart the process.
 
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of
@@ -782,13 +788,19 @@ unless it starts with "Added".
   the start, `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
-- **A send in a fork panics.** A send, a schedule or a retry, async or
-  blocking, in a process that was forked without `exec` after the core's
-  process runtime started in its parent panics with both process ids and
-  the fix; it never returns `EnqueueFailed`. Python's sends raise
-  `ForkedAfterCoreStart` in the same state. A blocking send whose runtime
-  the operating system refused to start is still a retryable
-  `EnqueueFailed`.
+- **Every call that runs on the core panics in a fork.** In a process that
+  was forked without `exec` after the core's process runtime started in its
+  parent, every public call that runs on the core panics with the call,
+  both process ids and the fix, async and blocking forms alike: the sends
+  and retries, the reads, the health reads, `check_live`, the workflow
+  starts, the methods of `WorkflowHandle`, `horsies::monitoring`,
+  `rerun_task`, `run_worker`, `run_scheduler` and the monitoring mount. No
+  call returns the fork as an error value; Python raises
+  `ForkedAfterCoreStart` in the same state. A runtime whose threads the
+  operating system refused to start is still the retryable database failure
+  of the call. `WorkerRunError::RuntimeUnavailable` and
+  `SchedulerRunError::RuntimeUnavailable` hold `RuntimeStartFailed` (new)
+  in place of `ProcessRuntimeRefusal`, which had the fork case too.
 - **`BrokerOperationError` is an enum with one variant per state.** The
   variants are Python's classes that the core produces: `OperationFailed`
   (with a `BrokerOperationFailedCode`, the nine operation codes),

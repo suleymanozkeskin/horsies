@@ -37,6 +37,7 @@ use super::dependency::OutputlessResults;
 use super::node::NodeKey;
 use super::registry::WorkflowRegistry;
 use crate::handle::{limit_duration, read_stored_result};
+use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
 use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
 
@@ -160,6 +161,13 @@ pub struct WorkflowNodeInfo {
 
 /// The handle of one started workflow whose result type is `T`. Clones
 /// share one workflow.
+///
+/// # Panics
+///
+/// Every method that runs on the core, async or blocking, panics in a
+/// process that was forked without `exec` after the core's process runtime
+/// started in its parent: a fork is a state of the process, never an error
+/// value of a call. Nothing ran.
 pub struct WorkflowHandle<T> {
     workflow_id: Uuid,
     reads: Arc<CoreHandle>,
@@ -208,8 +216,18 @@ impl<T> WorkflowHandle<T> {
         self.workflow_id
     }
 
-    /// The connected broker of the handle, or `DB_OPERATION_FAILED`.
-    async fn broker(&self) -> HandleResult<Arc<PostgresBroker>> {
+    /// The connected broker of the handle for its method `method`, or
+    /// `DB_OPERATION_FAILED`.
+    ///
+    /// # Panics
+    ///
+    /// In a fork, without `exec`, of the process that started the core's
+    /// process runtime. Nothing ran.
+    async fn broker(&self, method: &str) -> HandleResult<Arc<PostgresBroker>> {
+        refuse_in_a_fork(format_args!(
+            "WorkflowHandle::{method} of workflow {}",
+            self.workflow_id
+        ));
         self.reads.initialized_broker().await.map_err(|error| {
             HandleOperationError::DbOperationFailed {
                 message: error.to_string(),
@@ -225,7 +243,10 @@ impl<T> WorkflowHandle<T> {
     /// Errors: `WORKFLOW_NOT_FOUND`; `STORED_DATA_INVALID`;
     /// `DB_OPERATION_FAILED`.
     pub async fn status(&self) -> HandleResult<WorkflowStatus> {
-        self.broker().await?.workflow_status(self.workflow_id).await
+        self.broker("status")
+            .await?
+            .workflow_status(self.workflow_id)
+            .await
     }
 
     /// The stored result of each node that has one, by node id (Python
@@ -234,7 +255,7 @@ impl<T> WorkflowHandle<T> {
     /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
     pub async fn results(&self) -> HandleResult<BTreeMap<String, NodeResult>> {
         match self
-            .broker()
+            .broker("results")
             .await?
             .workflow_node_results(self.workflow_id)
             .await?
@@ -256,7 +277,7 @@ impl<T> WorkflowHandle<T> {
     /// node status or summary that does not read; `DB_OPERATION_FAILED`.
     pub async fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
         match self
-            .broker()
+            .broker("tasks")
             .await?
             .workflow_nodes(self.workflow_id)
             .await?
@@ -274,7 +295,7 @@ impl<T> WorkflowHandle<T> {
     ///
     /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
     pub async fn cancel(&self) -> HandleResult<()> {
-        self.broker()
+        self.broker("cancel")
             .await?
             .cancel_workflow(self.workflow_id)
             .await
@@ -286,7 +307,10 @@ impl<T> WorkflowHandle<T> {
     ///
     /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
     pub async fn pause(&self) -> HandleResult<bool> {
-        self.broker().await?.pause_workflow(self.workflow_id).await
+        self.broker("pause")
+            .await?
+            .pause_workflow(self.workflow_id)
+            .await
     }
 
     /// Resume a PAUSED workflow (Python `resume`): `true` when it resumed,
@@ -297,7 +321,7 @@ impl<T> WorkflowHandle<T> {
     /// `STORED_DATA_INVALID`; `RESUME_RECOVERY_FAILED` (the resume
     /// committed, the work after it failed).
     pub async fn resume(&self) -> HandleResult<bool> {
-        self.broker()
+        self.broker("resume")
             .await?
             .resume_client_workflow(self.workflow_id, &*self.workflows)
             .await
@@ -317,7 +341,7 @@ impl<T> WorkflowHandle<T> {
         E: UserErrorCode,
     {
         let broker = self
-            .broker()
+            .broker("result_for")
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
         let stored = broker
@@ -423,7 +447,7 @@ where
             });
         }
         let broker = self
-            .broker()
+            .broker("get")
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
         let wait = broker

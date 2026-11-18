@@ -23,7 +23,7 @@ from horsies._core import (
     CancelRefusedWorkflowTask,
     CancelStoredDataInvalid,
     CancelTaskAbsent,
-    CoreStopped,
+    CoreStartFailed,
     TaskCancelledRecord,
     TooManyPendingCalls,
 )
@@ -275,9 +275,9 @@ class TestCancelFailures:
         ('error', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.cancel_task_async', 65_536), True),
-            (CoreStopped('core task', 'panic'), False),
+            (CoreStartFailed('the core runtime could not start'), False),
         ],
-        ids=['too-many-calls', 'core-stopped'],
+        ids=['too-many-calls', 'core-start-failed'],
     )
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_cancel_is_a_database_failure(

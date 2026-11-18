@@ -28,7 +28,7 @@ from horsies._core import (
     CoreContractViolation,
     CorePreconditionFailed,
     CoreServerError,
-    CoreStopped,
+    CoreStartFailed,
     DatabasePingRecord,
     Enqueued,
     HandleClosed,
@@ -3536,7 +3536,7 @@ class TestClose:
         self,
     ) -> None:
         """A core boundary error of the blocking close is CLOSE_FAILED with the error."""
-        refused = CoreStopped('CoreHandle.close', 'a background task panicked')
+        refused = CoreStartFailed('the core runtime could not start')
         broker, runner = self._broker_closing(MagicMock(side_effect=refused))
 
         result = broker.close()

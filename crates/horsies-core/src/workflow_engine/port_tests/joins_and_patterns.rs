@@ -884,6 +884,196 @@ async fn a_failed_middle_node_skips_across_levels() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
 }
 
+/// `TestDAGPatterns.test_linear_chain`: A -> B -> C runs in order; each
+/// node is enqueued when the one before it completes.
+#[tokio::test]
+#[serial]
+async fn a_linear_chain_runs_in_order() {
+    let pool = shared_pool().await;
+    let workflow_id = run(
+        &pool,
+        &spec(
+            "linear",
+            vec![after(0, &[]), after(1, &[0]), after(2, &[1])],
+        ),
+    )
+    .await;
+
+    assert_status(&pool, workflow_id, 0, "ENQUEUED").await;
+    assert_status(&pool, workflow_id, 1, "PENDING").await;
+    assert_status(&pool, workflow_id, 2, "PENDING").await;
+    succeed(&pool, workflow_id, 0).await;
+    assert_status(&pool, workflow_id, 0, "COMPLETED").await;
+    assert_status(&pool, workflow_id, 1, "ENQUEUED").await;
+    assert_status(&pool, workflow_id, 2, "PENDING").await;
+    succeed(&pool, workflow_id, 1).await;
+    assert_status(&pool, workflow_id, 1, "COMPLETED").await;
+    assert_status(&pool, workflow_id, 2, "ENQUEUED").await;
+    succeed(&pool, workflow_id, 2).await;
+    assert_status(&pool, workflow_id, 2, "COMPLETED").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestDAGPatterns.test_fan_in`: [A, B, C] -> D; D is enqueued only after
+/// its last parent completes.
+#[tokio::test]
+#[serial]
+async fn a_fan_in_node_runs_after_all_its_parents() {
+    let pool = shared_pool().await;
+    let workflow_id = run(
+        &pool,
+        &spec(
+            "fan_in",
+            vec![
+                after(0, &[]),
+                after(1, &[]),
+                after(2, &[]),
+                after(3, &[0, 1, 2]),
+            ],
+        ),
+    )
+    .await;
+
+    for index in 0..=2 {
+        assert_status(&pool, workflow_id, index, "ENQUEUED").await;
+    }
+    assert_status(&pool, workflow_id, 3, "PENDING").await;
+    succeed(&pool, workflow_id, 0).await;
+    assert_status(&pool, workflow_id, 3, "PENDING").await;
+    succeed(&pool, workflow_id, 1).await;
+    assert_status(&pool, workflow_id, 3, "PENDING").await;
+    succeed(&pool, workflow_id, 2).await;
+    assert_status(&pool, workflow_id, 3, "ENQUEUED").await;
+    succeed(&pool, workflow_id, 3).await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestDAGPatterns.test_diamond`: A -> [B, C] -> D.
+#[tokio::test]
+#[serial]
+async fn a_diamond_runs_its_sink_after_both_arms() {
+    let pool = shared_pool().await;
+    let workflow_id = run(
+        &pool,
+        &spec(
+            "diamond",
+            vec![
+                after(0, &[]),
+                after(1, &[0]),
+                after(2, &[0]),
+                after(3, &[1, 2]),
+            ],
+        ),
+    )
+    .await;
+
+    succeed(&pool, workflow_id, 0).await;
+    assert_status(&pool, workflow_id, 1, "ENQUEUED").await;
+    assert_status(&pool, workflow_id, 2, "ENQUEUED").await;
+    assert_status(&pool, workflow_id, 3, "PENDING").await;
+    succeed(&pool, workflow_id, 1).await;
+    assert_status(&pool, workflow_id, 3, "PENDING").await;
+    succeed(&pool, workflow_id, 2).await;
+    assert_status(&pool, workflow_id, 3, "ENQUEUED").await;
+    succeed(&pool, workflow_id, 3).await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestDAGPatterns.test_deep_linear`: A -> B -> C -> D -> E; each node is
+/// enqueued in turn and completes.
+#[tokio::test]
+#[serial]
+async fn a_deep_chain_runs_each_node_in_turn() {
+    let pool = shared_pool().await;
+    let mut tasks = vec![after(0, &[])];
+    tasks.extend((1..5).map(|index| after(index, &[index - 1])));
+    let workflow_id = run(&pool, &spec("deep", tasks)).await;
+
+    for index in 0..5 {
+        assert_status(&pool, workflow_id, index, "ENQUEUED").await;
+        succeed(&pool, workflow_id, index).await;
+        assert_status(&pool, workflow_id, index, "COMPLETED").await;
+    }
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestDAGPatterns.test_multiple_roots`: [A, B] -> C.
+#[tokio::test]
+#[serial]
+async fn two_roots_start_together_and_lead_their_join() {
+    let pool = shared_pool().await;
+    let workflow_id = run(
+        &pool,
+        &spec(
+            "multi_root",
+            vec![after(0, &[]), after(1, &[]), after(2, &[0, 1])],
+        ),
+    )
+    .await;
+
+    assert_status(&pool, workflow_id, 0, "ENQUEUED").await;
+    assert_status(&pool, workflow_id, 1, "ENQUEUED").await;
+    assert_status(&pool, workflow_id, 2, "PENDING").await;
+    succeed(&pool, workflow_id, 0).await;
+    succeed(&pool, workflow_id, 1).await;
+    assert_status(&pool, workflow_id, 2, "ENQUEUED").await;
+    succeed(&pool, workflow_id, 2).await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestDAGPatterns.test_single_task_workflow`: one root with no
+/// dependencies completes the workflow.
+#[tokio::test]
+#[serial]
+async fn a_single_node_completes_its_workflow() {
+    let pool = shared_pool().await;
+    let workflow_id = run(&pool, &spec("single", vec![after(0, &[])])).await;
+
+    assert_status(&pool, workflow_id, 0, "ENQUEUED").await;
+    succeed(&pool, workflow_id, 0).await;
+    assert_status(&pool, workflow_id, 0, "COMPLETED").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestDAGPatterns.test_diamond_one_arm_fails`: A -> [B, C] -> D; B fails.
+/// D waits until C is terminal too, then is SKIPPED (no
+/// `allow_failed_deps`), and the workflow fails.
+#[tokio::test]
+#[serial]
+async fn a_failed_diamond_arm_skips_the_sink_once_the_other_arm_ends() {
+    let pool = shared_pool().await;
+    let workflow_id = run(
+        &pool,
+        &spec(
+            "diamond_fail",
+            vec![
+                after(0, &[]),
+                after(1, &[0]),
+                after(2, &[0]),
+                after(3, &[1, 2]),
+            ],
+        ),
+    )
+    .await;
+
+    succeed(&pool, workflow_id, 0).await;
+    assert_status(&pool, workflow_id, 1, "ENQUEUED").await;
+    assert_status(&pool, workflow_id, 2, "ENQUEUED").await;
+    fail(&pool, workflow_id, 1, "DELIBERATE_FAIL").await;
+    assert_status(&pool, workflow_id, 1, "FAILED").await;
+    assert_status(&pool, workflow_id, 3, "PENDING").await;
+    succeed(&pool, workflow_id, 2).await;
+    assert_status(&pool, workflow_id, 3, "SKIPPED").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
+}
+
 /// The roots of the wide fan-in.
 const WIDE_FAN_IN_ROOTS: usize = 50;
 

@@ -1,8 +1,9 @@
-//! Port of Python `tests/integration/test_claim_in_flight_count.py` and
-//! `tests/integration/test_monitoring_query_plans.py::test_claim_streams_plan_on_the_class_indexes`:
+//! Port of Python `tests/integration/test_claim_in_flight_count.py`,
+//! `tests/integration/test_monitoring_query_plans.py::test_claim_streams_plan_on_the_class_indexes`
+//! and `tests/integration/test_claim_pass_counts.py::TestClaimPassCounts::test_merged_counts_match_single_purpose_statements`:
 //! the plans of the statements inside `horsies_claim`, read from
-//! `auto_explain` notices, and the dead index entries that the in-flight
-//! count marks.
+//! `auto_explain` notices, the dead index entries that the in-flight count
+//! marks, and the counts of `horsies_claim_in_flight`.
 //!
 //! Each test runs on a database of its own (`TestDatabase`): the tests
 //! empty `horsies_tasks`, turn its autovacuum off, and sample it.
@@ -388,5 +389,120 @@ async fn the_claim_streams_plan_on_the_class_indexes() {
         }
     }
     drop(client);
+    database.drop().await;
+}
+
+/// The claim lease of a seeded row.
+#[derive(Debug, Clone, Copy)]
+enum Lease {
+    /// The lease runs five more minutes.
+    Live,
+    /// The lease ended a minute ago.
+    Expired,
+    /// No lease: a RUNNING or PENDING row.
+    NoLease,
+}
+
+/// The values of one task row of `status` on `queue`, held by `worker`
+/// when it is held, for the column list of [`seed_plan_population`].
+fn row_values(status: &str, queue: &str, worker: Option<&str>, lease: Lease) -> String {
+    let (claimed_at, holder) = match worker {
+        Some(worker) => ("NOW()", format!("'{worker}'")),
+        None => ("NULL", "NULL".to_owned()),
+    };
+    let expires = match lease {
+        Lease::Live => "NOW() + interval '5 minutes'",
+        Lease::Expired => "NOW() - interval '1 minute'",
+        Lease::NoLease => "NULL",
+    };
+    let started_at = match status {
+        "RUNNING" => "NOW()",
+        _ => "NULL",
+    };
+    format!(
+        "(gen_random_uuid(), 'in_flight_task', '{queue}', 100, '{{}}', NULL,
+          'ISOLATED', 'standard_30d', NOW(), NOW(),
+          1, sha256(convert_to(gen_random_uuid()::text, 'UTF8')), NULL,
+          '{status}', NOW(), {claimed_at}, {holder}, {expires},
+          {started_at}, NULL, NULL,
+          NULL, NULL, NULL,
+          0, 0, NULL, NULL, FALSE,
+          NOW(), FALSE, NULL, NULL)"
+    )
+}
+
+/// The counts of `horsies_claim_in_flight` for one worker over capped
+/// queues: its live claims, its rows in flight, every row in flight, and
+/// the count of each capped queue.
+async fn in_flight_counts(
+    client: &tokio_postgres::Client,
+    hard_cap_mode: bool,
+) -> (i64, i64, i64, serde_json::Value) {
+    let row = client
+        .query_one(
+            "SELECT my_claimed, my_in_flight, global_in_flight, queue_counts
+             FROM horsies_claim_in_flight($1, ARRAY['q_a', 'q_b'], $2,
+                                          '{\"ISOLATED\": \"ISOLATED\"}'::jsonb)",
+            &[&WORKER_ID, &hard_cap_mode],
+        )
+        .await
+        .expect("read the in-flight counts");
+    (row.get(0), row.get(1), row.get(2), row.get(3))
+}
+
+/// Python `test_claim_pass_counts.py::TestClaimPassCounts::test_merged_counts_match_single_purpose_statements`
+/// (the concrete counts; the five Python statements that the merged one
+/// was checked against go with `core/worker/sql.py`): across rows of this
+/// worker and of another, live and expired leases, and two queues, the
+/// claim counts the live claims of this worker (2), its RUNNING rows (1),
+/// its rows in flight (3), every row in flight (5: an expired lease and a
+/// PENDING row count nowhere), and per capped queue the rows in flight
+/// under the hard cap and the RUNNING rows under the soft cap.
+#[tokio::test]
+#[serial]
+async fn the_in_flight_counts_of_a_claim_pass() {
+    const OTHER_WORKER: &str = "in-flight-count-other";
+    let database = TestDatabase::create().await;
+    let client = database.client();
+    let rows = [
+        row_values("CLAIMED", "q_a", Some(WORKER_ID), Lease::Live),
+        row_values("CLAIMED", "q_a", Some(WORKER_ID), Lease::Expired),
+        row_values("CLAIMED", "q_b", Some(WORKER_ID), Lease::Live),
+        row_values("RUNNING", "q_b", Some(WORKER_ID), Lease::NoLease),
+        row_values("CLAIMED", "q_a", Some(OTHER_WORKER), Lease::Live),
+        row_values("CLAIMED", "q_b", Some(OTHER_WORKER), Lease::Expired),
+        row_values("RUNNING", "q_a", Some(OTHER_WORKER), Lease::NoLease),
+        row_values("PENDING", "q_a", None, Lease::NoLease),
+    ];
+    client
+        .batch_execute(&format!(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES {}",
+            rows.join(",\n")
+        ))
+        .await
+        .expect("seed the rows of each kind");
+
+    let (my_claimed, my_in_flight, global_in_flight, hard) = in_flight_counts(client, true).await;
+    let (_, _, _, soft) = in_flight_counts(client, false).await;
+
+    assert_eq!(my_claimed, 2);
+    assert_eq!(
+        my_in_flight - my_claimed,
+        1,
+        "the RUNNING rows of this worker"
+    );
+    assert_eq!(my_in_flight, 3);
+    assert_eq!(global_in_flight, 5);
+    assert_eq!(hard, serde_json::json!({"q_a": 3, "q_b": 2}));
+    assert_eq!(soft, serde_json::json!({"q_a": 1, "q_b": 1}));
     database.drop().await;
 }

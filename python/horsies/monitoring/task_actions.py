@@ -45,7 +45,7 @@ from horsies._core import (
 )
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
-from horsies.core.types.core_failure import core_error_retryable
+from horsies.core.types.core_failure import call_refusal_or_raise, core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 
@@ -107,7 +107,7 @@ class TaskActionDbOperationFailed:
     ``retryable`` is the core's classification of the cause: ``True`` when
     the condition may clear, for example a lost connection. ``exception``
     is the core's class of the cause (a ``CoreFailure`` leaf class, with the
-    subject ``cancel_task``), or the ``CoreError`` of the core boundary. The statement wrote nothing, or it
+    subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
     committed and its reply was lost: a repeated cancel tells which,
     because a committed cancel answers ``TaskActionNotCancellable`` with
     ``CANCELLED``.
@@ -298,6 +298,8 @@ async def cancel_task(
     uses no SQLAlchemy resource set.
 
     Raises:
+        ForkedAfterCoreStart, CoreStopped: the core of this process refuses
+            every call (``call_refusal_or_raise``). Nothing ran.
         PanicException: the cancel outcome contradicts the function (a lost
             claim, or no observed status). These are defects of the core,
             not outcomes.
@@ -307,5 +309,6 @@ async def cancel_task(
             task_id, include_running=include_running,
         )
     except CoreError as exc:
-        return _db_err(task_id, str(exc), core_error_retryable(exc), exc)
+        refusal = call_refusal_or_raise(exc)
+        return _db_err(task_id, str(refusal), core_error_retryable(refusal), refusal)
     return _cancel_answer(task_id, outcome)

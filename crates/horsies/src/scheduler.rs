@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use horsies_core::handle::CoreHandle;
-use horsies_core::process_runtime::{spawn_on_process_runtime, ProcessRuntimeRefusal};
 use horsies_core::scheduler_manifest::SchedulerManifest;
 use horsies_core::{RegisteredTask, SchedulerService, SchedulerStartError, SchedulerStarted};
 
@@ -24,6 +23,7 @@ pub use horsies_core::SchedulerStop;
 
 use crate::check::{CheckReport, CheckScope, SCHEDULER_STARTUP};
 use crate::config::{schedule_input_text, scheduler_manifest};
+use crate::process_state::{refuse_in_a_fork, runtime_for, RuntimeStartFailed};
 use crate::registry::resolve_task_queue;
 use crate::signals::stop_on_signals;
 use crate::{ErrorCode, Horsies, HorsiesError, ScheduleConfig, TaskSchedule};
@@ -61,10 +61,11 @@ pub enum SchedulerRunError {
     /// start may pass.
     #[error("the scheduler start failed: {message}")]
     StartFailed { message: String, retryable: bool },
-    /// The core's process runtime cannot listen for the stop signals.
-    /// Nothing started.
+    /// The OS refused the threads of the core's process runtime, which
+    /// listens for the stop signals. Nothing started; a later run tries the
+    /// start again.
     #[error("{0}")]
-    RuntimeUnavailable(ProcessRuntimeRefusal),
+    RuntimeUnavailable(RuntimeStartFailed),
 }
 
 /// A checked scheduler of the app's schedule section, not started.
@@ -97,7 +98,13 @@ impl PreparedScheduler {
     /// waits for the stop request.
     ///
     /// Errors: `StartRefused`, `StartFailed`.
+    ///
+    /// # Panics
+    ///
+    /// In a process that was forked without `exec` after the core's
+    /// process runtime started. Nothing started.
     pub async fn run(self) -> Result<SchedulerStopped, SchedulerRunError> {
+        refuse_in_a_fork(format_args!("PreparedScheduler::run"));
         let broker = self.handle.initialized_broker().await.map_err(|error| {
             SchedulerRunError::StartFailed {
                 message: error.to_string(),
@@ -152,12 +159,18 @@ impl Horsies {
     ///
     /// Errors: [`SchedulerRunError`]. The run returns `Ok` only at a stop
     /// request.
+    ///
+    /// # Panics
+    ///
+    /// After the checks, in a process that was forked without `exec` after
+    /// the core's process runtime started. Nothing started.
     pub async fn run_scheduler(&self) -> Result<SchedulerStopped, SchedulerRunError> {
         let prepared = self.scheduler()?;
         let stop = prepared.stop_handle();
-        let signals =
-            spawn_on_process_runtime(stop_on_signals("scheduler", move || stop.request_stop()))
-                .map_err(SchedulerRunError::RuntimeUnavailable)?;
+        let signals = runtime_for(format_args!("Horsies::run_scheduler"))
+            .map_err(SchedulerRunError::RuntimeUnavailable)?
+            .handle()
+            .spawn(stop_on_signals("scheduler", move || stop.request_stop()));
         let end = prepared.run().await;
         signals.abort();
         end

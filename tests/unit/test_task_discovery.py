@@ -13,7 +13,7 @@ from unittest import mock
 
 import pytest
 
-from horsies._core import CoreError
+from horsies._core import CoreStartFailed
 from horsies.core.app import Horsies
 from horsies.core.cli import discover_app
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -578,11 +578,11 @@ class TestLiveBrokerConnectivityCheck:
     def test_a_core_that_cannot_run_the_call_is_the_connectivity_refusal(self) -> None:
         app = _make_app()
 
-        with _core_check(CoreError('the core stopped')) as built:
+        with _core_check(CoreStartFailed('the core runtime could not start')) as built:
             errors = app.check(live=True)
 
         assert [error.code for error in errors] == [ErrorCode.BROKER_INVALID_URL]
-        assert errors[0].notes == ['the core stopped']
+        assert errors[0].notes == ['the core runtime could not start']
         assert built[0].closes == 1
 
     def test_pgbouncer_live_check_passes_the_session_url_to_the_core(self) -> None:

@@ -345,6 +345,15 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 `ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; `RetrievalCode.ASYNC_CONTEXT` is not cached; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 
+### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
+
+These two core errors (`horsies._core`) are states of the process, not of one call: the core refuses every later call in the process. Every call that runs on the core raises them, sync and async forms alike: the sends and their retry methods, the task, result and health reads, `check(live=True)`, the workflow start, `WorkflowHandle`, `horsies.monitoring` and the `horsies web` schema probe. No call returns them as a result, and no result type has a variant for them. Nothing ran, and a retry in the same process raises again.
+
+| Raised | Cause | Fix |
+|---|---|---|
+| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task | Start child processes that call horsies with the `spawn` or `forkserver` start method, or start the core after the fork: fork before the parent's first call |
+| `CoreStopped` | A background task of the core panicked: a defect in horsies, not a failure of the database or of your code. `args` are the `(subject, cause)` of the first panic | Restart the process: the core does not start again in it. Report the panic's subject and cause as a defect |
+
 ## CLI
 
 ```bash

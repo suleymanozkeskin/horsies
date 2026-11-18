@@ -18,7 +18,7 @@ import pytest
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStopped,
+    CoreStartFailed,
     MonitoringFailed,
     MonitoringJson,
     TaskBreakdownQuery,
@@ -257,9 +257,9 @@ class TestFailures:
         ('raised', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.monitoring_list_tasks_async', 65_536), True),
-            (CoreStopped('core task', 'panic'), False),
+            (CoreStartFailed('the core runtime could not start'), False),
         ],
-        ids=['too-many-calls', 'stopped'],
+        ids=['too-many-calls', 'start-failed'],
     )
     @pytest.mark.asyncio
     async def test_a_core_boundary_error_is_a_database_failure(

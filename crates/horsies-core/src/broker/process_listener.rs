@@ -498,7 +498,7 @@ impl ProcessListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Keepalives, DEFAULT_SOCKET_SETTINGS};
+    use crate::db::{Keepalives, ListenerStartFailure, DEFAULT_SOCKET_SETTINGS};
 
     fn any_channel() -> ChannelName {
         fixed_channel("horsies_listener_unit")
@@ -761,5 +761,111 @@ mod tests {
             .is_retryable()
         );
         assert!(!SessionCheckFailure::Subscribe(ListenError::NoSessionUrl).is_retryable());
+    }
+    /// A session URL whose server refuses every connection (port 1), of
+    /// these tests only, so no other test shares its process listener.
+    const REFUSED_URL: &str =
+        "postgresql://horsies:pw@127.0.0.1:1/horsies?application_name=refused_connect_unit";
+
+    /// The refusal of a subscription whose listener could not start: it may
+    /// clear, and its cause is the failure that `is_cause` accepts.
+    fn assert_start_refused(refused: &ListenError, is_cause: fn(&ListenerStartFailure) -> bool) {
+        assert!(refused.is_retryable(), "{refused}");
+        let ListenError::Subscribe(SubscribeError::StartFailed { cause }) = refused else {
+            panic!("expected the failed start of the listener, got {refused}");
+        };
+        assert!(is_cause(cause), "{cause}");
+    }
+
+    fn a_failed_connect(failure: &ListenerStartFailure) -> bool {
+        matches!(failure, ListenerStartFailure::Connect(_))
+    }
+
+    fn a_failed_listen(failure: &ListenerStartFailure) -> bool {
+        matches!(
+            failure,
+            ListenerStartFailure::Listen(_) | ListenerStartFailure::ListenTimedOut { .. }
+        )
+    }
+
+    /// Python `test_broker_listener.py::TestListenerResultSurface::test_start_returns_err_on_connect_failure`,
+    /// `::test_start_err_preserves_original_exception`,
+    /// `::test_listen_returns_err_on_connect_failure` and
+    /// `::test_listen_many_returns_err_on_connect_failure`: a listener whose
+    /// server refuses the connection refuses its first subscriptions, of a
+    /// wake and of the payloads of two channels, with the failed connect
+    /// kept as the cause; the refusal may clear. (Python names the channel
+    /// in the message of `listen`; the core's refusal is the start of the
+    /// one listener of every channel.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listener_that_cannot_connect_refuses_its_first_subscriptions_with_the_cause() {
+        let listener = ProcessListener::on_session_url(REFUSED_URL, DEFAULT_SOCKET_SETTINGS);
+
+        let Err(refused) = listener
+            .subscribe_wake(any_channel(), PayloadFilter::AnyPayload)
+            .await
+        else {
+            panic!("a listener that cannot connect must refuse the wake subscription");
+        };
+        assert_start_refused(&refused, a_failed_connect);
+        for channel in ["horsies_listener_unit_a", "horsies_listener_unit_b"] {
+            let Err(refused) = listener
+                .subscribe_payloads(fixed_channel(channel), default_payload_capacity())
+                .await
+            else {
+                panic!("a listener that cannot connect must refuse the payloads of {channel}");
+            };
+            assert_start_refused(&refused, a_failed_connect);
+        }
+    }
+
+    /// Python `TestListenerResultSurface::test_listen_returns_err_when_listen_sql_fails`:
+    /// the connection opens but its LISTEN fails (the proxy drops the reply
+    /// to the LISTEN and closes the connection). The first subscription is
+    /// refused with the failed LISTEN as its cause, and the refusal may
+    /// clear.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn a_listener_whose_listen_fails_refuses_its_first_subscription_with_the_cause() {
+        use crate::broker::lifecycle_tests::support::WireProxy;
+
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let upstream: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("the test database URL parses");
+        let proxy = WireProxy::start(&upstream).await;
+        let proxied_url = crate::broker::pools::test_url_of(&proxy.options(&upstream));
+        proxy.drop_reply_to_request_carrying(b"LISTEN");
+        let listener = ProcessListener::on_session_url(&proxied_url, DEFAULT_SOCKET_SETTINGS);
+
+        let Err(refused) = listener
+            .subscribe_wake(any_channel(), PayloadFilter::AnyPayload)
+            .await
+        else {
+            panic!("a listener whose LISTEN fails must refuse the subscription");
+        };
+
+        assert!(
+            proxy.reply_was_dropped(),
+            "the proxy relayed the LISTEN reply"
+        );
+        assert_start_refused(&refused, a_failed_listen);
+    }
+
+    /// Python `TestCallerUnwrapContract::test_broker_ensure_initialized_does_not_start_listener`:
+    /// the schema install of a broker does not start its listener.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_schema_install_does_not_start_the_listener() {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let broker = crate::broker::PostgresBroker::connect(&url)
+            .await
+            .expect("connect a broker");
+
+        broker
+            .ensure_schema_initialized()
+            .await
+            .expect("the schema is installed");
+
+        assert!(!broker.listener().started.initialized());
     }
 }

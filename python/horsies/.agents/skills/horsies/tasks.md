@@ -496,15 +496,6 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `EVENT_LOOP_LIMIT` | Refused | Not returned: a send runs on the core of the process, which has no event loop limit. The variant stays in `TaskSendError`, so an exhaustive `match` names it |
 | `LOOP_RUNNER_FAILED` | Accepted | Not returned: a sync send calls the core on the calling thread, not on the broker's sync runner. The variant stays in `TaskSendError` and in `TaskSendRetryable` |
 
-### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
-
-These two core errors (`horsies._core`) are states of the process, not of one send. The core refuses every later call in the process. `send()`, `send_async()`, `schedule()`, `schedule_async()`, the four retry methods and `PostgresBroker.enqueue()` / `enqueue_async()` raise them; no send returns them as `ENQUEUE_FAILED`. Nothing was sent, and a retry in the same process raises again.
-
-| Raised | Cause | Fix |
-|---|---|---|
-| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task | Start child processes that call horsies with the `spawn` or `forkserver` start method, or start the core after the fork: fork before the parent's first send or read |
-| `CoreStopped` | A core background task panicked; `args` are the `(subject, cause)` of the first panic | Restart the process; report the panic's subject and cause as a defect |
-
 ### `TaskSendPayload`
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
