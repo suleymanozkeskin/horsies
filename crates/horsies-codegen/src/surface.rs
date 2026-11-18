@@ -8,7 +8,6 @@
 //! the type comes from the core catalog itself.
 
 use horsies_core::catalog::{CodeCatalog, CodeEnum};
-use horsies_core::monitoring::MonitoringQueryErrorCode;
 use horsies_core::{BrokerErrorCode, TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
 
 /// The type text of an annotation.
@@ -941,14 +940,17 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
     },
 ];
 
-const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
+/// A failed monitoring read is a generated class of
+/// `horsies._catalog.monitoring_errors`, built in Rust.
+const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringQueryCoreError";
 const PING_WORKERS_OUTCOME: &str = "WorkerPongsRecord | BrokerFailure";
 const WORKER_STATES_OUTCOME: &str = "WorkerStatesRecord | BrokerFailure";
 const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerFailure";
 const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerFailure";
 const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerFailure";
 const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFailure";
-const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
+const MONITORING_DETAIL_OUTCOME: &str =
+    "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
 /// The monitoring methods of `CoreHandle`.
 const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
@@ -2262,21 +2264,6 @@ const MONITORING_CLASSES: &[StubClass] = &[
         doc: "The JSON text of the core model of one monitoring read.",
         constructor: Constructor::NoConstructor,
         properties: &[property("json", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "MonitoringFailed",
-        doc: "An expected failure of a monitoring read. Nothing changed: a read writes nothing.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            StubProperty {
-                name: "code",
-                annotation: TypeText::WireValuesOf(<MonitoringQueryErrorCode as CodeEnum>::CATALOG),
-            },
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
         methods: &[],
     },
     StubClass {
@@ -3866,7 +3853,7 @@ const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
 /// The generated classes of `horsies._catalog` that the annotations name.
 const IMPORTS: &[StubImport] = &[StubImport {
     module: "horsies._catalog.monitoring_errors",
-    names: &["TaskActionCoreError"],
+    names: &["MonitoringQueryCoreError", "TaskActionCoreError"],
 }];
 
 pub const CORE_MODULE: ModuleSurface = ModuleSurface {

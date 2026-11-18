@@ -35,12 +35,36 @@ pub enum MonitoringQueryErrorSource {
     Broker(#[from] BrokerError),
 }
 
+impl MonitoringQueryErrorSource {
+    /// Whether the error may clear: the driver's rule for a database
+    /// error, the error's own rule otherwise. Pure.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Database(error) => is_retryable_sqlx_error(error),
+            Self::History(error) => error.is_retryable(),
+            Self::Broker(error) => error.is_retryable(),
+        }
+    }
+}
+
+/// The error of a read that met stored history data outside the read
+/// contract: the cause of `HistoryContractViolation`. Python's exception of
+/// the class is a `HistoryContractError` with the error's text.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct HistoryContractSource(pub MonitoringQueryErrorSource);
+
 /// A failed monitoring read: one variant per class of Python's monitoring
 /// query catalog that the core produces, each with the facts of its state.
 /// Python's `MonitoringQueryEventLoopLimit` is a class of the Python client
 /// only, so it is not a variant. A monitoring read changes nothing. Each
 /// variant's doc is its Python class doc (`ErrorCatalog`).
-#[derive(Debug, thiserror::Error, horsies_core_derive::ErrorCatalog)]
+#[derive(
+    Debug,
+    thiserror::Error,
+    horsies_core_derive::ErrorCatalog,
+    horsies_core_derive::ErrorClassValues,
+)]
 #[error_catalog(
     module = "monitoring_errors",
     code = "MonitoringQueryErrorCode",
@@ -64,7 +88,9 @@ pub enum MonitoringQueryError {
         message: String,
         #[error_slot(python = "Bool")]
         retryable: bool,
-        #[error_slot(skip)]
+        /// The error that the read met; the exception is the core's class
+        /// of its cause, with its text.
+        #[error_slot(cause)]
         #[source]
         source: MonitoringQueryErrorSource,
     },
@@ -85,9 +111,11 @@ pub enum MonitoringQueryError {
     HistoryContractViolation {
         #[error_slot(python = "Str", hidden)]
         message: String,
-        #[error_slot(skip)]
+        /// The error that the read met; the exception is a
+        /// `HistoryContractError` with its text.
+        #[error_slot(cause)]
         #[source]
-        source: MonitoringQueryErrorSource,
+        source: HistoryContractSource,
     },
 }
 
@@ -118,8 +146,19 @@ impl MonitoringQueryError {
     /// The error that the read met. Pure.
     pub fn error_source(&self) -> &MonitoringQueryErrorSource {
         match self {
-            Self::DbOperationFailed { source, .. }
-            | Self::HistoryContractViolation { source, .. } => source,
+            Self::DbOperationFailed { source, .. } => source,
+            Self::HistoryContractViolation { source, .. } => &source.0,
+        }
+    }
+
+    /// The connect of the broker before the read `operation` failed: no
+    /// statement ran. `DB_OPERATION_FAILED` with the error's retry rule.
+    /// Pure.
+    pub fn connect_failed(operation: &str, error: BrokerError) -> Self {
+        Self::DbOperationFailed {
+            message: format!("{operation} failed: {error}"),
+            retryable: error.is_retryable(),
+            source: MonitoringQueryErrorSource::Broker(error),
         }
     }
 
@@ -185,7 +224,10 @@ impl ReadFailure {
                 retryable,
                 source,
             },
-            Self::Contract => MonitoringQueryError::HistoryContractViolation { message, source },
+            Self::Contract => MonitoringQueryError::HistoryContractViolation {
+                message,
+                source: HistoryContractSource(source),
+            },
         }
     }
 }

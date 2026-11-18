@@ -256,7 +256,7 @@ mod tests {
         );
         let stub = render_core_stub(&CORE_MODULE);
         assert!(stub.contains(
-            "from typing import Literal, final\n\nfrom horsies._catalog.monitoring_errors import TaskActionCoreError\n"
+            "from typing import Literal, final\n\nfrom horsies._catalog.monitoring_errors import MonitoringQueryCoreError, TaskActionCoreError\n"
         ));
     }
 
