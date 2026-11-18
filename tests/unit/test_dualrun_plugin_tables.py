@@ -4,7 +4,8 @@ Each listed node id names a test that exists, and no test is both core-only
 and reference-only for one module. A wrong id runs the test twice, and its
 run on the other implementation trips. A wrong id in ``LARGE_SEED_TESTS``
 leaves its test at the default capture limit. A wrong id in ``PAIR_RULES``
-leaves its test on the compare of the whole snapshot.
+or in ``DECIDED_DIFFERENCES`` leaves its test on the compare of the whole
+snapshot.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import pytest
 
 from tests.dualrun.operations.plugin import (
     CORE_ONLY_TESTS,
+    DECIDED_DIFFERENCES,
     LARGE_SEED_ROW_LIMIT,
     LARGE_SEED_TESTS,
     PAIR_RULES,
@@ -26,6 +28,7 @@ from tests.dualrun.operations.plugin import (
     _row_limit,  # pyright: ignore[reportPrivateUsage]
 )
 from tests.dualrun.operations.table import (
+    DecidedDifference,
     Implementation,
     PairRule,
     SwitchModule,
@@ -97,8 +100,35 @@ def test_a_test_outside_the_large_seed_list_reads_the_default_limit() -> None:
 def test_each_pair_rule_names_a_test_that_exists_and_is_its_compare(
     rule: PairRule,
 ) -> None:
+    """A pair rule applies in the dual-run of every module."""
     assert _defines(rule.node_id), f'{rule.node_id} names no test'
-    assert _pair_compare(rule.node_id) == rule
+    for module in SwitchModule:
+        assert _pair_compare(module, rule.node_id) == rule, module
+
+
+def _decided() -> list[tuple[SwitchModule, DecidedDifference]]:
+    return [
+        (module, decided)
+        for module, differences in DECIDED_DIFFERENCES.items()
+        for decided in differences
+    ]
+
+
+@pytest.mark.parametrize(
+    ('module', 'decided'),
+    _decided(),
+    ids=[f'{module.value}-{decided.fact.name}' for module, decided in _decided()],
+)
+def test_each_decided_difference_names_a_test_and_is_its_compare_in_its_module(
+    module: SwitchModule, decided: DecidedDifference
+) -> None:
+    """A decided difference applies in the dual-run of its module only."""
+    assert _defines(decided.node_id), f'{decided.node_id} names no test'
+    assert decided.decision.strip(), decided.node_id
+    assert _pair_compare(module, decided.node_id) == decided
+    for other in SwitchModule:
+        if other is not module:
+            assert _pair_compare(other, decided.node_id) == WholeSnapshot(), other
 
 
 def test_a_test_without_a_pair_rule_compares_the_whole_snapshot() -> None:
@@ -109,7 +139,8 @@ def test_a_test_without_a_pair_rule_compares_the_whole_snapshot() -> None:
     )
 
     assert _defines(node_id)
-    assert _pair_compare(node_id) == WholeSnapshot()
+    for module in SwitchModule:
+        assert _pair_compare(module, node_id) == WholeSnapshot(), module
 
 
 def test_no_test_is_core_only_and_reference_only() -> None:

@@ -33,6 +33,19 @@ and column stays as captured and compares by its column rule.
   table; a wake that is owed and not there becomes a row
   ``CAPACITY_WAKE_MISSING`` on that channel.
 
+A decided difference (``tests.dualrun.operations.table.DecidedDifference``)
+reduces nothing: its pair compares the whole snapshot.
+``decided_difference_explains`` tells whether every entry of the
+difference is one that its fact explains.
+
+- ``RECEIVED_WRITE_RUNS_TO_ITS_END``: each entry is part of the commit of
+  a received write: a ``horsies_tasks`` row only in the reference with the
+  status RUNNING; a ``horsies_task_history`` row only in the candidate with
+  the status COMPLETED; a ``task_done`` or ``horsies_task_status``
+  notification only in the candidate, for the task of such a history row.
+  There is one RUNNING row of the reference per committed row, and one
+  event of each channel per committed row.
+
 No reduction hides which rows exist or who owns them. A history row, or a
 task and role of a heartbeat, on one side only is still a row on one side
 only. A sender that differs, claim facts that agree with neither winner
@@ -53,8 +66,11 @@ from enum import Enum
 from typing import Final
 
 from tests.dualrun.catalog import NOTIFICATIONS, QUEUE_CHANNEL_PREFIX
+from tests.dualrun.compare import DiffEntry, ExtraRow, MissingRow, SnapshotDiff
 from tests.dualrun.normalize import NormalizedRow, NormalizedSnapshot, NormalizedTable
 from tests.dualrun.operations.table import (
+    DecidedDifference,
+    DecidedFact,
     PairCompare,
     PairFact,
     PairRule,
@@ -62,6 +78,7 @@ from tests.dualrun.operations.table import (
 )
 from tests.dualrun.rules import ColumnSpec, Exact, TableRules
 from tests.dualrun.values import (
+    Cell,
     DuringRun,
     ExactValue,
     IdLabel,
@@ -412,11 +429,73 @@ def _reduced(snapshot: NormalizedSnapshot, fact: PairFact) -> NormalizedSnapshot
 
 def project(snapshot: NormalizedSnapshot, compare: PairCompare) -> NormalizedSnapshot:
     """``snapshot`` as the pair of its test compares it: as captured under
-    ``WholeSnapshot``, reduced to the fact of the rule under a ``PairRule``.
-    The snapshot must hold the tables of the rule (asserted by
-    ``NormalizedSnapshot.table``)."""
+    ``WholeSnapshot`` and under a ``DecidedDifference``, reduced to the fact
+    of the rule under a ``PairRule``. The snapshot must hold the tables of
+    the rule (asserted by ``NormalizedSnapshot.table``)."""
     match compare:
-        case WholeSnapshot():
+        case WholeSnapshot() | DecidedDifference():
             return snapshot
         case PairRule(fact=fact):
             return _reduced(snapshot, fact)
+
+
+# ---- Decided differences ----
+
+RUNNING_STATUS: Final = ExactValue(text='RUNNING')
+COMMITTED_STATUS: Final = ExactValue(text='COMPLETED')
+MOVE_EVENT_CHANNELS: Final = (
+    ExactValue(text='task_done'),
+    ExactValue(text='horsies_task_status'),
+)
+"""The channels of the events of a move to history, normalized (``Exact``)."""
+
+
+def _cell_value(cells: tuple[Cell, ...], column: str) -> NormalizedValue:
+    """The value of ``column`` in the cells of a diff row. The column must be there once."""
+    match [cell.value for cell in cells if cell.column == column]:
+        case [value]:
+            return value
+        case found:
+            raise AssertionError(f'a diff row has {len(found)} cells of {column!r}')
+
+
+def _received_writes_explain(entries: tuple[DiffEntry, ...]) -> bool:
+    """Whether each entry is part of the commit of a received write, and each
+    commit is whole: one RUNNING row of the reference per committed history
+    row, and one event of each move channel per committed row."""
+    left_running = 0
+    committed: list[NormalizedValue] = []
+    events: Counter[tuple[NormalizedValue, NormalizedValue]] = Counter()
+    for entry in entries:
+        match entry:
+            case MissingRow(table=table, cells=cells) if (
+                table == TASKS_TABLE and _cell_value(cells, 'status') == RUNNING_STATUS
+            ):
+                left_running += 1
+            case ExtraRow(table=table, cells=cells) if (
+                table == HISTORY_TABLE
+                and _cell_value(cells, 'status') == COMMITTED_STATUS
+            ):
+                committed.append(_cell_value(cells, 'task_id'))
+            case ExtraRow(table=table, cells=cells) if (
+                table == NOTIFICATIONS.name
+                and _cell_value(cells, 'channel') in MOVE_EVENT_CHANNELS
+            ):
+                events[(_cell_value(cells, 'channel'), _cell_value(cells, 'task_id'))] += 1
+            case _:
+                return False
+    owed = Counter(
+        (channel, task) for task in committed for channel in MOVE_EVENT_CHANNELS
+    )
+    return (
+        left_running == len(committed)
+        and len(set(committed)) == len(committed)
+        and events == owed
+    )
+
+
+def decided_difference_explains(fact: DecidedFact, diff: SnapshotDiff) -> bool:
+    """Whether ``fact`` explains every entry of ``diff`` (an empty diff: yes)."""
+    match fact:
+        case DecidedFact.RECEIVED_WRITE_RUNS_TO_ITS_END:
+            return _received_writes_explain(diff.entries)

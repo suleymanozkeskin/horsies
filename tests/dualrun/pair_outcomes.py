@@ -28,8 +28,13 @@ from datetime import UTC, datetime
 from tests.dualrun.capture import CaptureFailure
 from tests.dualrun.compare import SnapshotDiff, compare_snapshots
 from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.operations.table import PairCompare
-from tests.dualrun.pair_rules import project
+from tests.dualrun.operations.table import (
+    DecidedDifference,
+    PairCompare,
+    PairRule,
+    WholeSnapshot,
+)
+from tests.dualrun.pair_rules import decided_difference_explains, project
 from tests.dualrun.values import RunWindow
 
 
@@ -134,6 +139,15 @@ class PairEqual:
 
 
 @dataclass(frozen=True, slots=True)
+class DecidedDifferenceSeen:
+    """The two snapshots differ, and the decided difference of the pair
+    explains every entry of ``diff``."""
+
+    diff: SnapshotDiff
+    decided: DecidedDifference
+
+
+@dataclass(frozen=True, slots=True)
 class DualRunMismatch:
     """The two snapshots differ, and neither run window crossed an hour boundary."""
 
@@ -150,7 +164,7 @@ class ClockBoundaryStraddle:
     candidate_window: RunWindow
 
 
-PairJudgement = PairEqual | DualRunMismatch | ClockBoundaryStraddle
+PairJudgement = PairEqual | DecidedDifferenceSeen | DualRunMismatch | ClockBoundaryStraddle
 
 
 def _hour(at: datetime) -> datetime:
@@ -169,13 +183,20 @@ def judge_pair(
     compare: PairCompare,
 ) -> PairJudgement:
     """The judgement of the core case's snapshot against the reference.
-    ``compare`` is the pair rule of the test: both snapshots are reduced to
-    its fact before the compare (``pair_rules.project``)."""
+    ``compare`` is how the pair of the test compares: under a pair rule both
+    snapshots are reduced to its fact before the compare
+    (``pair_rules.project``); under a decided difference a difference whose
+    every entry its fact explains is ``DecidedDifferenceSeen``."""
     diff = compare_snapshots(
         project(reference.snapshot, compare), project(candidate, compare)
     )
     if not diff.entries:
         return PairEqual()
+    match compare:
+        case DecidedDifference(fact=fact) if decided_difference_explains(fact, diff):
+            return DecidedDifferenceSeen(diff=diff, decided=compare)
+        case WholeSnapshot() | PairRule() | DecidedDifference():
+            pass
     match crosses_hour(reference.window) or crosses_hour(candidate_window):
         case True:
             return ClockBoundaryStraddle(
