@@ -28,6 +28,8 @@ from datetime import UTC, datetime
 from tests.dualrun.capture import CaptureFailure
 from tests.dualrun.compare import SnapshotDiff, compare_snapshots
 from tests.dualrun.normalize import NormalizedSnapshot
+from tests.dualrun.operations.table import PairCompare
+from tests.dualrun.pair_rules import project
 from tests.dualrun.values import RunWindow
 
 
@@ -164,9 +166,14 @@ def judge_pair(
     reference: ReferenceCaptured,
     candidate: NormalizedSnapshot,
     candidate_window: RunWindow,
+    compare: PairCompare,
 ) -> PairJudgement:
-    """The judgement of the core case's snapshot against the reference."""
-    diff = compare_snapshots(reference.snapshot, candidate)
+    """The judgement of the core case's snapshot against the reference.
+    ``compare`` is the pair rule of the test: both snapshots are reduced to
+    its fact before the compare (``pair_rules.project``)."""
+    diff = compare_snapshots(
+        project(reference.snapshot, compare), project(candidate, compare)
+    )
     if not diff.entries:
         return PairEqual()
     match crosses_hour(reference.window) or crosses_hour(candidate_window):

@@ -20,7 +20,7 @@ from tests.dualrun.operations.plugin import (
     _references,  # pyright: ignore[reportPrivateUsage]
 )
 from tests.dualrun.operations.rebinding import CallCounts
-from tests.dualrun.operations.table import Implementation
+from tests.dualrun.operations.table import Implementation, WholeSnapshot
 from tests.dualrun.pair_outcomes import PairKey, ReferenceCaptureFailed
 
 pytestmark = [pytest.mark.unit]
@@ -47,6 +47,7 @@ def test_a_core_case_whose_python_capture_failed_fails_with_that_error() -> None
         start=datetime(2026, 11, 18, tzinfo=UTC),
         listener=cast(NotificationListener, None),
         row_limit=10,
+        compare=WholeSnapshot(),
     )
 
     with pytest.raises(pytest.fail.Exception) as failed:

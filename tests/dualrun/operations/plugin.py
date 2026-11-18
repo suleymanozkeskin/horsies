@@ -26,7 +26,10 @@ Python case fails it as ``ReferenceRunMissing``. A capture that fails fails
 its case, and the core case of its pair, as ``DualRunCaptureFailed`` with the
 subject and the cause; it never counts as an equal snapshot. A capture reads
 at most ``TABLE_ROW_LIMIT`` rows per table, and the pair of a test in
-``LARGE_SEED_TESTS`` at most ``LARGE_SEED_ROW_LIMIT``. The first run of the session installs
+``LARGE_SEED_TESTS`` at most ``LARGE_SEED_ROW_LIMIT``. The pair of a test in
+``PAIR_RULES`` compares the fact of its rule in the place of the stored
+values that hold it (``tests/dualrun/pair_rules.py``); every other pair
+compares the whole snapshot. The first run of the session installs
 the baseline, runs the seed sequence of the integration tests
 (``ensure_history_seedable``) and saves that state. ``--dual-run`` needs the
 session database: the PgBouncer lane (``HORSIES_PGBOUNCER_TEST=1``) has none
@@ -88,8 +91,12 @@ from tests.dualrun.operations.table import (
     DualRunOperation,
     Implementation,
     LargeSeedTest,
+    PairCompare,
+    PairFact,
+    PairRule,
     ReferenceOnlyTest,
     SwitchModule,
+    WholeSnapshot,
 )
 
 from tests.dualrun.catalog import QUEUE_CHANNEL_PREFIX, TASK_CHANNELS, WORKFLOW_CHANNELS
@@ -193,6 +200,32 @@ LARGE_SEED_TESTS: Final[tuple[LargeSeedTest, ...]] = (
 )
 """The tests whose pairs capture up to ``LARGE_SEED_ROW_LIMIT`` rows per table."""
 
+PAIR_RULES: Final[tuple[PairRule, ...]] = (
+    PairRule(
+        node_id=(
+            'tests/integration/test_monitoring_task_actions.py::TestClaimCancelRace::'
+            'test_concurrent_claim_and_cancel_leave_one_consistent_outcome'
+        ),
+        fact=PairFact.ONE_RACE_WINNER,
+        reason=(
+            'the claim and the cancel run at once; either can take the PENDING row '
+            'first in any run'
+        ),
+    ),
+    PairRule(
+        node_id=(
+            'tests/integration/test_thread_lifecycle_writes.py::'
+            'test_seat_threads_share_a_pool_smaller_than_the_seats'
+        ),
+        fact=PairFact.HEARTBEAT_SENDERS,
+        reason=(
+            'six seat threads write their runner heartbeats at once; the send order '
+            'and the number of beats follow the run time'
+        ),
+    ),
+)
+"""The tests whose pairs compare the fact of their rule (``PairRule``)."""
+
 _BASE_NOTIFICATION_CHANNELS: Final = (
     *TASK_CHANNELS,
     *WORKFLOW_CHANNELS,
@@ -261,6 +294,7 @@ class PairCase:
     start: datetime
     listener: NotificationListener
     row_limit: int
+    compare: PairCompare
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -603,6 +637,7 @@ def _open_pair_case(
         start=start,
         listener=listener,
         row_limit=_row_limit(_base_node_id(item.nodeid)),
+        compare=_pair_compare(_base_node_id(item.nodeid)),
     )
 
 
@@ -615,6 +650,28 @@ def _row_limit(node_id: str) -> int:
             from tests.dualrun.capture import TABLE_ROW_LIMIT
 
             return TABLE_ROW_LIMIT
+
+
+def _pair_compare(node_id: str) -> PairCompare:
+    """How the pair of the test ``node_id`` compares: its rule in
+    ``PAIR_RULES``, else the whole snapshot. Two rules for one test are a
+    defect of the table."""
+    match [rule for rule in PAIR_RULES if rule.node_id == node_id]:
+        case []:
+            return WholeSnapshot()
+        case [rule]:
+            return rule
+        case rules:
+            raise AssertionError(f'{node_id} has {len(rules)} pair rules')
+
+
+def _compare_note(compare: PairCompare) -> str:
+    """The pair rule of a failure text, or nothing for the whole snapshot."""
+    match compare:
+        case WholeSnapshot():
+            return ''
+        case PairRule(fact=fact):
+            return f' under the pair rule {fact.name} ({fact.value})'
 
 
 def _capture(
@@ -729,15 +786,16 @@ def _after_core_body(config: pytest.Config, case: PairCase) -> None:
             pytest.fail(_capture_failed(case.implementation, error))
         case Ok((snapshot, window)):
             pass
-    match judge_pair(reference, snapshot, window):
+    note = _compare_note(case.compare)
+    match judge_pair(reference, snapshot, window, case.compare):
         case PairEqual():
             return
         case DualRunMismatch(diff=diff):
-            pytest.fail(f'DualRunMismatch:\n{render_diff(diff)}')
+            pytest.fail(f'DualRunMismatch{note}:\n{render_diff(diff)}')
         case ClockBoundaryStraddle(diff=diff, reference_window=left, candidate_window=right):
             pytest.fail(
                 f'ClockBoundaryStraddle: a run window crossed an hour (reference {left}, '
-                f'core {right}); the snapshots differ:\n{render_diff(diff)}'
+                f'core {right}); the snapshots differ{note}:\n{render_diff(diff)}'
             )
 
 

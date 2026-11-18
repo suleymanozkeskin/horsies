@@ -111,6 +111,49 @@ class LargeSeedTest:
     reason: str
 
 
+class PairFact(Enum):
+    """A fact that both runs of one test fix, while the stored state that
+    holds it follows the run timing. The value states the fact that the
+    pair compares; ``tests.dualrun.pair_rules.project`` reduces a snapshot
+    to it."""
+
+    ONE_RACE_WINNER = (
+        'exactly one of the claim and the cancel took the PENDING row, and the '
+        'history row and the status events agree with it; not which one'
+    )
+    """The cancel first: the history row has no claim time and no claim
+    worker. The claim first: the history row has both, and one more
+    ``horsies_task_status`` event of the task (the status change of the
+    claim)."""
+
+    HEARTBEAT_SENDERS = (
+        'per task and role, that heartbeat rows exist, and their senders '
+        '(sender_id, hostname, pid); not their count, send times or leaves'
+    )
+    """A leaf (``tableoid``) follows the send time."""
+
+
+@dataclass(frozen=True, slots=True)
+class PairRule:
+    """The pair of one integration test compares ``fact`` in the place of
+    the stored values that hold it, and every other captured value by its
+    column rule. ``reason`` states why the stored values follow the run
+    timing. ``node_id`` is the pytest id without parameters."""
+
+    node_id: str
+    fact: PairFact
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class WholeSnapshot:
+    """The pair compares every captured value by its column rule."""
+
+
+type PairCompare = WholeSnapshot | PairRule
+"""How the pair of one test compares its two snapshots."""
+
+
 class TripwireHit(BaseException):
     """A run called the implementation of the other run: the rebinding missed
     a call path.
