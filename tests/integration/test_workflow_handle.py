@@ -2531,6 +2531,42 @@ class TestWorkflowHandleInfraErrors:
         assert message is not None
         assert message.startswith(f'Get failed for workflow {handle.workflow_id}: ')
 
+    async def test_result_for_db_error_names_the_node(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        unreachable_broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """result_for_async() and result_for() return
+        TaskResult(err=BROKER_ERROR) when the read fails, with Python 0.7's
+        message, which names the node."""
+        task_a = make_simple_task(app, 'result_for_db_err_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='result_for_db_err', tasks=[node_a],
+        )
+        started = await start_ok(spec, broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(
+            workflow_id=started.workflow_id, broker=unreachable_broker,
+        )
+        assert node_a.node_id is not None
+        prefix = (
+            f'DB query failed for result_for node {node_a.node_id} '
+            f'in workflow {handle.workflow_id}: '
+        )
+
+        async_result = await handle.result_for_async(node_a)
+        sync_result = await asyncio.to_thread(handle.result_for, node_a)
+
+        for result in (async_result, sync_result):
+            assert result.is_err()
+            error = result.unwrap_err()
+            assert error.error_code == OperationalErrorCode.BROKER_ERROR
+            assert error.message is not None
+            assert error.message.startswith(prefix)
+            assert error.message.removeprefix(prefix) != ''
+
     async def test_cancel_db_error_returns_err_db_operation_failed(
         self,
         clean_workflow_tables: None,

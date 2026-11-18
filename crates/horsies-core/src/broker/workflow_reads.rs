@@ -68,7 +68,7 @@ impl PostgresBroker {
     ///
     /// Outcomes: the node's stored result; `None` when no node of this id stores a result or no
     /// workflow has the id (the read does not tell the two apart); `DB_OPERATION_FAILED` for a
-    /// failed read.
+    /// failed read, with a message that names the node.
     ///
     /// Panics: a row that does not decode (a defect).
     pub async fn workflow_node_result(
@@ -78,7 +78,12 @@ impl PostgresBroker {
     ) -> HandleResult<Option<StoredNodeResult>> {
         query::read_workflow_node_result(self, workflow_id, node_id)
             .await
-            .map_err(|error| handle_operation_error(HandleOperation::ResultFor, error, workflow_id))
+            .map_err(|error| {
+                let operation = HandleOperation::ResultFor {
+                    node_id: node_id.to_owned(),
+                };
+                handle_operation_error(operation, error, workflow_id)
+            })
     }
 
     /// The nodes of a workflow in index order: one read (Python `WorkflowHandle.tasks_async`).

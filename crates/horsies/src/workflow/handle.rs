@@ -341,8 +341,11 @@ impl<T> WorkflowHandle<T> {
         V: DeserializeOwned,
         E: UserErrorCode,
     {
+        let operation = HandleOperation::ResultFor {
+            node_id: key.node_id().to_owned(),
+        };
         let broker = self
-            .broker("result_for", HandleOperation::ResultFor)
+            .broker("result_for", operation)
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
         let stored = broker

@@ -38,8 +38,10 @@ class WorkflowOperation(Enum):
 
 def _label(operation: WorkflowOperation) -> str:
     """The word that starts the message of a failure, as the core's
-    ``HandleOperation::label`` gives it for the failures that it builds.
-    Pure."""
+    ``HandleOperation::failure_message`` starts the failures that it builds.
+    The core's message of a failed ``result_for`` read names the node
+    instead: ``DB query failed for result_for node {node_id} in workflow
+    {id}: {cause}``. Pure."""
     match operation:
         case WorkflowOperation.PAUSE:
             return 'Pause'

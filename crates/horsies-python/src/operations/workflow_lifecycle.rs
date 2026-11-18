@@ -79,8 +79,8 @@ impl HandleFailure {
         error: horsies_core::BrokerError,
     ) -> Self {
         Self {
+            error: HandleOperationError::connect_failed(operation.clone(), workflow_id, error),
             operation,
-            error: HandleOperationError::connect_failed(operation, workflow_id, error),
         }
     }
 }
@@ -105,7 +105,7 @@ enum Transition {
 impl Transition {
     /// The handle operation of the transition: its label and the subject
     /// of the exception of a failure.
-    const fn operation(self) -> HandleOperation {
+    fn operation(self) -> HandleOperation {
         match self {
             Self::Pause => HandleOperation::Pause,
             Self::Cancel => HandleOperation::Cancel,

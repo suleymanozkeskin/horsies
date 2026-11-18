@@ -138,8 +138,9 @@ before you upgrade a 0.7 deployment.
   (upper case, braces) gets the canonical form there.
   `HandleResumeRecoveryFailed.exception` holds the failure of the work
   after the commit alone, as in 0.7, and its `retryable` is the rule of that
-  failure. The `BROKER_ERROR` message of a failed `result_for` read is the
-  core's message, `Result read failed for workflow <id>: <cause>`.
+  failure. A failed `result_for` read keeps the `BROKER_ERROR` message of
+  0.7, which names the node: `DB query failed for result_for node
+  <node_id> in workflow <id>: <cause>`.
 
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
@@ -973,8 +974,12 @@ unless it starts with "Added".
   `WorkflowError::Broker`), and `HandleOperationError` is no longer
   `Clone`. The message of a failure starts with the operation's label, as
   Python's: `Status failed for workflow <id>: <cause>`, and `Workflow <id>
-  not found` for `WorkflowNotFound`. A blocking form whose process runtime
-  did not start has the cause `BrokerError::ProcessRuntime` (new).
+  not found` for `WorkflowNotFound`. The `WorkflowReadError::Database`
+  message of a failed `result_for` names the node: `DB query failed for
+  result_for node <node_id> in workflow <id>: <cause>`; the
+  `HandleOperation::ResultFor` variant holds the `node_id`. A blocking form
+  whose process runtime did not start has the cause
+  `BrokerError::ProcessRuntime` (new).
 - **`MonitoringQueryError` and `TaskActionError` are enums with one
   variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
   `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,

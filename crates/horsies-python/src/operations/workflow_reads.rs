@@ -313,7 +313,7 @@ fn node_result_outcome(
             workflow_id,
             node_id,
         }),
-        Err(error) => failed_read(HandleOperation::ResultFor, workflow_id, error),
+        Err(error) => failed_read(HandleOperation::ResultFor { node_id }, workflow_id, error),
     }
 }
 
@@ -383,7 +383,7 @@ pub async fn workflow_node_result_operation(
             let answer = broker.workflow_node_result(workflow_id, &node_id).await;
             node_result_outcome(workflow_id, node_id, answer)
         }
-        Err(error) => connect_failed(HandleOperation::ResultFor, workflow_id, error),
+        Err(error) => connect_failed(HandleOperation::ResultFor { node_id }, workflow_id, error),
     }
 }
 
@@ -539,7 +539,12 @@ mod tests {
         ) else {
             panic!("a failed read gives a failure");
         };
-        assert_eq!(failed.operation, HandleOperation::ResultFor);
+        assert_eq!(
+            failed.operation,
+            HandleOperation::ResultFor {
+                node_id: "a".to_owned()
+            }
+        );
         assert!(failed.error.retryable());
         let WorkflowReadOutcome::Failed(failed) = connect_failed(
             HandleOperation::Get,
@@ -563,6 +568,31 @@ mod tests {
             ),
             WorkflowReadOutcome::Absent(_)
         ));
+    }
+
+    /// A failed connect of a node result read names the node, in Python
+    /// 0.7's text, and keeps the read's subject.
+    #[test]
+    fn a_failed_node_result_connect_names_the_node() {
+        let WorkflowReadOutcome::Failed(failed) = connect_failed(
+            HandleOperation::ResultFor {
+                node_id: "fetch".to_owned(),
+            },
+            workflow(),
+            BrokerError::ConnectionFailed("refused".to_owned()),
+        ) else {
+            panic!("a failed connect gives a failure");
+        };
+        assert_eq!(failed.operation.subject(), "workflow_node_result");
+        assert_eq!(
+            failed.error.message(),
+            format!(
+                "DB query failed for result_for node fetch in workflow {}: connection failed: \
+                 refused",
+                workflow()
+            )
+        );
+        assert!(failed.error.retryable());
     }
 
     #[test]

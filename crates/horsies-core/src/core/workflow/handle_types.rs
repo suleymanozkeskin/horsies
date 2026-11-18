@@ -43,48 +43,36 @@ pub enum HandleErrorCode {
     AsyncContext,
 }
 
-/// A workflow handle operation that the core runs: the label that starts
-/// the message of its failures (Python `handle_records._label`) and the name
-/// of the core operation, which is the subject of the exception of a failure
-/// (the values of Python's `handle_records.WorkflowOperation`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A workflow handle operation that the core runs: what the message of its
+/// failures names (Python's handle texts) and the name of the core
+/// operation, which is the subject of the exception of a failure (the
+/// values of Python's `handle_records.WorkflowOperation`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandleOperation {
     Pause,
     Cancel,
     Status,
     /// The wait for the end of the workflow (`get`).
     Get,
-    /// The read of one node's stored result (`result_for`).
-    ResultFor,
+    /// The read of the stored result of the node `node_id` (`result_for`).
+    ResultFor {
+        node_id: String,
+    },
     Results,
     Tasks,
     Resume,
 }
 
 impl HandleOperation {
-    /// The word that starts the message of a failure. Pure.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Pause => "Pause",
-            Self::Cancel => "Cancel",
-            Self::Status => "Status",
-            Self::Get => "Get",
-            Self::ResultFor => "Result read",
-            Self::Results => "Results",
-            Self::Tasks => "Tasks",
-            Self::Resume => "Resume",
-        }
-    }
-
     /// The name of the core operation: the subject of the core's exception
     /// class of a failure. Pure.
-    pub const fn subject(self) -> &'static str {
+    pub fn subject(&self) -> &'static str {
         match self {
             Self::Pause => "pause_workflow",
             Self::Cancel => "cancel_workflow",
             Self::Status => "workflow_status",
             Self::Get => "wait_workflow_result",
-            Self::ResultFor => "workflow_node_result",
+            Self::ResultFor { .. } => "workflow_node_result",
             Self::Results => "workflow_node_results",
             Self::Tasks => "workflow_nodes",
             Self::Resume => "resume_workflow",
@@ -92,13 +80,29 @@ impl HandleOperation {
     }
 
     /// Python's message of a failure of this operation on `workflow_id`
-    /// with the text `cause`: `{label} failed for workflow {workflow_id}:
-    /// {cause}`. Pure.
-    pub fn failure_message(self, workflow_id: Uuid, cause: &dyn std::fmt::Display) -> String {
-        format!(
-            "{} failed for workflow {workflow_id}: {cause}",
-            self.label()
-        )
+    /// with the text `cause`. Pure.
+    ///
+    /// - `ResultFor`: `DB query failed for result_for node {node_id} in
+    ///   workflow {workflow_id}: {cause}` (Python 0.7's text).
+    /// - Every other operation: `{label} failed for workflow {workflow_id}:
+    ///   {cause}`, with the label of Python's `handle_records._label`.
+    pub fn failure_message(&self, workflow_id: Uuid, cause: &dyn std::fmt::Display) -> String {
+        let label = match self {
+            Self::ResultFor { node_id } => {
+                return format!(
+                    "DB query failed for result_for node {node_id} in workflow {workflow_id}: \
+                     {cause}"
+                );
+            }
+            Self::Pause => "Pause",
+            Self::Cancel => "Cancel",
+            Self::Status => "Status",
+            Self::Get => "Get",
+            Self::Results => "Results",
+            Self::Tasks => "Tasks",
+            Self::Resume => "Resume",
+        };
+        format!("{label} failed for workflow {workflow_id}: {cause}")
     }
 }
 
@@ -454,28 +458,36 @@ mod tests {
     /// (`handle_records.WorkflowOperation`), one per operation.
     #[test]
     fn each_operation_has_python_s_label_and_subject() {
+        let workflow_id = uuid::Uuid::from_u128(9);
         let operations = [
             (HandleOperation::Pause, "Pause", "pause_workflow"),
             (HandleOperation::Cancel, "Cancel", "cancel_workflow"),
             (HandleOperation::Status, "Status", "workflow_status"),
             (HandleOperation::Get, "Get", "wait_workflow_result"),
-            (
-                HandleOperation::ResultFor,
-                "Result read",
-                "workflow_node_result",
-            ),
             (HandleOperation::Results, "Results", "workflow_node_results"),
             (HandleOperation::Tasks, "Tasks", "workflow_nodes"),
             (HandleOperation::Resume, "Resume", "resume_workflow"),
         ];
         for (operation, label, subject) in operations {
-            assert_eq!(operation.label(), label);
+            assert_eq!(
+                operation.failure_message(workflow_id, &"boom"),
+                format!("{label} failed for workflow {workflow_id}: boom")
+            );
             assert_eq!(operation.subject(), subject);
         }
+    }
+
+    /// A failed `result_for` read names the node, in Python 0.7's text.
+    #[test]
+    fn a_failed_node_result_read_names_the_node() {
         let workflow_id = uuid::Uuid::from_u128(9);
+        let operation = HandleOperation::ResultFor {
+            node_id: "fetch".to_owned(),
+        };
+        assert_eq!(operation.subject(), "workflow_node_result");
         assert_eq!(
-            HandleOperation::ResultFor.failure_message(workflow_id, &"boom"),
-            format!("Result read failed for workflow {workflow_id}: boom")
+            operation.failure_message(workflow_id, &"boom"),
+            format!("DB query failed for result_for node fetch in workflow {workflow_id}: boom")
         );
     }
 
