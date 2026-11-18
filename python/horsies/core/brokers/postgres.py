@@ -125,10 +125,6 @@ from horsies.core.manifest import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.models.workflow_pg import (
-    WorkflowModel as _WorkflowModel,
-    WorkflowTaskModel as _WorkflowTaskModel,
-)
 from horsies.core.types.core_failure import (
     CoreCallRefusal,
     call_refusal_or_raise,
@@ -182,9 +178,6 @@ from horsies.core.utils.wait_timeout import wait_timeout_seconds
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
 from horsies.core.logging import enable_statement_echo, get_logger
-
-# Ensure workflow tables are registered in SQLAlchemy metadata.
-_ = (_WorkflowModel, _WorkflowTaskModel)
 
 
 def _operation_failed(

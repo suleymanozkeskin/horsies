@@ -288,6 +288,44 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
     assert!(BASELINE_TABLES_SQL.contains(&format!("CREATE TABLE {MIGRATIONS_TABLE} (")));
 }
 
+/// The checksum of migration 1000, pinned. An edit of a baseline SQL file
+/// changes it, so the edit shows in this test's diff as well, and a database
+/// installed before the edit refuses the build as edited
+/// (`a_changed_checksum_is_refused_as_edited`). Python
+/// `tests/unit/test_baseline_migration.py::test_checksum_is_pinned`.
+#[test]
+fn the_checksum_of_the_baseline_is_pinned() {
+    const PINNED_CHECKSUM_HEX: &str = concat!(
+        "cf80502bc1bd507891d6348b909b68be3f17a390c907442f",
+        "50f0db769488c3d9ce1a8c7cd470ef67239c8ea6291670c5",
+    );
+    let baseline = &embedded_migrations()[0];
+    assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
+    assert_eq!(hex(&baseline.checksum), PINNED_CHECKSUM_HEX);
+}
+
+/// The baseline text names no schema and holds no transaction control. The
+/// install creates the objects in the current schema, so a qualifier would put
+/// them elsewhere; it runs the text inside its own transaction with the
+/// bookkeeping row, so a COMMIT in the text would split the two. Python
+/// `tests/unit/test_baseline_migration.py::test_text_names_no_schema`,
+/// `::test_text_has_no_transaction_control`.
+#[test]
+fn the_baseline_text_names_no_schema_and_holds_no_transaction_control() {
+    let text = embedded_migrations()[0].script.sql();
+    assert!(
+        !text.contains("public."),
+        "the baseline names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the baseline holds transaction control: {line}"
+        );
+    }
+}
+
 /// The chain starts at the baseline and ascends; only the baseline writes the
 /// family row and publishes the history readers; each checksum is SHA-384 of
 /// its text.

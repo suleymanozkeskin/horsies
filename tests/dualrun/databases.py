@@ -8,24 +8,39 @@ functions create and drop only databases whose name matches
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final
+from typing import Final, LiteralString
 
 import psycopg
 from psycopg import sql
 from sqlalchemy.engine import make_url
 
-from horsies.core.baseline.install import install_baseline
-from horsies.core.baseline.migration import load_baseline_migration
+import horsies._core as _core
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.url import to_psycopg_url
 
 DATABASE_PREFIX: Final = 'dualrun_'
 _DATABASE_NAME: Final = re.compile(r'^dualrun_[0-9a-f]{32}$')
+
+BASELINE_VERSION: Final = 1000
+"""The version of migration 1000 in ``horsies_migrations``."""
+
+_INSERT_MIGRATION_SQL: Final[LiteralString] = """
+    INSERT INTO horsies_migrations
+        (version, description, installed_on, success, checksum, execution_time)
+    VALUES (%(version)s, 'baseline', now(), TRUE, %(checksum)s, %(execution_time)s)
+"""
+
+_INSERT_FAMILY_SQL: Final[LiteralString] = """
+    INSERT INTO horsies_client_family (only_row, family, recorded_at)
+    VALUES (TRUE, 'PYTHON', now())
+    ON CONFLICT (only_row) DO NOTHING
+"""
 
 
 class SetupStep(Enum):
@@ -84,39 +99,43 @@ def create_database(base_url: str) -> Result[DualRunDatabase, DatabaseSetupFaile
     return Ok(DualRunDatabase(name=name, url=_url_for(base_url, name)))
 
 
-async def _install(url: str) -> Result[None, str]:
-    migration = load_baseline_migration()
-    async with await psycopg.AsyncConnection.connect(
-        url, autocommit=True
-    ) as connection:
-        match await install_baseline(connection, migration):
-            case Err(failed):
-                return Err(f'{failed.step}: {failed.cause}')
-            case Ok():
-                return Ok(None)
-
-
 def install_baseline_schema(
     database: DualRunDatabase,
 ) -> Result[None, DatabaseSetupFailed]:
-    """Install the baseline migration with its bookkeeping and client family rows."""
+    """Install migration 1000 with its bookkeeping row and the PYTHON family row, in one transaction.
+
+    The text is the baseline SQL files of ``horsies._core``, concatenated in
+    their run order; the bookkeeping row stores its SHA-384 checksum, as the
+    core's install does. Unlike the core's install, this one runs no
+    coverage pass and publishes no readers: a fresh database holds the same
+    rows at any time of day, so two installs compare equal. On failure
+    nothing of the install stays and the database is empty.
+    """
+    migration = ''.join(text for _, text in _core.baseline_sql_files()).encode('utf-8')
     try:
-        outcome = asyncio.run(_install(database.url))
+        with psycopg.connect(database.url, autocommit=True) as connection:
+            with connection.transaction():
+                started = time.perf_counter_ns()
+                # No parameters: psycopg sends the text with the simple query
+                # protocol, which runs every statement of it.
+                _ = connection.execute(migration)
+                elapsed = time.perf_counter_ns() - started
+                _ = connection.execute(
+                    _INSERT_MIGRATION_SQL,
+                    {
+                        'version': BASELINE_VERSION,
+                        'checksum': hashlib.sha384(migration).digest(),
+                        'execution_time': elapsed,
+                    },
+                )
+                _ = connection.execute(_INSERT_FAMILY_SQL)
     except psycopg.Error as exc:
         return Err(
             DatabaseSetupFailed(
                 step=SetupStep.INSTALL, database=database.name, cause=str(exc)
             )
         )
-    match outcome:
-        case Err(cause):
-            return Err(
-                DatabaseSetupFailed(
-                    step=SetupStep.INSTALL, database=database.name, cause=cause
-                )
-            )
-        case Ok():
-            return Ok(None)
+    return Ok(None)
 
 
 def drop_database(

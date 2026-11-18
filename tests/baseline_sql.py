@@ -1,13 +1,19 @@
-"""The baseline migration text, for tests that check the installed SQL."""
+"""The baseline migration text, for tests that check the installed SQL.
+
+The text is the baseline SQL files that ``horsies._core`` compiles in
+(``baseline_sql_files``), concatenated in their run order with no
+separator: migration 1000 as the core installs it.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Final
 
 import pytest
 
-from horsies.core.baseline.migration import load_baseline_migration
+import horsies._core as _core
 
 _FUNCTION_HEAD: Final = re.compile(r'^CREATE FUNCTION (\w+)\(', re.MULTILINE)
 _DOLLAR_QUOTE: Final = '$$'
@@ -15,8 +21,14 @@ _RETURNS_TABLE: Final = 'RETURNS TABLE('
 
 
 def baseline_sql() -> str:
-    """The SQL text that the install runs."""
-    return load_baseline_migration().sql
+    """The SQL text of migration 1000, the text that the install runs."""
+    return ''.join(text for _, text in _core.baseline_sql_files())
+
+
+def baseline_checksum() -> bytes:
+    """The checksum that the ``horsies_migrations`` row of migration 1000
+    stores: SHA-384 of the UTF-8 bytes of ``baseline_sql()``."""
+    return hashlib.sha384(baseline_sql().encode('utf-8')).digest()
 
 
 def _parameter_list(name: str, sql: str, list_start: int) -> tuple[tuple[str, ...], int]:

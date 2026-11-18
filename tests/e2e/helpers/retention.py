@@ -32,8 +32,8 @@ import asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from horsies.core.utils.url import sqlalchemy_url
+from tests.integration.history_seeding import publish_history_readers
 
 
 async def _forget(database_url: str, class_key: str) -> None:
@@ -67,7 +67,7 @@ async def _forget(database_url: str, class_key: str) -> None:
         # Republish on its own transaction, after the catalog no longer
         # offers these leaves and before anything is dropped.
         async with engine.begin() as connection:
-            await StagedLoaderPublisher().republish(connection)
+            await publish_history_readers(connection)
 
         async with engine.begin() as connection:
             for leaf_name in leaves:
