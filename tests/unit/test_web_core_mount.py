@@ -4,15 +4,13 @@ The app asks the handler which verdicts a request needs, calls the user's
 policy for those and no other, and passes the verdicts with the request. No
 database is reachable here, so every request below is answered before a
 read: a refused verdict, a path id that is not a UUID, the page, an unknown
-API path. Each request is also sent to the Python app before the switch
-(``tests/dualrun/reference/web_app.py``): the status, the body and the policy
-calls must be equal.
+API path. Each expected answer (the status, the body and the policy calls)
+is the answer of the Python app before the switch to the core's handler.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -34,9 +32,6 @@ from horsies.web import (
     create_monitoring_app,
 )
 from horsies.web.app import ask_policy, path_inside_mount, read_bounded_body
-from tests.dualrun.reference.web_app import (
-    create_monitoring_app as reference_monitoring_app,
-)
 
 pytestmark = [pytest.mark.unit]
 
@@ -46,8 +41,6 @@ UNREACHABLE_URL: Final = 'postgresql://postgres:none@127.0.0.1:1/none'
 """Nothing listens here; no request below reaches the database."""
 
 ACT_HEADERS: Final = {INTENT_HEADER: INTENT_VALUE}
-
-type AppFactory = Callable[..., FastAPI]
 
 
 def make_horsies_app() -> Horsies:
@@ -85,7 +78,6 @@ class Answer:
 
 
 async def answer_of(
-    factory: AppFactory,
     method: str,
     path: str,
     *,
@@ -93,9 +85,11 @@ async def answer_of(
     act: bool,
     actions_enabled: bool = True,
 ) -> Answer:
-    """The answer of one request to a new app of ``factory``."""
+    """The answer of one request to a new monitoring app."""
     policy = RecordingPolicy(view=view, act=act)
-    built = factory(make_horsies_app(), auth_policy=policy, actions_enabled=actions_enabled)
+    built = create_monitoring_app(
+        make_horsies_app(), auth_policy=policy, actions_enabled=actions_enabled,
+    )
     try:
         async with AsyncClient(transport=ASGITransport(app=built), base_url='http://test') as client:
             response = await client.request(method, path, headers=ACT_HEADERS)
@@ -262,60 +256,142 @@ ACTION_PATHS: Final = (
 )
 
 
+NOT_AUTHORIZED: Final = {'detail': 'Not authorized.'}
+
+READ_REFUSALS: Final = (
+    (
+        'GET',
+        '/api/tasks/not-a-uuid',
+        400,
+        {
+            'code': 'INVALID_INPUT',
+            'detail': (
+                'Path parameter task_id: Input should be a valid UUID, '
+                'invalid character: found `n` at 1.'
+            ),
+        },
+        ('can_view',),
+    ),
+    (
+        'GET',
+        '/api/workflows/00000000-0000-4000-8000-000000000002/tasks/2147483648',
+        404,
+        {'detail': 'Workflow task not found.'},
+        ('can_view',),
+    ),
+    (
+        'GET',
+        '/api/workflows/00000000-0000-4000-8000-000000000002/tasks/x',
+        422,
+        {
+            'detail': [
+                {
+                    'type': 'int_parsing',
+                    'loc': ['path', 'task_index'],
+                    'msg': 'Input should be a valid integer, unable to parse string as an integer',
+                    'input': 'x',
+                },
+            ],
+        },
+        ('can_view',),
+    ),
+    (
+        'GET',
+        '/api/tasks?offset=500&limit=1',
+        400,
+        {'detail': 'offset + limit must be <= 500; got 501'},
+        ('can_view',),
+    ),
+    (
+        'GET',
+        '/api/tasks?limit=0',
+        422,
+        {
+            'detail': [
+                {
+                    'type': 'greater_than_equal',
+                    'loc': ['query', 'limit'],
+                    'msg': 'Input should be greater than or equal to 1',
+                    'input': '0',
+                    'ctx': {'ge': 1},
+                },
+            ],
+        },
+        ('can_view',),
+    ),
+    (
+        'GET',
+        '/api/tasks?status=NOT_A_STATUS',
+        400,
+        {'detail': "Unknown status 'NOT_A_STATUS'."},
+        ('can_view',),
+    ),
+    (
+        'GET',
+        '/api/workers/ping?timeout_seconds=99',
+        422,
+        {
+            'detail': [
+                {
+                    'type': 'less_than_equal',
+                    'loc': ['query', 'timeout_seconds'],
+                    'msg': 'Input should be less than or equal to 10',
+                    'input': '99',
+                    'ctx': {'le': 10.0},
+                },
+            ],
+        },
+        ('can_view',),
+    ),
+    ('GET', '/api/unknown', 404, {'detail': 'Not found.'}, ()),
+    ('GET', '/api', 404, {'detail': 'Not found.'}, ()),
+)
+"""Requests that the Python app refused before any read: the method, the
+path, and Python's status, body and policy calls."""
+
+
 class TestTheCoreAnswersAsPythonDid:
-    """Requests answered before any read: Python's app and the core's handler
-    give the same status and body, after the same policy calls."""
+    """Requests answered before any read: the core's handler gives the status
+    and the body of Python's app, after the same policy calls."""
 
     pytestmark = [asyncio_tests]
 
     @pytest.mark.parametrize(('method', 'path'), REFUSED_VIEW_PATHS)
     async def test_a_refused_view(self, method: str, path: str) -> None:
-        python = await answer_of(reference_monitoring_app, method, path, view=False, act=True)
-        core = await answer_of(create_monitoring_app, method, path, view=False, act=True)
+        core = await answer_of(method, path, view=False, act=True)
 
-        assert python.status == 403
-        assert core == python
+        assert core == Answer(status=403, body=NOT_AUTHORIZED, calls=('can_view',))
 
     @pytest.mark.parametrize('path', ACTION_PATHS)
     async def test_a_refused_act(self, path: str) -> None:
-        python = await answer_of(reference_monitoring_app, 'POST', path, view=True, act=False)
-        core = await answer_of(create_monitoring_app, 'POST', path, view=True, act=False)
+        core = await answer_of('POST', path, view=True, act=False)
 
-        assert python.calls == ('can_view', 'can_act')
-        assert core == python
+        assert core == Answer(
+            status=403, body=NOT_AUTHORIZED, calls=('can_view', 'can_act'),
+        )
 
     @pytest.mark.parametrize('path', ACTION_PATHS)
     async def test_an_action_while_actions_are_disabled(self, path: str) -> None:
-        python = await answer_of(
-            reference_monitoring_app, 'POST', path, view=True, act=True, actions_enabled=False,
-        )
-        core = await answer_of(
-            create_monitoring_app, 'POST', path, view=True, act=True, actions_enabled=False,
-        )
+        core = await answer_of('POST', path, view=True, act=True, actions_enabled=False)
 
-        assert python.calls == ('can_view',)
-        assert core == python
+        assert core == Answer(status=403, body=NOT_AUTHORIZED, calls=('can_view',))
 
     @pytest.mark.parametrize(
-        ('method', 'path'),
-        [
-            ('GET', '/api/tasks/not-a-uuid'),
-            ('GET', '/api/workflows/00000000-0000-4000-8000-000000000002/tasks/2147483648'),
-            ('GET', '/api/workflows/00000000-0000-4000-8000-000000000002/tasks/x'),
-            ('GET', '/api/tasks?offset=500&limit=1'),
-            ('GET', '/api/tasks?limit=0'),
-            ('GET', '/api/tasks?status=NOT_A_STATUS'),
-            ('GET', '/api/workers/ping?timeout_seconds=99'),
-            ('GET', '/api/unknown'),
-            ('GET', '/api'),
-        ],
+        ('method', 'path', 'status', 'body', 'calls'),
+        READ_REFUSALS,
+        ids=[f'{method}-{path}' for method, path, *_ in READ_REFUSALS],
     )
-    async def test_a_request_refused_before_any_read(self, method: str, path: str) -> None:
-        python = await answer_of(reference_monitoring_app, method, path, view=True, act=True)
-        core = await answer_of(create_monitoring_app, method, path, view=True, act=True)
+    async def test_a_request_refused_before_any_read(
+        self,
+        method: str,
+        path: str,
+        status: int,
+        body: object,
+        calls: tuple[str, ...],
+    ) -> None:
+        core = await answer_of(method, path, view=True, act=True)
 
-        assert python.status in {400, 404, 422}
-        assert core == python
+        assert core == Answer(status=status, body=body, calls=calls)
 
 
 _INJECTED: Final = re.compile(
@@ -324,11 +400,20 @@ _INJECTED: Final = re.compile(
 )
 
 
-async def injected_block(factory: AppFactory, path: str) -> tuple[int, str, str]:
+PYTHON_INJECTED_BLOCK: Final = (
+    '<base href="/monitoring/"><script>window.__HORSIES_UI__ = '
+    '{"basePath": "/monitoring", "apiBase": "/monitoring/api"}</script>'
+    '<link rel="stylesheet" href="/static/theme.css"></head>'
+)
+"""The block that the Python app injected into the page under the mount
+``/monitoring``, with the stylesheet ``/static/theme.css``."""
+
+
+async def injected_block(path: str) -> tuple[int, str, str]:
     """The status, the content type and the injected block of the page,
     under the mount ``/monitoring``."""
     host = FastAPI()
-    built = factory(
+    built = create_monitoring_app(
         make_horsies_app(),
         auth_policy=RecordingPolicy(view=False, act=False),
         config=MonitoringUIConfig(custom_css_url='/static/theme.css'),
@@ -355,10 +440,7 @@ class TestThePage:
 
     @pytest.mark.parametrize('path', ['/monitoring/', '/monitoring/tasks/some/client/route'])
     async def test_the_injected_block_is_pythons(self, path: str) -> None:
-        python = await injected_block(reference_monitoring_app, path)
-        core = await injected_block(create_monitoring_app, path)
+        core = await injected_block(path)
 
-        assert python[0] == 200
-        assert python[2] != ''
-        assert core == python
+        assert core == (200, 'text/html; charset=utf-8', PYTHON_INJECTED_BLOCK)
 
