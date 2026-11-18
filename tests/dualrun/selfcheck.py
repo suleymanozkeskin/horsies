@@ -64,6 +64,17 @@ FUNCTION_CALLS_SQL: Final = (
     / 'baseline_function_calls.sql'
 )
 _FIXED_ID: Final = re.compile(r"'(00000000-0000-7000-8000-[0-9a-f]{12})'")
+_PUBLISH_CHECK: Final = (
+    "SELECT expect_value('publish_history_readers', "
+    "(SELECT outcome FROM horsies_publish_history_readers()), 'PUBLISHED');"
+)
+"""The script's check of the reader publication. The core's SQL tests run
+the script on the bare baseline, where the call publishes the readers."""
+_PUBLISH_CHECK_AFTER_INSTALL: Final = _PUBLISH_CHECK.replace(
+    "'PUBLISHED'", "'ALREADY_CURRENT'"
+)
+"""The same check on a database that the core installed: the install
+published the readers, so the call answers ``ALREADY_CURRENT``."""
 _NEW_IDS_SQL: Final[LiteralString] = (
     'SELECT horsies_uuidv7() FROM generate_series(1, %(count)s)'
 )
@@ -115,8 +126,14 @@ def straddles(window: RunWindow, unit: CalendarUnit) -> bool:
 
 
 def function_calls_script(fixed_ids: dict[str, str]) -> str:
-    """The function-call script with each fixed id replaced by ``fixed_ids[id]``."""
+    """The function-call script for a database that the core installed: each
+    fixed id replaced by ``fixed_ids[id]``, and the reader publication
+    expected to answer ``ALREADY_CURRENT``."""
     text = FUNCTION_CALLS_SQL.read_text(encoding='utf-8')
+    assert text.count(_PUBLISH_CHECK) == 1, (
+        f'{FUNCTION_CALLS_SQL.name} checks the reader publication once: {_PUBLISH_CHECK}'
+    )
+    text = text.replace(_PUBLISH_CHECK, _PUBLISH_CHECK_AFTER_INSTALL)
     return _FIXED_ID.sub(lambda found: f"'{fixed_ids[found.group(1)]}'", text)
 
 
