@@ -242,9 +242,9 @@ async fn a_blocking_handle_method_on_a_runtime_thread_is_async_context() {
         assert_eq!(refused.workflow_id(), workflow_id);
     }
     assert!(
-        refusals[0].message.contains("`handle.status().await`"),
+        refusals[0].message().contains("`handle.status().await`"),
         "{}",
-        refusals[0].message
+        refusals[0].message()
     );
 }
 
