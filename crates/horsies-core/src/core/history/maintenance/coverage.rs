@@ -1,26 +1,14 @@
 //! Startup and periodic owner for coverage plus reader publication.
 
-use chrono::{DateTime, Duration, Timelike, Utc};
-use sqlx::PgConnection;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::broker::core_rows::{one_row, query_in, scalar, StatementLog};
 
-use crate::core::history::commands::EnsureLeafCoverage;
-use crate::core::history::ddl::classes::{
-    register_period_class, ClassRegistration, DEFAULT_RETENTION_DAYS, FOREVER_CLASS_KEY,
-    PERIOD_CLASS_KIND,
-};
+use crate::core::history::ddl::classes::DEFAULT_RETENTION_DAYS;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::heartbeats::partitioning::{
-    ensure_heartbeat_coverage, hourly_leaf_ref, register_heartbeat_class, EnsureHeartbeatCoverage,
-    HeartbeatClassRegistration,
-};
-use crate::core::history::names::{HEARTBEAT_CLASS_KEY, RETENTION_CLASSES};
+use crate::core::history::names::HEARTBEAT_CLASS_KEY;
 use crate::core::history::outcomes::LeafCreation;
-use crate::core::history::partitions::catalog::database_now;
-use crate::core::history::partitions::manager::ensure_leaf_coverage;
-use crate::core::history::partitions::publication::{LoaderPublication, UnpublishedLoader};
-use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
+use crate::core::history::periods::RetentionDays;
 use crate::core::history::reads::publisher::publish_readers_in;
 use crate::db::{
     CheckoutClass, CorePool, IsolationLevel, NotSentCause, PooledConnection, RollbackOutcome,
@@ -91,66 +79,6 @@ pub enum StartupCoverageOutcome {
     Refused(CoverageOutcome),
 }
 
-pub async fn heartbeat_coverage_present(
-    connection: &mut PgConnection,
-) -> Result<bool, HistoryError> {
-    let now = database_now(connection).await?;
-    let lower = now
-        .with_minute(0)
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
-    let leaf = hourly_leaf_ref(lower)?;
-    Ok(sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-        .bind(leaf.leaf_name())
-        .fetch_one(connection)
-        .await?)
-}
-
-/// The `forever` class and every period class, by key.
-async fn history_class_keys(connection: &mut PgConnection) -> Result<Vec<String>, HistoryError> {
-    let sql = format!(
-        "SELECT class_key FROM {RETENTION_CLASSES}
-         WHERE class_kind = '{PERIOD_CLASS_KIND}' OR class_key = $1
-         ORDER BY class_key"
-    );
-    Ok(sqlx::query_scalar(&sql)
-        .bind(FOREVER_CLASS_KEY)
-        .fetch_all(connection)
-        .await?)
-}
-
-async fn register_partition_coverage(
-    connection: &mut PgConnection,
-    heartbeat_horizon_hours: u32,
-    declared_periods: &[RetentionDays],
-) -> Result<Option<CoverageEnsureFailed>, HistoryError> {
-    let horizon = HeartbeatHorizonHours::new(heartbeat_horizon_hours)
-        .map_err(|refused| HistoryError::contract(refused.to_string()))?;
-    let heartbeat_registration = register_heartbeat_class(connection, horizon).await?;
-    if matches!(
-        heartbeat_registration,
-        HeartbeatClassRegistration::ParentUnpartitioned
-    ) {
-        return Ok(Some(CoverageEnsureFailed {
-            stage: "register_heartbeat_class",
-            class_key: Some(HEARTBEAT_CLASS_KEY.to_owned()),
-            refusal: format!("{heartbeat_registration:?}"),
-            heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
-            absent_leaves: Vec::new(),
-        }));
-    }
-
-    // A class key fixes its period, so registration cannot conflict: every
-    // outcome is a registered class.
-    for days in registered_periods(declared_periods) {
-        match register_period_class(connection, days).await? {
-            ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. } => {}
-        }
-    }
-    Ok(None)
-}
-
 /// The default period and every declared period, each once, in day order.
 pub(crate) fn registered_periods(declared_periods: &[RetentionDays]) -> Vec<RetentionDays> {
     let mut periods: Vec<RetentionDays> = declared_periods
@@ -161,149 +89,6 @@ pub(crate) fn registered_periods(declared_periods: &[RetentionDays]) -> Vec<Rete
     periods.sort_unstable();
     periods.dedup();
     periods
-}
-
-pub async fn ensure_partition_coverage<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    history_horizon_days: u32,
-    heartbeat_horizon_hours: u32,
-    declared_periods: &[RetentionDays],
-    publisher: &P,
-) -> Result<CoverageOutcome, HistoryError> {
-    if let Some(failed) =
-        register_partition_coverage(connection, heartbeat_horizon_hours, declared_periods).await?
-    {
-        return Ok(CoverageOutcome::Failed(failed));
-    }
-
-    let mut created_history = 0_u64;
-    let mut failures = Vec::new();
-    for (savepoint_number, class_key) in history_class_keys(connection)
-        .await?
-        .into_iter()
-        .enumerate()
-    {
-        let savepoint = format!("horsies_history_coverage_{savepoint_number}");
-        sqlx::query(&format!("SAVEPOINT {savepoint}"))
-            .execute(&mut *connection)
-            .await?;
-        let command = EnsureLeafCoverage::new(&class_key, history_horizon_days)
-            .map_err(|error| HistoryError::contract(error.to_string()))?;
-        let class_result: Result<Vec<LeafCreation>, HistoryError> = async {
-            let creations = ensure_leaf_coverage(connection, &command, &UnpublishedLoader).await?;
-            if creations
-                .iter()
-                .any(|creation| matches!(creation, LeafCreation::Created { .. }))
-            {
-                publisher.republish(connection).await?;
-            }
-            Ok(creations)
-        }
-        .await;
-        let creations = match class_result {
-            Ok(creations) => {
-                sqlx::query(&format!("RELEASE SAVEPOINT {savepoint}"))
-                    .execute(&mut *connection)
-                    .await?;
-                creations
-            }
-            Err(error) => {
-                sqlx::query(&format!("ROLLBACK TO SAVEPOINT {savepoint}"))
-                    .execute(&mut *connection)
-                    .await?;
-                sqlx::query(&format!("RELEASE SAVEPOINT {savepoint}"))
-                    .execute(&mut *connection)
-                    .await?;
-                failures.push(format!("{class_key}: {error}"));
-                continue;
-            }
-        };
-        created_history += creations
-            .iter()
-            .filter(|creation| matches!(creation, LeafCreation::Created { .. }))
-            .count() as u64;
-        let refusals: Vec<String> = creations
-            .into_iter()
-            .filter(|creation| {
-                !matches!(
-                    creation,
-                    LeafCreation::Created { .. }
-                        | LeafCreation::AlreadyConformant { .. }
-                        | LeafCreation::IndexRepaired { .. }
-                )
-            })
-            .map(|creation| format!("{creation:?}"))
-            .collect();
-        if !refusals.is_empty() {
-            failures.push(format!("{class_key}: {}", refusals.join("; ")));
-        }
-    }
-
-    let heartbeat_command = EnsureHeartbeatCoverage::new(heartbeat_horizon_hours)?;
-    let heartbeat_creations = ensure_heartbeat_coverage(connection, &heartbeat_command).await?;
-    let mut created_heartbeats = 0_u64;
-    for creation in heartbeat_creations {
-        match creation {
-            LeafCreation::Created { .. } => created_heartbeats += 1,
-            LeafCreation::AlreadyConformant { .. } | LeafCreation::IndexRepaired { .. } => {}
-            refusal => {
-                return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
-                    stage: "ensure_heartbeat_coverage",
-                    class_key: Some(HEARTBEAT_CLASS_KEY.to_owned()),
-                    refusal: format!("{refusal:?}"),
-                    heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
-                    absent_leaves: Vec::new(),
-                }));
-            }
-        }
-    }
-
-    let mut republished = false;
-    let mut absent_leaves = Vec::new();
-    if created_history > 0 || publisher.needs_republication(connection).await? {
-        let report = publisher.republish(connection).await?;
-        republished = true;
-        absent_leaves = report.absent_leaves;
-    }
-    if !failures.is_empty() {
-        let first_class = failures[0]
-            .split_once(':')
-            .map(|(class, _)| class.to_owned());
-        return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
-            stage: "ensure_leaf_coverage",
-            class_key: first_class,
-            refusal: format!(
-                "{} class(es) failed: {}",
-                failures.len(),
-                failures.join("; ")
-            ),
-            heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
-            absent_leaves,
-        }));
-    }
-    let now = database_now(connection).await?;
-    let day = now
-        .with_hour(0)
-        .and_then(|value| value.with_minute(0))
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
-    let hour = now
-        .with_minute(0)
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
-    Ok(CoverageOutcome::Ensured(CoverageEnsured {
-        created_history_leaves: created_history,
-        created_heartbeat_leaves: created_heartbeats,
-        republished,
-        heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
-        history_covered_through: HistoryCoverage::Until {
-            at: day + Duration::days(i64::from(history_horizon_days) + 1),
-        },
-        heartbeats_covered_through: hour + Duration::hours(i64::from(heartbeat_horizon_hours) + 1),
-        absent_leaves,
-    }))
 }
 
 /// Tries of one damaged leaf whose creation answers `Busy` (Python
@@ -685,28 +470,6 @@ async fn final_coverage_probe(
     }
     let probe = probe_coverage(&mut connection, log, request).await?;
     Ok((probe, true))
-}
-
-pub async fn ensure_startup_coverage<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    history_horizon_days: u32,
-    heartbeat_horizon_hours: u32,
-    declared_periods: &[RetentionDays],
-    publisher: &P,
-) -> Result<StartupCoverageOutcome, HistoryError> {
-    let outcome = ensure_partition_coverage(
-        connection,
-        history_horizon_days,
-        heartbeat_horizon_hours,
-        declared_periods,
-        publisher,
-    )
-    .await?;
-    if outcome.heartbeat_covered_now() {
-        Ok(StartupCoverageOutcome::Ready(outcome))
-    } else {
-        Ok(StartupCoverageOutcome::Refused(outcome))
-    }
 }
 
 /// Whether a startup may go on after `outcome`: only when a heartbeat leaf

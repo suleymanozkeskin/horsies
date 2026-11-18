@@ -10,11 +10,12 @@
 use std::time::Instant;
 
 use chrono::{DateTime, TimeZone};
-use sqlx::postgres::PgConnectOptions;
 
 use super::*;
 use crate::core::history::outcomes::LeafAttachment;
-use crate::core::history::partitions::catalog::read_leaf_ordering_index_exists;
+use crate::core::history::partitions::catalog::AT_LOWER_BOUND_KIND;
+use crate::test_support::history::try_create_history_leaf;
+use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
 
 const WEST_OF_UTC: &str = "Etc/GMT+12";
 const EAST_OF_UTC: &str = "Etc/GMT-12";
@@ -36,27 +37,15 @@ fn past_fold() -> DateTime<Utc> {
         .expect("fold instant")
 }
 
-fn test_options(database: &TestDatabase) -> PgConnectOptions {
-    PgConnectOptions::from_str(database.url()).expect("invalid test database URL")
-}
-
 /// A pool on the test database whose sessions run in `zone`.
-async fn pool_in_zone(database: &TestDatabase, zone: &'static str, max: u32) -> PgPool {
-    let pool = PgPoolOptions::new()
+async fn pool_in_zone(database: &TestDatabase, zone: &'static str, max: u32) -> TestPool {
+    let pool = TestPoolOptions::new()
         .max_connections(max)
-        .after_connect(move |connection, _metadata| {
-            Box::pin(async move {
-                sqlx::query("SELECT set_config('timezone', $1, false)")
-                    .bind(zone)
-                    .execute(&mut *connection)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect_with(test_options(database))
+        .session_setup(format!("SELECT set_config('timezone', '{zone}', false)"))
+        .connect(database.url())
         .await
         .expect("connect zoned pool");
-    let session_zone: String = sqlx::query_scalar("SHOW TimeZone")
+    let session_zone: String = sql::query_scalar("SHOW TimeZone")
         .fetch_one(&pool)
         .await
         .expect("read session time zone");
@@ -64,46 +53,66 @@ async fn pool_in_zone(database: &TestDatabase, zone: &'static str, max: u32) -> 
     pool
 }
 
-async fn set_local_zone(connection: &mut PgConnection, zone: &str) {
-    sqlx::query("SELECT set_config('timezone', $1, true)")
+/// A one-connection core session pool whose session runs in `zone`.
+async fn core_pool_in_zone(database: &TestDatabase, zone: &str) -> CorePool {
+    let core = crate::broker::pools::session_core_pool_for_test_url(database.url(), 1);
+    {
+        let mut connection = core
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the zoned core connection");
+        let _rows = connection
+            .query(
+                &SET_SESSION_TIMEZONE.bind().value(&zone).finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("set the core session time zone");
+    }
+    assert_eq!(core_session_timezone(&core).await, zone);
+    core
+}
+
+async fn set_local_zone(connection: &mut TestConnection, zone: &str) {
+    sql::query("SELECT set_config('timezone', $1, true)")
         .bind(zone)
         .execute(connection)
         .await
         .expect("set the transaction time zone");
 }
 
-async fn database_today(pool: &PgPool) -> DateTime<Utc> {
+async fn database_today(pool: &TestPool) -> DateTime<Utc> {
     let mut connection = pool.acquire().await.expect("acquire clock");
-    utc_day_start(database_now(&mut connection).await.expect("database now"))
+    utc_day_start(database_now(&mut connection).await)
 }
 
-async fn database_hour(pool: &PgPool) -> DateTime<Utc> {
+async fn database_hour(pool: &TestPool) -> DateTime<Utc> {
     let mut connection = pool.acquire().await.expect("acquire clock");
-    let now = database_now(&mut connection).await.expect("database now");
+    let now = database_now(&mut connection).await;
     now.with_minute(0)
         .and_then(|value| value.with_second(0))
         .and_then(|value| value.with_nanosecond(0))
         .expect("truncate to the hour")
 }
 
-async fn is_attached(pool: &PgPool, leaf_name: &str) -> bool {
-    sqlx::query_scalar(LEAF_ATTACHED_SQL)
+async fn is_attached(pool: &TestPool, leaf_name: &str) -> bool {
+    sql::query_scalar(LEAF_ATTACHED_SQL)
         .bind(leaf_name)
         .fetch_one(pool)
         .await
         .expect("read leaf attachment")
 }
 
-async fn relation_exists(pool: &PgPool, relation: &str) -> bool {
-    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+async fn relation_exists(pool: &TestPool, relation: &str) -> bool {
+    sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(relation)
         .fetch_one(pool)
         .await
         .expect("read relation presence")
 }
 
-async fn catalog_row_count(pool: &PgPool, leaf_name: &str) -> i64 {
-    sqlx::query_scalar(&format!(
+async fn catalog_row_count(pool: &TestPool, leaf_name: &str) -> i64 {
+    sql::query_scalar(&format!(
         "SELECT count(*) FROM {LEAF_CATALOG} WHERE leaf_name = $1"
     ))
     .bind(leaf_name)
@@ -114,11 +123,11 @@ async fn catalog_row_count(pool: &PgPool, leaf_name: &str) -> i64 {
 
 /// A RUNNING workflow, one node and one HISTORY pending row whose anchor is
 /// inside the leaf that starts at `leaf_lower`. Every baseline column is named.
-async fn seed_history_pending_row(pool: &PgPool, class_key: &str, leaf_lower: DateTime<Utc>) {
+async fn seed_history_pending_row(pool: &TestPool, class_key: &str, leaf_lower: DateTime<Utc>) {
     let workflow_id = Uuid::new_v4();
     let node_row_id = Uuid::new_v4();
     let mut transaction = pool.begin().await.expect("begin pending seed");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -126,10 +135,10 @@ async fn seed_history_pending_row(pool: &PgPool, class_key: &str, leaf_lower: Da
                    NOW(), NOW(), NOW(), NOW())",
     )
     .bind(workflow_id)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert pending workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow,
              id, workflow_id, task_index, task_name, input, queue_name, priority,
@@ -142,10 +151,10 @@ async fn seed_history_pending_row(pool: &PgPool, class_key: &str, leaf_lower: Da
     .bind(node_row_id)
     .bind(workflow_id)
     .bind(class_key)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert pending node");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_phase2_pending (
              task_id, workflow_id, workflow_node_row_id, terminalization_kind,
              recovery_source, history_class, history_anchor, history_schema_version,
@@ -160,48 +169,33 @@ async fn seed_history_pending_row(pool: &PgPool, class_key: &str, leaf_lower: Da
     .bind(class_key)
     .bind(leaf_lower + Duration::hours(1))
     .bind(vec![7_u8; 32])
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert pending row");
     transaction.commit().await.expect("commit pending seed");
 }
 
 /// `TestClassRegistration.test_register_verify_and_conflict`: a second
-/// registration of a period is `AlreadyRegistered`. The conflict half cannot
-/// be planted on the baseline: the key fixes the period, and the database
-/// refuses a row whose key and days disagree.
+/// registration of a period (`horsies_register_retention_classes`) is
+/// `VERIFIED`. The conflict half cannot be planted on the baseline: the key
+/// fixes the period, and the database refuses a row whose key and days
+/// disagree.
 #[tokio::test]
 #[serial]
 async fn a_registered_period_registers_again_as_already_registered() {
     let database = TestDatabase::create().await;
     let period = RetentionDays::parse_period(Duration::days(30)).expect("thirty days");
     let mut transaction = database.pool.begin().await.expect("begin registration");
-    let first = register_period_class(&mut transaction, period)
-        .await
-        .expect("first registration");
-    let second = register_period_class(&mut transaction, period)
-        .await
-        .expect("second registration");
+    let first = register_period_class(&mut transaction, period).await;
+    let second = register_period_class(&mut transaction, period).await;
     transaction.commit().await.expect("commit registration");
-    match first {
-        ClassRegistration::Registered {
-            class_key,
-            finite_parent_name,
-        } => {
-            assert_eq!(class_key, "standard_30d");
-            assert_eq!(finite_parent_name, "horsies_task_history_standard_30d");
-        }
-        ClassRegistration::AlreadyRegistered { class_key } => {
-            panic!("a fresh database has no {class_key} row before the first coverage pass")
-        }
-    }
     assert_eq!(
-        second,
-        ClassRegistration::AlreadyRegistered {
-            class_key: "standard_30d".to_owned(),
-        }
+        first, "REGISTERED",
+        "a fresh database has no standard_30d row before the first coverage pass"
     );
-    let stored: i16 = sqlx::query_scalar(&format!(
+    assert_eq!(second, "VERIFIED");
+    assert!(relation_exists(&database.pool, "horsies_task_history_standard_30d").await);
+    let stored: i16 = sql::query_scalar(&format!(
         "SELECT retention_days FROM {RETENTION_CLASSES} WHERE class_key = 'standard_30d'"
     ))
     .fetch_one(&database.pool)
@@ -209,7 +203,7 @@ async fn a_registered_period_registers_again_as_already_registered() {
     .expect("read stored period");
     assert_eq!(stored, 30);
 
-    let refused = sqlx::query(&format!(
+    let refused = sql::query(&format!(
         "INSERT INTO {RETENTION_CLASSES} (
              class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
          ) VALUES ('standard_31d', 'PERIOD', 7, NULL, statement_timestamp())"
@@ -259,8 +253,26 @@ async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() 
         ),
         "{outcome:?}"
     );
-    let row = catalog_row_where(&database.pool, "class_key = $1", class_key).await;
-    assert!(row.describes(class_key, leaf.bounds()));
+    let row: (String, String, String, Option<DateTime<Utc>>, DateTime<Utc>) =
+        sql::query_as(&format!(
+            "SELECT leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor
+             FROM {LEAF_CATALOG} WHERE class_key = $1
+             ORDER BY lower_anchor, leaf_name LIMIT 1"
+        ))
+        .bind(class_key)
+        .fetch_one(&database.pool)
+        .await
+        .expect("read the catalog row");
+    assert_eq!(
+        row,
+        (
+            leaf.leaf_name().to_owned(),
+            class_key.to_owned(),
+            AT_LOWER_BOUND_KIND.to_owned(),
+            Some(leaf.bounds().lower()),
+            leaf.bounds().upper(),
+        )
+    );
     database.drop().await;
 }
 
@@ -290,7 +302,7 @@ async fn a_detach_whose_bounds_differ_from_the_catalog_raises_and_frees_the_lock
     .expect("shifted leaf ref");
     let command = DetachExpiredHistoryLeaf::new(shifted, Some(5_000)).expect("detach");
     let error = detach_expired_leaf(
-        &core_pool_for_test_pool(&database.pool),
+        &core_pool_for_test_url(database.pool.url()),
         StatementLog::Off,
         &command,
     )
@@ -306,23 +318,27 @@ async fn a_detach_whose_bounds_differ_from_the_catalog_raises_and_frees_the_lock
     );
     let try_xact = format!("SELECT pg_try_advisory_xact_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
     let mut probe = database.pool.begin().await.expect("begin lock probe");
-    let free: bool = sqlx::query_scalar(&try_xact)
+    let free: bool = sql::query_scalar(&try_xact)
         .bind(class_key)
         .bind(lower)
-        .fetch_one(probe.as_mut())
+        .fetch_one(&mut *probe)
         .await
         .expect("probe the leaf lock");
     probe.rollback().await.expect("end lock probe");
     assert!(free, "the leaf lock is free after the refused detach");
     assert!(is_attached(&database.pool, leaf.leaf_name()).await);
-    let mut connection = database.pool.acquire().await.expect("acquire inspector");
+    let inspector = core_pool_for_test_url(database.pool.url());
     assert!(matches!(
-        inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone()))
-            .await
-            .expect("inspect the leaf"),
+        inspect_leaf_in_pool(
+            &inspector,
+            StatementLog::Off,
+            &InspectHistoryLeaf::new(leaf.clone())
+        )
+        .await
+        .expect("inspect the leaf"),
         LeafInspection::Detachable { .. }
     ));
-    drop(connection);
+    inspector.close();
     database.drop().await;
 }
 
@@ -333,7 +349,7 @@ async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
     let database = TestDatabase::create().await;
     let today = database_today(&database.pool).await;
     let bounds = LeafBounds::new(today, today + Duration::days(1)).expect("one day");
-    let mut connection = database.pool.acquire().await.expect("acquire inspector");
+    let inspector = core_pool_for_test_url(database.pool.url());
     let ghost = LeafRef::new(
         "horsies_task_history_ghost_2026_01_01",
         "ghost",
@@ -341,9 +357,13 @@ async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
     )
     .expect("ghost leaf ref");
     assert_eq!(
-        inspect_leaf(&mut connection, &InspectHistoryLeaf::new(ghost))
-            .await
-            .expect("inspect an unknown class"),
+        inspect_leaf_in_pool(
+            &inspector,
+            StatementLog::Off,
+            &InspectHistoryLeaf::new(ghost)
+        )
+        .await
+        .expect("inspect an unknown class"),
         LeafInspection::RetentionClassAbsent {
             class_key: "ghost".to_owned(),
         }
@@ -351,14 +371,18 @@ async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
     let forever =
         LeafRef::new("horsies_task_history_forever_x", FOREVER_CLASS_KEY, bounds).expect("ref");
     assert_eq!(
-        inspect_leaf(&mut connection, &InspectHistoryLeaf::new(forever))
-            .await
-            .expect("inspect the forever class"),
+        inspect_leaf_in_pool(
+            &inspector,
+            StatementLog::Off,
+            &InspectHistoryLeaf::new(forever)
+        )
+        .await
+        .expect("inspect the forever class"),
         LeafInspection::ForeverClassLeaf {
             class_key: FOREVER_CLASS_KEY.to_owned(),
         }
     );
-    drop(connection);
+    inspector.close();
     database.drop().await;
 }
 
@@ -377,11 +401,15 @@ async fn a_fresh_leaf_is_not_expired_and_a_detach_keeps_it() {
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
-    let mut connection = database.pool.acquire().await.expect("acquire inspector");
-    let inspection = inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone()))
-        .await
-        .expect("inspect today's leaf");
-    drop(connection);
+    let inspector = core_pool_for_test_url(database.pool.url());
+    let inspection = inspect_leaf_in_pool(
+        &inspector,
+        StatementLog::Off,
+        &InspectHistoryLeaf::new(leaf.clone()),
+    )
+    .await
+    .expect("inspect today's leaf");
+    inspector.close();
     assert_eq!(
         inspection,
         LeafInspection::NotExpired {
@@ -391,7 +419,7 @@ async fn a_fresh_leaf_is_not_expired_and_a_detach_keeps_it() {
     );
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach");
     let outcome = detach_expired_leaf(
-        &core_pool_for_test_pool(&database.pool),
+        &core_pool_for_test_url(database.pool.url()),
         StatementLog::Off,
         &command,
     )
@@ -425,12 +453,12 @@ async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
         LeafCreation::Created { .. }
     ));
     // One connection: the detach takes the session whose timeouts are set here.
-    let detach_pool = crate::broker::pools::session_core_pool_for_test_pool(&database.pool, 1);
+    let detach_pool = crate::broker::pools::session_core_pool_for_test_url(database.pool.url(), 1);
     set_core_session_timeouts(&detach_pool, "13s", "17s").await;
 
     let mut holder = database.pool.begin().await.expect("begin parent holder");
-    sqlx::query(&format!("LOCK TABLE {parent} IN SHARE MODE"))
-        .execute(holder.as_mut())
+    sql::query(&format!("LOCK TABLE {parent} IN SHARE MODE"))
+        .execute(&mut *holder)
         .await
         .expect("hold the parent in SHARE mode");
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(9_000)).expect("detach");
@@ -483,7 +511,7 @@ async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
     // read of the session's timeouts comes after it; the proxy holds that
     // statement.
     let (proxy, proxied, pause) = pausing_proxied_pool(&database, "AS lock_timeout").await;
-    let detach_pool = crate::broker::pools::session_core_pool_for_test_pool(&proxied, 1);
+    let detach_pool = crate::broker::pools::session_core_pool_for_test_url(proxied.url(), 1);
     proxied.close().await;
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach");
     let detach = tokio::spawn(async move {
@@ -493,10 +521,10 @@ async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
 
     let try_xact = format!("SELECT pg_try_advisory_xact_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
     let mut probe = database.pool.begin().await.expect("begin lock probe");
-    let free_while_held: bool = sqlx::query_scalar(&try_xact)
+    let free_while_held: bool = sql::query_scalar(&try_xact)
         .bind(class_key)
         .bind(lower)
-        .fetch_one(probe.as_mut())
+        .fetch_one(&mut *probe)
         .await
         .expect("probe the held lock");
     probe.rollback().await.expect("end lock probe");
@@ -513,10 +541,10 @@ async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
     let mut acquired = false;
     for _ in 0..40 {
         let mut probe = database.pool.begin().await.expect("begin lock probe");
-        acquired = sqlx::query_scalar(&try_xact)
+        acquired = sql::query_scalar(&try_xact)
             .bind(class_key)
             .bind(lower)
-            .fetch_one(probe.as_mut())
+            .fetch_one(&mut *probe)
             .await
             .expect("probe the released lock");
         probe.rollback().await.expect("end lock probe");
@@ -546,7 +574,7 @@ async fn a_drop_keeps_an_out_of_band_detached_leaf_with_a_pending_row() {
         LeafCreation::Created { .. }
     ));
     seed_history_pending_row(&database.pool, class_key, lower).await;
-    sqlx::query(&format!(
+    sql::query(&format!(
         "ALTER TABLE {parent} DETACH PARTITION {}",
         leaf.leaf_name()
     ))
@@ -554,14 +582,15 @@ async fn a_drop_keeps_an_out_of_band_detached_leaf_with_a_pending_row() {
     .await
     .expect("detach out of band");
 
-    let mut transaction = database.pool.begin().await.expect("begin drop");
-    let outcome = drop_detached_leaf(
-        &mut transaction,
+    let dropper = core_pool_for_test_url(database.pool.url());
+    let outcome = drop_detached_leaf_in_pool(
+        &dropper,
+        StatementLog::Off,
         &DropDetachedHistoryLeaf::new(leaf.clone()),
     )
     .await
     .expect("drop outcome");
-    transaction.commit().await.expect("commit drop");
+    dropper.close();
     assert!(
         matches!(
             outcome,
@@ -594,15 +623,15 @@ async fn a_role_without_create_privilege_cannot_create_a_leaf() {
         database_today(&database.pool).await + Duration::days(3),
     );
     let role = format!("port_worker_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+    sql::query(&format!("CREATE ROLE {role} NOLOGIN"))
         .execute(&database.pool)
         .await
         .expect("create worker role");
-    sqlx::query(&format!("GRANT USAGE ON SCHEMA public TO {role}"))
+    sql::query(&format!("GRANT USAGE ON SCHEMA public TO {role}"))
         .execute(&database.pool)
         .await
         .expect("grant schema usage");
-    sqlx::query(&format!(
+    sql::query(&format!(
         "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO {role}"
     ))
     .execute(&database.pool)
@@ -610,39 +639,23 @@ async fn a_role_without_create_privilege_cannot_create_a_leaf() {
     .expect("grant row privileges only");
 
     let mut transaction = database.pool.begin().await.expect("begin worker session");
-    sqlx::query(&format!("SET LOCAL ROLE {role}"))
-        .execute(transaction.as_mut())
+    sql::query(&format!("SET LOCAL ROLE {role}"))
+        .execute(&mut *transaction)
         .await
         .expect("become the worker role");
-    let refused = create_daily_leaf(
-        &mut transaction,
-        &CreateDailyHistoryLeaf::new(leaf.clone()).expect("daily command"),
-        &UnpublishedLoader,
-    )
-    .await
-    .expect_err("a worker role cannot run partition DDL");
+    let refused = try_create_history_leaf(&mut transaction, class_key, Some(leaf.bounds().lower()))
+        .await
+        .expect_err("a worker role cannot run partition DDL");
     transaction.rollback().await.expect("end worker session");
-    match refused {
-        crate::core::history::errors::HistoryError::Database(error) => {
-            assert_eq!(
-                error
-                    .as_database_error()
-                    .and_then(|database_error| database_error.code())
-                    .as_deref(),
-                Some("42501"),
-                "{error}"
-            );
-        }
-        other => panic!("expected a database privilege error, got {other:?}"),
-    }
+    assert_eq!(refused.sqlstate(), Some("42501"), "{refused:?}");
     assert!(!relation_exists(&database.pool, leaf.leaf_name()).await);
     assert_eq!(catalog_row_count(&database.pool, leaf.leaf_name()).await, 0);
 
-    sqlx::query(&format!("DROP OWNED BY {role}"))
+    sql::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.pool)
         .await
         .expect("drop the role's grants");
-    sqlx::query(&format!("DROP ROLE {role}"))
+    sql::query(&format!("DROP ROLE {role}"))
         .execute(&database.pool)
         .await
         .expect("drop worker role");
@@ -667,12 +680,12 @@ async fn raw_bound_rendering_differs_across_the_probe_time_zones() {
     for zone in [WEST_OF_UTC, EAST_OF_UTC] {
         let mut transaction = database.pool.begin().await.expect("begin rendering");
         set_local_zone(&mut transaction, zone).await;
-        let rendering: String = sqlx::query_scalar(
+        let rendering: String = sql::query_scalar(
             "SELECT pg_get_expr(c.relpartbound, c.oid) FROM pg_class AS c
              WHERE c.oid = to_regclass($1)",
         )
         .bind(leaf.leaf_name())
-        .fetch_one(transaction.as_mut())
+        .fetch_one(&mut *transaction)
         .await
         .expect("render the bound");
         transaction.rollback().await.expect("end rendering");
@@ -694,31 +707,31 @@ async fn a_leaf_created_on_one_side_of_utc_is_conformant_on_the_other() {
         ("standard_31d", 31, EAST_OF_UTC, WEST_OF_UTC),
     ] {
         let parent = register_class(&database.pool, class_key, days).await;
+        let today = database_today(&database.pool).await;
         let mut transaction = database.pool.begin().await.expect("begin creation");
         set_local_zone(&mut transaction, creating).await;
-        let created = ensure_leaf_coverage(
-            &mut transaction,
-            &EnsureLeafCoverage::new(class_key, 3).expect("coverage command"),
-            &UnpublishedLoader,
-        )
-        .await
-        .expect("create from one side");
+        let mut created = Vec::new();
+        for offset in 0..4 {
+            let leaf = leaf_ref(&parent, class_key, today + Duration::days(offset));
+            created.push(
+                create_history_leaf_of(&mut transaction, &leaf)
+                    .await
+                    .expect("create from one side"),
+            );
+        }
         transaction.commit().await.expect("commit creation");
         assert_eq!(created.len(), 4);
         assert!(created
             .iter()
             .all(|outcome| matches!(outcome, LeafCreation::Created { .. })));
 
-        let leaf = leaf_ref(&parent, class_key, database_today(&database.pool).await);
+        let leaf = leaf_ref(&parent, class_key, today);
         let mut transaction = database.pool.begin().await.expect("begin verification");
         set_local_zone(&mut transaction, inspecting).await;
-        let verified = create_daily_leaf(
-            &mut transaction,
-            &CreateDailyHistoryLeaf::new(leaf.clone()).expect("daily command"),
-            &UnpublishedLoader,
-        )
-        .await
-        .expect("verify from the other side");
+        let verified = create_history_leaf_of(&mut transaction, &leaf)
+            .await
+            .expect("verify from the other side");
+        transaction.rollback().await.expect("end verification");
         assert_eq!(
             verified,
             LeafCreation::AlreadyConformant {
@@ -726,10 +739,15 @@ async fn a_leaf_created_on_one_side_of_utc_is_conformant_on_the_other() {
             },
             "{creating} -> {inspecting}"
         );
-        let inspection = inspect_leaf(&mut transaction, &InspectHistoryLeaf::new(leaf))
-            .await
-            .expect("inspect from the other side");
-        transaction.rollback().await.expect("end verification");
+        let inspector = core_pool_in_zone(&database, inspecting).await;
+        let inspection = inspect_leaf_in_pool(
+            &inspector,
+            StatementLog::Off,
+            &InspectHistoryLeaf::new(leaf),
+        )
+        .await
+        .expect("inspect from the other side");
+        inspector.close();
         assert!(
             matches!(
                 inspection,
@@ -751,13 +769,10 @@ async fn a_heartbeat_leaf_is_conformant_across_utc_both_ways() {
         [(0, WEST_OF_UTC, EAST_OF_UTC), (3, EAST_OF_UTC, WEST_OF_UTC)]
     {
         let leaf = hourly_leaf_ref(hour + Duration::hours(offset_hours)).expect("hourly leaf");
-        let command = CreateHourlyHeartbeatLeaf::new(leaf.clone()).expect("hourly command");
         let mut transaction = database.pool.begin().await.expect("begin creation");
         set_local_zone(&mut transaction, creating).await;
-        register_heartbeat_class(&mut transaction, hours(2))
-            .await
-            .expect("register heartbeat class");
-        let created = create_hourly_heartbeat_leaf(&mut transaction, &command)
+        let _registration = register_heartbeat_class(&mut transaction, 2).await;
+        let created = create_heartbeat_leaf_of(&mut transaction, &leaf)
             .await
             .expect("create from one side");
         transaction.commit().await.expect("commit creation");
@@ -768,7 +783,7 @@ async fn a_heartbeat_leaf_is_conformant_across_utc_both_ways() {
 
         let mut transaction = database.pool.begin().await.expect("begin verification");
         set_local_zone(&mut transaction, inspecting).await;
-        let verified = create_hourly_heartbeat_leaf(&mut transaction, &command)
+        let verified = create_heartbeat_leaf_of(&mut transaction, &leaf)
             .await
             .expect("verify from the other side");
         transaction.rollback().await.expect("end verification");
@@ -803,6 +818,7 @@ async fn daily_leaves_at_the_fold_verify_as_conformant() {
             LeafCreation::Created { .. }
         ));
     }
+    let berlin_core = core_pool_in_zone(&database, DST_ZONE).await;
     for leaf in &leaves {
         assert_eq!(
             create_leaf(&berlin, leaf).await,
@@ -810,10 +826,13 @@ async fn daily_leaves_at_the_fold_verify_as_conformant() {
                 leaf_name: leaf.leaf_name().to_owned(),
             }
         );
-        let mut connection = berlin.acquire().await.expect("acquire inspector");
-        let inspection = inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone()))
-            .await
-            .expect("inspect a fold leaf");
+        let inspection = inspect_leaf_in_pool(
+            &berlin_core,
+            StatementLog::Off,
+            &InspectHistoryLeaf::new(leaf.clone()),
+        )
+        .await
+        .expect("inspect a fold leaf");
         assert!(
             matches!(
                 inspection,
@@ -822,31 +841,19 @@ async fn daily_leaves_at_the_fold_verify_as_conformant() {
             "{inspection:?}"
         );
     }
+    berlin_core.close();
     berlin.close().await;
     database.drop().await;
 }
 
-async fn create_hourly(pool: &PgPool, leaf: &LeafRef) -> LeafCreation {
-    let mut transaction = pool.begin().await.expect("begin hourly creation");
-    let outcome = create_hourly_heartbeat_leaf(
-        &mut transaction,
-        &CreateHourlyHeartbeatLeaf::new(leaf.clone()).expect("hourly command"),
-    )
-    .await
-    .expect("create hourly leaf");
-    transaction.commit().await.expect("commit hourly creation");
-    outcome
+async fn create_hourly(pool: &TestPool, leaf: &LeafRef) -> LeafCreation {
+    create_heartbeat_leaf_of(pool, leaf)
+        .await
+        .expect("create hourly leaf")
 }
 
-async fn register_heartbeats(pool: &PgPool) {
-    let mut transaction = pool.begin().await.expect("begin heartbeat registration");
-    register_heartbeat_class(&mut transaction, hours(2))
-        .await
-        .expect("register heartbeat class");
-    transaction
-        .commit()
-        .await
-        .expect("commit heartbeat registration");
+async fn register_heartbeats(pool: &TestPool) {
+    let _registration = register_heartbeat_class(pool, 2).await;
 }
 
 /// `test_hourly_leaves_at_the_fold_verify_as_conformant`.
@@ -900,7 +907,7 @@ async fn the_heartbeat_sweep_drops_leaves_across_a_fold() {
         );
     }
     // One connection, whose session runs in Europe/Berlin.
-    let berlin_core = crate::broker::pools::session_core_pool_for_test_pool(&berlin, 1);
+    let berlin_core = crate::broker::pools::session_core_pool_for_test_url(berlin.url(), 1);
     {
         let mut connection = berlin_core
             .checkout(CheckoutClass::Reserved)
@@ -954,17 +961,21 @@ async fn the_heartbeat_sweep_drops_leaves_across_a_fold() {
 #[serial]
 async fn a_heartbeat_written_to_the_parent_lands_in_its_hour_leaf() {
     let database = TestDatabase::create().await;
-    register_heartbeats(&database.pool).await;
-    let mut transaction = database.pool.begin().await.expect("begin coverage");
-    ensure_heartbeat_coverage(
-        &mut transaction,
-        &EnsureHeartbeatCoverage::new(2).expect("heartbeat coverage command"),
+    let coverage = ensure_partition_coverage_in_pool(
+        &core_pool_for_test_url(database.pool.url()),
+        StatementLog::Off,
+        2,
+        2,
+        &[],
     )
     .await
     .expect("heartbeat coverage");
-    transaction.commit().await.expect("commit coverage");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
     let task_id = Uuid::new_v4();
-    sqlx::query(&format!(
+    sql::query(&format!(
         "INSERT INTO {HEARTBEATS_TABLE} (task_id, role, sent_at, sender_id, hostname, pid)
          VALUES ($1, 'runner', statement_timestamp(), 'port-worker', 'port-host', 1)"
     ))
@@ -972,7 +983,7 @@ async fn a_heartbeat_written_to_the_parent_lands_in_its_hour_leaf() {
     .execute(&database.pool)
     .await
     .expect("write a heartbeat through the parent");
-    let (stored_in, sent_at): (String, DateTime<Utc>) = sqlx::query_as(&format!(
+    let (stored_in, sent_at): (String, DateTime<Utc>) = sql::query_as(&format!(
         "SELECT tableoid::regclass::text, sent_at FROM {HEARTBEATS_TABLE} WHERE task_id = $1"
     ))
     .bind(task_id)
@@ -993,29 +1004,7 @@ async fn a_heartbeat_written_to_the_parent_lands_in_its_hour_leaf() {
 #[serial]
 async fn the_static_forever_leaf_carries_the_ordering_index() {
     let database = TestDatabase::create().await;
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    assert!(
-        read_leaf_ordering_index_exists(&mut connection, TASK_HISTORY_FOREVER_LEAF)
-            .await
-            .expect("probe the forever leaf")
-    );
-    drop(connection);
-    database.drop().await;
-}
-
-/// `TestLeafBirth.test_absent_relation_reports_no_index`.
-#[tokio::test]
-#[serial]
-async fn an_absent_relation_reports_no_ordering_index() {
-    let database = TestDatabase::create().await;
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    assert!(!read_leaf_ordering_index_exists(
-        &mut connection,
-        "horsies_task_history_never_created"
-    )
-    .await
-    .expect("probe an absent relation"));
-    drop(connection);
+    assert!(ordering_index_exists(&database.pool, TASK_HISTORY_FOREVER_LEAF).await);
     database.drop().await;
 }
 
@@ -1031,32 +1020,20 @@ async fn leaf_repair_recreates_a_dropped_ordering_index() {
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
-    sqlx::query(&format!(
+    sql::query(&format!(
         "DROP INDEX {}",
         leaf_enqueued_index_name(leaf.leaf_name())
     ))
     .execute(&database.pool)
     .await
     .expect("drop the ordering index");
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    assert!(
-        !read_leaf_ordering_index_exists(&mut connection, leaf.leaf_name())
-            .await
-            .expect("probe the damaged leaf")
-    );
-    drop(connection);
+    assert!(!ordering_index_exists(&database.pool, leaf.leaf_name()).await);
 
     let repaired = create_leaf(&database.pool, &leaf).await;
     assert!(
         matches!(repaired, LeafCreation::IndexRepaired { .. }),
         "{repaired:?}"
     );
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    assert!(
-        read_leaf_ordering_index_exists(&mut connection, leaf.leaf_name())
-            .await
-            .expect("probe the repaired leaf")
-    );
-    drop(connection);
+    assert!(ordering_index_exists(&database.pool, leaf.leaf_name()).await);
     database.drop().await;
 }

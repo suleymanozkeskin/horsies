@@ -15,16 +15,14 @@ use uuid::Uuid;
 
 use super::*;
 use crate::broker::SendKind;
-use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
-use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
+use crate::core::history::commands::{LeafBounds, LeafRef};
+use crate::core::history::ddl::classes::finite_class_parent_name;
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
 use crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool;
 use crate::core::history::names::TASK_HISTORY_FOREVER_LEAF;
-use crate::core::history::partitions::catalog::database_now;
-use crate::core::history::partitions::manager::create_daily_leaf;
-use crate::core::history::partitions::publication::UnpublishedLoader;
 use crate::core::history::periods::RetentionDays;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::history::{create_history_leaf_of, database_now, register_period_class};
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes;
 
@@ -32,8 +30,8 @@ use crate::test_support::terminal_writes;
 const RETENTION_HOURS: u32 = 24;
 
 /// One database per test, on the baseline schema with the Rust client family:
-/// a copy of the installed test template (`crate::test_support`) with a sqlx
-/// pool for the reaper pass.
+/// a copy of the installed test template (`crate::test_support`) with a
+/// test-client pool for the fixtures and the probes.
 struct RetentionDatabase {
     pool: TestPool,
     database: crate::test_support::TestDatabase,
@@ -90,19 +88,8 @@ async fn run_maintenance_pass(
     snapshot
 }
 
-/// A sqlx connection to the database of `pool`, for the history functions
-/// that take a sqlx connection (`database_now`, `register_period_class`,
-/// `create_daily_leaf`).
-async fn sqlx_connection(pool: &TestPool) -> sqlx::PgConnection {
-    use sqlx::Connection;
-    sqlx::PgConnection::connect(pool.url())
-        .await
-        .expect("connect a sqlx session to the retention database")
-}
-
 async fn database_today(pool: &TestPool) -> DateTime<Utc> {
-    let mut connection = sqlx_connection(pool).await;
-    let now = database_now(&mut connection).await.expect("database now");
+    let now = database_now(pool).await;
     now.date_naive()
         .and_hms_opt(0, 0, 0)
         .expect("midnight")
@@ -111,13 +98,8 @@ async fn database_today(pool: &TestPool) -> DateTime<Utc> {
 
 async fn create_period_leaf(pool: &TestPool, days: RetentionDays, lower: DateTime<Utc>) -> LeafRef {
     let class_key = days.class_key();
-    let mut connection = sqlx_connection(pool).await;
-    let mut transaction = sqlx::Connection::begin(&mut connection)
-        .await
-        .expect("begin leaf creation");
-    let _ = register_period_class(&mut transaction, days)
-        .await
-        .expect("register the class");
+    let mut transaction = pool.begin().await.expect("begin leaf creation");
+    let _registered = register_period_class(&mut transaction, days).await;
     let parent = finite_class_parent_name(&class_key).expect("class parent");
     let leaf = LeafRef::new(
         daily_leaf_name(&parent, lower).expect("leaf name"),
@@ -125,13 +107,9 @@ async fn create_period_leaf(pool: &TestPool, days: RetentionDays, lower: DateTim
         LeafBounds::new(lower, lower + chrono::Duration::days(1)).expect("one day"),
     )
     .expect("leaf ref");
-    let created = create_daily_leaf(
-        &mut transaction,
-        &CreateDailyHistoryLeaf::new(leaf.clone()).expect("daily command"),
-        &UnpublishedLoader,
-    )
-    .await
-    .expect("create leaf");
+    let created = create_history_leaf_of(&mut transaction, &leaf)
+        .await
+        .expect("create leaf");
     transaction.commit().await.expect("commit leaf creation");
     assert!(
         matches!(

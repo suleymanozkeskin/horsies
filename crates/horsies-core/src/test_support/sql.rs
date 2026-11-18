@@ -140,6 +140,15 @@ impl Error {
     }
 }
 
+/// Why a test client of a SQL function failed.
+#[derive(Debug)]
+pub(crate) enum CallError {
+    /// The server refused the statement, or the session failed.
+    Database(Error),
+    /// The function answered outside the vocabulary of its client.
+    Contract(crate::core::history::errors::HistoryError),
+}
+
 /// A value that a test binds. Its declared PostgreSQL type follows from its
 /// Rust type: the type that sqlx declared for the same Rust type.
 pub(crate) trait Param: ToSql + Send + Sync {

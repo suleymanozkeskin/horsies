@@ -5,9 +5,9 @@
 //! Each test runs in one transaction that it rolls back, on the shared
 //! migrated database, under a key digest of its own.
 
+use crate::test_support::sql::{self, TestConnection, TestPool};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::reservations::{
@@ -28,7 +28,7 @@ fn fresh_key() -> Vec<u8> {
 }
 
 async fn claim(
-    connection: &mut PgConnection,
+    connection: &mut TestConnection,
     key: &[u8],
     fingerprint: &[u8],
     task_id: Uuid,
@@ -39,8 +39,8 @@ async fn claim(
 }
 
 /// Terminalize as of two hours ago: a one-hour window has passed.
-async fn terminalize_two_hours_ago(connection: &mut PgConnection, key: &[u8], task_id: Uuid) {
-    let terminalized: bool = sqlx::query_scalar(
+async fn terminalize_two_hours_ago(connection: &mut TestConnection, key: &[u8], task_id: Uuid) {
+    let terminalized: bool = sql::query_scalar(
         "SELECT horsies_key_reservation_terminalize(
              $1, $2, statement_timestamp() - interval '2 hours'
          )",
@@ -53,8 +53,8 @@ async fn terminalize_two_hours_ago(connection: &mut PgConnection, key: &[u8], ta
     assert!(terminalized);
 }
 
-async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::sqlx_migrated_pool().await
+async fn shared_pool() -> TestPool {
+    crate::test_support::migrated_pool().await
 }
 
 /// `TestClaimReplayConflict.test_window_above_maximum_is_rejected_before_mutation`:
@@ -78,9 +78,9 @@ async fn a_window_above_thirty_days_is_refused_before_any_write() {
     .expect_err("a window above 30 days is refused");
     drop(connection);
     match refused {
-        crate::core::history::errors::HistoryError::Database(error) => {
+        crate::test_support::sql::CallError::Database(error) => {
             let database_error = error.as_database_error().expect("a database refusal");
-            assert_eq!(database_error.code().as_deref(), Some("22023"));
+            assert_eq!(database_error.code().code(), "22023");
             assert!(
                 database_error.message().contains("30 days"),
                 "{}",
@@ -89,7 +89,7 @@ async fn a_window_above_thirty_days_is_refused_before_any_write() {
         }
         other => panic!("expected a database refusal, got {other:?}"),
     }
-    let rows: i64 = sqlx::query_scalar(
+    let rows: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_key_reservations WHERE idempotency_key_digest = $1",
     )
     .bind(&key)
@@ -242,7 +242,7 @@ async fn cleanup_deletes_only_expired_terminal_rows_and_never_live_ones() {
             .expect("second cleanup"),
         0
     );
-    let remaining: Vec<(Vec<u8>, String)> = sqlx::query_as(
+    let remaining: Vec<(Vec<u8>, String)> = sql::query_as(
         "SELECT idempotency_key_digest, disposition FROM horsies_key_reservations
          WHERE idempotency_key_digest = ANY($1)",
     )
