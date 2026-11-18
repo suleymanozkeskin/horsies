@@ -573,7 +573,10 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool.clone(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "snapshot-test".to_owned(),
             std::process::id() as i32,
@@ -807,7 +810,10 @@ mod tests {
         assert!(worker_config.queue_max_concurrency.is_empty());
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool.clone(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "baseline-columns-test".to_owned(),
             std::process::id() as i32,
@@ -1002,7 +1008,10 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool.clone(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "first-snapshot-test".to_owned(),
             std::process::id() as i32,

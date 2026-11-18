@@ -49,7 +49,7 @@ async fn snapshot(pool: &PgPool, id: Uuid) -> serde_json::Value {
 
 /// A broker on the test database: the marker runs on its main core pool.
 fn broker(pool: &PgPool) -> PostgresBroker {
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
 }
 
 async fn remove(pool: &PgPool, id: Uuid) {

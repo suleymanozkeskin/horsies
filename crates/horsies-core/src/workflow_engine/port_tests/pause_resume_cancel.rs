@@ -975,7 +975,7 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     .expect("the stale pass");
     assert_eq!(failed, 2);
     let _summary = drive_phase2_recovery_with(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
         &child_specs,
         0,
         100,

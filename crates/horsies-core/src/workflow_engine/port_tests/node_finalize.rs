@@ -168,7 +168,12 @@ async fn finalize(
     node_a: &RunningNode,
     claimed_at: DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    finalize_on(&PostgresBroker::from_pool(pool.clone()), node_a, claimed_at).await
+    finalize_on(
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        node_a,
+        claimed_at,
+    )
+    .await
 }
 
 /// [`finalize`] on `broker`: phase 1 and phase 2 run on its core pools.
@@ -340,7 +345,7 @@ async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
     let node_a = run_node_a(&pool, start_chain(&pool, "finalize_lost_reply").await).await;
-    let proxied_broker = PostgresBroker::from_pool(proxied.clone());
+    let proxied_broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
     let warm_up = {
         let (open, _write) = proxied_broker
             .core_pools_for_write()
@@ -575,7 +580,7 @@ async fn phase_two(
     queue_name: &str,
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     finalize_workflow_phase(
         &broker,
         &TestChildSpecs::empty(),
@@ -780,8 +785,10 @@ async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_no
     let before = node_image(&db.pool, workflow_id, 0).await;
     let upstream = database_options(&db.pool);
     let proxy = WireProxy::start(&upstream).await;
-    let proxied_broker =
-        PostgresBroker::from_pool(unpinged_single_connection_pool(proxy.options(&upstream)).await);
+    let proxied_broker = PostgresBroker::from_pool(
+        unpinged_single_connection_pool(proxy.options(&upstream)).await,
+        crate::ClientFamily::Rust,
+    );
     let mut listener = Notifications::listen(&db.pool, &[SEEDED_NODE_CHANNEL]).await;
 
     proxy.drop_reply_to_request_carrying(task_id.as_bytes());

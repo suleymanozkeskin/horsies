@@ -24,7 +24,10 @@ fn unreachable_pool() -> sqlx::PgPool {
 /// reached: each tick fails at its due read.
 fn unreachable_scheduler(plan: ActivePlan, stop: &SchedulerStop) -> ActiveScheduler {
     ActiveScheduler {
-        broker: Arc::new(PostgresBroker::from_pool(unreachable_pool())),
+        broker: Arc::new(PostgresBroker::from_pool(
+            unreachable_pool(),
+            crate::ClientFamily::Rust,
+        )),
         schedules: plan.schedules,
         commands: plan.commands,
         check_interval_seconds: plan.check_interval_seconds,
@@ -117,7 +120,10 @@ async fn a_stop_asked_for_before_the_run_ends_the_run_after_its_start() {
             .expect("store the digest of the due schedule");
     let stop = SchedulerStop::new();
     stop.request_stop();
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let service =
         SchedulerService::from_manifest(broker, manifest_for(&[due.clone(), new.clone()]), &stop);
 

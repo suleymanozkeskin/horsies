@@ -377,7 +377,7 @@ async fn post_claim_abandon_keeps_a_finished_node() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
 
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(task_id, generation())], WORKER)
         .await
         .expect("post-claim workflow check");
@@ -407,7 +407,7 @@ async fn pairwise_cancel_batch_skips_the_node() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "CANCELLED").await;
 
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(task_id, generation())], WORKER)
         .await
         .expect("post-claim workflow check");

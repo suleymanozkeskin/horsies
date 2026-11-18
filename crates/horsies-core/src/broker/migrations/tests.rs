@@ -1410,6 +1410,7 @@ async fn an_observe_only_broker_runs_no_schema_statement() {
     let database = MigrationTestDatabase::create().await;
     let broker = crate::broker::PostgresBroker::connect_observe_only(
         &crate::core::config::PostgresConfig::from_url(database.database.url()),
+        crate::ClientFamily::Rust,
     )
     .await
     .expect("connect an observe-only broker");
@@ -1446,6 +1447,7 @@ async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing(
     let before = installed_on(&database).await;
     let broker = crate::broker::PostgresBroker::connect_with(
         &crate::core::config::PostgresConfig::from_url(database.database.url()),
+        crate::ClientFamily::Rust,
     )
     .await
     .expect("connect the broker");
@@ -1554,6 +1556,7 @@ async fn history_relation_signatures(database: &MigrationTestDatabase) -> Vec<(S
 async fn install_through_a_new_broker(database: &MigrationTestDatabase) {
     let broker = crate::broker::PostgresBroker::connect_with(
         &crate::core::config::PostgresConfig::from_url(database.database.url()),
+        crate::ClientFamily::Rust,
     )
     .await
     .expect("connect the broker");
