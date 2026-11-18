@@ -68,7 +68,6 @@ from fnmatch import fnmatch
 from uuid import UUID
 from horsies.core.utils.imports import import_by_path
 from horsies.core.utils.loop_runner import (
-    LoopRunnerError,
     async_context_message,
     in_running_event_loop,
 )
@@ -1907,23 +1906,6 @@ class Horsies:
 
     # ------------- Health / liveness API -------------
 
-    def _loop_runner_err(
-        self, label: str, exc: LoopRunnerError,
-    ) -> 'BrokerResult[Any]':
-        """The broker's sync runner could not run the call. Nothing ran.
-
-        Not retryable: a stopped runner does not start again.
-        """
-        from horsies.core.brokers.result_types import (
-            BrokerLoopRunnerFailed,
-        )
-        from horsies.core.types.result import Err
-
-        return Err(BrokerLoopRunnerFailed(
-            message=f'Loop runner failed for app.{label}(): {exc}',
-            exception=exc,
-        ))
-
     def _wait_inside_task_ok(
         self, label: str, task_id: UUID,
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
@@ -2001,23 +1983,21 @@ class Horsies:
         timeout_seconds: float = 2.0,
         min_responses: int | None = None,
     ) -> 'BrokerResult[list[WorkerPong]]':
-        """Synchronous version of ``ping_workers_async``.
+        """Synchronous version of ``ping_workers_async``: the core's blocking
+        ping on the calling thread, with the GIL released, and the same
+        outcomes. The call is bounded by the window plus the core's bound of a
+        blocking call, and not bounded for an infinite ``timeout_seconds``.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('ping_workers')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(
-                self.ping_workers_async,
-                target_worker_id=target_worker_id,
-                timeout_seconds=timeout_seconds,
-                min_responses=min_responses,
-            )
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('ping_workers', exc)
+        return self.get_broker()._ping_workers_blocking(  # pyright: ignore[reportPrivateUsage]
+            target_worker_id=target_worker_id,
+            timeout_seconds=timeout_seconds,
+            min_responses=min_responses,
+        )
 
     async def list_worker_states_async(
         self,
@@ -2026,18 +2006,16 @@ class Horsies:
         return await self.get_broker().list_worker_states_async()
 
     def list_worker_states(self) -> 'BrokerResult[list[WorkerStateSnapshot]]':
-        """Synchronous version of ``list_worker_states_async``.
+        """Synchronous version of ``list_worker_states_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('list_worker_states')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.list_worker_states_async)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('list_worker_states', exc)
+        return self.get_broker()._list_worker_states_blocking()  # pyright: ignore[reportPrivateUsage]
 
     async def get_worker_state_async(
         self,
@@ -2050,18 +2028,16 @@ class Horsies:
         self,
         worker_id: str,
     ) -> 'BrokerResult[WorkerStateSnapshot | None]':
-        """Synchronous version of ``get_worker_state_async``.
+        """Synchronous version of ``get_worker_state_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_worker_state')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.get_worker_state_async, worker_id)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_worker_state', exc)
+        return self.get_broker()._get_worker_state_blocking(worker_id)  # pyright: ignore[reportPrivateUsage]
 
     async def get_worker_state_history_async(
         self,
@@ -2080,20 +2056,18 @@ class Horsies:
         *,
         limit: int | None = None,
     ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
-        """Synchronous version of ``get_worker_state_history_async``.
+        """Synchronous version of ``get_worker_state_history_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_worker_state_history')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(
-                self.get_worker_state_history_async, worker_id, limit=limit
-            )
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_worker_state_history', exc)
+        return self.get_broker()._get_worker_state_history_blocking(  # pyright: ignore[reportPrivateUsage]
+            worker_id, limit=limit,
+        )
 
     async def get_class_coverage_async(self) -> 'BrokerResult[ClassCoverage]':
         """For each (queue, class) with PENDING rows, whether a live worker serves it.
@@ -2103,18 +2077,16 @@ class Horsies:
         return await self.get_broker().get_class_coverage_async()
 
     def get_class_coverage(self) -> 'BrokerResult[ClassCoverage]':
-        """Synchronous version of ``get_class_coverage_async``.
+        """Synchronous version of ``get_class_coverage_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_class_coverage')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.get_class_coverage_async)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_class_coverage', exc)
+        return self.get_broker()._get_class_coverage_blocking()  # pyright: ignore[reportPrivateUsage]
 
     async def get_class_report_async(self) -> 'BrokerResult[ClassReport]':
         """Pending streams with their oldest wait and coverage, and the budget
@@ -2125,18 +2097,16 @@ class Horsies:
         return await self.get_broker().get_class_report_async()
 
     def get_class_report(self) -> 'BrokerResult[ClassReport]':
-        """Synchronous version of ``get_class_report_async``.
+        """Synchronous version of ``get_class_report_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_class_report')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.get_class_report_async)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_class_report', exc)
+        return self.get_broker()._get_class_report_blocking()  # pyright: ignore[reportPrivateUsage]
 
     def discover_tasks(
         self,

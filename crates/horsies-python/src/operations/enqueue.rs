@@ -277,12 +277,9 @@ pub enum SendOutcome {
     Invalid(SendValidationFailed),
     /// No retention class derives the class key; nothing was written.
     RetentionKeyRefused(SendEnqueueFailed),
-    /// The send catalog's answer to a broker error, and the cause of that
-    /// error.
-    Refused {
-        error: TaskSendError,
-        cause: FailureCause,
-    },
+    /// The send catalog's answer to a broker error; it carries the cause of
+    /// that error.
+    Refused(TaskSendError),
 }
 
 impl<'py> IntoPyObject<'py> for SendOutcome {
@@ -295,16 +292,12 @@ impl<'py> IntoPyObject<'py> for SendOutcome {
             Self::Enqueued(task_id) => Enqueued { task_id }.into_bound_py_any(py),
             Self::Invalid(invalid) => invalid.into_bound_py_any(py),
             Self::RetentionKeyRefused(failed) => failed.into_bound_py_any(py),
-            Self::Refused { error, cause } => refusal_record(py, error, cause),
+            Self::Refused(error) => refusal_record(py, error),
         }
     }
 }
 
-fn refusal_record(
-    py: Python<'_>,
-    error: TaskSendError,
-    cause: FailureCause,
-) -> PyResult<Bound<'_, PyAny>> {
+fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, PyAny>> {
     match error {
         TaskSendError::SendSuppressed { message } => {
             SendSuppressed { message }.into_bound_py_any(py)
@@ -315,7 +308,7 @@ fn refusal_record(
         // The send catalog's refusals besides the core's own (`refused`
         // takes those): a reservation window or a value that does not
         // serialize. Both refuse a fact of the call, which the input carries.
-        TaskSendError::ValidationFailed { message } => SendValidationFailed {
+        TaskSendError::ValidationFailed { message, .. } => SendValidationFailed {
             code: BrokerErrorCode::InvalidInput.to_string(),
             message,
             cause_text: None,
@@ -325,6 +318,7 @@ fn refusal_record(
             task_id,
             message,
             retryable,
+            cause,
             ..
         } => SendEnqueueFailed {
             task_id,
@@ -456,10 +450,11 @@ fn refused(
         BrokerError::EnqueueContract(refusal) => {
             SendOutcome::Invalid(SendValidationFailed::of(refusal, error.to_string()))
         }
-        other => SendOutcome::Refused {
-            error: send_error_from_enqueue(command.task_id, command.payload(retention), other),
-            cause: other.failure_cause(),
-        },
+        other => SendOutcome::Refused(send_error_from_enqueue(
+            command.task_id,
+            command.payload(retention),
+            other,
+        )),
     }
 }
 

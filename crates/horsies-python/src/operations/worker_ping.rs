@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyList, PyString};
 use pyo3::IntoPyObjectExt;
 
+use crate::bridge::blocking::{BlockingBound, BLOCKING_CALL_BOUND};
 use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
@@ -229,6 +230,18 @@ pub fn ping_request(
     }))
 }
 
+/// The bound of the blocking form of a ping: its window plus the bound of
+/// any other blocking call, for the connect, the reply subscription and the
+/// NOTIFY before the window. A window too long for that sum (an infinite
+/// `timeout_seconds`) has no call bound, as Python's sync ping waited with
+/// no deadline. Pure.
+pub fn ping_wait_bound(window: Duration) -> BlockingBound {
+    match window.checked_add(BLOCKING_CALL_BOUND) {
+        Some(limit) => BlockingBound::Within(limit),
+        None => BlockingBound::UntilTheOperationEnds,
+    }
+}
+
 /// Ping the workers: one NOTIFY on the ping channel, then the replies on
 /// the reply channel of the handle's process listener until the window
 /// ends or a stop condition holds.
@@ -428,5 +441,28 @@ mod tests {
         let (code, message) = refusal("None", "10 ** 400", "None");
         assert_eq!(code, "WORKER_PING_FAILED");
         assert!(message.starts_with("ping_workers failed: "), "{message}");
+    }
+
+    #[test]
+    fn a_blocking_ping_waits_its_window_plus_the_call_bound() {
+        assert_eq!(
+            ping_wait_bound(Duration::from_secs(2)),
+            BlockingBound::Within(Duration::from_secs(2) + BLOCKING_CALL_BOUND)
+        );
+    }
+
+    /// An infinite `timeout_seconds` is the longest window
+    /// (`ping_window`); the blocking ping then has no call bound.
+    #[test]
+    fn a_blocking_ping_with_an_infinite_window_has_no_call_bound() {
+        let window = match request_of("None", "float('inf')", "None") {
+            Ok(request) => request.window,
+            Err(refused) => panic!("an infinite window is accepted: {}", refused.message),
+        };
+        assert_eq!(window, Duration::MAX);
+        assert_eq!(
+            ping_wait_bound(window),
+            BlockingBound::UntilTheOperationEnds
+        );
     }
 }

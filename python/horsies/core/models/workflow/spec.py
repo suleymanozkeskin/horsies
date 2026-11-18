@@ -1743,7 +1743,8 @@ class WorkflowSpec(Generic[OutT]):
         return definition_key
 
     def start(self, workflow_id: str | None = None) -> WorkflowStartResult[WorkflowHandle[OutT]]:
-        """Start workflow execution.
+        """Start workflow execution: ``start_workflow``, a blocking call of the
+        core on the calling thread with the GIL released.
 
         Args:
             workflow_id: Optional custom workflow ID. Auto-generated if not provided.
@@ -1892,9 +1893,8 @@ class WorkflowSpec(Generic[OutT]):
         detect spec changes on collision.
 
         Accepts ``ENQUEUE_FAILED``, ``ASYNC_CONTEXT`` and
-        ``LOOP_RUNNER_FAILED`` errors (``WorkflowStartRetryable``). On a
-        stopped sync runner it returns ``LOOP_RUNNER_FAILED`` again; use
-        ``retry_start_async()``.
+        ``LOOP_RUNNER_FAILED`` errors (``WorkflowStartRetryable``). The start
+        runs as in ``start()``.
 
         Args:
             error: The retryable error from a previous ``start()`` call.
