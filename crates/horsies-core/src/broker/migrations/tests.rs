@@ -1300,6 +1300,107 @@ async fn an_install_finished_by_another_installer_during_the_wait_is_not_repeate
     database.drop().await;
 }
 
+/// The polls of [`wait_for_a_lock_try`], 20 ms apart: at most 10 s.
+const LOCK_TRY_POLLS: u32 = 500;
+
+/// The pause between two polls of [`wait_for_a_lock_try`].
+const LOCK_TRY_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// The statement timeout of the index build that runs while an installer
+/// waits for the lock.
+const INDEX_BUILD_STATEMENT_TIMEOUT: &str = "2s";
+
+/// Whether a backend other than `observer` and `holder_pid` ran the lock try
+/// of the install ([`TRY_INSTALL_LOCK`]) within [`LOCK_TRY_POLLS`] polls.
+async fn wait_for_a_lock_try(observer: &Client, holder_pid: i32) -> bool {
+    for _ in 0..LOCK_TRY_POLLS {
+        let seen: bool = observer
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND pid NOT IN (pg_backend_pid(), $1)
+                       AND query LIKE '%' || $2 || '%'
+                 )",
+                &[&holder_pid, &TRY_INSTALL_LOCK.sql()],
+            )
+            .await
+            .expect("read the backends of the database")
+            .get(0);
+        match seen {
+            true => return true,
+            false => tokio::time::sleep(LOCK_TRY_POLL_INTERVAL).await,
+        }
+    }
+    false
+}
+
+/// Python `tests/integration/test_schema_lock_wait.py::test_waiting_migrator_does_not_block_a_concurrent_index_build`:
+/// an installer that waits for the install lock holds no snapshot while it
+/// waits: it tries the lock in one statement every [`INSTALL_LOCK_POLL`] and
+/// holds no transaction between the tries. An index build that waits for
+/// every older snapshot (`CREATE INDEX CONCURRENTLY`, the form of the index
+/// steps that a lock holder runs) ends within its statement timeout while the
+/// installer waits, and the installer installs the chain once the lock is
+/// released.
+#[tokio::test]
+#[serial]
+async fn an_installer_that_waits_for_the_lock_does_not_block_a_concurrent_index_build() {
+    let database = MigrationTestDatabase::create().await;
+    let lock = InstallLockPlan {
+        key: rand::thread_rng().gen_range(1..i64::MAX),
+        wait: Duration::from_secs(60),
+    };
+    let holder = database.hold_lock(lock.key).await;
+    let holder_pid: i32 = holder
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("read the pid of the lock holder")
+        .get(0);
+    database
+        .execute("CREATE TABLE lock_wait_probe (name text)")
+        .await;
+    let builder = database.database.connect().await;
+    builder
+        .batch_execute(&format!(
+            "SET statement_timeout = '{INDEX_BUILD_STATEMENT_TIMEOUT}'"
+        ))
+        .await
+        .expect("bound the index build");
+    let build_during_the_wait = async {
+        assert!(
+            wait_for_a_lock_try(database.client(), holder_pid).await,
+            "the installer tries the lock"
+        );
+        builder
+            .batch_execute(
+                "CREATE INDEX CONCURRENTLY lock_wait_probe_name ON lock_wait_probe (name)",
+            )
+            .await
+            .expect("the index build ends while the installer waits");
+        let released: bool = holder
+            .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+            .await
+            .expect("release the lock")
+            .get(0);
+        assert!(released);
+    };
+
+    let (installed, ()) = tokio::join!(
+        database.install(ClientFamily::Rust, lock),
+        build_during_the_wait
+    );
+
+    installed.expect("the installer installs after the release");
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(embedded_migrations().len())
+    );
+    drop(builder);
+    drop(holder);
+    database.drop().await;
+}
+
 /// Python `test_broker_postgres.py::TestBaselineInstall::test_read_only_broker_runs_no_schema_statement`:
 /// an observe-only broker runs no schema statement. On an empty database its
 /// install calls return and the database stays empty.

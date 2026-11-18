@@ -21,9 +21,9 @@ use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::task::Execution;
 use crate::monitoring::{
-    get_task_detail, list_tasks, task_stats, MonitoringQueryError, MonitoringQueryErrorCode,
-    SortDirection, TaskAbsenceReason, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskListPage,
-    TaskListQuery, TaskSortField, TaskStatsQuery,
+    get_task_detail, get_workflow_node, list_tasks, task_stats, MonitoringQueryError,
+    MonitoringQueryErrorCode, SortDirection, TaskAbsenceReason, TaskDetail, TaskDetailNotFound,
+    TaskDetailRead, TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery,
 };
 
 /// Upper bound of a span that counts up to now (Python
@@ -419,6 +419,64 @@ async fn an_unknown_stored_status_in_history_is_a_contract_violation() {
     );
     assert!(!error.retryable());
     assert!(error.message().contains("NOT_KNOWN"), "{}", error.message());
+    database.drop().await;
+}
+
+/// Python `test_monitoring_task_detail_absence.py::TestLiveInTheSnapshotOfTheLiveMiss`:
+/// a published detail reader that reports a task live after the live miss
+/// of the same snapshot breaks the history contract. The task detail read
+/// and the read of the node of that task are `HISTORY_CONTRACT_VIOLATION`,
+/// not retryable, and the message names the task and the live miss. A
+/// stand-in reader that answers `LIVE` for every id gives that answer.
+#[tokio::test]
+#[serial]
+async fn a_live_answer_of_the_reader_after_a_live_miss_is_a_contract_violation() {
+    let database = SpecDatabase::create().await;
+    let task_id = Uuid::new_v4();
+    let run = RunSeed::running("alpha_flow");
+    seed_run(&database.pool, &run).await;
+    let mut node = NodeSeed::task(run.id, 0);
+    node.status = "COMPLETED".to_owned();
+    node.kind = NodeKind::Task {
+        task_id: Some(task_id),
+    };
+    seed_node(&database.pool, &node).await;
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION horsies_task_detail_staged(p_task_id uuid)
+         RETURNS TABLE (location text, task_row horsies_task_history)
+         LANGUAGE sql STABLE AS $$ SELECT 'LIVE'::text, NULL::horsies_task_history $$",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("install a reader that answers LIVE");
+    let broker = database.broker();
+
+    let detail = get_task_detail(&broker, task_id)
+        .await
+        .expect_err("a live answer after a live miss is refused");
+    let node_read = get_workflow_node(&broker, run.id, 0)
+        .await
+        .expect_err("the node read meets the same refusal");
+
+    for error in [detail, node_read] {
+        assert_eq!(
+            error.code(),
+            MonitoringQueryErrorCode::HistoryContractViolation
+        );
+        assert!(!error.retryable());
+        assert!(
+            error.message().contains(&task_id.to_string()),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error
+                .message()
+                .contains("after a live miss in the same snapshot"),
+            "{}",
+            error.message()
+        );
+    }
     database.drop().await;
 }
 

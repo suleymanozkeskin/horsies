@@ -576,6 +576,32 @@ async fn a_crashed_task_of_a_running_node_fails_the_node_and_the_workflow() {
     db.drop().await;
 }
 
+/// `test_recover_crashed_worker_idempotent` (case 1.7): a second phase-2
+/// pass after the pass that failed the crashed node advances nothing.
+#[tokio::test]
+#[serial]
+async fn a_second_pass_after_a_crashed_task_advances_nothing() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = start(
+        &db.pool,
+        &spec(
+            "recover_idem_crash",
+            vec![task_node(0, "recover_idem_crash_a")],
+        ),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+    crash_the_task_of_node_0(&db.pool, workflow_id).await;
+
+    let first = phase2_pass(&db.pool).await;
+    let second = phase2_pass(&db.pool).await;
+
+    assert_eq!(first, 1);
+    assert_eq!(second, 0);
+    assert_eq!(node_status(&db.pool, workflow_id, 0).await, "FAILED");
+    db.drop().await;
+}
+
 /// `test_recover_crashed_worker_dependent_propagation` (case 1.7): after the
 /// phase-2 pass fails the crashed node, its dependent is SKIPPED.
 #[tokio::test]

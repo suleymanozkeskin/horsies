@@ -79,14 +79,17 @@ async fn deferred_terminalization_requires_a_result_payload() {
     cleanup_workflows(&pool, &[workflow_id]).await;
 }
 
-/// Python `TestMoveInvariants::test_duplicate_identity_fails_closed`: a task
-/// that is live and in history at once is a corrupt identity, and the move
-/// refuses it.
+/// Python `TestMoveInvariants::test_duplicate_identity_fails_closed` and
+/// `test_task_history_terminalization_prototypes.py::test_live_and_history_duplicate_is_rejected`:
+/// a task that is live and in history at once is a corrupt identity, and the
+/// move refuses it and writes nothing: the live row and its attempts stay,
+/// history keeps the one planted row, and no phase-2 record is written.
 #[tokio::test]
 #[serial]
 async fn duplicate_identity_fails_closed() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
+    let attempts_before = live_attempts(&pool, task_id).await;
     let mut connection = pool.acquire().await.expect("acquire");
     let copied = copy_live_row_to_history(
         &mut *connection,
@@ -112,5 +115,14 @@ async fn duplicate_identity_fails_closed() {
 
     assert_server_refusal(&server_refusal(refused), "XX001", "multiple locations");
     assert!(live_row(&pool, task_id).await.is_some());
+    assert_eq!(live_attempts(&pool, task_id).await, attempts_before);
+    let history_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count the history rows");
+    assert_eq!(history_rows, 1);
+    assert!(!phase2_pending(&pool, task_id).await);
     cleanup_tasks(&pool, &[task_id]).await;
 }
