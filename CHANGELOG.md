@@ -244,6 +244,27 @@ before you upgrade a 0.7 deployment.
   `stale` and `uptime_s` of `GET /api/workers` are measured to the time of
   the database read; 0.7 measured them to the clock of the web host.
 
+- **A task breakdown keeps the unclaimed tasks apart from a worker named
+  `unknown`.** Each `GroupRow.group` of `horsies.monitoring.task_breakdown`
+  is `BreakdownValueGroup(value=...)` (a worker id, a task name or a queue
+  name) or, for `group_by='worker'` only, `BreakdownUnclaimedGroup()` (the
+  tasks that no worker claimed); it was a `str`. `GroupRow` derives from the
+  new `BreakdownCounts`, and `Breakdown.total` is a `BreakdownCounts` with no
+  `group`; it was a `GroupRow` with the group `'TOTAL'`.
+  `GET /api/tasks/breakdown` writes a group as
+  `{"kind": "value", "value": ...}` or `{"kind": "unclaimed"}`, and `total`
+  with no `group` key. 0.7 labelled the unclaimed tasks and a worker with
+  the id `unknown` both `'unknown'` and kept one row of the two, so the
+  groups summed to less than the total. Match `row.group` on the two
+  classes.
+
+- **The maps of a worker snapshot are a `dict`, never `None`.**
+  `WorkerStateSnapshot.queue_priorities`, `queue_max_concurrency` and
+  `recovery_config`, and `horsies.monitoring.WorkerStateInfo.queue_max_concurrency`
+  (`GET /api/workers`), are `{}` when the worker had none set; 0.7 gave
+  `None` (`null` on the web). The baseline columns are NOT NULL. Test for
+  `{}` where the code tested `None`.
+
 - **Monitoring and web times are in UTC.** The times of the
   `horsies.monitoring` reads and of the web API answers are UTC (`Z` in
   JSON), whatever the `TimeZone` of the database server or role is. 0.7
