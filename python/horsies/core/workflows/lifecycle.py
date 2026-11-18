@@ -30,8 +30,10 @@ from horsies.core.errors import WorkflowValidationError, ErrorCode
 from horsies.core.utils.db import autocommit_connection
 from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
+    HandleDbOperationFailed,
     HandleResult,
     HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid,
     HandleWorkflowNotFound,
 )
 from horsies.core.workflows.start_types import (
@@ -73,7 +75,6 @@ def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
 
 if TYPE_CHECKING:
     from horsies._core import (
-        HandleFailed,
         WorkflowAbsent,
         WorkflowExists,
         WorkflowIdTaken,
@@ -81,7 +82,6 @@ if TYPE_CHECKING:
         WorkflowNotRunning,
         WorkflowPaused,
         WorkflowResumed,
-        WorkflowResumeRecoveryFailed,
         WorkflowStartFailed,
         WorkflowStarted,
         WorkflowStartRequest,
@@ -678,18 +678,20 @@ def pause_workflow_blocking(
 
 def _pause_answer(
     workflow_id: str,
-    record: WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed,
+    record: (
+        WorkflowPaused
+        | WorkflowNotRunning
+        | WorkflowAbsent
+        | HandleDbOperationFailed
+        | HandleStoredDataInvalid
+    ),
 ) -> HandleResult[bool]:
-    """The answer of a pause for the core's record. Pure."""
+    """The answer of a pause for the core's record. A failure is the core's
+    class, returned as it is. Pure."""
     from horsies._core import (
-        HandleFailed,
         WorkflowAbsent,
         WorkflowNotRunning,
         WorkflowPaused,
-    )
-    from horsies.core.workflows.handle_records import (
-        WorkflowOperation,
-        handle_failed_error,
     )
 
     # The status trigger (horsies_notify_workflow_changes) sends
@@ -705,8 +707,8 @@ def _pause_answer(
                 message=f'Workflow {workflow_id} not found',
                 workflow_id=workflow_id,
             ))
-        case HandleFailed():
-            return Err(handle_failed_error(record, workflow_id, WorkflowOperation.PAUSE))
+        case HandleDbOperationFailed() | HandleStoredDataInvalid():
+            return Err(record)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -893,22 +895,18 @@ def _resume_answer(
     record: (
         WorkflowResumed
         | WorkflowNotPaused
-        | WorkflowResumeRecoveryFailed
         | WorkflowAbsent
-        | HandleFailed
+        | HandleDbOperationFailed
+        | HandleStoredDataInvalid
+        | HandleResumeRecoveryFailed
     ),
 ) -> HandleResult[bool]:
-    """The answer of a resume for the core's record. Pure."""
+    """The answer of a resume for the core's record. A failure is the core's
+    class, returned as it is. Pure."""
     from horsies._core import (
-        HandleFailed,
         WorkflowAbsent,
         WorkflowNotPaused,
         WorkflowResumed,
-        WorkflowResumeRecoveryFailed,
-    )
-    from horsies.core.workflows.handle_records import (
-        WorkflowOperation,
-        handle_failed_error,
     )
 
     match record:
@@ -921,14 +919,12 @@ def _resume_answer(
                 message=f'Workflow {workflow_id} not found',
                 workflow_id=workflow_id,
             ))
-        case WorkflowResumeRecoveryFailed(message=message, exception=exception):
-            return Err(HandleResumeRecoveryFailed(
-                message=message,
-                workflow_id=workflow_id,
-                exception=exception,
-            ))
-        case HandleFailed():
-            return Err(handle_failed_error(record, workflow_id, WorkflowOperation.RESUME))
+        case (
+            HandleDbOperationFailed()
+            | HandleStoredDataInvalid()
+            | HandleResumeRecoveryFailed()
+        ):
+            return Err(record)
         case _ as unreachable:
             assert_never(unreachable)
 

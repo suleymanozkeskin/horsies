@@ -398,6 +398,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::ClaimContract(_)
         | BrokerError::Statement(_)
         | BrokerError::PoolSettings(_)
+        | BrokerError::ProcessRuntime(_)
         | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),

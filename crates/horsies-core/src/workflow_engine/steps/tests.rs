@@ -281,7 +281,8 @@ async fn each_cancel_outcome_reads_into_its_variant() {
 #[should_panic(expected = "returned the outcome \"SUSPENDED\", which is outside its contract")]
 fn a_step_contract_error_has_no_handle_catalog_entry_and_panics() {
     let _error = crate::workflow_engine::lifecycle::handle_operation_error(
-        &WorkflowError::StepContract(StepContractError::UnknownOutcome {
+        crate::core::workflow::handle_types::HandleOperation::Pause,
+        WorkflowError::StepContract(StepContractError::UnknownOutcome {
             function: "horsies_workflow_pause",
             outcome: "SUSPENDED".to_owned(),
         }),

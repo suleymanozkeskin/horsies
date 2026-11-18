@@ -77,7 +77,6 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from horsies._core import (
-        HandleFailed,
         NodeResultNotStored,
         StoredNodeResultRecord,
         WaitTimedOut,
@@ -834,18 +833,19 @@ class WorkflowHandle(Generic[OutT]):
 
     def _status_answer(
         self,
-        record: WorkflowStatusRead | WorkflowAbsent | HandleFailed,
+        record: (
+            WorkflowStatusRead
+            | WorkflowAbsent
+            | HandleDbOperationFailed
+            | HandleStoredDataInvalid
+        ),
     ) -> Result[
         WorkflowStatus,
         HandleWorkflowNotFound | HandleDbOperationFailed | HandleStoredDataInvalid,
     ]:
         """The answer of ``status`` and ``status_async`` for the core's
-        record. Pure."""
-        from horsies._core import HandleFailed, WorkflowAbsent, WorkflowStatusRead
-        from horsies.core.workflows.handle_records import (
-            WorkflowOperation,
-            handle_failed_error,
-        )
+        record. A failure is the core's class, returned as it is. Pure."""
+        from horsies._core import WorkflowAbsent, WorkflowStatusRead
 
         match record:
             case WorkflowStatusRead(status=status):
@@ -855,10 +855,8 @@ class WorkflowHandle(Generic[OutT]):
                     message=f'Workflow {self.workflow_id} not found',
                     workflow_id=self.workflow_id,
                 ))
-            case HandleFailed():
-                return Err(handle_failed_error(
-                    record, self.workflow_id, WorkflowOperation.STATUS,
-                ))
+            case HandleDbOperationFailed() | HandleStoredDataInvalid():
+                return Err(record)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -996,14 +994,15 @@ class WorkflowHandle(Generic[OutT]):
             | WorkflowPausedRead
             | WaitTimedOut
             | WorkflowAbsent
-            | HandleFailed
+            | HandleDbOperationFailed
+            | HandleStoredDataInvalid
         ),
         timeout_ms: int | None,
     ) -> TaskResult[Any, TaskError]:
-        """The answer of ``get`` and ``get_async`` for the core's record. Pure
+        """The answer of ``get`` and ``get_async`` for the core's record. A
+        failure of the core is ``BROKER_ERROR`` with the core's message. Pure
         apart from the type lookups of the decode."""
         from horsies._core import (
-            HandleFailed,
             WaitTimedOut,
             WorkflowAbsent,
             WorkflowCompletedRead,
@@ -1039,10 +1038,11 @@ class WorkflowHandle(Generic[OutT]):
                         message=f'Workflow {self.workflow_id} not found',
                     ),
                 )
-            case HandleFailed(message=message):
-                return _broker_task_error(
-                    f'Get failed for workflow {self.workflow_id}: {message}',
-                )
+            case (
+                HandleDbOperationFailed(message=message)
+                | HandleStoredDataInvalid(message=message)
+            ):
+                return _broker_task_error(message)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -1202,17 +1202,21 @@ class WorkflowHandle(Generic[OutT]):
     def _node_result_answer(
         self,
         node_id: str,
-        record: StoredNodeResultRecord | NodeResultNotStored | HandleFailed,
+        record: (
+            StoredNodeResultRecord
+            | NodeResultNotStored
+            | HandleDbOperationFailed
+            | HandleStoredDataInvalid
+        ),
     ) -> TaskResult[Any, TaskError]:
         """The answer of ``result_for`` and ``result_for_async`` for the core's
-        record. Pure apart from the type lookups of the decode."""
+        record. A failure of the core is ``BROKER_ERROR`` with the core's
+        message. Pure apart from the type lookups of the decode."""
         from horsies._core import (
-            HandleFailed,
             NodeResultNotStored,
             StoredNodeResultRecord,
         )
 
-        failure_subject = f'result_for node {node_id} in workflow {self.workflow_id}'
         match record:
             case NodeResultNotStored():
                 return TaskResult(
@@ -1224,8 +1228,11 @@ class WorkflowHandle(Generic[OutT]):
                         ),
                     )
                 )
-            case HandleFailed(message=message):
-                return _broker_task_error(f'DB query failed for {failure_subject}: {message}')
+            case (
+                HandleDbOperationFailed(message=message)
+                | HandleStoredDataInvalid(message=message)
+            ):
+                return _broker_task_error(message)
             case StoredNodeResultRecord():
                 pass
             case _ as unreachable:
@@ -1322,15 +1329,17 @@ class WorkflowHandle(Generic[OutT]):
 
     def _results_answer(
         self,
-        record: WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed,
+        record: (
+            WorkflowNodeResultsRead
+            | WorkflowAbsent
+            | HandleDbOperationFailed
+            | HandleStoredDataInvalid
+        ),
     ) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]:
         """The answer of ``results`` and ``results_async`` for the core's record.
-        Pure apart from the type lookups of the decode."""
-        from horsies._core import HandleFailed, WorkflowAbsent, WorkflowNodeResultsRead
-        from horsies.core.workflows.handle_records import (
-            WorkflowOperation,
-            handle_failed_error,
-        )
+        A failure is the core's class, returned as it is. Pure apart from the
+        type lookups of the decode."""
+        from horsies._core import WorkflowAbsent, WorkflowNodeResultsRead
 
         match record:
             case WorkflowAbsent():
@@ -1338,10 +1347,8 @@ class WorkflowHandle(Generic[OutT]):
                     message=f'Workflow {self.workflow_id} not found',
                     workflow_id=self.workflow_id,
                 ))
-            case HandleFailed():
-                return Err(handle_failed_error(
-                    record, self.workflow_id, WorkflowOperation.RESULTS,
-                ))
+            case HandleDbOperationFailed() | HandleStoredDataInvalid():
+                return Err(record)
             case WorkflowNodeResultsRead(nodes=nodes):
                 pass
             case _ as unreachable:
@@ -1444,15 +1451,17 @@ class WorkflowHandle(Generic[OutT]):
 
     def _tasks_answer(
         self,
-        record: WorkflowNodesRead | WorkflowAbsent | HandleFailed,
+        record: (
+            WorkflowNodesRead
+            | WorkflowAbsent
+            | HandleDbOperationFailed
+            | HandleStoredDataInvalid
+        ),
     ) -> HandleResult[list[WorkflowTaskInfo]]:
         """The answer of ``tasks`` and ``tasks_async`` for the core's record.
-        Pure apart from the type lookups of the decode."""
-        from horsies._core import HandleFailed, WorkflowAbsent, WorkflowNodesRead
-        from horsies.core.workflows.handle_records import (
-            WorkflowOperation,
-            handle_failed_error,
-        )
+        A failure is the core's class, returned as it is. Pure apart from the
+        type lookups of the decode."""
+        from horsies._core import WorkflowAbsent, WorkflowNodesRead
 
         match record:
             case WorkflowAbsent():
@@ -1460,10 +1469,8 @@ class WorkflowHandle(Generic[OutT]):
                     message=f'Workflow {self.workflow_id} not found',
                     workflow_id=self.workflow_id,
                 ))
-            case HandleFailed():
-                return Err(handle_failed_error(
-                    record, self.workflow_id, WorkflowOperation.TASKS,
-                ))
+            case HandleDbOperationFailed() | HandleStoredDataInvalid():
+                return Err(record)
             case WorkflowNodesRead(nodes=nodes):
                 pass
             case _ as unreachable:
@@ -1615,15 +1622,17 @@ class WorkflowHandle(Generic[OutT]):
 
     def _cancel_answer(
         self,
-        record: WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed,
+        record: (
+            WorkflowCancelled
+            | WorkflowNotCancellable
+            | WorkflowAbsent
+            | HandleDbOperationFailed
+            | HandleStoredDataInvalid
+        ),
     ) -> HandleResult[None]:
         """The answer of ``cancel`` and ``cancel_async`` for the core's record.
-        Pure apart from the type lookups of the decode."""
-        from horsies._core import HandleFailed, WorkflowAbsent, WorkflowCancelled, WorkflowNotCancellable
-        from horsies.core.workflows.handle_records import (
-            WorkflowOperation,
-            handle_failed_error,
-        )
+        A failure is the core's class, returned as it is. Pure."""
+        from horsies._core import WorkflowAbsent, WorkflowCancelled, WorkflowNotCancellable
 
         # The CANCELLED status write fires horsies_workflow_notify_trigger
         # per workflow row, so no workflow_done notify is sent here.
@@ -1635,10 +1644,8 @@ class WorkflowHandle(Generic[OutT]):
                     message=f'Workflow {self.workflow_id} not found',
                     workflow_id=self.workflow_id,
                 ))
-            case HandleFailed():
-                return Err(handle_failed_error(
-                    record, self.workflow_id, WorkflowOperation.CANCEL,
-                ))
+            case HandleDbOperationFailed() | HandleStoredDataInvalid():
+                return Err(record)
             case _ as unreachable:
                 assert_never(unreachable)
 

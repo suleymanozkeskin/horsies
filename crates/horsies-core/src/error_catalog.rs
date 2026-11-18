@@ -47,6 +47,7 @@ use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::task::send_types::TaskSendError;
 use crate::failure_cause::FailureCause;
 use crate::monitoring::{MonitoringQueryError, TaskActionError};
+use crate::workflow_engine::error::WorkflowError;
 use crate::{BrokerOperationError, BrokerOperationFailedCode, HandleOperationError};
 
 /// The Python type of an instance field of a generated class.
@@ -228,6 +229,30 @@ impl ExceptionCause for BrokerError {
             text: self.to_string(),
             retryable: self.is_retryable(),
             cause: self.failure_cause(),
+        }
+    }
+}
+
+/// A workflow engine error is the core's class of its cause, with its text
+/// and its retry rule. A broker error inside it is that broker error, with
+/// the broker error's own text: the exception of a failed connect and of a
+/// failed statement of a workflow step is the same as for any broker
+/// operation.
+impl ExceptionCause for WorkflowError {
+    fn exception_value(&self) -> ExceptionValue {
+        match self {
+            Self::Broker(error) => error.exception_value(),
+            Self::Database(_)
+            | Self::Serialization(_)
+            | Self::WorkflowNotFound { .. }
+            | Self::InvalidStatus(_)
+            | Self::Validation(_)
+            | Self::StepContract(_)
+            | Self::ChildSpecSource(_) => ExceptionValue::CoreFailure {
+                text: self.to_string(),
+                retryable: self.is_retryable(),
+                cause: self.failure_cause(),
+            },
         }
     }
 }
@@ -1137,5 +1162,176 @@ mod tests {
         assert!(OUTCOME_DECODE_ERROR
             .doc
             .starts_with("The returned row does not satisfy the wire contract.\n\nNever raised"));
+    }
+
+    const WORKFLOW: Uuid = Uuid::from_u128(0x7a1b_2c3d_4e5f_4061_8273_9a4b_5c6d_7e8f);
+
+    /// A refused connect, as the broker reports it.
+    fn refused() -> BrokerError {
+        BrokerError::ConnectionFailed("refused".to_owned())
+    }
+
+    /// One value of each variant of the handle catalog.
+    fn every_handle_error() -> Vec<HandleOperationError> {
+        vec![
+            HandleOperationError::not_found(WORKFLOW),
+            HandleOperationError::connect_failed(
+                crate::HandleOperation::Status,
+                WORKFLOW,
+                refused(),
+            ),
+            HandleOperationError::StoredDataInvalid {
+                message: format!("Status failed for workflow {WORKFLOW}: invalid status: BOGUS"),
+                workflow_id: WORKFLOW,
+                cause: WorkflowError::InvalidStatus("BOGUS".to_owned()),
+            },
+            HandleOperationError::ResumeRecoveryFailed {
+                message: format!(
+                    "Workflow {WORKFLOW} resumed; the recovery pass for its tree failed: \
+                     broker error: connection failed: refused"
+                ),
+                workflow_id: WORKFLOW,
+                cause: WorkflowError::Broker(refused()),
+            },
+            HandleOperationError::AsyncContext {
+                message: "sync call inside a loop".to_owned(),
+                workflow_id: WORKFLOW,
+            },
+        ]
+    }
+
+    /// The values of each handle error name the instance slots of its
+    /// class, in the class's order, and the values cover every class.
+    #[test]
+    fn the_values_of_each_handle_error_name_the_instance_slots_of_its_class() {
+        let catalog = <HandleOperationError as ErrorEnum>::ERROR_CATALOG;
+        let errors = every_handle_error();
+        for error in &errors {
+            let class = catalog
+                .classes
+                .iter()
+                .find(|class| class.python_class == error.python_class())
+                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+            let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
+            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+        }
+        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let classes: HashSet<&str> = catalog
+            .classes
+            .iter()
+            .map(|class| class.python_class)
+            .collect();
+        assert_eq!(covered, classes);
+    }
+
+    /// Python's `HandleDbOperationFailed` of a failed connect: the message
+    /// names the operation, the workflow id is its text, and the exception
+    /// is the core's class of the broker error with the broker error's own
+    /// text.
+    #[test]
+    fn a_handle_database_failure_builds_its_exception_from_its_cause() {
+        let failed = HandleOperationError::connect_failed(
+            crate::HandleOperation::Status,
+            WORKFLOW,
+            refused(),
+        );
+        let message = format!("Status failed for workflow {WORKFLOW}: connection failed: refused");
+        assert_eq!(
+            failed.slot_values(),
+            vec![
+                SlotValue {
+                    name: "message",
+                    value: SlotData::Str(&message),
+                },
+                SlotValue {
+                    name: "retryable",
+                    value: SlotData::Bool(true),
+                },
+                SlotValue {
+                    name: "workflow_id",
+                    value: SlotData::UuidText(WORKFLOW),
+                },
+                SlotValue {
+                    name: "exception",
+                    value: SlotData::Exception(ExceptionValue::CoreFailure {
+                        text: "connection failed: refused".to_owned(),
+                        retryable: true,
+                        cause: FailureCause::Connection,
+                    }),
+                },
+            ]
+        );
+    }
+
+    /// The exception of each cause of a workflow engine error: a broker
+    /// error inside it is that broker error with its own text; every other
+    /// error is the core's class of its cause with the error's text and its
+    /// retry rule.
+    #[test]
+    fn a_workflow_error_builds_the_core_class_of_its_cause() {
+        let statement = BrokerError::Database(sqlx::Error::Database(Box::new(ServerError {
+            code: "57014",
+            message: "canceling statement due to statement timeout",
+        })));
+        let statement_text = statement.to_string();
+        assert_eq!(
+            WorkflowError::Broker(statement).exception_value(),
+            ExceptionValue::CoreFailure {
+                text: statement_text,
+                retryable: true,
+                cause: FailureCause::Server(crate::ServerErrorFacts::of_code(
+                    "57014",
+                    "canceling statement due to statement timeout".to_owned(),
+                )),
+            }
+        );
+        assert_eq!(
+            WorkflowError::Broker(refused()).exception_value(),
+            ExceptionValue::CoreFailure {
+                text: "connection failed: refused".to_owned(),
+                retryable: true,
+                cause: FailureCause::Connection,
+            }
+        );
+        assert_eq!(
+            WorkflowError::InvalidStatus("BOGUS".to_owned()).exception_value(),
+            ExceptionValue::CoreFailure {
+                text: "invalid status: BOGUS".to_owned(),
+                retryable: false,
+                cause: FailureCause::ContractViolation,
+            }
+        );
+        let pool = WorkflowError::Database(sqlx::Error::PoolTimedOut);
+        assert_eq!(
+            pool.exception_value(),
+            ExceptionValue::CoreFailure {
+                text: pool.to_string(),
+                retryable: true,
+                cause: pool.failure_cause(),
+            }
+        );
+    }
+
+    /// Python's `HandleResumeRecoveryFailed`: the exception has the text of
+    /// the failure of the recovery pass alone, as in 0.7, not the message
+    /// that names the resume.
+    #[test]
+    fn a_failed_recovery_pass_builds_its_exception_from_its_cause_alone() {
+        let failed = every_handle_error()
+            .into_iter()
+            .find(|error| matches!(error, HandleOperationError::ResumeRecoveryFailed { .. }))
+            .expect("the list holds the failed recovery pass");
+        assert_eq!(
+            failed.slot_values().last(),
+            Some(&SlotValue {
+                name: "exception",
+                value: SlotData::Exception(ExceptionValue::CoreFailure {
+                    text: "connection failed: refused".to_owned(),
+                    retryable: true,
+                    cause: FailureCause::Connection,
+                }),
+            })
+        );
+        assert!(!failed.retryable());
     }
 }

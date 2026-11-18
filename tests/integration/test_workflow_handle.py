@@ -35,7 +35,7 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.typed import encode_task_error
-from horsies._core import CoreServerError
+from horsies._core import CoreConnectionError, CoreServerError
 from horsies.core.types.result import Err, Ok, is_ok, is_err
 from horsies.core.workflows.functions import EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL
 from horsies.core.workflows.lifecycle import expire_paused_workflows
@@ -2332,6 +2332,17 @@ class TestResumeCommitSplit:
         # The tree read after the commit meets a search_path with no tables.
         assert isinstance(err.exception, CoreServerError)
         assert err.workflow_id == handle.workflow_id
+        assert err.retryable is False
+        assert err.message.startswith(
+            f'Workflow {handle.workflow_id} resumed; the recovery pass for its tree failed: ',
+        )
+        # The exception holds the failure of the recovery pass alone, as in
+        # 0.7: its text is the server's message with the resume as its
+        # subject, not the message that names the resume.
+        assert err.exception.subject == 'resume_workflow'
+        assert err.exception.message in err.message
+        assert not err.exception.message.startswith('Workflow ')
+        assert str(err.exception) == f'resume_workflow: {err.exception.message}'
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.RUNNING
@@ -2381,10 +2392,15 @@ class TestResumeCommitSplit:
         assert is_err(resume_r)
         err = resume_r.err_value
         assert isinstance(err, HandleDbOperationFailed)
+        assert type(err) is HandleDbOperationFailed
         assert isinstance(err.exception, CoreServerError)
         assert err.exception.sqlstate == '57P01'
         assert err.exception.message == 'resume refused by the test'
+        assert err.exception.subject == 'resume_workflow'
+        assert str(err.exception) == 'resume_workflow: resume refused by the test'
         assert 'resume refused by the test' in err.message
+        assert err.message.startswith(f'Resume failed for workflow {handle.workflow_id}: ')
+        assert err.workflow_id == handle.workflow_id
         assert err.retryable is True
         status_r = await handle.status_async()
         assert is_ok(status_r)
@@ -2429,6 +2445,27 @@ class TestUnknownStoredWorkflowStatus:
         assert status_r.ok_value == WorkflowStatus.RUNNING
 
 
+def _assert_failed_connect(
+    error: object, label: str, subject: str, workflow_id: str,
+) -> None:
+    """A failed connect of a handle operation, as the core builds it:
+    ``HandleDbOperationFailed`` with Python's message (the operation's label,
+    the workflow id and the cause's text), retryable, and the core's class of
+    the cause with the operation as its subject and the cause's own text."""
+    assert type(error) is HandleDbOperationFailed
+    assert error.workflow_id == workflow_id
+    assert error.retryable is True
+    prefix = f'{label} failed for workflow {workflow_id}: '
+    assert error.message.startswith(prefix)
+    cause_text = error.message.removeprefix(prefix)
+    assert cause_text != ''
+    assert type(error.exception) is CoreConnectionError
+    assert error.exception.subject == subject
+    assert error.exception.message == cause_text
+    assert error.exception.retryable is True
+    assert str(error.exception) == f'{subject}: {cause_text}'
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestWorkflowHandleInfraErrors:
@@ -2468,6 +2505,9 @@ class TestWorkflowHandleInfraErrors:
         assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert status_r.err_value.workflow_id == handle.workflow_id
         assert status_r.err_value.retryable is True
+        _assert_failed_connect(
+            status_r.err_value, 'Status', 'workflow_status', handle.workflow_id,
+        )
 
     async def test_get_db_error_returns_taskresult_broker_error(
         self,
@@ -2486,6 +2526,10 @@ class TestWorkflowHandleInfraErrors:
 
         assert result.is_err()
         assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
+        # The core's message of the failed wait, as the handle built it.
+        message = result.unwrap_err().message
+        assert message is not None
+        assert message.startswith(f'Get failed for workflow {handle.workflow_id}: ')
 
     async def test_cancel_db_error_returns_err_db_operation_failed(
         self,
@@ -2506,6 +2550,9 @@ class TestWorkflowHandleInfraErrors:
         assert is_err(cancel_r)
         assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert cancel_r.err_value.retryable is True
+        _assert_failed_connect(
+            cancel_r.err_value, 'Cancel', 'cancel_workflow', handle.workflow_id,
+        )
         status = (
             await session.execute(
                 text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
@@ -2531,6 +2578,9 @@ class TestWorkflowHandleInfraErrors:
         assert is_err(results_r)
         assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert results_r.err_value.workflow_id == handle.workflow_id
+        _assert_failed_connect(
+            results_r.err_value, 'Results', 'workflow_node_results', handle.workflow_id,
+        )
 
     async def test_handle_methods_do_not_leak_db_exceptions(
         self,

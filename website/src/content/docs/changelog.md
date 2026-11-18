@@ -131,6 +131,21 @@ before you upgrade a 0.7 deployment.
   `TaskActionDbOperationFailed.exception` keeps the text of its cause, and
   `TaskActionStoredDataInvalid.exception` is an `OutcomeDecodeError`.
 
+- **The core builds the error classes of the workflow handle.** A failed
+  pause, cancel, resume or handle read returns the
+  `HandleDbOperationFailed`, `HandleStoredDataInvalid` or
+  `HandleResumeRecoveryFailed` class that the core builds, with Python's
+  message: the operation's label, the workflow id and the cause's text
+  (`Status failed for workflow <id>: <cause>`). The records `HandleFailed`
+  and `WorkflowResumeRecoveryFailed` of `horsies._core` are removed.
+  `workflow_id` and the id in the message are the canonical text of the
+  UUID: a `WorkflowHandle` made from another spelling of the same UUID
+  (upper case, braces) gets the canonical form there.
+  `HandleResumeRecoveryFailed.exception` holds the failure of the work
+  after the commit alone, as in 0.7, and its `retryable` is the rule of that
+  failure. The `BROKER_ERROR` message of a failed `result_for` read is the
+  core's message, `Result read failed for workflow <id>: <cause>`.
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async
@@ -957,6 +972,14 @@ unless it starts with "Added".
   `AsyncContext`; each has `message` and `workflow_id`. The fields become
   the methods `code()`, `message()`, `retryable()`, `workflow_id()` and
   `failure_cause()`.
+- **The `cause` of `HandleOperationError` is the `WorkflowError`.**
+  `DbOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
+  the `WorkflowError` that failed the operation (a failed connect is
+  `WorkflowError::Broker`), and `HandleOperationError` is no longer
+  `Clone`. The message of a failure starts with the operation's label, as
+  Python's: `Status failed for workflow <id>: <cause>`, and `Workflow <id>
+  not found` for `WorkflowNotFound`. A blocking form whose process runtime
+  did not start has the cause `BrokerError::ProcessRuntime` (new).
 - **`MonitoringQueryError` and `TaskActionError` are enums with one
   variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
   `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,

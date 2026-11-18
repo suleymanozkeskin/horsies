@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Literal, final
 
 from horsies._catalog.monitoring_errors import TaskActionCoreError
+from horsies._catalog.workflow_handle_errors import HandleDbOperationFailed, HandleResumeRecoveryFailed, HandleStoredDataInvalid
 
 
 class CoreError(Exception):
@@ -231,13 +232,13 @@ class CoreHandle:
         """
     def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed]:
         """The awaitable form of the method above."""
-    def resume_workflow(self, workflow_id: uuid.UUID) -> WorkflowResumed | WorkflowNotPaused | WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed:
+    def resume_workflow(self, workflow_id: uuid.UUID) -> WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed:
         """Resume one workflow tree. Writes; a caller that leaves does not stop it. The child starts
         it owes build their children through the child spec source. A build that raised
         KeyboardInterrupt or SystemExit raises it again; one that raised an Exception raises it
         again when the resume failed with it. With no child spec source it raises RuntimeError.
         """
-    def resume_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowResumed | WorkflowNotPaused | WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed]:
+    def resume_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed]:
         """The awaitable form of the method above."""
     def finish_workflow_node_async(self, request: NodeFinishRequest) -> asyncio.Future[NodeFinished | NodeFinishFailed]:
         """Phase 2 of one finished workflow task. Writes; the child starts it owes build their
@@ -269,17 +270,17 @@ class CoreHandle:
         """Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000
         claims. A request with no claim sends nothing.
         """
-    def pause_workflow(self, workflow_id: uuid.UUID) -> WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed:
+    def pause_workflow(self, workflow_id: uuid.UUID) -> WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid:
         """Pause one workflow tree. Writes, in one statement; a caller that leaves does not stop
         it. A row outside the function's contract raises PanicException.
         """
-    def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
+    def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above."""
-    def cancel_workflow(self, workflow_id: uuid.UUID) -> WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed:
+    def cancel_workflow(self, workflow_id: uuid.UUID) -> WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid:
         """Cancel one workflow tree. Writes, in one statement; a caller that leaves does not stop
         it. A row outside the function's contract raises PanicException.
         """
-    def cancel_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed]:
+    def cancel_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above."""
     def delete_expired_workflows_async(self, older_than_hours: int, batch_size: int, budget_ms: int) -> asyncio.Future[WorkflowsDeleted | WorkflowDeleteFailed]:
         """One workflow retention pass of the reaper, in batches until one deletes nothing or the
@@ -290,30 +291,30 @@ class CoreHandle:
         """Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,
         oldest first. Writes; each candidate commits alone.
         """
-    def workflow_status(self, workflow_id: uuid.UUID) -> WorkflowStatusRead | WorkflowAbsent | HandleFailed:
+    def workflow_status(self, workflow_id: uuid.UUID) -> WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid:
         """The status of one workflow. Reads only."""
-    def workflow_status_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowStatusRead | WorkflowAbsent | HandleFailed]:
+    def workflow_status_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above."""
-    def wait_workflow_result(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed:
+    def wait_workflow_result(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid:
         """Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a
         caller that leaves drops the wait and its subscription. Bounded by the limit plus the bound
         of a blocking call; not bounded with no limit. A negative timeout raises OverflowError.
         """
-    def wait_workflow_result_async(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed]:
+    def wait_workflow_result_async(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above. A cancelled await drops the wait and its
         subscription.
         """
-    def workflow_node_results(self, workflow_id: uuid.UUID) -> WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed:
+    def workflow_node_results(self, workflow_id: uuid.UUID) -> WorkflowNodeResultsRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid:
         """The nodes of one workflow that store a result. Reads only."""
-    def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed]:
+    def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above."""
-    def workflow_node_result(self, workflow_id: uuid.UUID, node_id: str) -> StoredNodeResultRecord | NodeResultNotStored | HandleFailed:
+    def workflow_node_result(self, workflow_id: uuid.UUID, node_id: str) -> StoredNodeResultRecord | NodeResultNotStored | HandleDbOperationFailed | HandleStoredDataInvalid:
         """The stored result of one node. Reads only."""
-    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | HandleFailed]:
+    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above."""
-    def workflow_nodes(self, workflow_id: uuid.UUID) -> WorkflowNodesRead | WorkflowAbsent | HandleFailed:
+    def workflow_nodes(self, workflow_id: uuid.UUID) -> WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid:
         """The nodes of one workflow in index order. Reads only."""
-    def workflow_nodes_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodesRead | WorkflowAbsent | HandleFailed]:
+    def workflow_nodes_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above."""
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
@@ -1995,24 +1996,6 @@ class WorkflowAbsent:
 
 
 @final
-class HandleFailed:
-    """The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a
-    stored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After
-    DB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.
-    """
-    @property
-    def workflow_id(self) -> uuid.UUID: ...
-    @property
-    def code(self) -> Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def retryable(self) -> bool: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
-
-
-@final
 class WorkflowsDeleted:
     """The workflow retention pass ended: a batch deleted no workflow, or the budget passed
     after a batch.
@@ -2475,19 +2458,6 @@ class WorkflowNotPaused:
     """The workflow exists and is not PAUSED. Nothing was written."""
     @property
     def workflow_id(self) -> uuid.UUID: ...
-
-
-@final
-class WorkflowResumeRecoveryFailed:
-    """The resume committed; the parent advance or the recovery pass of the tree after it
-    failed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.
-    """
-    @property
-    def workflow_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final

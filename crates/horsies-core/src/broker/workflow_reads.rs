@@ -5,14 +5,15 @@
 //! envelope with its own output type.
 //!
 //! The reads write nothing and run no client family check: a read of a database of
-//! another family answers what it stores.
+//! another family answers what it stores. The message of a failure starts with the label of the
+//! read's [`HandleOperation`], as Python's handle names it.
 
 use std::time::Duration;
 
 use uuid::Uuid;
 
 use crate::broker::postgres::PostgresBroker;
-use crate::core::workflow::handle_types::HandleResult;
+use crate::core::workflow::handle_types::{HandleOperation, HandleResult};
 use crate::core::WorkflowStatus;
 use crate::workflow_engine::lifecycle::handle_operation_error;
 use crate::workflow_engine::query::{
@@ -30,7 +31,7 @@ impl PostgresBroker {
     pub async fn workflow_status(&self, workflow_id: Uuid) -> HandleResult<WorkflowStatus> {
         query::get_workflow_status(self, workflow_id)
             .await
-            .map_err(|error| handle_operation_error(&error, workflow_id))
+            .map_err(|error| handle_operation_error(HandleOperation::Status, error, workflow_id))
     }
 
     /// Wait for the end of a workflow, up to `timeout` (none: no limit), with its stored values
@@ -48,7 +49,7 @@ impl PostgresBroker {
     ) -> HandleResult<WorkflowWait> {
         query::wait_workflow_end(self, workflow_id, timeout)
             .await
-            .map_err(|error| handle_operation_error(&error, workflow_id))
+            .map_err(|error| handle_operation_error(HandleOperation::Get, error, workflow_id))
     }
 
     /// The nodes of a workflow that store a result: one read (Python
@@ -60,7 +61,7 @@ impl PostgresBroker {
     pub async fn workflow_node_results(&self, workflow_id: Uuid) -> HandleResult<NodeResultsRead> {
         query::read_workflow_node_results(self, workflow_id)
             .await
-            .map_err(|error| handle_operation_error(&error, workflow_id))
+            .map_err(|error| handle_operation_error(HandleOperation::Results, error, workflow_id))
     }
 
     /// The stored result of one node: one read (Python `WorkflowHandle.result_for_async`).
@@ -77,7 +78,7 @@ impl PostgresBroker {
     ) -> HandleResult<Option<StoredNodeResult>> {
         query::read_workflow_node_result(self, workflow_id, node_id)
             .await
-            .map_err(|error| handle_operation_error(&error, workflow_id))
+            .map_err(|error| handle_operation_error(HandleOperation::ResultFor, error, workflow_id))
     }
 
     /// The nodes of a workflow in index order: one read (Python `WorkflowHandle.tasks_async`).
@@ -88,6 +89,6 @@ impl PostgresBroker {
     pub async fn workflow_nodes(&self, workflow_id: Uuid) -> HandleResult<NodesRead> {
         query::read_workflow_nodes(self, workflow_id)
             .await
-            .map_err(|error| handle_operation_error(&error, workflow_id))
+            .map_err(|error| handle_operation_error(HandleOperation::Tasks, error, workflow_id))
     }
 }

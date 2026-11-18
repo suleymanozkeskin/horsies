@@ -372,7 +372,11 @@ mod tests {
         let error = |code: HandleErrorCode| {
             let message = "recovery failed".to_owned();
             let workflow_id = Uuid::nil();
-            let cause = crate::failure_cause::FailureCause::Connection;
+            let cause = || {
+                WorkflowError::Broker(crate::broker::BrokerError::ConnectionFailed(
+                    "refused".to_owned(),
+                ))
+            };
             match code {
                 HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
                     message,
@@ -382,18 +386,18 @@ mod tests {
                     message,
                     retryable: true,
                     workflow_id,
-                    cause,
+                    cause: cause(),
                 },
                 HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
                     message,
                     workflow_id,
-                    cause,
+                    cause: cause(),
                 },
                 HandleErrorCode::ResumeRecoveryFailed => {
                     HandleOperationError::ResumeRecoveryFailed {
                         message,
                         workflow_id,
-                        cause,
+                        cause: cause(),
                     }
                 }
                 HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {

@@ -270,7 +270,8 @@ impl BrokerError {
     /// - Stored data or rows that break their reader: [`FailureCause::ContractViolation`].
     /// - Refused settings, a database of another family or schema, a send
     ///   that another command holds, a claim argument out of range, a held
-    ///   install lock: [`FailureCause::PreconditionFailed`].
+    ///   install lock, a process runtime that refused the call:
+    ///   [`FailureCause::PreconditionFailed`].
     pub fn failure_cause(&self) -> FailureCause {
         match self {
             Self::Database(error) => FailureCause::of_sqlx_error(error),
@@ -296,7 +297,8 @@ impl BrokerError {
             | Self::SchemaRefused(_)
             | Self::InstallLock(_)
             | Self::InvalidClaimArgument(_)
-            | Self::PoolSettings(_) => FailureCause::PreconditionFailed,
+            | Self::PoolSettings(_)
+            | Self::ProcessRuntime(_) => FailureCause::PreconditionFailed,
         }
     }
 }

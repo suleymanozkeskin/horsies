@@ -32,6 +32,11 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowSpec
 from horsies.core.models.workflow.handle import WorkflowHandle
+from horsies.core.models.workflow.handle_types import (
+    HandleDbOperationFailed,
+    HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid,
+)
 from horsies.core.types.result import is_ok
 from horsies.core.workflows.lifecycle import (
     pause_workflow,
@@ -78,12 +83,34 @@ def _record(record_class: type, **fields: object) -> MagicMock:
     return record
 
 
-def _handle_failed(code: str) -> MagicMock:
-    return _record(
-        core.HandleFailed,
-        code=code,
-        message=f'{code}: connection lost',
-        retryable=code == 'DB_OPERATION_FAILED',
+def _db_operation_failed() -> HandleDbOperationFailed:
+    """The core's answer of a read or write whose connection was lost."""
+    return HandleDbOperationFailed(
+        message=f'Status failed for workflow {WORKFLOW_ID}: connection lost',
+        retryable=True,
+        workflow_id=WORKFLOW_ID,
+        exception=CONNECTION_LOST,
+    )
+
+
+def _stored_data_invalid() -> HandleStoredDataInvalid:
+    """The core's answer of a stored value that does not parse."""
+    return HandleStoredDataInvalid(
+        message=f'Status failed for workflow {WORKFLOW_ID}: invalid status: BOGUS',
+        workflow_id=WORKFLOW_ID,
+        exception=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
+    )
+
+
+def _recovery_failed() -> HandleResumeRecoveryFailed:
+    """The core's answer of a resume whose recovery pass failed after the
+    commit."""
+    return HandleResumeRecoveryFailed(
+        message=(
+            f'Workflow {WORKFLOW_ID} resumed; the recovery pass for its tree failed: '
+            'connection lost'
+        ),
+        workflow_id=WORKFLOW_ID,
         exception=CONNECTION_LOST,
     )
 
@@ -141,8 +168,8 @@ class Facade:
 
 
 HANDLE_FAILURES: Final[dict[str, object]] = {
-    'db_operation_failed': _handle_failed('DB_OPERATION_FAILED'),
-    'stored_data_invalid': _handle_failed('STORED_DATA_INVALID'),
+    'db_operation_failed': _db_operation_failed(),
+    'stored_data_invalid': _stored_data_invalid(),
     'core_cannot_run_the_call': CORE_REFUSAL,
 }
 
@@ -180,7 +207,7 @@ FACADES: Final[dict[str, Facade]] = {
             'paused': _record(core.WorkflowPausedRead),
             'timed_out': _record(core.WaitTimedOut),
             'absent': _record(core.WorkflowAbsent),
-            'read_failed': _handle_failed('DB_OPERATION_FAILED'),
+            'read_failed': _db_operation_failed(),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -208,7 +235,7 @@ FACADES: Final[dict[str, Facade]] = {
                 sub_definition_key=None,
             ),
             'not_stored': _record(core.NodeResultNotStored, node_id=NODE_ID),
-            'read_failed': _handle_failed('DB_OPERATION_FAILED'),
+            'read_failed': _db_operation_failed(),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -343,11 +370,7 @@ FACADES: Final[dict[str, Facade]] = {
         answers={
             'resumed': _record(core.WorkflowResumed),
             'not_paused': _record(core.WorkflowNotPaused),
-            'recovery_failed': _record(
-                core.WorkflowResumeRecoveryFailed,
-                message='recovery pass failed',
-                exception=CONNECTION_LOST,
-            ),
+            'recovery_failed': _recovery_failed(),
             'absent': _record(core.WorkflowAbsent),
             **HANDLE_FAILURES,
         },
@@ -361,11 +384,7 @@ FACADES: Final[dict[str, Facade]] = {
         answers={
             'resumed': _record(core.WorkflowResumed),
             'not_paused': _record(core.WorkflowNotPaused),
-            'recovery_failed': _record(
-                core.WorkflowResumeRecoveryFailed,
-                message='recovery pass failed',
-                exception=CONNECTION_LOST,
-            ),
+            'recovery_failed': _recovery_failed(),
             'absent': _record(core.WorkflowAbsent),
             **HANDLE_FAILURES,
         },
