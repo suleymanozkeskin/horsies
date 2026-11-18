@@ -33,6 +33,7 @@ from horsies.core.codec.kwargs import (
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import (
+    Json,
     loads_json,
     dumps_json,
     SerializationError,
@@ -1306,12 +1307,14 @@ def _prepare_task_call(
 
     # Deserialize task arguments. Strict-serde: positional args are
     # rejected at every producer; the wire shape for args is always
-    # `null` or `[]`. Inspect the raw loaded JSON to enforce this
-    # before any typed decode runs.
-    args_json_result = loads_json(args_json)
-    if is_err(args_json_result):
-        return _serialization_error_response(task_name, args_json_result.err_value)
-    raw_args = args_json_result.ok_value
+    # absent (None), `null` or `[]`. Inspect the raw loaded JSON to
+    # enforce this before any typed decode runs.
+    raw_args: Json = None
+    if args_json is not None:
+        args_json_result = loads_json(args_json)
+        if is_err(args_json_result):
+            return _serialization_error_response(task_name, args_json_result.err_value)
+        raw_args = args_json_result.ok_value
     if raw_args is not None and raw_args != []:
         return _serialization_error_response(
             task_name,

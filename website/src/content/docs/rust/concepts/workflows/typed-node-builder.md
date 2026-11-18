@@ -83,8 +83,9 @@ Each method returns `Result<TaskNode<T, I>, HorsiesError>`. The text of `input_j
 
 | Input | Code |
 |-------|------|
-| A key, at any depth, that binds to no field of the input type | `HRS-019` |
+| A key of the input that binds to no parameter | `HRS-019` |
 | A parameter with no value and no `arg_from` | `HRS-020` |
+| A key that binds to no field, or a field with no value, inside the value of a parameter | `HRS-031` |
 | A value of another type | `HRS-031` |
 | A parameter that both `set` and `arg_from` give | `HRS-021` |
 
@@ -124,6 +125,7 @@ async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError
 
 In the spec of [Build a Node](#build-a-node):
 
+<!-- rust-check: skip partial -- a fragment of checkout_spec above: builder and charged are its locals -->
 ```rust
 let _audit = builder.task(
     audit_checkout::node()?
@@ -185,6 +187,7 @@ let _audit = builder.task(
 
 **Do not name a context source that the node does not wait for.** `workflow_ctx_from` without a dependency on the node is `HRS-009`.
 
+<!-- rust-check: skip elided -- a Wrong / Correct pair of expressions -->
 ```rust
 // Wrong
 audit_checkout::node()?.workflow_ctx_from([charged])

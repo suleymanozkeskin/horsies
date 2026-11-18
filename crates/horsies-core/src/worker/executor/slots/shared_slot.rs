@@ -38,9 +38,7 @@ use super::seat_runs::{
     RunStopReport, RunWork, SeatRun, SeatRuns, StopReportFrame, StopStep, SHARED_STUCK_BACKSTOP,
 };
 use super::shared::{Accepting, QueuedSeatRun, SharedPoolShared, Take};
-use crate::worker::executor::protocol::{
-    ChildFrame, FailureDetail, ParentFrame, RunRef, SharedResultFrame,
-};
+use crate::worker::executor::protocol::{ChildFrame, ParentFrame, RunRef, SharedResultFrame};
 use crate::worker::executor::supervisor::{
     ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
 };
@@ -83,6 +81,18 @@ enum KillSent {
     Sent(KillReason),
 }
 
+/// Whether a generation told the claim loop that its child is ready
+/// (#1148).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadyNotice {
+    /// The child has not been open with a free seat yet: no claim pass
+    /// counted it.
+    Pending,
+    /// Noted on the board once. Later free seats come from ends of runs,
+    /// whose outcome writes wake the claim loop.
+    Noted,
+}
+
 /// One child of the slot and its runs.
 struct Generation {
     channel: ChildChannel,
@@ -92,6 +102,7 @@ struct Generation {
     tasks_done: u64,
     /// The defect that ended this generation, when one did.
     defect: Option<SlotDefect>,
+    ready: ReadyNotice,
 }
 
 /// What woke the slot.
@@ -192,6 +203,7 @@ async fn serve_generation(
         kill: KillSent::NotSent,
         tasks_done: 0,
         defect: None,
+        ready: ReadyNotice::Pending,
     };
     let mut finished_seen: u64 = 0;
     let flow = loop {
@@ -240,6 +252,7 @@ async fn serve_generation(
 async fn serve_step(pool: &SharedPoolShared, local: usize, generation: &mut Generation) -> Flow {
     pull_runs(pool, local, generation).await;
     publish(pool, local, generation);
+    note_ready(pool, generation);
     match after_change(pool, generation) {
         Flow::Continue => {}
         ended => return ended,
@@ -295,6 +308,22 @@ fn publish(pool: &SharedPoolShared, local: usize, generation: &Generation) {
     };
     pool.board.set(pool.first + local, phase);
     pool.publish_load(local, accepting, runs);
+}
+
+/// The first time in a generation that the child is open with a free seat,
+/// after its load is published: note the ready child on the board once, so
+/// the claim loop runs a pass that places a task on it.
+fn note_ready(pool: &SharedPoolShared, generation: &mut Generation) {
+    let open_with_free_seat = generation.service == ChildService::Open
+        && generation.kill == KillSent::NotSent
+        && generation.runs.has_free_seat();
+    match (generation.ready, open_with_free_seat) {
+        (ReadyNotice::Pending, true) => {
+            pool.board.note_child_ready();
+            generation.ready = ReadyNotice::Noted;
+        }
+        (ReadyNotice::Pending, false) | (ReadyNotice::Noted, _) => {}
+    }
 }
 
 /// Wait for the next frame, a backstop, a placement, the stop or the drain
@@ -812,9 +841,7 @@ async fn answer_after_exit(
             KillSent::Sent(KillReason::Backstop { run }) if run == seat.run => {
                 end_at_late_backstop_exit(seat.work, seat.run, loss)
             }
-            KillSent::Sent(_) | KillSent::NotSent => AttemptEnd::Crashed {
-                reason: FailureDetail::cut(&late.to_string()),
-            },
+            KillSent::Sent(_) | KillSent::NotSent => AttemptEnd::of_lost_child(&late),
         };
         finish(seat, end);
     }

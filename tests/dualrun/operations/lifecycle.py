@@ -181,5 +181,14 @@ LIFECYCLE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
         ),
         reason='patches finish_failed_attempt_in_core, the core path of the failed attempt',
     ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_statement_echo.py::test_a_broker_with_echo_logs_its_core_statements_at_info_on_horsies_sql'
+        ),
+        reason=(
+            "reads the core's statement records of expire_pending_tasks on horsies.sql; the "
+            'reference expiry runs on the SQLAlchemy engine, which writes no such record'
+        ),
+    ),
 )
 """The tests of this module that run once, on the core (``CoreOnlyTest``)."""

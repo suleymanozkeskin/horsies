@@ -39,6 +39,8 @@ mod claim_plan_tests;
 #[cfg(test)]
 mod exit_not_seen_tests;
 #[cfg(test)]
+mod held_dispatch_tests;
+#[cfg(test)]
 mod held_exits;
 #[cfg(test)]
 mod isolated_run_tests;
@@ -52,6 +54,8 @@ mod outcome_tests;
 mod placement_tests;
 #[cfg(test)]
 mod plain_success_tests;
+#[cfg(test)]
+mod ready_wake_tests;
 #[cfg(test)]
 mod report_tests;
 #[cfg(test)]

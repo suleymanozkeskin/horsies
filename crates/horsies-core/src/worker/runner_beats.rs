@@ -259,6 +259,20 @@ impl LiveDispatches {
         self.snapshot().0
     }
 
+    /// The process of each held dispatch that a child runs, in ticket
+    /// order, for tests that check which child the beats cover.
+    #[cfg(test)]
+    pub(crate) fn held_child_pids(&self) -> Vec<ProcessId> {
+        self.lock()
+            .held
+            .values()
+            .filter_map(|dispatch| match &dispatch.runner {
+                DispatchRunner::Child(child) => Some(child.pid),
+                DispatchRunner::WorkerProcess => None,
+            })
+            .collect()
+    }
+
     /// Refuse every later hold, and return and remove what is held, in
     /// ticket order. A second call returns nothing.
     fn close(&self) -> Vec<LiveDispatch> {

@@ -1,12 +1,10 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod args_merge;
-pub mod bound_handle;
 pub mod child_spec;
 pub(crate) mod child_start;
 pub mod engine;
 pub mod error;
-pub mod info;
 pub mod lifecycle;
 pub mod phase2_recovery;
 pub mod query;

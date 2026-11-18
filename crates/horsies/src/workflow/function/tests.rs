@@ -68,6 +68,26 @@ impl WorkflowDefinition for Regional {
     }
 }
 
+/// Its build refuses every region.
+struct RefusingRegional;
+
+impl WorkflowDefinition for RefusingRegional {
+    type Output = u32;
+    type Params = Region;
+
+    fn name() -> &'static str {
+        "refusing_regional"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.function.refusing_regional.v1"
+    }
+
+    fn build_with(params: Region) -> Result<WorkflowSpec, HorsiesError> {
+        Err(HorsiesError::new(format!("bad region: {}", params.region)))
+    }
+}
+
 /// Never registered: its process-wide start is refused.
 struct Unregistered;
 
@@ -139,6 +159,30 @@ fn the_check_builds_each_case() {
     assert_eq!(findings[0].code, Some(ErrorCode::WorkflowCheckCaseInvalid));
 }
 
+/// Python `_check_workflow_builders`: the check runs each case with the
+/// sends of the process suppressed, and leaves the suppression as it was.
+#[test]
+fn the_check_runs_each_case_with_the_sends_suppressed() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let app = app();
+    let suppression = app.send_suppression();
+    let seen = Arc::new(AtomicBool::new(false));
+    let seen_in_case = Arc::clone(&seen);
+    app.check_workflow_builder("suppressed", move |_case: &u32| {
+        seen_in_case.store(suppression.is_active(), Ordering::Relaxed);
+        Daily::build()
+    })
+    .case(0)
+    .register()
+    .unwrap();
+    assert!(!app.are_sends_suppressed());
+    let findings = app.workflow_check_findings();
+    assert!(findings.is_empty(), "{findings:?}");
+    assert!(seen.load(Ordering::Relaxed));
+    assert!(!app.are_sends_suppressed());
+}
+
 #[tokio::test]
 async fn a_spec_without_a_definition_key_is_refused_before_any_io() {
     let app = app();
@@ -202,4 +246,27 @@ fn the_first_registration_serves_the_process_wide_start() {
     let _later = second.register_workflow_definition::<Daily>().unwrap();
     let kept = global::<Daily, WorkflowFunction<u32>>().unwrap();
     assert_eq!(kept.name(), function.name());
+}
+
+/// A template start whose build refuses is `VALIDATION_FAILED`, not
+/// retryable, with the name of the workflow and the text of the build's
+/// error, before any I/O.
+#[tokio::test]
+async fn a_template_start_whose_build_refuses_is_validation_failed_before_any_io() {
+    let mut app = app();
+    let template = app.workflow_template::<RefusingRegional>().unwrap();
+    let refused = template
+        .start(Region {
+            region: "antarctica".to_owned(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
+    assert_eq!(refused.workflow_name, "refusing_regional");
+    assert!(!refused.retryable);
+    assert!(
+        refused.message.contains("bad region: antarctica"),
+        "{}",
+        refused.message
+    );
 }

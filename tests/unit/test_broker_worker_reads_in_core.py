@@ -21,6 +21,7 @@ import pytest
 from horsies._core import (
     AllSlotsServingRecord,
     BrokerFailure,
+    CoreConnectionError,
     BudgetLoadRecord,
     ClassBudgetRecord,
     ClassCoverageRecord,
@@ -79,7 +80,6 @@ from horsies.core.models.health import (
     WorkerStateSnapshot,
 )
 from horsies.core.models.tasks import Execution
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
 from tests.unit.test_broker_postgres import _make_broker  # pyright: ignore[reportPrivateUsage]
@@ -491,10 +491,15 @@ class TestFailures:
         self, method: str, read: str, call: _Read, retryable: bool,
     ) -> None:
         message = f'{read} failed: connection refused'
+        cause = CoreConnectionError(read, 'connection refused', retryable)
         broker = _broker_answering(
             method,
             _record(
-                BrokerFailure, code='MONITORING_QUERY_FAILED', message=message, retryable=retryable,
+                BrokerFailure,
+                code='MONITORING_QUERY_FAILED',
+                message=message,
+                retryable=retryable,
+                exception=cause,
             ),
         )
 
@@ -505,8 +510,7 @@ class TestFailures:
                 assert error.code is BrokerErrorCode.MONITORING_QUERY_FAILED
                 assert error.message == message
                 assert error.retryable is retryable
-                assert isinstance(error.exception, CoreOperationFailed)
-                assert error.exception.subject == f'PostgresBroker.{read}'
+                assert error.exception is cause
             case _:
                 raise AssertionError(f'expected MONITORING_QUERY_FAILED, got {result!r}')
 
@@ -624,10 +628,15 @@ class TestWorkerPing:
     @pytest.mark.asyncio
     async def test_a_ping_failure_keeps_its_message_and_retry_rule(self, retryable: bool) -> None:
         message = 'ping_workers ping notify failed: connection refused'
+        cause = CoreConnectionError('ping_workers', 'connection refused', retryable)
         broker = _broker_answering(
             'ping_workers_async',
             _record(
-                BrokerFailure, code='WORKER_PING_FAILED', message=message, retryable=retryable,
+                BrokerFailure,
+                code='WORKER_PING_FAILED',
+                message=message,
+                retryable=retryable,
+                exception=cause,
             ),
         )
 
@@ -638,8 +647,7 @@ class TestWorkerPing:
                 assert error.code is BrokerErrorCode.WORKER_PING_FAILED
                 assert error.message == message
                 assert error.retryable is retryable
-                assert isinstance(error.exception, CoreOperationFailed)
-                assert error.exception.subject == 'PostgresBroker.ping_workers_async'
+                assert error.exception is cause
             case _:
                 raise AssertionError(f'expected WORKER_PING_FAILED, got {result!r}')
 

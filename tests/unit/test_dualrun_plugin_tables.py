@@ -83,3 +83,28 @@ def test_a_listed_test_runs_once_on_its_implementation() -> None:
         Implementation.PYTHON_REFERENCE,
         Implementation.CORE,
     ]
+
+
+def _undo_calls(path: Path) -> list[int]:
+    """The lines of every ``<receiver>.undo()`` call in ``path``."""
+    tree = ast.parse(path.read_text(encoding='utf-8'))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == 'undo'
+    ]
+
+
+def test_no_integration_test_undoes_the_patches_of_the_dual_run() -> None:
+    """The dual-run puts each reference in place with the test's own
+    ``monkeypatch`` fixture. ``monkeypatch.undo()`` in a test also removes
+    that rebinding, so the rest of its Python case runs production code. A
+    test scopes a patch of its own with ``pytest.MonkeyPatch.context()``."""
+    found = {
+        str(path.relative_to(ROOT)): lines
+        for path in sorted((ROOT / 'tests' / 'integration').rglob('*.py'))
+        if (lines := _undo_calls(path))
+    }
+    assert found == {}

@@ -11,6 +11,7 @@ use crate::core::task::error::OperationalErrorCode;
 use crate::worker::executor::protocol::{
     FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
 };
+use crate::worker::executor::supervisor::ChildLost;
 use crate::worker::retry::StoredOptions;
 
 /// The execution class of a task row: the class that the claim reads, the
@@ -167,12 +168,29 @@ pub enum AttemptEnd {
         retry: RetryPlacement,
         reason: FailureDetail,
     },
-    /// The child was lost with its exit seen, or killed at the drain
-    /// deadline: the crash path (`WORKER_CRASHED`).
+    /// The child was lost with its exit seen, a kill at the drain deadline
+    /// included: the crash path (`WORKER_CRASHED`). The reason is built by
+    /// [`AttemptEnd::of_lost_child`].
     Crashed { reason: FailureDetail },
     /// The child was killed and its exit was not seen. Nothing is written:
     /// stale recovery or the claim lease decides the row.
     EndUnknown { pid: ProcessId },
+}
+
+/// The start of the crash reason of a child lost with no result (Python
+/// `_finalize_child_loss`, `python/horsies/core/worker/finalize.py`).
+pub const LOST_CHILD_REASON_PREFIX: &str = "Worker child lost: ";
+
+impl AttemptEnd {
+    /// The crash end of a run whose child `lost` ended with no result, once
+    /// its exit was seen. The reason is Python's
+    /// `f'Worker child lost: {lost.describe()}'`; the outcome writer stores
+    /// it as the error message and as the attempt's failed reason. Pure.
+    pub fn of_lost_child(lost: &ChildLost) -> Self {
+        Self::Crashed {
+            reason: FailureDetail::cut(&format!("{LOST_CHILD_REASON_PREFIX}{lost}")),
+        }
+    }
 }
 
 /// How the write of one attempt end settled.

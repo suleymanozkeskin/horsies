@@ -134,7 +134,7 @@ def root_retry_and_deadline(
         SerializationError: task_options_json does not parse to an object,
             or its retry_policy does not validate as RetryPolicy.
     """
-    if not task_options_json:
+    if task_options_json is None:
         return 0, None
 
     parsed_r = loads_json(task_options_json)
@@ -170,7 +170,7 @@ def root_execution(
         SerializationError: task_options_json does not parse, or its
             ``execution`` or ``cancel_grace_ms`` does not validate.
     """
-    if not task_options_json:
+    if task_options_json is None:
         return Execution.ISOLATED
     parsed_r = loads_json(task_options_json)
     if _is_err(parsed_r):

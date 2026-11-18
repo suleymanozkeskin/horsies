@@ -27,6 +27,7 @@ from the run start.
 from __future__ import annotations
 
 from datetime import timedelta
+from enum import Enum
 from typing import Final
 
 from tests.dualrun.rules import (
@@ -39,6 +40,7 @@ from tests.dualrun.rules import (
     FormatVersion,
     GeneratedName,
     IdFamily,
+    IdsInText,
     Ignored,
     Index,
     JsonPath,
@@ -46,6 +48,8 @@ from tests.dualrun.rules import (
     JsonTime,
     Key,
     NormalisedId,
+    RunMeasure,
+    RunMeasuresInText,
     RunWindowReference,
     SnapshotCatalog,
     StoredJson,
@@ -103,15 +107,22 @@ TASK_INPUT: Final = StoredJson(
 """A task's input. The input of an engine-minted workflow task names its
 workflow in ``__h_workflow_meta__``."""
 
+WORKFLOW_IDS_IN_TEXT: Final = IdsInText(family=IdFamily.WORKFLOW)
+"""A message that can name a workflow by its id."""
+
 WORKFLOW_ERROR: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
     paths=(
         JsonPath(steps=(Key(name='data'), Key(name='workflow_id')), rule=WORKFLOW_ID),
+        JsonPath(steps=(Key(name='sub_workflow_id'),), rule=WORKFLOW_ID),
+        JsonPath(steps=(Key(name='message'),), rule=WORKFLOW_IDS_IN_TEXT),
     ),
 )
 """A stored workflow error. The recovery limit error names its workflow in
-``data.workflow_id``."""
+``data.workflow_id``. The error of a workflow that a failed child paused
+names the child in ``sub_workflow_id`` and in ``message`` (``Subworkflow
+<id> failed``)."""
 
 NODE_RESULT: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -121,10 +132,18 @@ NODE_RESULT: Final = StoredJson(
             steps=(Key(name='err'), Key(name='data'), Key(name='workflow_id')),
             rule=WORKFLOW_ID,
         ),
+        JsonPath(
+            steps=(Key(name='err'), Key(name='sub_workflow_id')), rule=WORKFLOW_ID
+        ),
+        JsonPath(
+            steps=(Key(name='err'), Key(name='message')), rule=WORKFLOW_IDS_IN_TEXT
+        ),
     ),
 )
 """A stored node result. The recovery limit result names its workflow in
-``err.data.workflow_id``."""
+``err.data.workflow_id``. The result of a sub-workflow node whose child
+failed names the child in ``err.sub_workflow_id`` and in ``err.message``
+(``Subworkflow <id> failed with status <status>``)."""
 
 TASK_OPTIONS: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -192,6 +211,30 @@ RERUN_ENVELOPE: Final = StoredJson(
     ),
 )
 """Rerun envelope version 1: ``{"input": <input>, "options": <task options>}``."""
+
+BLOCKED_TIME: Final = RunMeasure(
+    name='blocked_ms',
+    pattern=r' for (\d+) ms, past the block limit',
+)
+"""The time that a task held the event loop of its shared async child, as the
+worker measured it, in the ``TASK_BLOCKED_LOOP`` and ``NEIGHBOUR_BLOCKED_LOOP``
+reports: ``... held the event loop of its shared async child for <n> ms, past
+the block limit, ...`` (``python/horsies/core/worker/shared_finalize.py``,
+``crates/horsies-core/src/worker/executor/slots/seat_runs.rs``)."""
+
+KILLED_CHILD_PID: Final = RunMeasure(
+    name='killed_child_pid',
+    pattern=r'the worker killed the child \(pid=(\d+), ',
+)
+"""The process id of the worker child that the worker killed, in the
+``the worker killed the child (pid=<n>, <exit>)`` part of a kill report. Each
+run starts its own processes; the whole-run catalog ignores the process id
+columns for the same reason (``tests/dualrun/worker_run.py``)."""
+
+KILL_REPORT_MEASURES: Final = RunMeasuresInText(measures=(BLOCKED_TIME, KILLED_CHILD_PID))
+"""The rule of a stored text that can hold a kill report: the measured block
+time and the killed child's process id become tokens; the rest of the text,
+the codes and the other fields compare exactly."""
 
 SLOTS_DOWN: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -693,3 +736,74 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
     ),
 )
 """The rules of the 20 baseline tables, in labelling order."""
+
+
+# ---- Notifications ----
+
+
+class NotificationPayload(Enum):
+    """What the payload of a notification channel holds."""
+
+    TASK_ID = 'a task id'
+    WORKFLOW_ID = 'a workflow id'
+    TEXT = 'a fixed text'
+
+
+TASK_CHANNELS: Final = ('task_new', 'task_done', 'horsies_task_status')
+"""Channels whose payload is a task id (``0001_tables.sql`` triggers, ``0006_history_functions.sql`` moves)."""
+
+WORKFLOW_CHANNELS: Final = ('workflow_done', 'horsies_workflow_status')
+"""Channels whose payload is a workflow id."""
+
+QUEUE_CHANNEL_PREFIX: Final = 'task_queue_'
+"""The wake channel of a queue, ``task_queue_<queue>``; its payload is
+``new``, ``capacity`` or ``class``."""
+
+
+def notification_payload(channel: str) -> NotificationPayload:
+    """The payload kind of ``channel``. A channel outside the three lists is a
+    defect of the caller, which listens only on known channels (asserted)."""
+    match channel:
+        case _ if channel in TASK_CHANNELS:
+            return NotificationPayload.TASK_ID
+        case _ if channel in WORKFLOW_CHANNELS:
+            return NotificationPayload.WORKFLOW_ID
+        case _ if channel.startswith(QUEUE_CHANNEL_PREFIX):
+            return NotificationPayload.TEXT
+        case _:
+            raise AssertionError(
+                f'no payload rule for the notification channel {channel!r}'
+            )
+
+
+NOTIFICATIONS: Final = TableRules(
+    name='notifications',
+    columns=_columns(
+        ('channel', EXACT),
+        ('task_id', TASK_ID),
+        ('workflow_id', WORKFLOW_ID),
+        ('payload', EXACT),
+    ),
+    order_by=('channel', 'payload', 'task_id', 'workflow_id'),
+    identity=('channel', 'task_id', 'workflow_id', 'payload'),
+)
+"""The notifications of a run, one row each: the channel, and the payload in
+the column of its kind (``notification_row``). Rows with one identity
+compare as a multiset, so the section compares as a multiset per channel."""
+
+NOTIFIED_CATALOG: Final = SnapshotCatalog(
+    tables=(*BASELINE_CATALOG.tables, NOTIFICATIONS),
+)
+"""The baseline tables, then the notifications: a payload id takes the label
+that its row in a table gave it."""
+
+
+def notification_row(channel: str, payload: str) -> tuple[str | None, ...]:
+    """One raw row of ``NOTIFICATIONS``."""
+    match notification_payload(channel):
+        case NotificationPayload.TASK_ID:
+            return (channel, payload, None, None)
+        case NotificationPayload.WORKFLOW_ID:
+            return (channel, None, payload, None)
+        case NotificationPayload.TEXT:
+            return (channel, None, None, payload)

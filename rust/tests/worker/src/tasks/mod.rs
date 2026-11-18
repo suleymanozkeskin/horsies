@@ -12,13 +12,17 @@ use crate::instance::Instance;
 pub mod basic;
 pub mod classes;
 pub mod custom;
+pub mod recovery;
 pub mod retry;
 pub mod scheduled;
+pub mod subworkflow;
+pub mod workflow;
 
 /// Register the tasks of `instance` on `app`. Stops at the first refusal.
 pub fn register(app: &mut Horsies, instance: Instance) -> Result<(), HorsiesError> {
     match instance {
         Instance::CustomQueues => register_custom(app),
+        Instance::RecoveryQueues => register_recovery_queues(app),
         Instance::Scheduler => {
             register_default(app)?;
             register_scheduled(app)
@@ -69,7 +73,31 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _thread_hang = classes::thread_hang::register(app)?;
     let _thread_overrun = classes::thread_overrun::register(app)?;
     let _outlives_drain = classes::outlives_drain::register(app)?;
-    Ok(())
+    register_workflow(app)
+}
+
+/// The node tasks of the workflow layers, then the sub-workflow tasks and
+/// definitions.
+fn register_workflow(app: &mut Horsies) -> Result<(), HorsiesError> {
+    let _step = workflow::step::register(app)?;
+    let _slow_step = workflow::slow_step::register(app)?;
+    let _final_result = workflow::final_result::register(app)?;
+    let _fail = workflow::fail::register(app)?;
+    let _produce_int = workflow::produce_int::register(app)?;
+    let _double = workflow::double::register(app)?;
+    let _sum_two = workflow::sum_two::register(app)?;
+    let _check_upstream_skipped = workflow::check_upstream_skipped::register(app)?;
+    let _produce_dict = workflow::produce_dict::register(app)?;
+    let _receive_dict = workflow::receive_dict::register(app)?;
+    let _ctx_reader = workflow::ctx_reader::register(app)?;
+    let _ctx_sum = workflow::ctx_sum::register(app)?;
+    let _mixed_reader = workflow::mixed_reader::register(app)?;
+    let _fail_with = workflow::fail_with::register(app)?;
+    let _mark = workflow::mark::register(app)?;
+    let _slow_mark = workflow::slow_mark::register(app)?;
+    let _retry_then_ok = workflow::retry_then_ok::register(app)?;
+    let _ctx_reader_str = workflow::ctx_reader_str::register(app)?;
+    subworkflow::register(app)
 }
 
 /// The tasks of the custom queue instance.
@@ -81,6 +109,13 @@ fn register_custom(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _slow_high = custom::slow_high::register(app)?;
     let _slow_normal = custom::slow_normal::register(app)?;
     let _slow_low = custom::slow_low::register(app)?;
+    Ok(())
+}
+
+/// The tasks of the recovery queue instance.
+fn register_recovery_queues(app: &mut Horsies) -> Result<(), HorsiesError> {
+    let _healthcheck = recovery::recovery_healthcheck::register(app)?;
+    let _wf_step = recovery::recovery_wf_step::register(app)?;
     Ok(())
 }
 

@@ -15,11 +15,10 @@ use super::support::{
     workflow_error_code, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, WorkflowSeed,
     POISON_TASK_OPTIONS,
 };
-use crate::core::registry::workflow::RegisteredWorkflowDefinition;
-use crate::core::{
-    AnyNode, HorsiesError, OnError, SpecBuildError, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
-    WorkflowStartErrorCode,
-};
+use crate::broker::workflow_start::ClientStartError;
+use crate::core::{AnyNode, HorsiesError, OnError, TaskResult, WorkflowSpec};
+use crate::test_support::child_specs::{TestBuildRefused, TestChildSpecs};
+use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::start_statement::{node_failure_result, subworkflow_load_failed_error};
 
 fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
@@ -42,7 +41,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
         workflow_id,
         index,
         &ok(value),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 }
@@ -53,7 +52,7 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
         workflow_id,
         index,
         &err(error_code, "failed"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 }
@@ -130,12 +129,7 @@ async fn a_recovering_node_keeps_its_result_and_the_failed_workflow_stores_none(
         ],
     );
     workflow_spec.output_index = Some(1);
-    let workflow_id = start(
-        &pool,
-        &workflow_spec,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &workflow_spec, &TestChildSpecs::empty()).await;
 
     fail(&pool, workflow_id, 0, "TEST_FAIL").await;
     succeed(&pool, workflow_id, 1, serde_json::json!(999)).await;
@@ -165,12 +159,7 @@ async fn a_second_failure_while_paused_keeps_the_first_error() {
         vec![after(0, "pause_a", &[]), after(1, "pause_b", &[])],
     );
     workflow_spec.on_error = OnError::Pause;
-    let workflow_id = start(
-        &pool,
-        &workflow_spec,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &workflow_spec, &TestChildSpecs::empty()).await;
 
     fail(&pool, workflow_id, 0, "FIRST_ERROR").await;
     assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
@@ -202,12 +191,7 @@ async fn the_stored_error_is_the_one_of_the_lowest_failed_index() {
         ],
     );
     workflow_spec.on_error = OnError::Fail;
-    let workflow_id = start(
-        &pool,
-        &workflow_spec,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &workflow_spec, &TestChildSpecs::empty()).await;
 
     fail(&pool, workflow_id, 1, "SECOND_ERROR").await;
     fail(&pool, workflow_id, 0, "FIRST_ERROR").await;
@@ -248,7 +232,7 @@ async fn a_ready_node_of_a_paused_workflow_is_not_enqueued() {
         &db.pool,
         running_task,
         &ok(serde_json::json!(1)),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -286,7 +270,7 @@ async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
         &db.pool,
         running_task,
         &ok(serde_json::json!(1)),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -306,20 +290,14 @@ async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
 async fn a_child_builder_failure_at_promotion_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let broken_key = "tests.port.broken_child_enqueue.v1";
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    registry
-        .register_definition(RegisteredWorkflowDefinition {
-            name: "broken_child_for_enqueue".to_owned(),
-            definition_key: broken_key.to_owned(),
-            declared_children: Vec::new(),
-            spec_builder: Arc::new(|_input| {
-                Err(SpecBuildError::Failed(HorsiesError::new(
-                    "boom from build_with",
-                )))
-            }),
-        })
-        .expect("register the broken child");
+    let child_specs = TestChildSpecs::empty().with_build(
+        broken_key,
+        Arc::new(|_input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
+            Err(TestBuildRefused::Failed(HorsiesError::new(
+                "boom from build_with",
+            )))
+        }),
+    );
     let broken = WorkflowSpec {
         definition_key: Some(broken_key.to_owned()),
         ..spec("broken_child_for_enqueue", vec![task_node(0, "unused")])
@@ -332,7 +310,7 @@ async fn a_child_builder_failure_at_promotion_fails_the_node() {
             "enq_sub_build_exception",
             vec![after(0, "enq_sub_a", &[]), sub],
         ),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -341,7 +319,7 @@ async fn a_child_builder_failure_at_promotion_fails_the_node() {
         workflow_id,
         0,
         &ok(serde_json::json!(2)),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -382,7 +360,7 @@ async fn store_node_options(pool: &PgPool, workflow_id: Uuid, task_index: i32, o
 #[serial]
 async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let workflow_id = start(
         &db.pool,
         &spec(
@@ -392,7 +370,7 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
                 after(1, "unprepared_dependent", &[0]),
             ],
         ),
-        &registry,
+        &child_specs,
     )
     .await;
     store_node_options(&db.pool, workflow_id, 1, r#"{"retry_policy": 5}"#).await;
@@ -402,7 +380,7 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
         workflow_id,
         0,
         &ok(serde_json::json!(1)),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -420,7 +398,7 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
         "{error:?}"
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "task_index": 1,
@@ -441,7 +419,7 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
 #[serial]
 async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibling() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let mut paused_spec = spec(
         "unprepared_task_node_pause",
         vec![
@@ -451,7 +429,7 @@ async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibl
         ],
     );
     paused_spec.on_error = OnError::Pause;
-    let workflow_id = start(&db.pool, &paused_spec, &registry).await;
+    let workflow_id = start(&db.pool, &paused_spec, &child_specs).await;
     store_node_options(&db.pool, workflow_id, 1, POISON_TASK_OPTIONS).await;
 
     let _source = finish_node(
@@ -459,7 +437,7 @@ async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibl
         workflow_id,
         0,
         &ok(serde_json::json!(1)),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -488,22 +466,25 @@ async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibl
 #[serial]
 async fn resume_of_a_completed_or_failed_workflow_returns_false() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let mut completed = spec("resume_completed", vec![after(0, "resume_a", &[])]);
     completed.on_error = OnError::Pause;
-    let completed_id = start(&pool, &completed, &registry).await;
+    let completed_id = start(&pool, &completed, &child_specs).await;
     succeed(&pool, completed_id, 0, serde_json::json!(1)).await;
     let failed_id = start(
         &pool,
         &spec("resume_failed", vec![after(0, "resume_fail_a", &[])]),
-        &registry,
+        &child_specs,
     )
     .await;
     fail(&pool, failed_id, 0, "TEST_FAIL").await;
 
     for (workflow_id, status) in [(completed_id, "COMPLETED"), (failed_id, "FAILED")] {
         assert_eq!(workflow_status(&pool, workflow_id).await, status);
-        let resumed = handle(&pool, workflow_id).resume().await.expect("resume()");
+        let resumed = handle(&pool, workflow_id)
+            .resume(&child_specs)
+            .await
+            .expect("resume()");
         assert!(!resumed, "{status}");
         assert_eq!(workflow_status(&pool, workflow_id).await, status);
     }
@@ -524,7 +505,7 @@ async fn a_chain_of_allow_failed_deps_nodes_is_enqueued() {
                 recovery(2, "afd_chain_c", 1),
             ],
         ),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -553,7 +534,7 @@ async fn a_node_with_one_failed_and_one_ok_dependency_is_enqueued() {
                 receiver,
             ],
         ),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -587,7 +568,7 @@ async fn an_allow_failed_deps_node_receives_upstream_skipped_for_a_skipped_depen
                 recovery(2, "afd_skipped_recv", 1),
             ],
         ),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -612,20 +593,24 @@ async fn start_refuses_a_task_node_with_no_resolved_queue() {
     unresolved.priority = None;
     let workflow_id = Uuid::new_v4();
 
-    let error = try_start(
+    let (_, started) = try_start(
         &pool,
         &spec("val_q_wf", vec![unresolved]),
         Some(workflow_id),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
-    .await
-    .expect_err("a node with no queue is refused");
+    .await;
+    let error = started.expect_err("a node with no queue is refused");
 
-    assert_eq!(error.code, WorkflowStartErrorCode::ValidationFailed);
-    assert!(!error.retryable);
-    assert!(error.message.contains("queue"), "{}", error.message);
-    assert_eq!(error.workflow_name, "val_q_wf");
-    assert_eq!(error.workflow_id, Some(workflow_id));
+    assert!(
+        matches!(
+            &error,
+            ClientStartError::Start(WorkflowError::Validation(_) | WorkflowError::Serialization(_))
+        ),
+        "{error:?}"
+    );
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("queue"), "{error}");
 }
 
 /// `test_success_case_not_met_error`: the required node was SKIPPED, not
@@ -639,12 +624,7 @@ async fn a_skipped_required_node_gives_workflow_success_case_not_met() {
         vec![after(0, "sp_notmet_a", &[]), after(1, "sp_notmet_b", &[0])],
     );
     workflow_spec.success_policy = Some(required(&[&[1]]));
-    let workflow_id = start(
-        &pool,
-        &workflow_spec,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &workflow_spec, &TestChildSpecs::empty()).await;
 
     fail(&pool, workflow_id, 0, "TEST_FAIL").await;
 
@@ -655,55 +635,27 @@ async fn a_skipped_required_node_gives_workflow_success_case_not_met() {
     );
 }
 
-/// `test_start_missing_definition_key`
-#[tokio::test]
-#[serial]
-async fn start_refuses_a_spec_with_no_definition_key() {
-    let pool = shared_pool().await;
-    let mut workflow_spec = spec(
-        "missing_def_key_wf",
-        vec![task_node(0, "missing_def_key_a")],
-    );
-    workflow_spec.definition_key = None;
-
-    let error = try_start(
-        &pool,
-        &workflow_spec,
-        None,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await
-    .expect_err("a spec with no definition key is refused");
-
-    assert_eq!(error.code, WorkflowStartErrorCode::ValidationFailed);
-    assert!(!error.retryable);
-    assert!(
-        error.message.contains("definition_key"),
-        "{}",
-        error.message
-    );
-}
-
 /// `test_start_schema_init_failure` and `test_start_db_transient_error`: a
-/// start that cannot reach its database is a retryable `ENQUEUE_FAILED` and
-/// names its workflow id.
+/// start that cannot reach its database fails at the schema install, and a
+/// resend can succeed.
 #[tokio::test]
-async fn a_start_that_cannot_reach_the_database_is_a_retryable_enqueue_failure() {
-    let workflow_id = Uuid::new_v4();
+async fn a_start_that_cannot_reach_the_database_is_a_retryable_schema_install_failure() {
     let workflow_spec = spec("db_err_wf", vec![task_node(0, "db_err_a")]);
 
-    let error = try_start(
+    let (_, started) = try_start(
         &unreachable_pool(),
         &workflow_spec,
-        Some(workflow_id),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        None,
+        &TestChildSpecs::empty(),
     )
-    .await
-    .expect_err("no database");
+    .await;
+    let error = started.expect_err("no database");
 
-    assert_eq!(error.code, WorkflowStartErrorCode::EnqueueFailed);
-    assert!(error.retryable);
-    assert_eq!(error.workflow_id, Some(workflow_id));
+    assert!(
+        matches!(error, ClientStartError::SchemaInstall(_)),
+        "{error:?}"
+    );
+    assert!(error.is_retryable());
 }
 
 /// `test_start_rollback_integrity`: a database failure after the workflow row
@@ -729,16 +681,27 @@ async fn a_failure_in_the_middle_of_a_start_leaves_no_row() {
     )
     .await;
 
-    let error = try_start(
+    let (_, started) = try_start(
         &db.pool,
         &spec("rollback_wf", vec![task_node(0, "rollback_a")]),
         None,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
-    .await
-    .expect_err("the node insert is refused");
+    .await;
+    let error = started.expect_err("the node insert is refused");
 
-    assert_eq!(error.code, WorkflowStartErrorCode::EnqueueFailed);
+    assert!(
+        matches!(
+            &error,
+            ClientStartError::Start(
+                WorkflowError::Database(_)
+                    | WorkflowError::Broker(_)
+                    | WorkflowError::StepContract(_)
+                    | WorkflowError::ChildSpecSource(_)
+            )
+        ),
+        "{error:?}"
+    );
     let rows: i64 =
         sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE name = 'rollback_wf'")
             .fetch_one(&db.pool)

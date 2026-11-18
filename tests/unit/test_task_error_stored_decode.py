@@ -131,8 +131,9 @@ _NOT_AN_ENVELOPE = pytest.mark.parametrize(
     [
         ('not json at all', 'JSON parse failed'),
         ('{"ok": null, "err": {"message": "m"}}', '__h_task_result__'),
+        ('', 'JSON parse failed: the text is empty'),
     ],
-    ids=['text-that-is-not-json', 'json-that-is-not-an-envelope'],
+    ids=['text-that-is-not-json', 'json-that-is-not-an-envelope', 'empty-text'],
 )
 """Stored text that fails before the err slot, with a word of the cause."""
 

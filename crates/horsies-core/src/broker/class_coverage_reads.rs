@@ -5,9 +5,8 @@
 //! Python reference: `tests/dualrun/reference/class_coverage_reads.py`. Python
 //! runs each read as several statements in one transaction. Here each read is
 //! one autocommit statement, so its parts read one snapshot and one `now()`.
-//! The broker's reads run on the main core pool; the reaper's fleet check
-//! ([`read_class_coverage`]) runs the same statement on the reaper's sqlx
-//! pool until the reaper loop runs on the core pools.
+//! Both reads run on the main core pool; the reaper's fleet check
+//! ([`read_class_coverage`]) runs the same statement there as reserved work.
 //! The parts come back as JSON arrays in one row. Every part is bounded by a
 //! named limit; a part that returns more than its limit refuses the read
 //! instead of answering in part.
@@ -24,19 +23,18 @@ use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
 
 use crate::broker::class_coverage::{
     class_coverage, class_report, live_worker, refused, ClassCoverage, ClassReadRefused,
     ClassReport, LiveWorker, StreamHead,
 };
 use crate::broker::core_rows::{column, one_row};
-use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
-use crate::db::{ParameterType, TypedStatement};
+use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
 use crate::failure_cause::FailureCause;
 
 /// The most snapshot rows inside the live window that a read takes. A worker
@@ -211,7 +209,7 @@ static CLASS_REPORT: TypedStatement =
     TypedStatement::new("class_report", CLASS_REPORT_SQL, CLASS_READ_PARAMETERS);
 
 /// The row of [`CLASS_COVERAGE_SQL`].
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct CoverageRow {
     checked_at: DateTime<Utc>,
     recent_rows: i64,
@@ -259,7 +257,7 @@ impl PostgresBroker {
     ///   the same answer.
     pub async fn get_class_coverage(&self) -> BrokerResult<ClassCoverage> {
         let row = self
-            .coverage_row()
+            .coverage_row(CheckoutClass::Batch)
             .await
             .map_err(|error| class_statement_failed("get_class_coverage", &error))?;
         coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
@@ -285,22 +283,25 @@ impl PostgresBroker {
         report_from_row(row).map_err(|cause| class_read_refused("get_class_report", &cause))
     }
 
-    /// The row of [`CLASS_COVERAGE_SQL`], read on the main core pool
-    /// ([`PostgresBroker::query_main`]). Reads only.
+    /// The row of [`CLASS_COVERAGE_SQL`], read on the main core pool with a
+    /// checkout of `class`: [`CheckoutClass::Batch`] for a caller of the
+    /// handle, [`CheckoutClass::Reserved`] for the reaper. Reads only.
     ///
     /// Errors: [`BrokerError::PoolSettings`], [`BrokerError::Statement`],
     /// [`BrokerError::RowDecode`].
-    async fn coverage_row(&self) -> Result<CoverageRow, BrokerError> {
+    async fn coverage_row(&self, class: CheckoutClass) -> Result<CoverageRow, BrokerError> {
         let statement = &CLASS_COVERAGE;
-        let rows = self
-            .query_main(
-                &statement
-                    .bind()
-                    .value(&LIVE_WINDOW_SECONDS)
-                    .value(&LIVE_SNAPSHOT_READ_LIMIT)
-                    .value(&PENDING_STREAM_READ_LIMIT)
-                    .finish(),
-            )
+        let bound = statement
+            .bind()
+            .value(&LIVE_WINDOW_SECONDS)
+            .value(&LIVE_SNAPSHOT_READ_LIMIT)
+            .value(&PENDING_STREAM_READ_LIMIT)
+            .finish();
+        let open = self.core_pools_for_read()?;
+        self.statement_log().log(statement);
+        let rows = open
+            .main()
+            .query(class, &bound, StatementBound::ConnectionTimeouts)
             .await?;
         let row = one_row(rows, statement)?;
         Ok(CoverageRow {
@@ -336,29 +337,16 @@ impl PostgresBroker {
     }
 }
 
-/// The fleet check of [`PostgresBroker::get_class_coverage`], read on the
-/// sqlx `pool` of the reaper after each pass. Same statement, same answers
-/// and errors; reads only.
-pub(crate) async fn read_class_coverage(pool: &PgPool) -> BrokerResult<ClassCoverage> {
-    let row: CoverageRow = sqlx::query_as(CLASS_COVERAGE_SQL)
-        .bind(LIVE_WINDOW_SECONDS)
-        .bind(LIVE_SNAPSHOT_READ_LIMIT)
-        .bind(PENDING_STREAM_READ_LIMIT)
-        .fetch_one(pool)
+/// The fleet check of [`PostgresBroker::get_class_coverage`] for the reaper,
+/// after each pass: the same statement on the main core pool, checked out as
+/// reserved work ([`CheckoutClass::Reserved`]) as the reaper's other steps.
+/// Same answers and errors; reads only.
+pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> BrokerResult<ClassCoverage> {
+    let row = broker
+        .coverage_row(CheckoutClass::Reserved)
         .await
-        .map_err(|error| class_read_failed("get_class_coverage", &error))?;
+        .map_err(|error| class_statement_failed("get_class_coverage", &error))?;
     coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
-}
-
-/// A class read that the database did not answer. `retryable` is the driver
-/// classification (Python `_operation_failed`, `postgres.py:173-190`).
-fn class_read_failed(operation: &str, error: &sqlx::Error) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::MonitoringQueryFailed,
-        message: format!("{operation} failed: {error}"),
-        retryable: is_retryable_sqlx_error(error),
-        cause: FailureCause::of_sqlx_error(error),
-    }
 }
 
 /// A class read on the core pool that the database did not answer, or whose

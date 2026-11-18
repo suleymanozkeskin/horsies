@@ -21,13 +21,13 @@ use super::support::{
     WorkflowSeed, PORT_QUEUE,
 };
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::JoinType;
-use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
-use crate::workflow_engine::engine::on_workflow_task_complete;
-use crate::workflow_engine::lifecycle::{pause_workflow, resume_workflow};
-use crate::workflow_engine::recovery::recover_stuck_workflows;
+use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::engine::on_workflow_task_complete_with;
+use crate::workflow_engine::lifecycle::{pause_workflow, resume_client_workflow};
+use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
+use crate::workflow_engine::steps::ChildBuild;
 
 /// Stored task options that do not parse (Python's `_corrupt_stored_options`).
 const CORRUPT_TASK_OPTIONS: &str = "{not-json";
@@ -52,12 +52,7 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
 }
 
 async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(
-        pool,
-        workflow_spec,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await
+    start(pool, workflow_spec, &TestChildSpecs::empty()).await
 }
 
 async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
@@ -66,7 +61,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
         workflow_id,
         index,
         &ok(value),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 }
@@ -219,11 +214,10 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     )
     .await;
 
-    on_workflow_task_complete(
+    on_workflow_task_complete_with(
         &PostgresBroker::from_pool(db.pool.clone()),
         root_task,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &RetentionConfig::default(),
+        ChildBuild::Client(&TestChildSpecs::empty()),
     )
     .await
     .expect("phase 2 of the root");
@@ -290,7 +284,7 @@ async fn the_promotion_moves_only_pending_nodes() {
         workflow_id,
         4,
         &err("PROMOTION_WRITE_FAIL", "forced"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -416,17 +410,15 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
         .expect("read the backend pid of the holder");
     let recovery_broker = PostgresBroker::from_pool(db.pool.clone());
     let pause_broker = PostgresBroker::from_pool(db.pool.clone());
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let retention = RetentionConfig::default();
+    let child_specs = TestChildSpecs::empty();
 
     // On the heap. In a debug build, with the pass future inline in the join
     // and the timeout below, the test needed 2.125 to 2.25 MiB of stack (the
     // test thread has 2 MiB); boxed, it needs 1.75 to 1.875 MiB.
-    let recovery = Box::pin(recover_stuck_workflows(
+    let recovery = Box::pin(recover_stuck_workflows_observed_with(
         &recovery_broker,
-        &registry,
+        ChildBuild::Client(&child_specs),
         RECOVERY_FAILURE_LIMIT,
-        &retention,
     ));
     let pause_during_the_step = async {
         let step_pid = sole_waiter_on(&db.pool, holder_pid).await;
@@ -625,7 +617,7 @@ async fn complete_the_root(pool: &PgPool, workflow_id: Uuid) {
         pool,
         root_task,
         &ok(serde_json::json!(0)),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await
     .expect("phase 2 of the root applies; the bad node fails alone");
@@ -681,15 +673,9 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
     assert_eq!((rows[&1].task_id, rows[&1].started_at), (None, None));
 
-    let resumed = resume_workflow(
-        &broker(&db.pool),
-        workflow_id,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
-    .expect("resume");
+    let resumed = resume_client_workflow(&broker(&db.pool), workflow_id, &TestChildSpecs::empty())
+        .await
+        .expect("resume");
 
     assert!(resumed);
     let resumed_rows = node_rows(&db.pool, workflow_id).await;
@@ -736,7 +722,7 @@ async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
             &db.pool,
             root_task,
             &ok(serde_json::json!(0)),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
         )
         .await;
 

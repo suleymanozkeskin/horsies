@@ -42,8 +42,8 @@ use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
 use crate::worker::executor::protocol::{
-    BodyEnd, ChildFrame, FailureDetail, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
-    TaskTimeoutMs, ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
+    BodyEnd, ChildFrame, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame, TaskTimeoutMs,
+    ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{
     ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
@@ -168,12 +168,22 @@ impl TaskAnswer {
         let answer = self.answer.take()?;
         let seen_end = match &self.returned {
             IsolatedReturn::Seen(returned) => returned.clone(),
-            IsolatedReturn::NotSeen => AttemptEnd::Crashed {
-                reason: FailureDetail::cut(&lost.to_string()),
-            },
+            IsolatedReturn::NotSeen => AttemptEnd::of_lost_child(lost),
         };
         Some((answer, seen_end))
     }
+}
+
+/// Whether a slot waiting for work tells the claim loop that its child is
+/// ready (#1148).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadyNotice {
+    /// The first wait of a generation: the child is new, so no claim pass
+    /// counted it. The wait notes it on the board once.
+    AtFirstWait,
+    /// A later wait: the end of the task before it already woke the claim
+    /// loop (the outcome write).
+    Quiet,
 }
 
 /// What came first for a task in flight.
@@ -247,10 +257,12 @@ async fn serve_generation(
     defects: &mut SlotDefects,
 ) -> GenerationEnd {
     let mut tasks_done: u64 = 0;
+    let mut notice = ReadyNotice::AtFirstWait;
     loop {
-        let Some(run) = next_run(shared, &channel).await else {
+        let Some(run) = next_run(shared, &channel, notice).await else {
             break;
         };
+        notice = ReadyNotice::Quiet;
         tasks_done = tasks_done.saturating_add(1);
         let QueuedRun {
             frame,
@@ -331,8 +343,15 @@ fn recycle_reason(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> Opti
 }
 
 /// Wait for work. `None`: this child must not take any. While it waits,
-/// the slot counts as idle in the free slots of its pool.
-async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedRun> {
+/// the slot counts as idle in the free slots of its pool. With
+/// [`ReadyNotice::AtFirstWait`], the first time the slot waits with no task
+/// queued it notes the ready child on the board, after it counts as idle:
+/// the claim pass that the note wakes counts this slot as free.
+async fn next_run(
+    shared: &PoolShared,
+    channel: &ChildChannel,
+    mut notice: ReadyNotice,
+) -> Option<QueuedRun> {
     let mut exit = channel.exit_watch();
     let mut idle = shared.idle_slot();
     loop {
@@ -343,6 +362,13 @@ async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedR
         }
         if let Some(run) = idle.take() {
             return Some(run);
+        }
+        match notice {
+            ReadyNotice::AtFirstWait => {
+                shared.board.note_child_ready();
+                notice = ReadyNotice::Quiet;
+            }
+            ReadyNotice::Quiet => {}
         }
         tokio::select! {
             () = shared.queued.notified() => {}
@@ -475,12 +501,13 @@ async fn run_one(
             AfterRun::ChildGone(TasksFinished::NoTask)
         }
         FirstAnswer::DrainDeadline => {
+            // Python `_kill_at_deadline` kills with `kill_for_caller`, so the
+            // loss reads as a kill by the worker (`KILLED_BY_PARENT`), and
+            // `_finalize_child_loss` writes its crash reason.
             drop(held);
             shared.drain_kills.note([task_id]);
-            let crashed = AttemptEnd::Crashed {
-                reason: FailureDetail::cut("the worker killed the child at the drain deadline"),
-            };
-            answer.send(end_after_kill(shared, channel, crashed).await);
+            let lost = lost_after_kill(channel).await;
+            answer.send(end_of_loss(shared, channel, lost).await);
             AfterRun::ChildGone(TasksFinished::NoTask)
         }
     }
@@ -515,9 +542,7 @@ async fn end_after_kill(
 
 /// A lost child: the crash path once its exit is seen.
 async fn end_of_loss(shared: &PoolShared, channel: &ChildChannel, lost: ChildLost) -> AttemptEnd {
-    let crashed = AttemptEnd::Crashed {
-        reason: FailureDetail::cut(&lost.to_string()),
-    };
+    let crashed = AttemptEnd::of_lost_child(&lost);
     end_once_seen(shared, channel, lost, crashed).await
 }
 

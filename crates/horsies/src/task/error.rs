@@ -5,11 +5,11 @@
 //! `exception`, `error_code`, `data`, `message`, and the two fields of a
 //! sub-workflow failure. This module converts in both directions.
 
-use horsies_core::core::codec::{check_user_value, to_json_value_strict};
+use horsies_core::core::codec::{check_user_value_text, StrictJsonError, UserValueRefused};
 use horsies_core::core::task::error::{
     ExceptionRecord, TaskErrorKind, DATA_REFUSED_KEY, ERROR_DATA_DEPTH_LIMIT,
 };
-use horsies_core::{BuiltInTaskCode, SubWorkflowFailure};
+use horsies_core::{BuiltInTaskCode, JsonText, JsonTextRefused, SubWorkflowFailure};
 
 use super::user_code::{stored_user_code, UserErrorCode};
 
@@ -59,7 +59,7 @@ impl<E: UserErrorCode> std::fmt::Display for TaskErrorCode<E> {
 pub struct TaskError<E> {
     code: TaskErrorCode<E>,
     message: Option<String>,
-    data: Option<serde_json::Value>,
+    data: Option<JsonText>,
     exception: Option<ExceptionRecord>,
     kind: TaskErrorKind,
 }
@@ -133,8 +133,10 @@ impl<E: UserErrorCode> TaskError<E> {
         self.message.as_deref()
     }
 
-    /// The data, as it is stored.
-    pub fn data(&self) -> Option<&serde_json::Value> {
+    /// The data, as its stored text: `get` gives the text, `decode::<T>`
+    /// the value. An integer outside the `i64` and `u64` range keeps every
+    /// digit, so it decodes as `u128` or `i128`.
+    pub fn data(&self) -> Option<&JsonText> {
         self.data.as_ref()
     }
 
@@ -202,21 +204,38 @@ impl<E: UserErrorCode> std::fmt::Display for TaskError<E> {
 
 impl<E: UserErrorCode> std::error::Error for TaskError<E> {}
 
-/// The stored value of `data`, or the cause that Python stores in
-/// `data_refused`.
-fn error_data(data: &impl serde::Serialize) -> Result<serde_json::Value, &'static str> {
-    let value = to_json_value_strict(data).map_err(|_| NOT_JSON_NATIVE_CAUSE)?;
-    check_user_value(&value, ERROR_DATA_DEPTH_LIMIT).map_err(|refused| refused.stored_cause())?;
-    Ok(value)
+/// The stored text of `data`, or the cause that Python stores in
+/// `data_refused`. The text is written by the core's strict writer, so an
+/// integer of any width keeps every digit. Pure.
+fn error_data(data: &impl serde::Serialize) -> Result<JsonText, &'static str> {
+    let text = JsonText::of(data).map_err(|refused| written_data_cause(&refused))?;
+    check_user_value_text(&text, ERROR_DATA_DEPTH_LIMIT)
+        .map_err(|refused| refused.stored_cause())?;
+    Ok(text)
 }
 
-fn data_refused(cause: &'static str) -> serde_json::Value {
+/// The cause that Python stores for a value that does not write as strict
+/// JSON: a value that is not JSON-native, an integer longer than Python's
+/// limit, or a value deeper than any stored text. Pure.
+fn written_data_cause(refused: &JsonTextRefused) -> &'static str {
+    match refused {
+        JsonTextRefused::NotJsonNative(_) => NOT_JSON_NATIVE_CAUSE,
+        JsonTextRefused::NotStrictJson(StrictJsonError::IntegerTooLong { .. }) => {
+            UserValueRefused::IntegerTooLong.stored_cause()
+        }
+        JsonTextRefused::NotStrictJson(_) => UserValueRefused::DeeperThanTextBound.stored_cause(),
+    }
+}
+
+/// `{"data_refused": "<cause>"}`. Pure.
+fn data_refused(cause: &'static str) -> JsonText {
     let mut object = serde_json::Map::new();
     let _previous = object.insert(
         DATA_REFUSED_KEY.to_owned(),
         serde_json::Value::String(cause.to_owned()),
     );
-    serde_json::Value::Object(object)
+    JsonText::of(&serde_json::Value::Object(object))
+        .expect("an object of one text member writes as strict JSON")
 }
 
 #[cfg(test)]
@@ -263,6 +282,11 @@ mod tests {
         (1..depth).fold(json!([1]), |inner, _| json!([inner]))
     }
 
+    /// The data of `error` decoded as a JSON value.
+    fn data_of(error: &TaskError<ChargeCode>) -> Option<serde_json::Value> {
+        error.data().map(|data| data.decode().unwrap())
+    }
+
     #[test]
     fn a_user_error_has_its_code_and_message() {
         let error = declined();
@@ -283,9 +307,33 @@ mod tests {
     #[test]
     fn finite_data_is_stored_as_it_is() {
         let error = declined().with_data(BTreeMap::from([("attempt", 2)]));
-        assert_eq!(error.data(), Some(&json!({"attempt": 2})));
+        assert_eq!(data_of(&error), Some(json!({"attempt": 2})));
         let value = json!({"field": "email"});
-        assert_eq!(declined().with_data(&value).data(), Some(&value));
+        assert_eq!(data_of(&declined().with_data(&value)), Some(value));
+    }
+
+    /// An integer outside the `i64` and `u64` range is stored with every
+    /// digit and decodes as its type, as Python stores it.
+    #[test]
+    fn data_outside_i64_and_u64_keeps_every_digit() {
+        let error = declined().with_data(BTreeMap::from([
+            ("wide", i128::try_from(u64::MAX).unwrap() + 1),
+            ("below", i128::from(i64::MIN) - 1),
+        ]));
+        assert_eq!(
+            error.data().map(JsonText::get),
+            Some(r#"{"below":-9223372036854775809,"wide":18446744073709551616}"#)
+        );
+        let max = declined().with_data(u128::MAX);
+        assert_eq!(
+            max.data().map(JsonText::get),
+            Some("340282366920938463463374607431768211455")
+        );
+        let stored = serde_json::to_string(&max.clone().into_stored()).unwrap();
+        let read: horsies_core::TaskError = serde_json::from_str(&stored).unwrap();
+        let read = TaskError::<ChargeCode>::from_stored(read).unwrap();
+        assert_eq!(read.data().unwrap().decode::<u128>().unwrap(), u128::MAX);
+        assert_eq!(read, max);
     }
 
     #[test]
@@ -293,8 +341,8 @@ mod tests {
         for ratio in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let error = declined().with_data(Ratio { ratio });
             assert_eq!(
-                error.data(),
-                Some(&json!({"data_refused": "StrictJsonError"}))
+                data_of(&error),
+                Some(json!({"data_refused": "StrictJsonError"}))
             );
             assert_eq!(error.code(), &TaskErrorCode::User(ChargeCode::CardDeclined));
             assert_eq!(error.message(), Some("card declined"));
@@ -305,8 +353,8 @@ mod tests {
     fn an_engine_key_is_replaced() {
         let error = declined().with_data(json!({"inner": {"__h_task_result__": 1}}));
         assert_eq!(
-            error.data(),
-            Some(&json!({"data_refused": "StrictJsonError"}))
+            data_of(&error),
+            Some(json!({"data_refused": "StrictJsonError"}))
         );
     }
 
@@ -314,11 +362,17 @@ mod tests {
     fn data_deeper_than_the_error_bound_is_replaced() {
         let error = declined().with_data(nested(ERROR_DATA_DEPTH_LIMIT + 1));
         assert_eq!(
-            error.data(),
-            Some(&json!({"data_refused": "ValueValidationError"}))
+            data_of(&error),
+            Some(json!({"data_refused": "ValueValidationError"}))
         );
         let at_bound = declined().with_data(nested(ERROR_DATA_DEPTH_LIMIT));
-        assert_eq!(at_bound.data(), Some(&nested(ERROR_DATA_DEPTH_LIMIT)));
+        assert_eq!(data_of(&at_bound), Some(nested(ERROR_DATA_DEPTH_LIMIT)));
+        let past_text_bound =
+            declined().with_data(nested(horsies_core::core::codec::MAX_JSON_DEPTH + 1));
+        assert_eq!(
+            data_of(&past_text_bound),
+            Some(json!({"data_refused": "StrictJsonError"}))
+        );
     }
 
     #[test]
