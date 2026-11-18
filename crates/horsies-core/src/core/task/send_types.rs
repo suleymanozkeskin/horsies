@@ -88,7 +88,9 @@ impl TaskSendPayload {
     /// The input is its text (Python's `None` stores the same `{}`), and
     /// the retention is its class key, or `None` for forever. Pure.
     pub fn record_values(&self) -> Vec<RecordFieldValue<'_>> {
-        let field = |name: &'static str, value: RecordValue<'_>| RecordFieldValue { name, value };
+        fn field<'a>(name: &'static str, value: RecordValue<'a>) -> RecordFieldValue<'a> {
+            RecordFieldValue { name, value }
+        }
         let retention_class_key = match self.retention {
             EnqueueRetention::Forever => None,
             EnqueueRetention::Default | EnqueueRetention::Period(_) => {
