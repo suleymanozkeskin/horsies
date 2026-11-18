@@ -48,6 +48,10 @@ from tests.e2e.tasks.basic import healthcheck
 from tests.e2e.tasks.instance import app
 from tests.integration.history_seeding import force_terminal
 from tests.broker_resources_support import current_resources
+from tests.workflow_recovery_support import (
+    phase2_recovery_pass,
+    workflow_recovery_pass,
+)
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -221,22 +225,8 @@ async def _run_workflow_recovery(broker: PostgresBroker) -> int:
     first is what the reaper does; without it a stuck-workflow scan sees
     a node nothing has moved yet.
     """
-    from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
-    from horsies.core.workflows.recovery import (
-        GLOBAL_SCAN_ROW_CAP,
-        recover_stuck_workflows_global,
-    )
-
-    phase2 = await drive_phase2_recovery(
-        current_resources(broker).session_factory,
-        broker,
-        grace_ms=0,
-        max_rows=GLOBAL_SCAN_ROW_CAP,
-        quarantine_after_attempts=25,
-    )
-    report = await recover_stuck_workflows_global(
-        current_resources(broker).session_factory, broker,
-    )
+    phase2 = await phase2_recovery_pass(broker)
+    report = await workflow_recovery_pass(broker)
     return report.recovered + phase2.applied
 
 
