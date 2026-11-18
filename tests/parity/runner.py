@@ -7,8 +7,13 @@ database. One side, on an empty `dualrun_` database:
 1. Read the database clock.
 2. Start one worker of the side per profile of the scenario, and the
    scheduler of the side for a scenario with `ScheduleSlots`, before the
-   send process or after it (`WorkerStart`). The first operation of the
-   side installs the schema, so the client family row is the side's.
+   send process or after it (`WorkerStart`). The first worker starts
+   alone; the others start once it logged `WORKER_READY_LINE`, and the
+   start ends once each of them logged it too. So the sends of a
+   `BEFORE_SENDS` scenario start after every worker of the side ended its
+   own start.
+   The first operation of the side installs the schema, so the client
+   family row is the side's.
 3. Run the send process of the side (`python -m tests.parity.send`, or
    `horsies-parity send`): it sends the tasks, reruns tasks, starts the
    workflows, runs the actions on them and pings, and prints the ids of the
@@ -49,6 +54,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Final, LiteralString
 from uuid import UUID
@@ -445,35 +451,110 @@ def _start_process(
     return StartedProcess(name=name, process=process, log_path=log_path)
 
 
+@dataclass(frozen=True, slots=True)
+class WorkersReady:
+    """Each started worker of the side logged `WORKER_READY_LINE`."""
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerNotReady:
+    """A worker did not log `WORKER_READY_LINE`: a process of the side
+    exited first, or `TERMINAL_WAIT` passed. `detail` names the worker and
+    the cause."""
+
+    detail: str
+
+
+type Readiness = WorkersReady | WorkerNotReady
+
+
+@dataclass(frozen=True, slots=True)
+class StartedSide:
+    """The processes that the start of a side left running, and whether
+    each worker got ready. After `WorkerNotReady` no later process of the
+    side started."""
+
+    processes: tuple[StartedProcess, ...]
+    readiness: Readiness
+
+
+def _logged_ready(worker: StartedProcess) -> bool:
+    return WORKER_READY_LINE in _tail(worker.log_path, limit=READY_LOG_BYTES)
+
+
+def _wait_ready(
+    running: Sequence[StartedProcess], workers: Sequence[StartedProcess],
+) -> Readiness:
+    """`WorkersReady` once each of `workers` logged `WORKER_READY_LINE`;
+    `WorkerNotReady` when a process of `running` exited first, or
+    `TERMINAL_WAIT` passed for one worker."""
+    for worker in workers:
+        match _wait_until(running, partial(_logged_ready, worker), f'{worker.name} ready'):
+            case None:
+                pass
+            case str() as cause:
+                return WorkerNotReady(detail=f'{worker.name} not ready: {cause}')
+    return WorkersReady()
+
+
 def _start_processes(
     commands: SideCommands, scenario: Scenario, env: dict[str, str], log_dir: Path,
-) -> list[StartedProcess]:
+) -> StartedSide:
     """One worker per profile of `scenario`, then the scheduler of a
     scenario with `ScheduleSlots`, each with its own log file.
 
     The first worker starts alone, and the others start once its log shows
     `WORKER_READY_LINE`: on a fresh database a worker whose startup coverage
     meets the coverage gate of another starting worker refuses its boot
-    (`coverage_gate_busy`), on both clients. A first worker that exits or
-    does not get ready within `TERMINAL_WAIT` is reported by the next wait of
-    the side."""
+    (`coverage_gate_busy`), on both clients. The others start together,
+    and the scheduler starts once each of them logged `WORKER_READY_LINE`
+    too. A worker that does not get ready ends the start with
+    `WorkerNotReady`."""
     first, *others = scenario.profiles
-    started = [_start_process('worker-0', [*commands.worker, f'--profile={first}'], env, log_dir)]
-    _ = _wait_until(
-        started,
-        lambda: WORKER_READY_LINE in _tail(started[0].log_path, limit=READY_LOG_BYTES),
-        'worker-0 ready',
-    )
-    started.extend(
+    leader = _start_process('worker-0', [*commands.worker, f'--profile={first}'], env, log_dir)
+    match _wait_ready([leader], [leader]):
+        case WorkersReady():
+            pass
+        case WorkerNotReady() as not_ready:
+            return StartedSide(processes=(leader,), readiness=not_ready)
+    followers = tuple(
         _start_process(f'worker-{position}', [*commands.worker, f'--profile={profile}'], env, log_dir)
         for position, profile in enumerate(others, start=1)
     )
+    workers = (leader, *followers)
+    match _wait_ready(workers, followers):
+        case WorkersReady():
+            pass
+        case WorkerNotReady() as not_ready:
+            return StartedSide(processes=workers, readiness=not_ready)
     match scenario.scheduler:
         case ScheduleSlots():
-            started.append(_start_process('scheduler', commands.scheduler, env, log_dir))
+            scheduler = _start_process('scheduler', commands.scheduler, env, log_dir)
+            return StartedSide(processes=(*workers, scheduler), readiness=WorkersReady())
         case NoScheduler():
-            pass
-    return started
+            return StartedSide(processes=workers, readiness=WorkersReady())
+
+
+def _send_when_ready(
+    readiness: Readiness, send_command: list[str], scenario: Scenario, env: dict[str, str],
+) -> Result[SentIds, str]:
+    """The send of a `BEFORE_SENDS` scenario: it runs only once each worker
+    of the side got ready."""
+    match readiness:
+        case WorkersReady():
+            return _run_send(send_command, scenario, env)
+        case WorkerNotReady(detail=detail):
+            return Err(detail)
+
+
+def _sent_then_ready(sent: Result[SentIds, str], readiness: Readiness) -> Result[SentIds, str]:
+    """The send of an `AFTER_ACTIONS` scenario and the readiness of the
+    workers that started after it: the earlier failure of the two."""
+    match sent, readiness:
+        case (Err(), _) | (Ok(), WorkersReady()):
+            return sent
+        case (Ok(), WorkerNotReady(detail=detail)):
+            return Err(detail)
 
 
 def _run_send(
@@ -602,11 +683,14 @@ def run_side(
             try:
                 match scenario.worker_start:
                     case WorkerStart.BEFORE_SENDS:
-                        processes = _start_processes(commands, scenario, env, log_dir)
-                        sent_ids = _run_send(commands.send, scenario, env)
+                        side = _start_processes(commands, scenario, env, log_dir)
+                        processes = list(side.processes)
+                        sent_ids = _send_when_ready(side.readiness, commands.send, scenario, env)
                     case WorkerStart.AFTER_ACTIONS:
-                        sent_ids = _run_send(commands.send, scenario, env)
-                        processes = _start_processes(commands, scenario, env, log_dir)
+                        sent_first = _run_send(commands.send, scenario, env)
+                        side = _start_processes(commands, scenario, env, log_dir)
+                        processes = list(side.processes)
+                        sent_ids = _sent_then_ready(sent_first, side.readiness)
                 match sent_ids:
                     case Ok(sent):
                         pass
