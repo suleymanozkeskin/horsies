@@ -2742,18 +2742,18 @@ mod rerun_family_error_tests {
 /// history result is checked in [`history_task_info`]; the live row holds no
 /// result.
 fn task_info_history_error(task_id: Uuid, error: BrokerError) -> BrokerOperationError {
-    match &error {
-        BrokerError::Serialization(_) => {
-            let detail = error.to_string();
+    match error {
+        unreadable @ BrokerError::Serialization(_) => {
+            let detail = unreadable.to_string();
             BrokerOperationError::task_info_invalid_json(
                 task_id,
                 &detail,
-                BrokerCheckCause::Error(error),
+                BrokerCheckCause::Error(unreadable),
             )
         }
-        _ => BrokerOperationError::task_info_query_failed(
+        other => BrokerOperationError::task_info_query_failed(
             task_id,
-            BrokerOperationSource::Broker(error),
+            BrokerOperationSource::Broker(other),
         ),
     }
 }
@@ -2925,14 +2925,14 @@ fn invalid_raw_result(message: String) -> BrokerOperationError {
 /// (`Broker error while retrieving task {task_id}: {error}`), retryable by
 /// the error's rule.
 fn raw_result_operation_error(task_id: Uuid, error: BrokerError) -> BrokerOperationError {
-    match &error {
-        BrokerError::Serialization(_)
+    match error {
+        unreadable @ (BrokerError::Serialization(_)
         | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidStatus(_) => BrokerOperationError::InvalidJsonPayload {
-            message: error.to_string(),
-            cause: BrokerCheckCause::Error(error),
+        | BrokerError::InvalidStatus(_)) => BrokerOperationError::InvalidJsonPayload {
+            message: unreadable.to_string(),
+            cause: BrokerCheckCause::Error(unreadable),
         },
-        _ => BrokerOperationError::raw_result_query_failed(task_id, error),
+        other => BrokerOperationError::raw_result_query_failed(task_id, other),
     }
 }
 

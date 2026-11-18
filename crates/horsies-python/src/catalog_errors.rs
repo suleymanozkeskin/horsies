@@ -27,6 +27,11 @@ use crate::core_failures::FailureException;
 /// The package of the generated modules.
 const CATALOG_PACKAGE: &str = "horsies._catalog";
 
+/// The module and the class of `NoCause()`, the `exception` of a failure
+/// that a check of the core found (`horsies._catalog.error_detail`).
+const NO_CAUSE_MODULE: &str = "error_detail";
+const NO_CAUSE_CLASS: &str = "NoCause";
+
 /// The imported classes of `horsies._catalog`, keyed by `(module, class)`.
 static CATALOG_CLASSES: PyOnceLock<Py<PyDict>> = PyOnceLock::new();
 
@@ -97,7 +102,8 @@ fn slot_object<'py>(
 }
 
 /// The exception of the `exception` slot: the core's class of the cause
-/// with `subject`, or the generated exception class with its message.
+/// with `subject`, the generated exception class with its message, or
+/// `NoCause()` for a check of the core.
 fn exception_object<'py>(
     py: Python<'py>,
     subject: &'static str,
@@ -112,6 +118,7 @@ fn exception_object<'py>(
         ExceptionValue::Generated { class, text } => {
             catalog_class(py, class.python_module, class.python_class)?.call1((text,))
         }
+        ExceptionValue::NoCause => catalog_class(py, NO_CAUSE_MODULE, NO_CAUSE_CLASS)?.call0(),
     }
 }
 
