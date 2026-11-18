@@ -1375,7 +1375,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(completed, None)
         .await
         .unwrap_err();
-    assert_eq!(shape_error.code(), crate::BrokerErrorCode::InvalidJsonPayload);
+    assert_eq!(
+        shape_error.code(),
+        crate::BrokerErrorCode::InvalidJsonPayload
+    );
 
     // The baseline stores no result content type: format version 1 implies
     // it, so a stored content type cannot disagree with the version.

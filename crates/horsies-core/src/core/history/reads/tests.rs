@@ -1240,7 +1240,10 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         crate::broker::BrokerErrorCode::TaskInfoQueryFailed,
         "{refused:?}"
     );
-    assert!(refused.message().contains(TASK_RESULT_FUNCTION), "{refused}");
+    assert!(
+        refused.message().contains(TASK_RESULT_FUNCTION),
+        "{refused}"
+    );
     let fallback = broker
         .get_raw_result_record(completed_id, None)
         .await
