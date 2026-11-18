@@ -141,7 +141,9 @@ before you upgrade a 0.7 deployment.
 - **A worker child whose core stopped ends itself.** It never serves on
   with a stopped core (`CoreStopped`) or as a fork of a child
   (`ForkedAfterCoreStart`). The child exits with code 80, and the worker
-  starts a new child. At the start of a task, before task code ran, the
+  starts a new child; the frame that the child sends last says that it
+  ends itself, so the worker sends it no other task. At the start of a
+  task, before task code ran, the
   worker releases the claim with no attempt charged, and the new child runs
   the task. After a body that finished, the child reports the result and
   the worker writes it as for any task: the task keeps its result, with no

@@ -8,6 +8,9 @@ is a fork of the child).
   ``CoreStoppedBeforeStart``; the child reports it as
   ``OWNERSHIP_UNCONFIRMED`` (the worker releases the claim) and then ends
   with ``CORE_STOPPED_EXIT_CODE``. A fork ends at once and writes no frame.
+- The result frame of a run after which the child ends says so
+  (``child``: ``ends_itself``), so the worker sends that child no other
+  run.
 - In the body: a body that the refusal ended (its task error holds the
   refusal) ends the child at once with no report, so the worker takes the
   crashed-child path.
@@ -29,7 +32,7 @@ import json
 import struct
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Final, NoReturn
+from typing import Any, Final, Literal, NoReturn
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -401,6 +404,7 @@ class TestTheReportOfAnIsolatedRun:
             'kind': 'stopped_before_running',
             'reason': 'OWNERSHIP_UNCONFIRMED',
         }
+        assert metas[0]['child'] == 'ends_itself'
         assert _last_message(caplog).startswith(
             f'At the start of task {TASK_UUID}: the core of this child stopped'
         )
@@ -435,6 +439,7 @@ class TestTheReportOfAnIsolatedRun:
         assert markers == [frame]
         assert [meta['kind'] for meta in metas] == ['result']
         assert metas[0]['end'] == {'kind': 'result'}
+        assert metas[0]['child'] == 'ends_itself'
         assert bodies == [ENVELOPE]
         assert _last_message(caplog).startswith(
             f'After the body of task {TASK_UUID}: the core of this child stopped'
@@ -550,6 +555,47 @@ class TestTheFrameOfACoreStop:
 
         assert meta['end'] == {'kind': 'result'}
         assert encoded[start : start + body_bytes].decode('utf-8') == ENVELOPE
+
+    @pytest.mark.parametrize(
+        ('end', 'child'),
+        [
+            pytest.param(ResultEnvelope(ENVELOPE), 'serves_on', id='result'),
+            pytest.param(
+                StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED'), 'serves_on', id='stopped',
+            ),
+            pytest.param(SeatTimedOut(), 'serves_on', id='timed-out'),
+            pytest.param(
+                CoreStoppedBeforeStart(_stopped()), 'ends_itself', id='release-then-end',
+            ),
+            pytest.param(
+                CoreStoppedAfterBody(result=ResultEnvelope(ENVELOPE), stopped=_stopped()),
+                'ends_itself',
+                id='result-then-end',
+            ),
+        ],
+    )
+    def test_the_frame_names_the_end_of_the_child_that_follows_it(
+        self,
+        exits: list[str],
+        end: Any,
+        child: Literal['serves_on', 'ends_itself'],
+    ) -> None:
+        """The worker sends no run to a child whose frame says
+        ``ends_itself``. The frame says it for exactly the ends after which
+        the child ends itself once the frame is written."""
+        encoded = child_main.encode_child_frame(_shared_result(end))
+        assert isinstance(encoded, bytes)
+        meta_bytes, _body_bytes = _HEADER.unpack_from(encoded)
+        meta = json.loads(encoded[_HEADER.size : _HEADER.size + meta_bytes])
+
+        assert meta['child'] == child
+        match child:
+            case 'ends_itself':
+                with pytest.raises(_Exited):
+                    shared_child._end_after_written(_shared_result(end))
+            case 'serves_on':
+                shared_child._end_after_written(_shared_result(end))
+                assert exits == []
 
 
 def test_the_exit_code_is_the_core_s() -> None:

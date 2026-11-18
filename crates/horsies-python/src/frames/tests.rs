@@ -6,11 +6,11 @@
 use std::ffi::CStr;
 
 use horsies_core::frame_protocol::{
-    decode_preload_frame, BodyEnd, ChildFrame, ChildFrameRefusal, LeftWorkEnd, LoopCulprit,
-    NoLeftWork, PreloadFrame, ReportedBootCause, RssReading, RunEnd, SeatEnd, ShortageErrno,
-    StopReason, BOOT_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, HEADER_BYTES, MAX_BODY_BYTES,
-    MAX_BOOT_ERROR_NAME_CHARS, MAX_LEFTOVER_TASK_NAMES, PROTOCOL_MISMATCH_EXIT_CODE,
-    PROTOCOL_VERSION, SPAWN_REQUEST_BYTE,
+    decode_preload_frame, BodyEnd, ChildAfterFrame, ChildFrame, ChildFrameRefusal, LeftWorkEnd,
+    LoopCulprit, NoLeftWork, PreloadFrame, ReportedBootCause, RssReading, RunEnd, SeatEnd,
+    ShortageErrno, StopReason, BOOT_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, HEADER_BYTES,
+    MAX_BODY_BYTES, MAX_BOOT_ERROR_NAME_CHARS, MAX_LEFTOVER_TASK_NAMES,
+    PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION, SPAWN_REQUEST_BYTE,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyModule};
@@ -270,6 +270,7 @@ encoded = core.encode_child_frame(core.ResultFrame(
     end=core.TaskResult(envelope='{\"ok\":true}'),
     rss_mb=31.5,
     task_loop='NO_TASK_LOOP',
+    child='SERVES_ON',
 ))
 assert isinstance(encoded, bytes), encoded
 ",
@@ -287,6 +288,7 @@ assert isinstance(encoded, bytes), encoded
             );
             assert!(matches!(result.rss, RssReading::Mb(rss) if rss.get() == 31.5));
             assert_eq!(result.task_loop, NoLeftWork::NoTaskLoop);
+            assert_eq!(result.child, ChildAfterFrame::ServesOn);
         }
         other => panic!("a result frame decodes as a result frame, not {other:?}"),
     }
@@ -306,9 +308,17 @@ stopped = core.encode_child_frame(core.ResultFrame(
     end=core.StoppedBeforeRunning(reason='WORKFLOW_STOPPED'),
     rss_mb='UNREADABLE',
     task_loop='LOOP_HOLDS_NO_TASK',
+    child='ENDS_ITSELF',
 ))
 timed_out = core.encode_child_frame(core.SharedResultFrame(
-    dispatch=3, task_id=task_id, end='TIMED_OUT', rss_mb=12.0,
+    dispatch=3, task_id=task_id, end='TIMED_OUT', rss_mb=12.0, child='SERVES_ON',
+))
+released = core.encode_child_frame(core.SharedResultFrame(
+    dispatch=4,
+    task_id=task_id,
+    end=core.StoppedBeforeRunning(reason='OWNERSHIP_UNCONFIRMED'),
+    rss_mb=12.0,
+    child='ENDS_ITSELF',
 ))
 returned = core.encode_child_frame(core.BodyReturnedFrame(
     task_id=task_id, returned=core.WorkerFailure(detail='boom'), left=left,
@@ -341,10 +351,21 @@ ready = core.encode_child_frame(core.ReadyFrame(pid=4321, rss_mb=25.0))
         ChildFrame::Result(result)
             if result.end == RunEnd::StoppedBeforeRunning(StopReason::WorkflowStopped)
                 && result.rss == RssReading::Unreadable
+                && result.child == ChildAfterFrame::EndsItself
     ));
     assert!(matches!(
         frame("timed_out"),
-        ChildFrame::SharedResult(result) if result.end == SeatEnd::TimedOut
+        ChildFrame::SharedResult(result)
+            if result.end == SeatEnd::TimedOut && result.child == ChildAfterFrame::ServesOn
+    ));
+    assert!(matches!(
+        frame("released"),
+        ChildFrame::SharedResult(result)
+            if result.end
+                == SeatEnd::Finished(RunEnd::StoppedBeforeRunning(
+                    StopReason::OwnershipUnconfirmed
+                ))
+                && result.child == ChildAfterFrame::EndsItself
     ));
     match frame("returned") {
         ChildFrame::BodyReturned(returned) => {
@@ -405,7 +426,19 @@ cases = [
     lambda: core.StoppedBeforeRunning(reason='GONE'),
     lambda: core.ResourceShortage(errno='EPERM'),
     lambda: core.LeftWorkEndedFrame(task_id=task_id, end='LATER', rss_mb=1.0),
-    lambda: core.SharedResultFrame(dispatch=1, task_id=task_id, end='LATE', rss_mb=1.0),
+    lambda: core.SharedResultFrame(
+        dispatch=1, task_id=task_id, end='LATE', rss_mb=1.0, child='SERVES_ON',
+    ),
+    lambda: core.SharedResultFrame(
+        dispatch=1, task_id=task_id, end='TIMED_OUT', rss_mb=1.0, child='RETIRES',
+    ),
+    lambda: core.ResultFrame(
+        task_id=task_id,
+        end=core.TaskResult(envelope='{}'),
+        rss_mb=1.0,
+        task_loop='NO_TASK_LOOP',
+        child='RETIRES',
+    ),
 ]
 for position, case in enumerate(cases):
     try:

@@ -737,6 +737,7 @@ fn the_result_frame_carries_a_closed_run_end() {
             end,
             rss: rss_reading,
             task_loop,
+            child: ChildAfterFrame::ServesOn,
         })
     };
     assert_child_bytes(
@@ -748,7 +749,8 @@ fn the_result_frame_carries_a_closed_run_end() {
         &framed(
             concat!(
                 r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"result"},"rss_mb":30.5,"task_loop":{"kind":"none"}}"#,
+                r#""end":{"kind":"result"},"rss_mb":30.5,"task_loop":{"kind":"none"},"#,
+                r#""child":"serves_on"}"#,
             ),
             br#"{"ok":3}"#,
         ),
@@ -763,7 +765,7 @@ fn the_result_frame_carries_a_closed_run_end() {
             concat!(
                 r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""end":{"kind":"stopped_before_running","reason":"CLAIM_LOST"},"#,
-                r#""rss_mb":null,"task_loop":{"kind":"empty"}}"#,
+                r#""rss_mb":null,"task_loop":{"kind":"empty"},"child":"serves_on"}"#,
             ),
             b"",
         ),
@@ -778,7 +780,7 @@ fn the_result_frame_carries_a_closed_run_end() {
             concat!(
                 r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""end":{"kind":"worker_failure","detail":"encode failed"},"rss_mb":31.0,"#,
-                r#""task_loop":{"kind":"none"}}"#,
+                r#""task_loop":{"kind":"none"},"child":"serves_on"}"#,
             ),
             b"",
         ),
@@ -792,12 +794,13 @@ fn the_shared_result_frame_carries_a_seat_end() {
             run: run_ref(9, T5),
             end: SeatEnd::TimedOut,
             rss: rss(31.0),
+            child: ChildAfterFrame::ServesOn,
         }),
         &framed(
             concat!(
                 r#"{"kind":"shared_result","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"timed_out"},"rss_mb":31.0}"#,
+                r#""end":{"kind":"timed_out"},"rss_mb":31.0,"child":"serves_on"}"#,
             ),
             b"",
         ),
@@ -807,15 +810,80 @@ fn the_shared_result_frame_carries_a_seat_end() {
             run: run_ref(9, T5),
             end: SeatEnd::Finished(RunEnd::Result(envelope("[1,2]"))),
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         }),
         &framed(
             concat!(
                 r#"{"kind":"shared_result","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"result"},"rss_mb":null}"#,
+                r#""end":{"kind":"result"},"rss_mb":null,"child":"serves_on"}"#,
             ),
             b"[1,2]",
         ),
+    );
+}
+
+/// A child whose core stopped says so in the frame that ends its run: the
+/// release of a refused start, or the result of a body that finished.
+#[test]
+fn a_result_frame_names_a_child_that_ends_itself() {
+    assert_child_bytes(
+        &ChildFrame::Result(ResultFrame {
+            task_id: task_id(T5),
+            end: RunEnd::StoppedBeforeRunning(StopReason::OwnershipUnconfirmed),
+            rss: RssReading::Unreadable,
+            task_loop: NoLeftWork::NoTaskLoop,
+            child: ChildAfterFrame::EndsItself,
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""end":{"kind":"stopped_before_running","reason":"OWNERSHIP_UNCONFIRMED"},"#,
+                r#""rss_mb":null,"task_loop":{"kind":"none"},"child":"ends_itself"}"#,
+            ),
+            b"",
+        ),
+    );
+    assert_child_bytes(
+        &ChildFrame::SharedResult(SharedResultFrame {
+            run: run_ref(9, T5),
+            end: SeatEnd::Finished(RunEnd::Result(envelope("[1,2]"))),
+            rss: RssReading::Unreadable,
+            child: ChildAfterFrame::EndsItself,
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"shared_result","dispatch":9,"#,
+                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""end":{"kind":"result"},"rss_mb":null,"child":"ends_itself"}"#,
+            ),
+            b"[1,2]",
+        ),
+    );
+}
+
+/// A result frame without `child`, or with a value outside it, is refused:
+/// the parent never guesses whether a child serves on.
+#[test]
+fn a_result_frame_without_a_known_child_value_is_refused() {
+    let without = format!(
+        r#"{{"kind":"result","task_id":"{T1}","end":{{"kind":"stopped_before_running","reason":"CLAIM_LOST"}},"rss_mb":null,"task_loop":{{"kind":"none"}}}}"#
+    );
+    assert_eq!(
+        malformed_child(&framed(&without, b"")),
+        MalformedFrame::MissingField {
+            field: "child".to_owned(),
+        },
+    );
+    let unknown = format!(
+        r#"{{"kind":"shared_result","dispatch":1,"task_id":"{T1}","end":{{"kind":"timed_out"}},"rss_mb":null,"child":"retires"}}"#
+    );
+    assert_eq!(
+        malformed_child(&framed(&unknown, b"")),
+        MalformedFrame::BrokenRule {
+            field: "child".to_owned(),
+            rule: "is not one of serves_on, ends_itself",
+        },
     );
 }
 
@@ -883,6 +951,7 @@ fn every_stop_reason_round_trips() {
             run: run_ref(1, T1),
             end: SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         });
         let bytes = encode_child_frame(&frame).unwrap().to_bytes();
         assert_eq!(decode_child_bytes(&bytes).unwrap(), frame);
@@ -893,7 +962,7 @@ fn every_stop_reason_round_trips() {
 /// of the frame.
 fn run_end_of(end: &str) -> Result<RunEnd, MalformedFrame> {
     let meta = format!(
-        r#"{{"kind":"result","task_id":"{T1}","end":{end},"rss_mb":null,"task_loop":{{"kind":"none"}}}}"#
+        r#"{{"kind":"result","task_id":"{T1}","end":{end},"rss_mb":null,"task_loop":{{"kind":"none"}},"child":"serves_on"}}"#
     );
     match decode_child_bytes(&framed(&meta, b"")) {
         Ok(ChildFrame::Result(frame)) => Ok(frame.end),
@@ -942,6 +1011,7 @@ fn the_expired_stop_reason_is_spelled_as_the_task_expired_code() {
         end: RunEnd::StoppedBeforeRunning(StopReason::TaskExpired),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     });
     let (meta, _body) = split(&encode_child_frame(&frame).unwrap().to_bytes());
     let meta = String::from_utf8(meta).unwrap();
@@ -961,6 +1031,7 @@ fn a_worker_failure_keeps_its_text_and_an_unknown_stop_reason_is_refused() {
             end: RunEnd::WorkerFailure(FailureDetail::new(detail.to_owned()).unwrap()),
             rss: RssReading::Unreadable,
             task_loop: NoLeftWork::NoTaskLoop,
+            child: ChildAfterFrame::ServesOn,
         });
         let bytes = encode_child_frame(&frame).unwrap().to_bytes();
         assert_eq!(decode_child_bytes(&bytes).unwrap(), frame, "{detail}");
@@ -1157,7 +1228,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
         },
     );
     let stopped = format!(
-        r#"{{"kind":"result","task_id":"{T1}","end":{{"kind":"stopped_before_running","reason":"CLAIM_LOST"}},"rss_mb":null,"task_loop":{{"kind":"none"}}}}"#
+        r#"{{"kind":"result","task_id":"{T1}","end":{{"kind":"stopped_before_running","reason":"CLAIM_LOST"}},"rss_mb":null,"task_loop":{{"kind":"none"}},"child":"serves_on"}}"#
     );
     assert_eq!(
         malformed_child(&framed(&stopped, b"{}")),

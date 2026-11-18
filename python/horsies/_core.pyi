@@ -3122,7 +3122,7 @@ class BootFailedFrame:
 @final
 class ResultFrame:
     """An isolated task ended and left no work on a task loop."""
-    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final
@@ -3148,7 +3148,7 @@ class LeftWorkStuckFrame:
 @final
 class SharedResultFrame:
     """A run of a shared child ended; its seat is free."""
-    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE']) -> None: ...
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final

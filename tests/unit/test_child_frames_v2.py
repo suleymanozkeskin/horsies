@@ -101,6 +101,7 @@ class TestChildFrames:
         assert meta['end'] == {'kind': 'result'}
         assert meta['rss_mb'] is None
         assert meta['task_loop'] == {'kind': 'none'}
+        assert meta['child'] == 'serves_on'
         assert body.decode('utf-8') == envelope
 
     @pytest.mark.parametrize(
@@ -132,6 +133,7 @@ class TestChildFrames:
         )
         assert meta['kind'] == 'shared_result'
         assert meta['end'] == {'kind': 'timed_out'}
+        assert meta['child'] == 'serves_on'
         assert body == b''
 
     def test_left_work_reports_name_their_tasks(self) -> None:

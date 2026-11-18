@@ -15,9 +15,9 @@ use super::seat_runs::*;
 use super::shared_stop::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    BlockedWhere, BodyEnd, CancelGraceMs, DispatchNumber, LeftoverCancelFrame, LeftoverName,
-    LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, ProcessId, ResultEnvelopeText, RssMb,
-    RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, StuckWork,
+    BlockedWhere, BodyEnd, CancelGraceMs, ChildAfterFrame, DispatchNumber, LeftoverCancelFrame,
+    LeftoverName, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, ProcessId, ResultEnvelopeText,
+    RssMb, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, StuckWork,
     TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{
@@ -203,6 +203,7 @@ fn an_async_run_reports_its_stop_in_order() {
             run,
             end: SeatEnd::TimedOut,
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         })
         .unwrap();
     assert_eq!(
@@ -287,6 +288,7 @@ fn a_return_with_left_work_keeps_what_it_returned() {
             run,
             end: SeatEnd::TimedOut,
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         })
         .unwrap_err()
         .why,
@@ -297,6 +299,7 @@ fn a_return_with_left_work_keeps_what_it_returned() {
             run,
             end: SeatEnd::Finished(RunEnd::from(returned())),
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         })
         .unwrap();
     assert_eq!(end, AttemptEnd::Reported(RunEnd::from(returned())));
@@ -310,6 +313,7 @@ fn a_refusal_never_ends_at_a_timeout() {
             run: run_ref(1),
             end: SeatEnd::TimedOut,
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         })
         .unwrap_err()
         .why,

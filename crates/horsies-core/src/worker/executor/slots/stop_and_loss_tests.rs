@@ -26,8 +26,8 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
-    CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ProcessId, RssReading, RunRef,
-    SeatEnd, SharedResultFrame, TaskTimeoutMs,
+    CancelGraceMs, ChildAfterFrame, DispatchNumber, FailureDetail, IsolatedWork, ProcessId,
+    RssReading, RunRef, SeatEnd, SharedResultFrame, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause, PartialFrame, Spawner};
 
@@ -74,6 +74,7 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
                 run,
                 end: SeatEnd::TimedOut,
                 rss: RssReading::Unreadable,
+                child: ChildAfterFrame::ServesOn,
             })
             .unwrap();
         assert_eq!(
