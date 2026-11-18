@@ -34,57 +34,115 @@ pub enum TaskActionErrorCode {
 /// A refused or failed task action: one variant per class of Python's task
 /// action catalog that the core produces, each with the facts of its state.
 /// Python's `TaskActionEventLoopLimit` is a class of the Python client only,
-/// so it is not a variant.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// so it is not a variant. Each variant's doc is its Python class doc
+/// (`ErrorCatalog`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, horsies_core_derive::ErrorCatalog)]
+#[error_catalog(
+    module = "monitoring_errors",
+    code = "TaskActionErrorCode",
+    union = "TaskActionCoreError",
+    union_doc = "Every failure of a task action that the core gives: one class per state."
+)]
 pub enum TaskActionError {
-    /// Python `TaskActionNotFound`: neither the live table nor the history
-    /// holds the task. Nothing changed.
+    /// No task has this id. Nothing changed.
+    ///
+    /// Neither the live table nor history holds the task (retention can
+    /// remove it).
     #[error("{message}")]
-    NotFound { message: String, task_id: Uuid },
-    /// Python `TaskActionNotCancellable`: the status that the cancel found
-    /// does not admit it (a terminal status, or `RUNNING` without
-    /// `include_running`). Nothing changed.
+    #[error_class(class = "TaskActionNotFound", code = "TaskNotFound", never_retryable)]
+    NotFound {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "Uuid")]
+        task_id: Uuid,
+    },
+    /// The task's status does not admit the cancel. Nothing changed.
+    ///
+    /// ``current_status`` is the status that the cancel found: a terminal
+    /// status, or ``RUNNING`` when ``include_running`` is ``False``. A call
+    /// with ``include_running=True`` cancels a ``RUNNING`` task.
     #[error("{message}")]
+    #[error_class(
+        class = "TaskActionNotCancellable",
+        code = "TaskNotCancellable",
+        never_retryable
+    )]
     NotCancellable {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskStatus")]
         current_status: TaskStatus,
     },
-    /// Python `TaskActionWorkflowTask`: the task belongs to a workflow; only
-    /// the workflow actions drive it. Nothing changed.
+    /// The task belongs to a workflow. Nothing changed.
+    ///
+    /// Only the workflow primitives drive a workflow task: pause, resume and
+    /// cancel on its workflow. ``current_status`` is the task's status.
     #[error("{message}")]
+    #[error_class(
+        class = "TaskActionWorkflowTask",
+        code = "TaskIsWorkflowTask",
+        never_retryable
+    )]
     WorkflowTask {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskStatus")]
         current_status: TaskStatus,
     },
-    /// Python `TaskActionDbOperationFailed`: the connect, the client family
-    /// check or the statement failed. Nothing was written, or the
-    /// statement's outcome is unknown. `retryable` is the classification of
-    /// the cause.
+    /// The cancel statement failed with a database or driver error, or the
+    /// core of this process could not run it.
+    ///
+    /// ``retryable`` is the core's classification of the cause: ``True`` when
+    /// the condition may clear, for example a lost connection. ``exception``
+    /// is the core's class of the cause (a ``CoreFailure`` leaf class, with the
+    /// subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
+    /// committed and its reply was lost: a repeated cancel tells which,
+    /// because a committed cancel answers ``TaskActionNotCancellable`` with
+    /// ``CANCELLED``.
     #[error("{message}")]
+    #[error_class(
+        class = "TaskActionDbOperationFailed",
+        code = "DbOperationFailed",
+        exception = "BaseException"
+    )]
     DbOperationFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `TaskActionStoredDataInvalid`: stored task data does not parse.
-    /// Nothing changed: the cancel refused the task. Not retryable.
+    /// Stored task data does not parse. Nothing changed: the cancel refused the task.
+    ///
+    /// ``exception`` is an ``OutcomeDecodeError`` with the core's message, for
+    /// example a history status that is not a task status. A repeat gives the
+    /// same result until the stored row changes.
     #[error("{message}")]
-    StoredDataInvalid { message: String, task_id: Uuid },
+    #[error_class(
+        class = "TaskActionStoredDataInvalid",
+        code = "StoredDataInvalid",
+        never_retryable,
+        exception = "BaseException"
+    )]
+    StoredDataInvalid {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "Uuid")]
+        task_id: Uuid,
+    },
 }
 
 impl TaskActionError {
     /// The catalog code of the variant. Pure.
     pub fn code(&self) -> TaskActionErrorCode {
-        match self {
-            Self::NotFound { .. } => TaskActionErrorCode::TaskNotFound,
-            Self::NotCancellable { .. } => TaskActionErrorCode::TaskNotCancellable,
-            Self::WorkflowTask { .. } => TaskActionErrorCode::TaskIsWorkflowTask,
-            Self::DbOperationFailed { .. } => TaskActionErrorCode::DbOperationFailed,
-            Self::StoredDataInvalid { .. } => TaskActionErrorCode::StoredDataInvalid,
-        }
+        crate::error_catalog::ErrorEnum::error_code(self)
     }
 
     /// What was refused or failed, and why. Pure.

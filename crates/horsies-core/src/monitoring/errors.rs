@@ -38,25 +38,54 @@ pub enum MonitoringQueryErrorSource {
 /// A failed monitoring read: one variant per class of Python's monitoring
 /// query catalog that the core produces, each with the facts of its state.
 /// Python's `MonitoringQueryEventLoopLimit` is a class of the Python client
-/// only, so it is not a variant. A monitoring read changes nothing.
-#[derive(Debug, thiserror::Error)]
+/// only, so it is not a variant. A monitoring read changes nothing. Each
+/// variant's doc is its Python class doc (`ErrorCatalog`).
+#[derive(Debug, thiserror::Error, horsies_core_derive::ErrorCatalog)]
+#[error_catalog(
+    module = "monitoring_errors",
+    code = "MonitoringQueryErrorCode",
+    union = "MonitoringQueryCoreError",
+    union_doc = "Every failure of a monitoring query that the core gives: one class per state."
+)]
 pub enum MonitoringQueryError {
-    /// Python `MonitoringQueryDbOperationFailed`: the read failed with a
-    /// database, driver or connection error. `retryable` is the
-    /// classification of the cause.
+    /// The query failed with a database or driver error. Nothing changed.
+    ///
+    /// ``retryable`` is the driver classification of the cause: ``True`` when
+    /// the condition may clear, for example a lost connection. ``exception``
+    /// is the ``SQLAlchemyError``.
     #[error("{message}")]
+    #[error_class(
+        class = "MonitoringQueryDbOperationFailed",
+        code = "DbOperationFailed",
+        exception = "BaseException"
+    )]
     DbOperationFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(skip)]
         #[source]
         source: MonitoringQueryErrorSource,
     },
-    /// Python `MonitoringQueryHistoryContractViolation`: stored history data
-    /// does not decode. Not retryable: a repeat gives the same result until
-    /// the stored row changes.
+    /// Stored history data does not decode. Nothing changed.
+    ///
+    /// ``exception`` is the ``HistoryContractError``: for example a history
+    /// status that is not a ``TaskStatus`` member, an attempt snapshot that
+    /// does not decode, or an EXPLAIN payload that the row estimate cannot
+    /// read. A repeat gives the same result until the stored row or the
+    /// server changes.
     #[error("{message}")]
+    #[error_class(
+        class = "MonitoringQueryHistoryContractViolation",
+        code = "HistoryContractViolation",
+        never_retryable,
+        exception = "BaseException"
+    )]
     HistoryContractViolation {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(skip)]
         #[source]
         source: MonitoringQueryErrorSource,
     },
@@ -65,12 +94,7 @@ pub enum MonitoringQueryError {
 impl MonitoringQueryError {
     /// The catalog code of the variant. Pure.
     pub fn code(&self) -> MonitoringQueryErrorCode {
-        match self {
-            Self::DbOperationFailed { .. } => MonitoringQueryErrorCode::DbOperationFailed,
-            Self::HistoryContractViolation { .. } => {
-                MonitoringQueryErrorCode::HistoryContractViolation
-            }
-        }
+        crate::error_catalog::ErrorEnum::error_code(self)
     }
 
     /// What failed and why. Pure.
