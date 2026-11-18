@@ -183,9 +183,10 @@ Decoders:
 - Python: `loads_json`, `validate_task_result_envelope`
   (`python/horsies/core/codec/typed.py:1133`), `decode_task_result` (`:1183`),
   `decode_task_error` (`:1078`).
-- Core: `TaskResult`'s `Deserialize` (`crates/horsies-core/src/core/task/result.rs:63`),
-  `read_task_result_text` (`:158`), `TaskError::from_stored_value`
-  (`crates/horsies-core/src/core/task/error.rs:665`). A result read keeps the
+- Core: `TaskResult`'s `Deserialize` (`crates/horsies-core/src/core/task/result.rs:67`),
+  `read_task_result_text` (`:123`), `TaskError::from_stored_text`
+  (`crates/horsies-core/src/core/task/error.rs:678`); the `ok` value and the
+  error `data` decode from their own text. A result read keeps the
   stored text (`StoredEnvelopeText::parse`,
   `crates/horsies-core/src/broker/result_types.rs:146`). The child host
   (`build_task_input`, an `args_from` member and a result of the workflow

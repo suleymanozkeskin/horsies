@@ -92,7 +92,7 @@ async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str
     );
     assert_eq!(error.message.as_deref(), Some(message), "{case}");
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1})),
         "{case}"
     );
@@ -286,7 +286,7 @@ async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
             );
             assert_eq!(error.message.as_deref(), Some(expected.as_str()), "{case}");
             assert_eq!(
-                error.data,
+                error.data_value(),
                 Some(serde_json::json!({"dependency_index": 0})),
                 "{case}"
             );

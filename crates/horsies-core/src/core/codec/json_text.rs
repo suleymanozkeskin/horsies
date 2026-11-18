@@ -30,6 +30,26 @@ impl JsonText {
         Ok(Self(raw_value_of_checked(text)))
     }
 
+    /// The text of `value`, written by the core's strict writer
+    /// ([`super::to_json_string`]): compact, each float as Python writes it,
+    /// an integer of any width with all its digits.
+    ///
+    /// Errors: [`JsonTextRefused`]. Pure.
+    pub fn of<T: Serialize>(value: &T) -> Result<Self, JsonTextRefused> {
+        let text = super::to_json_string(value).map_err(JsonTextRefused::NotJsonNative)?;
+        Self::parse(&text).map_err(JsonTextRefused::NotStrictJson)
+    }
+
+    /// The text of a value that the engine builds with `serde_json::json!`
+    /// from texts, integers and booleans, such as the `data` of a library
+    /// error.
+    ///
+    /// Panics: when the value does not write as strict JSON, a defect of the
+    /// engine code that built it. Pure.
+    pub(crate) fn of_engine_value(value: &serde_json::Value) -> Self {
+        Self::of(value).expect("a value that the engine builds writes as strict JSON")
+    }
+
     /// A member or an element of a text that passed the strict read rule:
     /// the part passes the rule too. Pure.
     pub(crate) fn of_checked_part(part: &RawValue) -> Self {
@@ -50,6 +70,20 @@ impl JsonText {
     pub fn decode<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         super::decode_checked(serde_json::Deserializer::from_str(self.get()))
     }
+}
+
+/// Why a value does not become a [`JsonText`].
+#[derive(Debug, thiserror::Error)]
+pub enum JsonTextRefused {
+    /// The value does not write as JSON: a non-finite float, a map key that
+    /// is not a text, or a `Serialize` impl that fails.
+    #[error("the value does not write as JSON: {0}")]
+    NotJsonNative(serde_json::Error),
+    /// The written text breaks the strict read rule: nested deeper than
+    /// [`super::MAX_JSON_DEPTH`] levels, an integer of more than
+    /// [`super::MAX_INT_DIGITS`] digits, or a repeated key.
+    #[error("the written value breaks the strict read rule: {0}")]
+    NotStrictJson(StrictJsonError),
 }
 
 impl PartialEq for JsonText {
@@ -104,7 +138,7 @@ fn raw_value_of_checked(text: &str) -> Box<RawValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::JsonText;
+    use super::{JsonText, JsonTextRefused};
 
     const U128_MAX_TEXT: &str = "340282366920938463463374607431768211455";
     const BELOW_I64_MIN_TEXT: &str = "-9223372036854775809";
@@ -132,6 +166,27 @@ mod tests {
         for text in ["", "NaN", r#"{"a":1,"a":2}"#, "[1] [2]", "1e400"] {
             assert!(JsonText::parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_value_writes_with_every_digit_of_a_wide_integer() {
+        let written = JsonText::of(&(u128::MAX, i128::from(i64::MIN) - 1, 1e-5)).unwrap();
+        assert_eq!(
+            written.get(),
+            format!("[{U128_MAX_TEXT},{BELOW_I64_MIN_TEXT},1e-05]")
+        );
+        assert!(matches!(
+            JsonText::of(&f64::NAN),
+            Err(JsonTextRefused::NotJsonNative(_))
+        ));
+        let mut deep = serde_json::json!(1);
+        for _ in 0..=crate::core::codec::MAX_JSON_DEPTH {
+            deep = serde_json::Value::Array(vec![deep]);
+        }
+        assert!(matches!(
+            JsonText::of(&deep),
+            Err(JsonTextRefused::NotStrictJson(_))
+        ));
     }
 
     #[test]

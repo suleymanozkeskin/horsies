@@ -449,7 +449,10 @@ unless it starts with "Added".
   only the engine writes, data deeper than the error bound) is replaced with
   `{"data_refused": "<cause>"}`, the cause that Python stores, and the code
   and the message are kept. The replacement is logged at ERROR with the
-  code. Before, a non-finite float became `null` with no notice.
+  code. Before, a non-finite float became `null` with no notice. `data()`
+  returns `Option<&JsonText>`, the data as its stored text (`get`,
+  `decode::<T>`): an integer outside the `i64` and `u64` range is stored
+  with every digit and reads as `u128` or `i128`, as in Python.
 - **Added: `#[derive(horsies::UserErrorCode)]`.** On an enum of unit
   variants, each variant's code is its name in UPPER_SNAKE_CASE
   (`RateLimited` is `RATE_LIMITED`). A code with the name of a built-in code
