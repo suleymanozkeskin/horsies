@@ -389,7 +389,9 @@ fn launch_with_preload() -> ChildLaunch {
 /// command of the child program, and the init frame of a child.
 #[test]
 fn the_preload_plan_takes_the_mode_the_command_and_the_init_frame_of_the_first_kind() {
-    let all_kinds = profile(serde_json::from_str(ALL_KINDS).expect("test JSON"));
+    let mut document: serde_json::Value = serde_json::from_str(ALL_KINDS).expect("test JSON");
+    document["preload"] = serde_json::json!("library");
+    let all_kinds = profile(document);
     let plan = preload_plan(&all_kinds, &launch_with_preload()).expect("a library preload");
     assert_eq!(plan.mode, PreloadMode::Library);
     assert_eq!(plan.command, preload_command());
@@ -417,6 +419,7 @@ fn no_preload_runs_for_a_profile_without_one_or_a_child_program_without_one() {
     assert!(preload_plan(&no_preload, &launch_with_preload()).is_none());
     let library = profile(serde_json::json!({
         "isolated": {"kind": "isolated_children", "count": 1},
+        "preload": "library",
     }));
     assert!(preload_plan(&library, &launch()).is_none());
 }
