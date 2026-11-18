@@ -429,8 +429,8 @@ impl CoreHandle {
         )
     }
 
-    /// Enqueue one task: `Enqueued` or one of the send failure classes.
-    /// Writes.
+    /// Enqueue one task: `Enqueued`, or the generated broker error class of
+    /// the failure (`BrokerCoreEnqueueError`). Writes.
     fn enqueue(&self, py: Python<'_>, request: &Bound<'_, EnqueueRequest>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -786,7 +786,8 @@ impl CoreHandle {
     }
 
     /// Start one workflow (`horsies_workflow_start`): `WorkflowStarted`,
-    /// `WorkflowExists`, `WorkflowIdTaken` or `WorkflowStartFailed`. Writes;
+    /// `WorkflowExists`, or the generated `WorkflowStartIdConflict` or
+    /// `WorkflowStartEnqueueFailed` (`horsies._catalog.workflow_start_errors`). Writes;
     /// a caller that leaves does not stop it. The children of its
     /// sub-workflow roots come from the child spec source, which runs on the
     /// callback thread while this thread waits with the GIL released. A

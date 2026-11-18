@@ -234,9 +234,9 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 
 | Variant | `code()` | Other fields |
 |---------|----------|--------------|
-| `ValidationFailed` | `ValidationFailed` | `workflow_id`, `cause` (what refused the start) |
+| `ValidationFailed` | `ValidationFailed` | `workflow_id`, `cause`: a `StartRefusalCause`, the `WorkflowError` that refused the start (`Error`) or a check that found the refusal with no error (`Check`) |
 | `IdConflict` | `WorkflowIdConflict` | `workflow_id`, `existing_workflow_name` |
-| `EnqueueFailed` | `EnqueueFailed` | `workflow_id`, `retryable`, `cause` (what the start met) |
+| `EnqueueFailed` | `EnqueueFailed` | `workflow_id`, `retryable`, `cause`: the `WorkflowError` that the start met; a failed connect or schema install is `WorkflowError::Broker` |
 | `AsyncContext` | `AsyncContext` | `workflow_id` |
 
 `retryable()` is `false` for every variant but `EnqueueFailed`.

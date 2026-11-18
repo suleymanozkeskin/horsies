@@ -51,14 +51,15 @@ pub use crate::core::{
     PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
     RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionChoice,
     RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, SubWorkflowFailure, SubWorkflowParams,
-    SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
-    TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule,
-    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode,
-    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
-    WorkflowContext, WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    RetryPolicyError, ScheduleConfig, SchedulePattern, StartRefusalCause, SubWorkflowFailure,
+    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
+    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions,
+    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResult, TaskStatus, UserCode, UserCodeRefused, ValidationReport, Weekday,
+    WeeklySchedule, WorkerResilienceConfig, WorkflowContext, WorkflowMeta, WorkflowSpec,
+    WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus,
+    WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
+    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 // A user value kept as its stored text: a sub-workflow summary output, the `data` of a task error.
@@ -67,13 +68,13 @@ pub use crate::core::codec::{JsonText, JsonTextRefused};
 // broker re-exports
 pub use crate::broker::{
     expected_schema_version, BrokerCheckCause, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerOperationSource, BrokerResult, CheckInterruption, CheckedSend,
-    ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError,
-    ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead, RawResultRecord,
-    SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, StoredEnvelopeRefused,
-    StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow, WorkerPingRequest,
-    WorkerPingStep, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
-    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    BrokerOperationFailedCode, BrokerOperationSource, BrokerRefusalCause, BrokerResult,
+    CheckInterruption, CheckedSend, ConnectivityRefusal, DatabasePing, ExpiredTaskRow,
+    HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker,
+    RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
+    StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow,
+    WorkerPingRequest, WorkerPingStep, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.

@@ -44,7 +44,7 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
   <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`.
   `OperationFailed` carries its `cause`, a `BrokerOperationSource` (the
   `BrokerError`, a refused class read, a snapshot that does not read, a
-  refused subscription); `InvalidInput` carries `BrokerCheckCause::Check`.
+  refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`.
   Each read connects the app's handle and installs the schema once per
   handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,

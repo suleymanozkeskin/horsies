@@ -15,7 +15,8 @@ pub use node::{AnyNode, JoinType, NodeKey, SubWorkflowParams};
 pub use policy::{SuccessCase, SuccessPolicy};
 pub use spec::WorkflowSpec;
 pub use start_types::{
-    validate_start_retry, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
+    validate_start_retry, StartRefusalCause, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult,
 };
 pub use status::{
     OnError, WorkflowStatus, WorkflowTaskStatus, WF_TASK_TERMINAL_VALUES,

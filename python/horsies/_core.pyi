@@ -7,9 +7,10 @@ import uuid
 from collections.abc import Callable
 from typing import Literal, final
 
-from horsies._catalog.broker_errors import BrokerInvalidInput, BrokerInvalidJsonPayload, BrokerListenerDisabled, BrokerOperationFailed
+from horsies._catalog.broker_errors import BrokerCoreEnqueueError, BrokerInvalidInput, BrokerInvalidJsonPayload, BrokerListenerDisabled, BrokerOperationFailed
 from horsies._catalog.monitoring_errors import MonitoringQueryCoreError, TaskActionCoreError
 from horsies._catalog.workflow_handle_errors import HandleDbOperationFailed, HandleResumeRecoveryFailed, HandleStoredDataInvalid
+from horsies._catalog.workflow_start_errors import WorkflowStartEnqueueFailed, WorkflowStartIdConflict
 
 
 class CoreError(Exception):
@@ -166,11 +167,11 @@ class CoreHandle:
         """The schema state of the database. Reads only."""
     def schema_status_async(self) -> asyncio.Future[SchemaStatusRecord]:
         """The awaitable form of the method above."""
-    def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
+    def enqueue(self, request: EnqueueRequest) -> Enqueued | BrokerCoreEnqueueError:
         """Enqueue one task, in one statement. Installs the schema once per handle first. Writes; a
         resend with send_kind REPEAT is safe.
         """
-    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
+    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | BrokerCoreEnqueueError]:
         """The awaitable form of the method above."""
     def requeue_stale_claimed_async(self, stale_after_ms: int) -> asyncio.Future[StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed]:
         """One stale CLAIMED requeue pass. Writes; each batch commits alone. A threshold that
@@ -225,13 +226,13 @@ class CoreHandle:
         on the callback thread for each sub-workflow child that an operation builds. A second
         registration raises RuntimeError. Starts nothing.
         """
-    def start_workflow(self, request: WorkflowStartRequest) -> WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed:
+    def start_workflow(self, request: WorkflowStartRequest) -> WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed:
         """Start one workflow. Writes; a caller that leaves does not stop it. The children of its
         sub-workflow roots come from the child spec source. A build that raised (KeyboardInterrupt,
         SystemExit, or an Exception such as SerializationError) rolls the start back and raises it
         again. With no child spec source it raises RuntimeError.
         """
-    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed]:
+    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed]:
         """The awaitable form of the method above."""
     def resume_workflow(self, workflow_id: uuid.UUID) -> WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed:
         """Resume one workflow tree. Writes; a caller that leaves does not stop it. The child starts
@@ -661,103 +662,6 @@ class Enqueued:
     """The task is stored, or it already was under the same command."""
     @property
     def task_id(self) -> uuid.UUID: ...
-
-
-@final
-class SendSuppressed:
-    """Sends are suppressed. Nothing was written."""
-    @property
-    def message(self) -> str: ...
-
-
-@final
-class SendAsyncContext:
-    """A blocking send ran on a thread that runs an event loop or a tokio runtime. Nothing was
-    written. A client produces it before the send, never the core's enqueue.
-    """
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
-
-
-@final
-class SendValidationFailed:
-    """The core refused the send before any statement. Nothing was written."""
-    @property
-    def code(self) -> Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def cause(self) -> SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule: ...
-
-
-@final
-class SendRefusalUnreadableJson:
-    """The refused text does not read as JSON. reader_error is the JSON reader's error."""
-    @property
-    def reader_error(self) -> str: ...
-
-
-@final
-class SendRefusalByRule:
-    """A rule refused a value that reads. The message is the only fact."""
-
-
-@final
-class SendRefusalByValueRule:
-    """A rule of the version-1 command or of the scoped idempotency key refused a value. rule is
-    the rule's text.
-    """
-    @property
-    def rule(self) -> str: ...
-
-
-@final
-class SendEnqueueFailed:
-    """The enqueue failed; the row may or may not exist. A retention class key that no class
-    derives is this record too, built before any statement: nothing was written, and
-    retryable is False.
-    """
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def retryable(self) -> bool: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
-
-
-@final
-class SendPayloadMismatch:
-    """The task id exists with another command or idempotency key. Nothing was written."""
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
-
-
-@final
-class SendPayloadTooLarge:
-    """The input is larger than the configured limit. Nothing was written."""
-    @property
-    def message(self) -> str: ...
-    @property
-    def size_bytes(self) -> int: ...
-    @property
-    def limit_bytes(self) -> int: ...
-
-
-@final
-class SendKeyConflict:
-    """The idempotency key is reserved by owner_task_id with another command."""
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def owner_task_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
 
 
 @final
@@ -2235,15 +2139,6 @@ class WorkflowExists:
 
 
 @final
-class WorkflowIdTaken:
-    """A workflow with this id exists under another name. Nothing was written."""
-    @property
-    def workflow_id(self) -> uuid.UUID: ...
-    @property
-    def existing_name(self) -> str: ...
-
-
-@final
 class NodeFinishRequest:
     """One frozen phase 2. Another facts or wake value raises ValueError."""
     def __init__(self, *, task_id: uuid.UUID, facts: Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN'], wake: Literal['SEND', 'NONE']) -> None: ...
@@ -2452,22 +2347,6 @@ class WorkflowNotPaused:
     """The workflow exists and is not PAUSED. Nothing was written."""
     @property
     def workflow_id(self) -> uuid.UUID: ...
-
-
-@final
-class WorkflowStartFailed:
-    """The connect, the schema install, the client family check, the statement or an owed
-    child start failed, or a child build did not run. Nothing committed, or the commit
-    outcome is unknown: a resend with the same id then finds the workflow.
-    """
-    @property
-    def workflow_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def retryable(self) -> bool: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final

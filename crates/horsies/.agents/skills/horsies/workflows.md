@@ -364,7 +364,11 @@ message, retryable, workflow_name, workflow_id, cause }` and `AsyncContext {
 message, workflow_name, workflow_id }`. The methods `code()`, `message()`,
 `retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()` read
 every variant. `workflow_id` is the id of the start: the caller's, or the
-id minted for it before the checks.
+id minted for it before the checks. The `cause` of `ValidationFailed` is a
+`StartRefusalCause`: `Error(WorkflowError)` for a refusal by the engine,
+`Check` for a refusal that a check found. The `cause` of `EnqueueFailed` is
+the `WorkflowError` that the start met; a failed connect or schema install
+is `WorkflowError::Broker`.
 
 | `WorkflowStartErrorCode` | When |
 |---|---|

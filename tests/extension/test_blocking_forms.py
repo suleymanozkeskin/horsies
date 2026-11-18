@@ -24,7 +24,7 @@ PROGRAM = 'blocking_forms'
 LIFE: Final[list[tuple[str, str]]] = [
     ('start', 'WorkflowStarted'),
     ('start_again', 'WorkflowExists'),
-    ('start_other_name', 'WorkflowIdTaken'),
+    ('start_other_name', 'WorkflowStartIdConflict'),
     ('status', 'WorkflowStatusRead'),
     ('wait_no_time', 'WaitTimedOut'),
     ('node_result', 'NodeResultNotStored'),
@@ -77,7 +77,9 @@ def test_each_blocking_workflow_form_gives_the_outcome_of_its_awaitable_form(
     assert [(step, _class_of(outcome)) for step, outcome in pairs] == LIFE
     outcomes = dict(pairs)
     assert outcomes['status'] == ['WorkflowStatusRead', 'RUNNING']
-    assert outcomes['start_other_name'] == ['WorkflowIdTaken', 'tests.extension.blocking_forms']
+    assert outcomes['start_other_name'] == [
+        'WorkflowStartIdConflict', 'tests.extension.blocking_forms',
+    ]
     assert outcomes['node_results'] == ['WorkflowNodeResultsRead', []]
     # A cancel writes no error.
     assert outcomes['wait_no_limit'] == ['WorkflowEndedRead', 'CANCELLED', True]
@@ -118,7 +120,7 @@ def test_each_blocking_form_on_an_unreachable_database_gives_the_awaitable_failu
 
     assert blocking == awaited
     outcomes = dict(_pairs(blocking))
-    assert _class_of(outcomes['start']) == 'WorkflowStartFailed'
+    assert _class_of(outcomes['start']) == 'WorkflowStartEnqueueFailed'
     for read in ('status', 'wait', 'node_result', 'node_results', 'nodes', 'pause', 'resume', 'cancel'):
         assert _class_and_code(outcomes[read]) == (
             'HandleDbOperationFailed', 'DB_OPERATION_FAILED',

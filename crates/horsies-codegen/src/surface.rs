@@ -416,9 +416,9 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
 
 const PING_OUTCOME: &str = "DatabasePingRecord | BrokerOperationFailed";
 const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed";
-const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendAsyncContext | \
-     SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | \
-     SendKeyConflict";
+/// A refused or failed send is a generated class of
+/// `horsies._catalog.broker_errors`, built in Rust.
+const SEND_OUTCOME: &str = "Enqueued | BrokerCoreEnqueueError";
 const TASK_INFO_OUTCOME: &str =
     "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
 const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
@@ -453,8 +453,10 @@ const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
 const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | \
      AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
 
+/// A refused or failed start is a generated class of
+/// `horsies._catalog.workflow_start_errors`, built in Rust.
 const START_WORKFLOW_OUTCOME: &str =
-    "WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed";
+    "WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed";
 const START_WORKFLOW_PARAMETERS: &[StubParameter] =
     &[positional("request", "WorkflowStartRequest")];
 const REGISTER_CHILD_SPEC_SOURCE_PARAMETERS: &[StubParameter] = &[positional(
@@ -1443,96 +1445,6 @@ const RECORD_CLASSES: &[StubClass] = &[
         doc: "The task is stored, or it already was under the same command.",
         constructor: Constructor::NoConstructor,
         properties: &[property("task_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendSuppressed",
-        doc: "Sends are suppressed. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendAsyncContext",
-        doc: "A blocking send ran on a thread that runs an event loop or a tokio runtime. Nothing was\nwritten. A client produces it before the send, never the core's enqueue.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendValidationFailed",
-        doc: "The core refused the send before any statement. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("code", "Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']"),
-            property("message", "str"),
-            property(
-                "cause",
-                "SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule",
-            ),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendRefusalUnreadableJson",
-        doc: "The refused text does not read as JSON. reader_error is the JSON reader's error.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("reader_error", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendRefusalByRule",
-        doc: "A rule refused a value that reads. The message is the only fact.",
-        constructor: Constructor::NoConstructor,
-        properties: &[],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendRefusalByValueRule",
-        doc: "A rule of the version-1 command or of the scoped idempotency key refused a value. rule is\nthe rule's text.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("rule", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendEnqueueFailed",
-        doc: "The enqueue failed; the row may or may not exist. A retention class key that no class\nderives is this record too, built before any statement: nothing was written, and\nretryable is False.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendPayloadMismatch",
-        doc: "The task id exists with another command or idempotency key. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendPayloadTooLarge",
-        doc: "The input is larger than the configured limit. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("message", "str"),
-            property("size_bytes", "int"),
-            property("limit_bytes", "int"),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendKeyConflict",
-        doc: "The idempotency key is reserved by owner_task_id with another command.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            property("owner_task_id", "uuid.UUID"),
-            property("message", "str"),
-        ],
         methods: &[],
     },
     StubClass {
@@ -2914,16 +2826,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "WorkflowIdTaken",
-        doc: "A workflow with this id exists under another name. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("existing_name", "str"),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "NodeFinishRequest",
         doc: "One frozen phase 2. Another facts or wake value raises ValueError.",
         constructor: Constructor::Parameters(NODE_FINISH_REQUEST_PARAMETERS),
@@ -3084,18 +2986,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         doc: "The workflow exists and is not PAUSED. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("workflow_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "WorkflowStartFailed",
-        doc: "The connect, the schema install, the client family check, the statement or an owed\nchild start failed, or a child build did not run. Nothing committed, or the commit\noutcome is unknown: a resend with the same id then finds the workflow.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
         methods: &[],
     },
 ];
@@ -3856,6 +3746,7 @@ const IMPORTS: &[StubImport] = &[
     StubImport {
         module: "horsies._catalog.broker_errors",
         names: &[
+            "BrokerCoreEnqueueError",
             "BrokerInvalidInput",
             "BrokerInvalidJsonPayload",
             "BrokerListenerDisabled",
@@ -3873,6 +3764,10 @@ const IMPORTS: &[StubImport] = &[
             "HandleResumeRecoveryFailed",
             "HandleStoredDataInvalid",
         ],
+    },
+    StubImport {
+        module: "horsies._catalog.workflow_start_errors",
+        names: &["WorkflowStartEnqueueFailed", "WorkflowStartIdConflict"],
     },
 ];
 

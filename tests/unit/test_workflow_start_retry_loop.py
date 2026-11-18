@@ -12,7 +12,6 @@ is faked.
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -56,14 +55,15 @@ def _broker(answer: object = None, *, raises: BaseException | None = None) -> An
     return broker
 
 
-def _failure_record(cause: BaseException, *, retryable: bool) -> MagicMock:
-    """A stand-in for the core's ``WorkflowStartFailed``: a class pattern matches it."""
-    record = MagicMock(spec=core.WorkflowStartFailed)
-    record.workflow_id = uuid.UUID(WORKFLOW_ID)
-    record.message = f'start failed: {cause}'
-    record.retryable = retryable
-    record.exception = cause
-    return record
+def _failure_record(cause: BaseException, *, retryable: bool) -> WorkflowStartEnqueueFailed:
+    """The class that the core builds for a failed start of ``test-wf``."""
+    return WorkflowStartEnqueueFailed(
+        message=f'start failed: {cause}',
+        retryable=retryable,
+        workflow_name='test-wf',
+        workflow_id=WORKFLOW_ID,
+        exception=cause,
+    )
 
 
 async def _start_with_spec_data(broker: Any, **options: Any) -> Any:

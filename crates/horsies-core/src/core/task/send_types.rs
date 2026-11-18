@@ -381,8 +381,8 @@ impl std::error::Error for TaskSendError {}
 /// - a key reserved by another task is `IDEMPOTENCY_KEY_CONFLICT`, naming
 ///   the owner;
 /// - every other error is `ENQUEUE_FAILED` with the error's own retryable
-///   flag; a conflict whose row vanished before the compare is not
-///   retryable.
+///   flag; a conflict whose row vanished before the compare and a retention
+///   class key that no class derives are not retryable.
 ///
 /// `cause` of `VALIDATION_FAILED` and `ENQUEUE_FAILED` is the cause of
 /// `error` ([`BrokerError::failure_cause`]).
@@ -421,6 +421,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
         | BrokerError::EnqueueConflictUnverifiable { .. }
+        | BrokerError::RetentionClassKey(_)
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
         | BrokerError::InstallCoverage(_)
