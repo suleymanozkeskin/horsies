@@ -74,8 +74,9 @@ HEADER: Final = (
 _ATTR: Final = re.compile(r'^\s*#\[(?:tokio::test|test|sqlx::test)\b')
 _FN: Final = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)')
 _MOD: Final = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*\{')
-_STRING: Final = re.compile(r'"(?:\\.|[^"\\])*"')
 _CHAR: Final = re.compile(r"'(?:\\.|[^'\\])'")
+_RAW_STRING_OPEN: Final = re.compile(r'b?r(#*)"')
+_IDENTIFIER_CHAR: Final = re.compile(r'\w')
 
 # Tests that the tip holds under another name, for the 0.8.0 rule (one input
 # value, the core's catalogs, the clean-slate history): frozen name -> tip
@@ -186,9 +187,58 @@ def _module_of(file: str) -> list[str]:
             return [file]
 
 
-def _code(line: str) -> str:
-    """The line without string and char literals and its line comment."""
-    return _CHAR.sub("''", _STRING.sub('""', line)).split('//')[0]
+def _literal_end(text: str, start: int) -> int | None:
+    """The index after the string or char literal, or the comment, that
+    starts at `start` of `text`, or None when no literal starts there. A
+    string, a raw string (`r#"..."#`) and a block comment may span lines; the
+    end of the text ends an open one."""
+    if text.startswith('//', start):
+        end = text.find('\n', start)
+        return len(text) if end == -1 else end
+    if text.startswith('/*', start):
+        end = text.find('*/', start + 2)
+        return len(text) if end == -1 else end + 2
+    previous = text[start - 1] if start > 0 else ' '
+    raw = _RAW_STRING_OPEN.match(text, start)
+    if raw is not None and _IDENTIFIER_CHAR.match(previous) is None:
+        closing = '"' + raw.group(1)
+        end = text.find(closing, raw.end())
+        return len(text) if end == -1 else end + len(closing)
+    match text[start]:
+        case '"':
+            index = start + 1
+            while index < len(text):
+                match text[index]:
+                    case '\\':
+                        index += 2
+                    case '"':
+                        return index + 1
+                    case _:
+                        index += 1
+            return len(text)
+        case "'":
+            char = _CHAR.match(text, start)
+            return None if char is None else char.end()
+        case _:
+            return None
+
+
+def _code_lines(text: str) -> list[str]:
+    """The lines of `text` with the contents of string and char literals and
+    of comments blanked, so that a brace counts only in code. The text keeps
+    its lines: a literal that spans lines leaves its newlines."""
+    kept: list[str] = []
+    index = 0
+    while index < len(text):
+        end = _literal_end(text, index)
+        match end:
+            case None:
+                kept.append(text[index])
+                index += 1
+            case int():
+                kept.append(''.join('\n' if char == '\n' else ' ' for char in text[index:end]))
+                index = end
+    return ''.join(kept).split('\n')
 
 
 def _inline_tests(text: str) -> list[tuple[list[str], str]]:
@@ -197,15 +247,14 @@ def _inline_tests(text: str) -> list[tuple[list[str], str]]:
     stack: list[tuple[str, int]] = []
     depth = 0
     after_attribute = False
-    for line in text.split('\n'):
-        opened = _MOD.match(line)
-        if _ATTR.match(line):
+    for code in _code_lines(text):
+        opened = _MOD.match(code)
+        if _ATTR.match(code):
             after_attribute = True
-        function = _FN.match(line)
+        function = _FN.match(code)
         if function is not None and after_attribute:
             found.append(([name for name, _depth in stack], function.group(1)))
             after_attribute = False
-        code = _code(line)
         if opened is not None:
             stack.append((opened.group(1), depth))
         depth += code.count('{') - code.count('}')

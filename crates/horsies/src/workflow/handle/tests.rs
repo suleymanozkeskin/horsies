@@ -352,7 +352,15 @@ fn an_outputless_entry_without_a_payload_a_task_name_or_an_envelope_names_its_no
     else {
         panic!("an outputless result reads as Succeeded");
     };
-    assert_eq!(results.get("a"), Some(&TaskOutcome::Succeeded(json!(1))));
+    let Some(TaskOutcome::Succeeded(value)) = results.get("a") else {
+        panic!("entry a reads as Succeeded");
+    };
+    assert_eq!(
+        value
+            .decode::<serde_json::Value>()
+            .expect("the stored value decodes"),
+        json!(1)
+    );
     for node in ["b", "c", "d"] {
         let Some(TaskOutcome::Failed(error)) = results.get(node) else {
             panic!("entry {node} reads as Failed");
