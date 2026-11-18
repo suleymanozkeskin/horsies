@@ -2,12 +2,14 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::core::task::result::TaskResult;
 
+mod any_format_text;
 mod json_text;
 mod object_members;
 pub(crate) mod python_loads;
 mod strict;
 mod strict_read;
 pub mod user_value;
+pub(crate) use any_format_text::optional_json_text_of_any_format;
 pub use json_text::{JsonText, JsonTextRefused};
 pub use object_members::object_members;
 pub use strict::{to_json_bytes_strict, to_json_value_strict};

@@ -669,8 +669,9 @@ unless it starts with "Added".
   form, and returns `Result<TaskSchedule, JsonTextRefused>`
   (`horsies::JsonTextRefused`). An integer outside the `i64` and `u64` range
   keeps every digit: a schedule input of `u128::MAX` is stored as written
-  and its task reads `u128::MAX`. A JSON config text keeps the text of the
-  `input` member; a TOML config text refuses an `input` member.
+  and its task reads `u128::MAX`. A config text of any serde format (TOML,
+  JSON) gives the `input` member as its value, written by the same writer;
+  there an integer must fit `i64` or `u64`.
 - **Added: the blocking API, `horsies::blocking`.** `TaskFunction::blocking()`,
   `TaskHandle::blocking()`, `Horsies::blocking()`,
   `WorkflowFunction::blocking()`, `WorkflowTemplate::blocking()` and
