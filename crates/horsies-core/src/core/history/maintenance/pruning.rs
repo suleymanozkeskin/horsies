@@ -512,7 +512,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_candidate_read_scans_only_active_catalog_records() {
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let url = crate::test_support::migrated_database_url().await;
         let (client, notices) = connect_collecting_notices(&url).await;
         client.batch_execute("BEGIN").await.expect("begin");
         client

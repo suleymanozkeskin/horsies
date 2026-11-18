@@ -242,7 +242,7 @@ async fn remove_task(pool: &PgPool, task_id: Uuid) {
 #[tokio::test]
 #[serial]
 async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = format!("slots_{}", &Uuid::new_v4().simple().to_string()[..8]);
     let (task_id, generation) = seed_running(&pool, &queue).await;
     let broker = Arc::new(PostgresBroker::from_pool(

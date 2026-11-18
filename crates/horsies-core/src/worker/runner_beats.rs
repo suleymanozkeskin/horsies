@@ -1473,7 +1473,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn one_statement_beats_only_rows_that_pass_the_fence() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         // The heartbeat table has no default partition: the current hour
         // needs its leaf, as at worker start.
         crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool(

@@ -107,7 +107,7 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
 #[tokio::test]
 #[serial]
 async fn a_complete_locked_record_owes_phase_two() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let seeded = seed_record(&pool, "COMPLETE_LOCKED").await;
 
@@ -131,7 +131,7 @@ async fn a_complete_locked_record_owes_phase_two() {
 #[tokio::test]
 #[serial]
 async fn failure_and_expiry_records_owe_phase_two() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     for kind in [
         "FAIL_RUNNING",
@@ -162,7 +162,7 @@ async fn failure_and_expiry_records_owe_phase_two() {
 #[tokio::test]
 #[serial]
 async fn a_consumed_record_owes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     let outcome = replay_of_committed_write(&broker, Uuid::new_v4(), true).await;
@@ -178,7 +178,7 @@ async fn a_consumed_record_owes_nothing() {
 #[tokio::test]
 #[serial]
 async fn a_plain_task_replay_owes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     let outcome = replay_of_committed_write(&broker, Uuid::new_v4(), false).await;

@@ -54,7 +54,7 @@ async fn terminalize_two_hours_ago(connection: &mut PgConnection, key: &[u8], ta
 }
 
 async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+    crate::broker::terminalization_matrix::sqlx_migrated_pool().await
 }
 
 /// `TestClaimReplayConflict.test_window_above_maximum_is_rejected_before_mutation`:

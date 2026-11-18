@@ -117,7 +117,7 @@ fn reported_value() -> AttemptEnd {
 #[tokio::test]
 #[serial_test::serial]
 async fn plain_successes_settle_through_the_batcher() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let first = claimed_now();
     let second = claimed_now();
     seed_running(&pool, first.task_id, WORKER, first.claimed_at).await;
@@ -148,7 +148,7 @@ async fn plain_successes_settle_through_the_batcher() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plain_success_on_a_row_this_claim_does_not_hold_writes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, OTHER_WORKER, claimed.claimed_at).await;
     let writer = writer(Arc::new(PostgresBroker::from_pool(
@@ -271,7 +271,7 @@ async fn seed_workflow_node_task(
 #[tokio::test]
 #[serial_test::serial]
 async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let writer = Arc::new(writer_with_queue_room(Arc::new(PostgresBroker::from_pool(
         pool.clone(),
         crate::ClientFamily::Rust,
@@ -358,7 +358,7 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plain_success_settle_is_one_round_trip() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
@@ -397,7 +397,7 @@ async fn a_plain_success_settle_is_one_round_trip() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_stop_for_a_node_not_linked_sends_no_statement() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;

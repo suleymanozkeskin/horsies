@@ -14,14 +14,13 @@
 
 use chrono::Duration;
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::claims::claim_pass;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::error::BrokerError;
-use crate::broker::pools::unpinged_single_connection_core_pool;
+use crate::broker::pools::unpinged_single_connection_core_pool_for_url;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization;
 use crate::broker::terminalization::on_test_pool::terminalize;
@@ -29,6 +28,7 @@ use crate::core::lifecycle::{
     OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
 use crate::db::StatementFailure;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::{
     finalize_workflow_phase, FinalizeError, FinalizeStage, PhaseTwoForm,
 };
@@ -52,8 +52,8 @@ fn running_in_queue() -> TaskSeed {
     }
 }
 
-async fn history_rows(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
+async fn history_rows(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -146,9 +146,9 @@ async fn a_lost_claim_generation_writes_nothing() {
 #[serial]
 async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
     let pool = pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = unpinged_single_connection_core_pool_for_url(&proxy.url(upstream));
     // Open the connection, run the pool's first-use check and prepare the
     // statement on it, so the completion is one request with one reply. The
     // connection is back in the pool when the call returns.
@@ -213,7 +213,7 @@ async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
 #[serial]
 async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
     let pool = pool().await;
-    let unpinged = unpinged_single_connection_core_pool(&database_options(&pool));
+    let unpinged = unpinged_single_connection_core_pool_for_url(pool.url());
     let pid = core_pool_backend_pid(&unpinged).await;
     let task_id = seed_task(&pool, &running_in_queue()).await;
     let before = live_row(&pool, task_id).await;
@@ -280,10 +280,10 @@ async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
 #[serial]
 async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pool = pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let broker = PostgresBroker::from_pool(proxied, crate::ClientFamily::Rust);
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
+    let broker = PostgresBroker::from_test_url(proxied.url(), crate::ClientFamily::Rust);
     plain_phase_two(&broker).await.expect("warm up");
     proxy.reset_round_trips();
 
@@ -316,7 +316,7 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
 #[serial]
 async fn a_dead_connection_fails_the_claim_pass_as_retryable() {
     let pool = pool().await;
-    let unpinged = unpinged_single_connection_core_pool(&database_options(&pool));
+    let unpinged = unpinged_single_connection_core_pool_for_url(pool.url());
     let pid = core_pool_backend_pid(&unpinged).await;
     let task_id = seed_task(
         &pool,

@@ -959,7 +959,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_workflow_counts_once_per_pass() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_node(&pool, workflow_id, 0, "PENDING").await;
@@ -1013,7 +1013,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_limit_fails_a_workflow_with_no_live_node() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_node(&pool, workflow_id, 0, "READY").await;
@@ -1078,7 +1078,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_limit_keeps_a_stored_first_error_and_leaves_a_live_node_to_finish() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let first_error =
             serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
@@ -1124,7 +1124,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_workflow_that_is_not_running_refuses_the_limit_and_keeps_the_count() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "PAUSED", None).await;
         seed_node(&pool, workflow_id, 0, "PENDING").await;
@@ -1155,7 +1155,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_panicking_candidate_counts_toward_the_bound() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_node(&pool, workflow_id, 0, "PENDING").await;
@@ -1185,7 +1185,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_over_limit_count_takes_running_workflows_only() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let before = count_over_failure_limit(&broker_of(&pool), 1_000)
             .await
             .unwrap();

@@ -179,7 +179,7 @@ mod publication_contract_tests {
     #[tokio::test]
     #[serial]
     async fn failed_publication_restores_manifest_and_reader_definitions_on_rollback() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut tx = pool.begin().await.unwrap();
         let manifest_sql = "SELECT jsonb_agg(to_jsonb(m) ORDER BY probe_position) FROM horsies_task_lookup_manifest m";
         let before: serde_json::Value = sqlx::query_scalar(manifest_sql)

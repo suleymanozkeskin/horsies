@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::{Connection, PgPool};
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::{core_pool_for_test_pool, unpinged_single_connection_core_pool};
+use crate::broker::pools::{core_pool_for_test_url, unpinged_single_connection_core_pool_for_url};
 use crate::core::lifecycle::{TerminalizationKind, TerminalizationOutcome};
 use crate::db::{CorePool, Transience};
+use crate::test_support::sql::{self, TestConnection, TestPool};
 use crate::worker::finalize_batch::statement::complete_plain_successes;
 use crate::worker::finalize_batch::{BatchWriteError, PlainSuccess, SuccessBatch};
 
@@ -72,7 +72,7 @@ fn running() -> TaskSeed {
 }
 
 /// `count` rows of [`running`].
-async fn running_tasks(pool: &PgPool, count: usize) -> Vec<Uuid> {
+async fn running_tasks(pool: &TestPool, count: usize) -> Vec<Uuid> {
     let mut task_ids = Vec::with_capacity(count);
     for _ in 0..count {
         task_ids.push(seed_task(pool, &running()).await);
@@ -128,8 +128,8 @@ fn kinds(outcomes: &[TerminalizationOutcome]) -> Vec<&'static str> {
 }
 
 /// The status of each task that still has a live row.
-async fn live_statuses(pool: &PgPool, task_ids: &[Uuid]) -> Vec<(Uuid, String)> {
-    sqlx::query_as("SELECT id, status::text FROM horsies_tasks WHERE id = ANY($1) ORDER BY id")
+async fn live_statuses(pool: &TestPool, task_ids: &[Uuid]) -> Vec<(Uuid, String)> {
+    sql::query_as("SELECT id, status::text FROM horsies_tasks WHERE id = ANY($1) ORDER BY id")
         .bind(task_ids)
         .fetch_all(pool)
         .await
@@ -137,8 +137,8 @@ async fn live_statuses(pool: &PgPool, task_ids: &[Uuid]) -> Vec<(Uuid, String)> 
 }
 
 /// The tasks of `task_ids` that have a history row.
-async fn moved(pool: &PgPool, task_ids: &[Uuid]) -> Vec<Uuid> {
-    sqlx::query_scalar(
+async fn moved(pool: &TestPool, task_ids: &[Uuid]) -> Vec<Uuid> {
+    sql::query_scalar(
         "SELECT task_id FROM horsies_task_history WHERE task_id = ANY($1) ORDER BY task_id",
     )
     .bind(task_ids)
@@ -154,14 +154,14 @@ fn sorted(task_ids: &[Uuid]) -> Vec<Uuid> {
 }
 
 /// A connection that holds task advisory locks, as another writer would.
-async fn lock_holder(pool: &PgPool) -> sqlx::PgConnection {
-    sqlx::PgConnection::connect_with(&database_options(pool))
+async fn lock_holder(pool: &TestPool) -> TestConnection {
+    TestConnection::connect(pool.url())
         .await
         .expect("connect the lock holder")
 }
 
-async fn hold_task_lock(holder: &mut sqlx::PgConnection, task_id: Uuid) {
-    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1::text, $2))")
+async fn hold_task_lock(holder: &mut TestConnection, task_id: Uuid) {
+    sql::query("SELECT pg_advisory_lock(hashtextextended($1::text, $2))")
         .bind(task_id)
         .bind(TASK_LOCK_SEED)
         .execute(holder)
@@ -169,8 +169,8 @@ async fn hold_task_lock(holder: &mut sqlx::PgConnection, task_id: Uuid) {
         .expect("hold the task's advisory lock");
 }
 
-async fn release_task_lock(holder: &mut sqlx::PgConnection, task_id: Uuid) {
-    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1::text, $2))")
+async fn release_task_lock(holder: &mut TestConnection, task_id: Uuid) {
+    sql::query("SELECT pg_advisory_unlock(hashtextextended($1::text, $2))")
         .bind(task_id)
         .bind(TASK_LOCK_SEED)
         .execute(holder)
@@ -179,9 +179,9 @@ async fn release_task_lock(holder: &mut sqlx::PgConnection, task_id: Uuid) {
 }
 
 /// The backend that runs the batch statement and waits on a lock.
-async fn batch_backend_waiting(pool: &PgPool) -> i32 {
+async fn batch_backend_waiting(pool: &TestPool) -> i32 {
     for _ in 0..WAIT_POLLS {
-        let waiting: Option<i32> = sqlx::query_scalar(
+        let waiting: Option<i32> = sql::query_scalar(
             "SELECT pid FROM pg_stat_activity
              WHERE query LIKE '%horsies_complete_tasks_fused(%'
                AND wait_event_type = 'Lock'
@@ -208,7 +208,7 @@ async fn batch_backend_waiting(pool: &PgPool) -> i32 {
 #[serial]
 async fn a_batch_completes_every_row_once_and_its_replay_writes_nothing() {
     let pool = pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
     let task_ids = running_tasks(&pool, BATCH_ROWS).await;
     let batch = batch_of(&task_ids);
@@ -253,7 +253,7 @@ async fn a_batch_completes_every_row_once_and_its_replay_writes_nothing() {
 #[serial]
 async fn each_row_keeps_its_own_fence_in_one_batch() {
     let pool = pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mine = seed_task(&pool, &running()).await;
     let foreign = seed_task(
         &pool,
@@ -320,7 +320,7 @@ async fn each_row_keeps_its_own_fence_in_one_batch() {
 #[serial]
 async fn a_batch_writes_each_result_text_as_given() {
     let pool = pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let first = seed_task(&pool, &running()).await;
     let second = seed_task(&pool, &running()).await;
     let first_text = format!(
@@ -366,7 +366,7 @@ async fn a_batch_writes_each_result_text_as_given() {
 #[serial]
 async fn a_claim_generation_keeps_its_microseconds() {
     let pool = pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let same = seed_task(&pool, &running()).await;
     let later = seed_task(&pool, &running()).await;
     let batch = SuccessBatch::new(vec![
@@ -393,9 +393,9 @@ async fn a_claim_generation_keeps_its_microseconds() {
 #[serial]
 async fn a_batch_of_rows_is_one_round_trip() {
     let pool = pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = unpinged_single_connection_core_pool_for_url(&proxy.url(upstream));
     // Open the connection, run the pool's first-use check and prepare the
     // statement on it, with a task that does not exist.
     let warm_up = write(&proxied, &batch_of(&[Uuid::new_v4()]))
@@ -428,7 +428,7 @@ async fn a_batch_of_rows_is_one_round_trip() {
 #[serial]
 async fn a_bad_row_refuses_its_whole_batch_and_each_row_alone_writes_its_own() {
     let pool = pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let good_a = seed_task(&pool, &running()).await;
     let bad = seed_task(
         &pool,
@@ -474,9 +474,9 @@ async fn a_bad_row_refuses_its_whole_batch_and_each_row_alone_writes_its_own() {
 #[serial]
 async fn a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row() {
     let pool = pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = unpinged_single_connection_core_pool_for_url(&proxy.url(upstream));
     // Warm the connection first, so the batch is its one request.
     let warm_up = write(&proxied, &batch_of(&[Uuid::new_v4()]))
         .await
@@ -497,7 +497,7 @@ async fn a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row() {
     }
     // The premise of the replay: the statement committed.
     assert_eq!(live_statuses(&pool, &task_ids).await, Vec::new());
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let replayed = write(&core, &batch).await.expect("the replay");
 
     assert_eq!(kinds(&replayed), vec!["AlreadyApplied"; 4]);
@@ -519,7 +519,7 @@ async fn a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row() {
 #[serial]
 async fn the_answer_and_the_capacity_wake_follow_the_commit() {
     let pool = pool().await;
-    let core = Arc::new(core_pool_for_test_pool(&pool));
+    let core = Arc::new(core_pool_for_test_url(pool.url()));
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
     let task_ids = running_tasks(&pool, 3).await;
     let last = *sorted(&task_ids).last().expect("three rows");
@@ -563,7 +563,7 @@ async fn the_answer_and_the_capacity_wake_follow_the_commit() {
 #[serial]
 async fn a_batch_killed_mid_statement_leaves_its_rows_running() {
     let pool = pool().await;
-    let core = Arc::new(core_pool_for_test_pool(&pool));
+    let core = Arc::new(core_pool_for_test_url(pool.url()));
     let task_ids = running_tasks(&pool, 3).await;
     let last = *sorted(&task_ids).last().expect("three rows");
     let mut holder = lock_holder(&pool).await;
@@ -606,7 +606,7 @@ async fn a_batch_killed_mid_statement_leaves_its_rows_running() {
 #[serial]
 async fn the_batch_locks_its_rows_in_sorted_task_id_order() {
     let pool = pool().await;
-    let core = Arc::new(core_pool_for_test_pool(&pool));
+    let core = Arc::new(core_pool_for_test_url(pool.url()));
     let task_ids = running_tasks(&pool, 3).await;
     let ordered = sorted(&task_ids);
     let (low, middle, high) = (ordered[0], ordered[1], ordered[2]);
@@ -617,7 +617,7 @@ async fn the_batch_locks_its_rows_in_sorted_task_id_order() {
     let writing = tokio::spawn(async move { write(&writer, &batch).await });
     let pid = batch_backend_waiting(&pool).await;
 
-    let mut locks: Vec<(Uuid, bool)> = sqlx::query_as(
+    let mut locks: Vec<(Uuid, bool)> = sql::query_as(
         "SELECT t.task_id, l.granted
          FROM unnest($1::uuid[]) AS t(task_id)
          JOIN pg_locks AS l

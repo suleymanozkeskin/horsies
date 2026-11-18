@@ -354,7 +354,7 @@ fn test_queue() -> String {
 #[tokio::test]
 #[serial]
 async fn a_listed_code_schedules_the_retry_and_wakes_its_queue_after_the_delay() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let options = retry_options(3, "fixed", &[1, 1, 1], &["ERR"]);
     let seeded = seed_task(
@@ -410,7 +410,7 @@ async fn a_listed_code_schedules_the_retry_and_wakes_its_queue_after_the_delay()
 #[tokio::test]
 #[serial]
 async fn good_until_is_judged_under_the_lock() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let options = retry_options(1, "fixed", &[1], &["ERR"]);
     let seeded = seed_task(
@@ -451,7 +451,7 @@ async fn good_until_is_judged_under_the_lock() {
 #[tokio::test]
 #[serial]
 async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
     let claimed = claimed_task(&pool, seeded.task_id).await;
@@ -486,7 +486,7 @@ async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
 #[tokio::test]
 #[serial]
 async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
     let claimed = claimed_task(&pool, seeded.task_id).await;
@@ -518,7 +518,7 @@ async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
 #[tokio::test]
 #[serial]
 async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(
         &pool,
@@ -554,7 +554,7 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 #[tokio::test]
 #[serial]
 async fn a_workflow_success_replay_owes_phase_two() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(
         &pool,
@@ -591,7 +591,7 @@ async fn a_workflow_success_replay_owes_phase_two() {
 #[tokio::test]
 #[serial]
 async fn a_stale_generation_success_leaves_the_newer_claim_unchanged() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(
         &pool,
@@ -624,7 +624,7 @@ async fn a_stale_generation_success_leaves_the_newer_claim_unchanged() {
 #[tokio::test]
 #[serial]
 async fn a_plain_task_owes_no_phase_two() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let succeeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
     let failed = seed_task(&pool, &TaskSeed::plain(&queue)).await;
@@ -677,7 +677,7 @@ fn a_task_result_cannot_carry_the_workflow_stopped_code() {
 #[tokio::test]
 #[serial]
 async fn retries_keep_the_sent_at_and_the_second_delay_is_longer() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let options = retry_options(3, "exponential", &[1], &["ERR"]);
     let seeded = seed_task(
@@ -852,7 +852,7 @@ async fn node_and_phase_two_record(
 #[tokio::test]
 #[serial]
 async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(
         &pool,
@@ -897,7 +897,7 @@ async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
 #[tokio::test]
 #[serial]
 async fn phase_two_of_a_plain_task_wakes_its_queue_once() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let mut listener = listen_on_queue(&pool, &queue).await;
 
@@ -919,7 +919,7 @@ async fn phase_two_of_a_plain_task_wakes_its_queue_once() {
 #[tokio::test]
 #[serial]
 async fn phase_two_of_a_workflow_task_with_no_record_sends_no_wake() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let mut listener = listen_on_queue(&pool, &queue).await;
 
@@ -958,7 +958,7 @@ fn longest_queue() -> String {
 #[tokio::test]
 #[serial]
 async fn the_node_finish_wakes_the_queue_of_the_node_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = longest_queue();
     let seeded = seed_task(
         &pool,
@@ -1019,7 +1019,7 @@ async fn the_node_finish_wakes_the_queue_of_the_node_row() {
 #[tokio::test]
 #[serial]
 async fn a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
 
     let result = phase_two(&pool, Uuid::new_v4(), &too_long_queue(), false).await;
 
@@ -1063,7 +1063,7 @@ fn with_query_parameter(url: &str, parameter: &str) -> String {
 #[tokio::test]
 #[serial]
 async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(
         &pool,
@@ -1080,7 +1080,7 @@ async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
         "{}",
         describe(&phase_one)
     );
-    let database_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let database_url = crate::test_support::migrated_database_url().await;
     let timeout_broker = PostgresBroker::connect_with(
         &PostgresConfig::from_url(with_query_parameter(
             &database_url,

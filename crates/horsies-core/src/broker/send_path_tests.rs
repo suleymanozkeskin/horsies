@@ -16,16 +16,16 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serial_test::serial;
-use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{
     send_error_from_enqueue, TaskSendError, TaskSendErrorCode, TaskSendPayload,
 };
+use crate::test_support::sql::{self, TestPool};
+use crate::test_support::{migrated_database_url, migrated_pool};
 
 /// The upper bound of `retry_policy.max_retries` (Python `MAX_RETRY_ATTEMPTS`).
 const MAX_RETRY_ATTEMPTS: i32 = 20;
@@ -97,32 +97,32 @@ fn new_task_id() -> Uuid {
     mint_task_id().expect("mint a task id")
 }
 
-async fn rows_of_task_name(pool: &PgPool, task_name: &str) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+async fn rows_of_task_name(pool: &TestPool, task_name: &str) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
         .bind(task_name)
         .fetch_one(pool)
         .await
         .expect("count the task rows")
 }
 
-async fn rows_of_task_id(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+async fn rows_of_task_id(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("count the task row")
 }
 
-async fn stored_max_retries(pool: &PgPool, task_id: Uuid) -> i32 {
-    sqlx::query_scalar("SELECT max_retries FROM horsies_tasks WHERE id = $1")
+async fn stored_max_retries(pool: &TestPool, task_id: Uuid) -> i32 {
+    sql::query_scalar("SELECT max_retries FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("read the stored retry limit")
 }
 
-async fn remove_task_name(pool: &PgPool, task_name: &str) {
-    sqlx::query(
+async fn remove_task_name(pool: &TestPool, task_name: &str) {
+    sql::query(
         "DELETE FROM horsies_key_reservations
          WHERE task_id IN (SELECT id FROM horsies_tasks WHERE task_name = $1)",
     )
@@ -130,7 +130,7 @@ async fn remove_task_name(pool: &PgPool, task_name: &str) {
     .execute(pool)
     .await
     .expect("remove the key reservations of the test");
-    sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE task_name = $1")
         .bind(task_name)
         .execute(pool)
         .await
@@ -204,7 +204,7 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
 #[serial]
 async fn a_malformed_retry_policy_is_refused_before_any_row() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("malformed_policy");
 
     for (case, task_options) in malformed_policies() {
@@ -235,7 +235,7 @@ async fn a_malformed_retry_policy_is_refused_before_any_row() {
 #[serial]
 async fn valid_retry_policies_store_their_limits() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("valid_policy");
 
     for limit in [1, MAX_RETRY_ATTEMPTS] {
@@ -258,7 +258,7 @@ async fn valid_retry_policies_store_their_limits() {
 #[serial]
 async fn a_null_retry_policy_stores_zero_retries() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("null_policy");
     let payload = plain_payload(&task_name, "{}", Some("{\"retry_policy\": null}"));
 
@@ -279,7 +279,7 @@ async fn a_null_retry_policy_stores_zero_retries() {
 #[serial]
 async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_same_conflict() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("key_owner");
     let key = format!("conflict-key-{}", Uuid::new_v4());
     let mut first = plain_payload(&task_name, "{\"value\":1}", None);
@@ -330,9 +330,9 @@ async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_sa
 
 /// Cancel the one backend that waits for a lock on `horsies_tasks`, and
 /// return its pid. Bounded by [`STATE_POLL_LIMIT`] polls.
-async fn cancel_the_insert_that_waits_for_the_table(pool: &PgPool) -> i32 {
+async fn cancel_the_insert_that_waits_for_the_table(pool: &TestPool) -> i32 {
     for _ in 0..STATE_POLL_LIMIT {
-        let waiting: Option<i32> = sqlx::query_scalar(
+        let waiting: Option<i32> = sql::query_scalar(
             "SELECT pid FROM pg_locks
              WHERE relation = 'horsies_tasks'::regclass AND NOT granted
              LIMIT 1",
@@ -341,7 +341,7 @@ async fn cancel_the_insert_that_waits_for_the_table(pool: &PgPool) -> i32 {
         .await
         .expect("read the lock waits");
         if let Some(pid) = waiting {
-            let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+            let cancelled: bool = sql::query_scalar("SELECT pg_cancel_backend($1)")
                 .bind(pid)
                 .fetch_one(pool)
                 .await
@@ -363,13 +363,13 @@ async fn cancel_the_insert_that_waits_for_the_table(pool: &PgPool) -> i32 {
 #[serial]
 async fn a_failed_enqueue_statement_names_its_cause_and_holds_no_input_value() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("hidden_arguments");
     let input = format!("{{\"secret\":\"{ARGUMENT_MARKER}\"}}");
     let payload = plain_payload(&task_name, &input, None);
     let task_id = new_task_id();
     let mut lock_holder = pool.begin().await.expect("open the lock holder");
-    sqlx::query("LOCK TABLE horsies_tasks IN ACCESS EXCLUSIVE MODE")
+    sql::query("LOCK TABLE horsies_tasks IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock_holder)
         .await
         .expect("lock the task table");
@@ -409,8 +409,8 @@ async fn a_failed_enqueue_statement_names_its_cause_and_holds_no_input_value() {
 
 /// Terminate every backend of `application_name` and wait until none is
 /// left. Bounded by [`STATE_POLL_LIMIT`] polls.
-async fn terminate_application(pool: &PgPool, application_name: &str) {
-    let terminated: i64 = sqlx::query_scalar(
+async fn terminate_application(pool: &TestPool, application_name: &str) {
+    let terminated: i64 = sql::query_scalar(
         "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity
          WHERE application_name = $1",
     )
@@ -424,7 +424,7 @@ async fn terminate_application(pool: &PgPool, application_name: &str) {
     );
     for _ in 0..STATE_POLL_LIMIT {
         let left: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+            sql::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
                 .bind(application_name)
                 .fetch_one(pool)
                 .await
@@ -500,7 +500,10 @@ async fn a_send_on_a_closed_pooled_connection_is_retryable_and_the_next_send_wri
 }
 
 /// The `jit` setting of one connection of `pool`.
-async fn jit_of(pool: &PgPool) -> String {
+/// The `jit` setting on a connection of a sqlx pool of the broker. The sqlx
+/// pools and these two tests go together; `broker::pools::kept_session_tests`
+/// holds the same rules on the core pools.
+async fn jit_of(pool: &sqlx::PgPool) -> String {
     sqlx::query_scalar("SELECT current_setting('jit')")
         .fetch_one(pool)
         .await
@@ -550,7 +553,7 @@ async fn jit_stays_off_after_the_first_transaction_rolls_back() {
         .fetch_one(&mut *connection)
         .await
         .expect("read the jit setting");
-    let jit: String = row.try_get("jit").expect("the jit column");
+    let jit: String = sqlx::Row::try_get(&row, "jit").expect("the jit column");
 
     assert_eq!(jit, "off");
     drop(connection);
@@ -592,7 +595,7 @@ async fn in_transaction_mode_only_the_session_pool_turns_jit_off() {
 #[serial]
 async fn the_row_stores_the_sent_input_text_byte_for_byte() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("accepted_input");
 
     for input in ["{}", "null", "{ \"z\": 1, \"a\": 2 }", "[ ]"] {
@@ -616,7 +619,7 @@ async fn the_row_stores_the_sent_input_text_byte_for_byte() {
             .await
             .expect("the send writes its row");
 
-        let stored: String = sqlx::query_scalar("SELECT input FROM horsies_tasks WHERE id = $1")
+        let stored: String = sql::query_scalar("SELECT input FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await

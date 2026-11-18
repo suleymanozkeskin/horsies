@@ -20,11 +20,12 @@ use crate::broker::child_writes::{
     WriteDeadline, CHILD_STATEMENT_BOUND, FINALIZING_MARKER_BOUND, FINALIZING_MARKER_END,
     START_ATTEMPT_END,
 };
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::{OrphanSelfHeal, PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
 use crate::core::registry::task::TaskRegistry;
 use crate::db::{CheckoutClass, CorePool, KeptOpen};
+use crate::test_support::migrated_database_url;
 use crate::worker::executor::protocol::StopReason;
 
 const WORKER_ID: &str = "start-attempt-worker";
@@ -327,7 +328,7 @@ async fn until_a_checkout_waits(pool: &CorePool) {
 #[tokio::test]
 #[serial]
 async fn a_held_claim_starts_running_with_the_process_of_its_child() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
     let (context, _peer) = context(pool.clone());
 
@@ -347,7 +348,7 @@ async fn a_held_claim_starts_running_with_the_process_of_its_child() {
 #[tokio::test]
 #[serial]
 async fn a_start_of_another_claim_generation_is_a_lost_claim() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
     let (context, _peer) = context(pool.clone());
     let before = live_row(&pool, task_id).await;
@@ -368,7 +369,7 @@ async fn a_start_of_another_claim_generation_is_a_lost_claim() {
 #[tokio::test]
 #[serial]
 async fn a_passed_deadline_expires_the_claim_before_the_start() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, true).await;
     let (context, _peer) = context(pool.clone());
 

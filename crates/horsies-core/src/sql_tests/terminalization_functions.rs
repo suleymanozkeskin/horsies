@@ -480,7 +480,7 @@ fn assert_refused<T: std::fmt::Debug>(
 /// broker fixture does: a terminal move writes a history row. The database
 /// is dropped when the runtime of the test shuts down.
 async fn covered() -> Session {
-    let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let url = crate::test_support::migrated_database_url().await;
     Session::open(&url).await
 }
 

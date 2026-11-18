@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::support::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
+use crate::test_support::sql;
 
 /// Bound of the paused sweep that runs beside an open node update.
 const SWEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -76,7 +77,7 @@ async fn paused_sweep_judges_from_the_capture_not_a_reread() {
     let node_row_id = seed_node(&pool, workflow_id, Some(task_id), "ENQUEUED").await;
 
     let mut progress = pool.begin().await.expect("begin node progress");
-    sqlx::query("UPDATE horsies_workflow_tasks SET status = 'RUNNING' WHERE id = $1")
+    sql::query("UPDATE horsies_workflow_tasks SET status = 'RUNNING' WHERE id = $1")
         .bind(node_row_id)
         .execute(&mut *progress)
         .await

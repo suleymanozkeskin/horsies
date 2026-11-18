@@ -2121,7 +2121,7 @@ mod tests {
     async fn a_booted_worker_wakes_on_its_queue_and_answers_pings() {
         let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
             test_pool().await,
-            &crate::broker::terminalization_matrix::migrated_database_url().await,
+            &crate::test_support::migrated_database_url().await,
             crate::ClientFamily::Rust,
         ));
         let worker = worker_of_one_idle_child(
@@ -2335,7 +2335,7 @@ mod tests {
     }
 
     async fn test_pool() -> PgPool {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut transaction = pool.begin().await.expect("coverage transaction");
         let coverage =
             ensure_startup_coverage(transaction.as_mut(), 2, 2, &[], &StagedLoaderPublisher)
@@ -4779,7 +4779,7 @@ mod tests {
         /// A copy of the installed test template (`crate::test_support`)
         /// with its family row removed.
         async fn create() -> Self {
-            let config_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+            let config_url = crate::test_support::migrated_database_url().await;
             let database = crate::test_support::TestDatabase::create().await;
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .max_connections(8)
@@ -5077,7 +5077,7 @@ mod tests {
     async fn startup_coverage_runs_on_the_session_pool() {
         use crate::core::config::PostgresConfig;
 
-        let main_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let main_url = crate::test_support::migrated_database_url().await;
         let separator = if main_url.contains('?') { '&' } else { '?' };
         let session_url = format!("{main_url}{separator}application_name=start_session");
         let broker = PostgresBroker::connect_with(

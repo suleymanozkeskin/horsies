@@ -157,7 +157,7 @@ fn failure_error(kind: ChildStartKind) -> crate::core::TaskError {
 
 async fn test_broker() -> PostgresBroker {
     PostgresBroker::from_pool(
-        crate::broker::terminalization_matrix::migrated_pool().await,
+        crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
         crate::ClientFamily::Rust,
     )
 }
@@ -992,7 +992,7 @@ async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
 #[tokio::test]
 #[serial]
 async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let broker = Arc::new(PostgresBroker::from_pool(
         pool.clone(),
         crate::ClientFamily::Rust,

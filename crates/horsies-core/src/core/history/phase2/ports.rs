@@ -21,7 +21,7 @@ const PORT_WORKER: &str = "port-phase2-worker";
 const CLASS_KEY: &str = "standard_30d";
 
 async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+    crate::broker::terminalization_matrix::sqlx_migrated_pool().await
 }
 
 async fn seed_workflow(

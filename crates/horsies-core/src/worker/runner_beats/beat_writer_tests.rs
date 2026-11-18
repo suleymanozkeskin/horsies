@@ -91,7 +91,7 @@ struct RowSeed<'a> {
 }
 
 async fn migrated_pool_with_heartbeat_leaves() -> PgPool {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     // The heartbeat table has no default partition: the current hour needs
     // its leaf, as at worker start.
     ensure_startup_coverage_in_pool(

@@ -8,6 +8,7 @@ pub(crate) mod child_specs;
 mod database;
 mod log_capture;
 pub(crate) mod sql;
+mod sqlx_bridge;
 pub(crate) mod sqlx_terminal_writes;
 pub(crate) mod terminal_writes;
 
@@ -69,7 +70,7 @@ pub(crate) async fn migrated_database_url() -> String {
 }
 
 /// One coverage pass on a core pool of `url`.
-async fn cover_partitions(url: &str) {
+pub(crate) async fn cover_partitions(url: &str) {
     let core = core_pool_for_test_url(url);
     let coverage = ensure_partition_coverage_in_pool(
         &core,
@@ -151,6 +152,16 @@ pub(crate) async fn broker_with_closed_sqlx_pools(
         sqlx::postgres::PgPoolOptions::new().connect_lazy_with((*pool.connect_options()).clone());
     adapter.close().await;
     crate::broker::PostgresBroker::from_pool(adapter, ClientFamily::Rust)
+}
+
+/// A broker on the test database of `url` whose sqlx adapter pools are
+/// closed: every call that borrows them fails. A path that runs to its end on
+/// this broker runs on the core pools alone. The core pools connect at their
+/// first checkout.
+pub(crate) async fn broker_with_closed_sqlx_pools_on(url: &str) -> crate::broker::PostgresBroker {
+    let broker = crate::broker::PostgresBroker::from_test_url(url, ClientFamily::Rust);
+    broker.pool().close().await;
+    broker
 }
 
 /// Installs the schema into the template of this process: the

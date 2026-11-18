@@ -29,7 +29,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::HeartbeatRow;
-    use crate::broker::terminalization_matrix::migrated_pool;
+    use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 
     /// The columns of `horsies_heartbeats`, in table order.
     const HEARTBEAT_COLUMNS: [&str; 6] =

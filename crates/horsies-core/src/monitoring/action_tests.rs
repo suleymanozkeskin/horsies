@@ -5,7 +5,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::terminalization_matrix::migrated_pool;
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
 use crate::test_support::child_specs::TestChildSpecs;

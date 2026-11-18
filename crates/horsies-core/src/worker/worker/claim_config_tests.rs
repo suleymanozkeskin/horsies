@@ -211,7 +211,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn equal_queue_priority_fifo() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let older = seed(&pool, "q2", 100, 30.0).await;
         seed(&pool, "q1", 100, 5.0).await;
         let config = ClaimerConfig {
@@ -237,7 +237,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn distinct_queue_priority_wins() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let high = seed(&pool, "q_hi", 1, 0.0).await;
         seed(&pool, "q_lo", 10, 10.0).await;
         let config = ClaimerConfig {
@@ -267,7 +267,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn equal_queue_priority_explicit_task_priority_wins() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         seed(&pool, "q1", 100, 30.0).await;
         let urgent = seed(&pool, "q2", 1, 5.0).await;
         let config = ClaimerConfig {
@@ -294,7 +294,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn claim_returns_rows_in_dispatch_order() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let low_queue = seed(&pool, "bounds_low", 1, 50.0).await;
         let late = seed(&pool, "bounds_high", 50, 1.0).await;
         let early = seed(&pool, "bounds_high", 50, 30.0).await;
@@ -332,7 +332,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn per_queue_cap_never_over_claims() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
         seed_n(&pool, "b", 50, 300).await;
         let config = ClaimerConfig {
@@ -355,7 +355,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn cluster_cap_never_over_claims() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
         seed_n(&pool, "b", 50, 300).await;
         let config = ClaimerConfig {
@@ -378,7 +378,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn cap_only_queue_is_serviced_and_capped() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         seed_n(&pool, "capped", 50, 20).await;
         let config = ClaimerConfig {
             queues: names(&["capped"]),
@@ -403,7 +403,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn cap_without_priorities_never_over_claims() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
         seed_n(&pool, "b", 50, 300).await;
         let config = ClaimerConfig {
@@ -441,7 +441,7 @@ mod claim_lock_scoping {
     #[tokio::test]
     #[serial]
     async fn disjoint_capped_queue_does_not_block() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let passer = ClaimerConfig {
             queues: names(&["lock_qb"]),
             processes: 1,
@@ -473,7 +473,7 @@ mod claim_lock_scoping {
     #[tokio::test]
     #[serial]
     async fn same_capped_queue_blocks() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let passer = ClaimerConfig {
             queues: names(&["lock_qc"]),
             processes: 1,
@@ -500,7 +500,7 @@ mod claim_lock_scoping {
     #[tokio::test]
     #[serial]
     async fn global_cap_still_blocks_across_queues() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let passer = ClaimerConfig {
             queues: names(&["lock_qd"]),
             processes: 1,
@@ -534,7 +534,7 @@ mod claim_cap_expired {
     #[tokio::test]
     #[serial]
     async fn an_expired_claim_is_not_counted_in_the_queue_hard_cap() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let expired_default = seed(&pool, "default", 100, 0.0).await;
         let active_default = seed(&pool, "default", 100, 0.0).await;
         let active_critical = seed(&pool, "critical", 100, 0.0).await;
@@ -584,7 +584,7 @@ mod claim_cap_expired {
     #[tokio::test]
     #[serial]
     async fn a_pass_under_the_caps_claims_the_pending_row_beside_an_expired_claim() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let pending = seed(&pool, "default", 100, 30.0 * 60.0).await;
         let expired = seed(&pool, "default", 100, 20.0 * 60.0).await;
         sqlx::query(

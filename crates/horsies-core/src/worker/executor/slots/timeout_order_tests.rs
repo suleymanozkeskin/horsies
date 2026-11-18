@@ -279,7 +279,7 @@ fn timed_out() -> AttemptEnd {
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Running, WORKER_ID).await;
 
@@ -306,7 +306,7 @@ async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Claimed, WORKER_ID).await;
 
@@ -329,7 +329,7 @@ async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_row_this_claim_does_not_hold_changes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     for (state, holder) in [
         (RowState::Running, "another-worker"),
         (RowState::Pending, WORKER_ID),
@@ -425,7 +425,7 @@ async fn wakes_before_sentinel(
 #[tokio::test]
 #[serial]
 async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Running, WORKER_ID).await;
     let task = claimed(task_id, &queue, generation);
@@ -574,7 +574,7 @@ fn phase_two_owed(written: Result<UnreportedAttemptWrite, FinalizeError>) -> Pha
 #[tokio::test]
 #[serial]
 async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_attempt() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation, workflow_id) = seed_workflow_task(&pool, &queue).await;
     let task = ClaimedTask {
@@ -626,7 +626,7 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation, workflow_id) = seed_workflow_task(&pool, &queue).await;
     let task = ClaimedTask {

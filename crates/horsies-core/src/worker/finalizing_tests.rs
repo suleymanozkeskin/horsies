@@ -63,7 +63,7 @@ async fn remove(pool: &PgPool, id: Uuid) {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_rejects_stale_owner_and_generation() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     for (worker, claimed_at) in [
@@ -86,7 +86,7 @@ async fn finalizing_handoff_rejects_stale_owner_and_generation() {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     assert_eq!(
@@ -132,7 +132,7 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
 #[tokio::test]
 #[serial]
 async fn the_finalizing_marker_refuses_a_null_claim_generation() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (id, _) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     let refused = sqlx::query(MARK_FINALIZING_SQL)
@@ -191,7 +191,7 @@ fn marker_row_read(definition: &str, id: Uuid, generation: DateTime<Utc>) -> Str
 #[tokio::test]
 #[serial]
 async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     let definition: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
         .bind(MARKER_FUNCTION)
@@ -220,7 +220,7 @@ async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     for status in ["PENDING", "CLAIMED"] {
         sqlx::query(
@@ -256,7 +256,7 @@ async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let waiting_broker = std::sync::Arc::new(broker(&pool));
 
     for (replacement_worker, generation_delta) in [("new-worker", 0), ("current-worker", 1)] {

@@ -13,18 +13,16 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::enqueue_history_tests::migrated_pool;
 use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
-use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
+use crate::core::history::maintenance::coverage::CoverageOutcome;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::sqlx_terminal_writes as terminal_writes;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+use crate::test_support::terminal_writes;
 
 const TASK_NAME: &str = "port.identity";
 const INPUT: &str = "{\"order_id\":\"order-1\"}";
@@ -95,12 +93,12 @@ async fn send_as(
         .await
 }
 
-async fn clear_enqueue_state(pool: &PgPool) {
-    sqlx::query("DELETE FROM horsies_key_reservations")
+async fn clear_enqueue_state(pool: &TestPool) {
+    sql::query("DELETE FROM horsies_key_reservations")
         .execute(pool)
         .await
         .expect("clear reservations");
-    sqlx::query("DELETE FROM horsies_tasks")
+    sql::query("DELETE FROM horsies_tasks")
         .execute(pool)
         .await
         .expect("clear tasks");
@@ -108,31 +106,31 @@ async fn clear_enqueue_state(pool: &PgPool) {
 
 /// Creates the history leaves of the default class and publishes the
 /// readers, so a move finds its leaf.
-async fn ensure_history_coverage(pool: &PgPool) {
+async fn ensure_history_coverage(pool: &TestPool) {
     let config = RetentionConfig::default();
-    let mut transaction = pool.begin().await.expect("begin coverage");
-    let coverage = ensure_partition_coverage(
-        &mut transaction,
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
+    let coverage = crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
+        &core,
+        crate::broker::core_rows::StatementLog::Off,
         config.history_leaf_horizon_days,
         config.heartbeat_leaf_horizon_hours,
         &config.registrable_periods(),
-        &StagedLoaderPublisher,
     )
     .await
     .expect("ensure coverage");
+    core.close();
     assert!(
         matches!(coverage, CoverageOutcome::Ensured(_)),
         "{coverage:?}"
     );
-    transaction.commit().await.expect("commit coverage");
 }
 
 /// Moves a PENDING task to history: the row becomes RUNNING under
 /// `PORT_WORKER`, with the process facts of its start, then completes
 /// (`horsies_complete_task_fused`). The move terminalizes the task's key
 /// reservation.
-async fn move_to_history(pool: &PgPool, task_id: Uuid) {
-    let started = sqlx::query(
+async fn move_to_history(pool: &TestPool, task_id: Uuid) {
+    let started = sql::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
              started_at = NOW(), worker_pid = 4242, worker_hostname = 'port-host',
@@ -161,15 +159,15 @@ async fn move_to_history(pool: &PgPool, task_id: Uuid) {
     );
 }
 
-async fn count(pool: &PgPool, sql: &str, task_id: Uuid) -> i64 {
-    sqlx::query_scalar(sql)
+async fn count(pool: &TestPool, sql: &str, task_id: Uuid) -> i64 {
+    sql::query_scalar(sql)
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("count rows")
 }
 
-async fn live_rows(pool: &PgPool, task_id: Uuid) -> i64 {
+async fn live_rows(pool: &TestPool, task_id: Uuid) -> i64 {
     count(
         pool,
         "SELECT count(*) FROM horsies_tasks WHERE id = $1",
@@ -178,7 +176,7 @@ async fn live_rows(pool: &PgPool, task_id: Uuid) -> i64 {
     .await
 }
 
-async fn history_rows(pool: &PgPool, task_id: Uuid) -> i64 {
+async fn history_rows(pool: &TestPool, task_id: Uuid) -> i64 {
     count(
         pool,
         "SELECT count(*) FROM horsies_task_history WHERE task_id = $1",
@@ -187,7 +185,7 @@ async fn history_rows(pool: &PgPool, task_id: Uuid) -> i64 {
     .await
 }
 
-async fn reservations_of(pool: &PgPool, task_id: Uuid) -> i64 {
+async fn reservations_of(pool: &TestPool, task_id: Uuid) -> i64 {
     count(
         pool,
         "SELECT count(*) FROM horsies_key_reservations WHERE task_id = $1",
@@ -196,8 +194,8 @@ async fn reservations_of(pool: &PgPool, task_id: Uuid) -> i64 {
     .await
 }
 
-async fn all_reservations(pool: &PgPool) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_key_reservations")
+async fn all_reservations(pool: &TestPool) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_key_reservations")
         .fetch_one(pool)
         .await
         .expect("count reservations")
@@ -209,17 +207,17 @@ type ConcurrentOutcome = (Uuid, i32, Result<Uuid, BrokerError>);
 /// Sends `CONCURRENT_SENDS` commands under `key` at once, each with its own
 /// task id and the priority that `priority_of(index)` gives.
 async fn concurrent_sends(
-    pool: &PgPool,
+    pool: &TestPool,
     key: &'static str,
     priority_of: fn(usize) -> i32,
 ) -> Vec<ConcurrentOutcome> {
-    let wide = PgPoolOptions::new()
+    let wide = TestPoolOptions::new()
         .max_connections(CONCURRENT_CONNECTIONS)
-        .connect_with((*pool.connect_options()).clone())
+        .connect(pool.url())
         .await
         .expect("connect the concurrent pool");
-    let broker = Arc::new(PostgresBroker::from_pool(
-        wide.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        wide.url(),
         crate::ClientFamily::Rust,
     ));
     let sent_at = Utc::now();
@@ -272,7 +270,7 @@ async fn concurrent_sends_of_one_key_apply_once_and_replay_the_rest() {
             .all(|(_, _, outcome)| matches!(outcome, Ok(id) if *id == winner)),
         "{outcomes:?}"
     );
-    let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
+    let tasks: i64 = sql::query_scalar("SELECT count(*) FROM horsies_tasks")
         .fetch_one(&pool)
         .await
         .expect("count tasks");
@@ -324,14 +322,14 @@ async fn a_key_replays_its_task_after_the_history_row_is_gone() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let first = Send::new(Some("history-removed"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("first send"),
         first.task_id
     );
     move_to_history(&pool, first.task_id).await;
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
         .bind(first.task_id)
         .execute(&pool)
         .await
@@ -353,14 +351,14 @@ async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let first = Send::new(Some("reusable-order"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("first send"),
         first.task_id
     );
     move_to_history(&pool, first.task_id).await;
-    let expired = sqlx::query(
+    let expired = sql::query(
         "UPDATE horsies_key_reservations
          SET expires_at = statement_timestamp() - interval '1 second'
          WHERE task_id = $1 AND disposition = 'TERMINAL'",
@@ -394,7 +392,7 @@ async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
 async fn an_unkeyed_resend_of_a_keyed_task_returns_it_and_keeps_its_key() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let keyed = Send::new(Some("order-1"), Utc::now());
     assert_eq!(
         send(&broker, keyed).await.expect("keyed send"),
@@ -406,7 +404,7 @@ async fn an_unkeyed_resend_of_a_keyed_task_returns_it_and_keeps_its_key() {
 
     assert_eq!(resent, keyed.task_id);
     assert_eq!(live_rows(&pool, keyed.task_id).await, 1);
-    let bound: Option<i32> = sqlx::query_scalar(
+    let bound: Option<i32> = sql::query_scalar(
         "SELECT octet_length(idempotency_key_digest) FROM horsies_tasks WHERE id = $1",
     )
     .bind(keyed.task_id)
@@ -426,7 +424,7 @@ async fn a_replay_after_the_move_returns_the_moved_task() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let first = Send::new(Some("order-1"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("first send"),
@@ -454,7 +452,7 @@ async fn a_repeat_send_of_a_finished_task_answers_from_history() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let repeated = Send::new(None, Utc::now());
     let other = Send::new(None, Utc::now());
     let first = Send::new(None, Utc::now());
@@ -495,7 +493,7 @@ async fn a_repeat_send_of_a_finished_task_answers_from_history() {
 async fn unkeyed_sends_write_no_reservation() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let sent_at = Utc::now();
     for one in [Send::new(None, sent_at), Send::new(None, sent_at)] {
         assert_eq!(send(&broker, one).await.expect("unkeyed send"), one.task_id);
@@ -513,7 +511,7 @@ async fn unkeyed_sends_write_no_reservation() {
 async fn a_new_row_stores_the_exact_version_one_fingerprint() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_id = mint_task_id().expect("mint a task id");
     let applied = broker
         .enqueue(
@@ -546,7 +544,7 @@ async fn a_new_row_stores_the_exact_version_one_fingerprint() {
         Option<Vec<u8>>,
         String,
         bool,
-    ) = sqlx::query_as(
+    ) = sql::query_as(
         "SELECT input, command_fingerprint_version, command_fingerprint,
                     retention_class_key, retain_rerun_input
              FROM horsies_tasks WHERE id = $1",
@@ -570,7 +568,7 @@ async fn a_new_row_stores_the_exact_version_one_fingerprint() {
 async fn after_the_bind_a_send_with_a_new_id_replays_the_bound_task() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let existing = Send::new(None, Utc::now());
     assert_eq!(
         send(&broker, existing).await.expect("unkeyed send"),
@@ -581,7 +579,7 @@ async fn after_the_bind_a_send_with_a_new_id_replays_the_bound_task() {
         ..existing
     };
     assert_eq!(send(&broker, keyed).await.expect("bind"), existing.task_id);
-    let (disposition, digests_match): (String, bool) = sqlx::query_as(
+    let (disposition, digests_match): (String, bool) = sql::query_as(
         "SELECT r.disposition, r.idempotency_key_digest = t.idempotency_key_digest
          FROM horsies_key_reservations AS r
          JOIN horsies_tasks AS t ON t.id = r.task_id
@@ -611,7 +609,7 @@ async fn after_the_bind_a_send_with_a_new_id_replays_the_bound_task() {
 async fn a_keyed_task_resent_under_a_second_key_is_a_payload_mismatch() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let first = Send::new(Some("first-key"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("keyed send"),
@@ -640,7 +638,7 @@ async fn a_keyed_task_resent_under_a_second_key_is_a_payload_mismatch() {
 #[serial]
 async fn the_reservation_table_has_exactly_its_key_and_expiry_index() {
     let pool = migrated_pool().await;
-    let names: Vec<String> = sqlx::query_scalar(
+    let names: Vec<String> = sql::query_scalar(
         "SELECT indexname::text FROM pg_indexes WHERE tablename = 'horsies_key_reservations'",
     )
     .fetch_all(&pool)

@@ -127,7 +127,7 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
 #[tokio::test]
 #[serial]
 async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let suffix = Uuid::new_v4().simple().to_string();
     let task_name = format!("scheduled_options_task_{}", &suffix[..12]);
     let schedule_name = format!("scheduled_options_{}", &suffix[..12]);

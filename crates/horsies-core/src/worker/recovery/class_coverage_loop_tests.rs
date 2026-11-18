@@ -9,7 +9,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -18,6 +17,7 @@ use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
+use crate::test_support::sql::{self, TestPool};
 
 /// The least reaper check interval. The loop reads the fleet check from one
 /// interval after its start on.
@@ -89,8 +89,8 @@ impl tracing::Subscriber for CapturedLines {
 
 /// A snapshot of `w-async` on queue `a`, written now, whose one budget runs
 /// only `SHARED_ASYNC` rows.
-async fn async_children_snapshot(pool: &PgPool) {
-    sqlx::query(
+async fn async_children_snapshot(pool: &TestPool) {
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, queues,
@@ -113,8 +113,8 @@ async fn async_children_snapshot(pool: &PgPool) {
 
 /// A `PENDING` `ISOLATED` row on queue `a`, due 10 s ago: a shared task that
 /// went back to the queue as `ISOLATED` waits as this row does.
-async fn pending_isolated_row(pool: &PgPool) {
-    sqlx::query(
+async fn pending_isolated_row(pool: &TestPool) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, execution, retention_class_key,
             sent_at, created_at, command_fingerprint_version, command_fingerprint,
@@ -142,7 +142,7 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
     let database = MonitoringTestDatabase::create().await;
     let retention = RetentionConfig::default();
     ensure_startup_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         retention.history_leaf_horizon_days,
         retention.heartbeat_leaf_horizon_hours,
@@ -158,7 +158,7 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
     // The reaper's broker has no sqlx connection: the fleet check runs on the
     // core pools, and a failed check would log a warning, not this error.
     let reaper = spawn_reaper(
-        Arc::new(crate::test_support::broker_with_closed_sqlx_pools(&database.pool).await),
+        Arc::new(crate::test_support::broker_with_closed_sqlx_pools_on(database.pool.url()).await),
         crate::test_support::child_specs::no_child_specs(),
         RecoveryConfig {
             check_interval_ms: CHECK_INTERVAL_MS,

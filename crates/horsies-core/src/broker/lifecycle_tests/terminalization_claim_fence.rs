@@ -14,13 +14,14 @@ use uuid::Uuid;
 use super::support::*;
 use crate::broker::claims::claim_pass;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::workflow_stop_before_start::{
     stop_before_start, OrphanSelfHeal, StopBeforeStart, StopMove,
 };
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand};
+use crate::test_support::sql::{self, TestPool};
 
 const CLAIM_QUEUE: &str = "lifecycle_claim_fence";
 
@@ -53,7 +54,7 @@ async fn t03_stale_generation_does_not_cancel_reclaimed_task() {
     let task_id = seed_task(&pool, &workflow_task_claimed_at(reclaimed)).await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "CANCELLED").await;
 
-    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
+    PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(task_id, dispatched)], WORKER)
         .await
         .expect("post-claim workflow check");
@@ -79,7 +80,7 @@ async fn batch_fences_each_task_on_its_own_generation() {
     let fresh_workflow = link_workflow_task(&pool, fresh, "ENQUEUED", "PAUSED").await;
     let stale_workflow = link_workflow_task(&pool, stale, "ENQUEUED", "PAUSED").await;
 
-    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
+    PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(fresh, dispatched), (stale, dispatched)], WORKER)
         .await
         .expect("post-claim workflow check");
@@ -106,10 +107,10 @@ async fn real_claim_path_arms_the_fence() {
     )
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "PAUSED").await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let pass = claim_pass(
-        &core_pool_for_test_pool(&pool),
+        &core_pool_for_test_url(pool.url()),
         StatementLog::Off,
         &claim_request(CLAIM_QUEUE),
     )
@@ -121,7 +122,7 @@ async fn real_claim_path_arms_the_fence() {
         .find(|row| row.id == task_id)
         .expect("the claim returned the seeded task");
     // The reaper requeues the row and the same worker claims it again.
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_tasks SET claimed_at = claimed_at + interval '1 minute' WHERE id = $1",
     )
     .bind(task_id)
@@ -145,13 +146,13 @@ async fn real_claim_path_arms_the_fence() {
 /// The stop before start of `task_id` under the claim of the dispatch that
 /// carries `dispatched`, with the orphan self-heal `self_heal`.
 async fn stop_dispatched_with(
-    pool: &sqlx::PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     dispatched: DateTime<Utc>,
     self_heal: OrphanSelfHeal,
 ) -> StopBeforeStart {
     stop_before_start(
-        &core_pool_for_test_pool(pool),
+        &core_pool_for_test_url(pool.url()),
         StatementLog::Off,
         task_id,
         &OwnedClaim {
@@ -166,7 +167,7 @@ async fn stop_dispatched_with(
 }
 
 /// [`stop_dispatched_with`] with the orphan self-heal off.
-async fn stop_dispatched(pool: &sqlx::PgPool, task_id: Uuid, dispatched: DateTime<Utc>) {
+async fn stop_dispatched(pool: &TestPool, task_id: Uuid, dispatched: DateTime<Utc>) {
     let _stopped = stop_dispatched_with(pool, task_id, dispatched, OrphanSelfHeal::Off).await;
 }
 

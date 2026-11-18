@@ -14,9 +14,9 @@
 //! queue holds only the rows the test seeds. Each claim is one committed
 //! statement, as Python's `_claim`.
 
+use crate::test_support::sql::{self, TestPool, TestTransaction};
 use serde_json::{json, Value};
 use serial_test::serial;
-use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::support::pool;
@@ -102,14 +102,14 @@ impl Seed {
 }
 
 /// Insert one live task row, committed. Returns its id.
-async fn seed(pool: &PgPool, seed: &Seed) -> Uuid {
+async fn seed(pool: &TestPool, seed: &Seed) -> Uuid {
     let id = Uuid::new_v4();
     let (status, owner): (&str, Option<&str>) = match &seed.state {
         SeedState::Pending => ("PENDING", None),
         SeedState::Running { owner } => ("RUNNING", Some(owner.as_str())),
         SeedState::Claimed { owner, .. } => ("CLAIMED", Some(owner.as_str())),
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, enqueued_at, claimed_at,
             claimed_by_worker_id, is_workflow_task, created_at, updated_at, retry_count,
@@ -143,7 +143,7 @@ async fn seed(pool: &PgPool, seed: &Seed) -> Uuid {
         ..
     } = &seed.state
     {
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET claimed_at = now() - interval '2 minutes',
                  claim_expires_at = now() - interval '1 minute'
@@ -157,7 +157,7 @@ async fn seed(pool: &PgPool, seed: &Seed) -> Uuid {
     id
 }
 
-async fn seed_many(pool: &PgPool, seeds: &[Seed]) -> Vec<Uuid> {
+async fn seed_many(pool: &TestPool, seeds: &[Seed]) -> Vec<Uuid> {
     let mut ids = Vec::with_capacity(seeds.len());
     for one in seeds {
         ids.push(seed(pool, one).await);
@@ -215,11 +215,11 @@ struct Claimed {
     short_by: i32,
 }
 
-async fn claim_on<'e, E>(executor: E, params: &Params) -> Result<Claimed, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = Postgres>,
-{
-    let rows: Vec<(String, Option<Uuid>, Option<String>, Option<i32>)> = sqlx::query_as(CLAIM_SQL)
+async fn claim_on<'e>(
+    target: impl Into<sql::Target<'e>>,
+    params: &Params,
+) -> Result<Claimed, sql::Error> {
+    let rows: Vec<(String, Option<Uuid>, Option<String>, Option<i32>)> = sql::query_as(CLAIM_SQL)
         .bind(&params.worker_id)
         .bind(json!(params.queues))
         .bind(&params.queue_priority)
@@ -231,7 +231,7 @@ where
         .bind(params.max_claim_per_worker)
         .bind(params.max_claim_batch)
         .bind(LEASE_MS)
-        .fetch_all(executor)
+        .fetch_all(target)
         .await?;
     let mut claimed = Claimed {
         rows: Vec::new(),
@@ -248,7 +248,7 @@ where
 }
 
 /// One committed claim (Python `_claim`).
-async fn claim(pool: &PgPool, params: &Params) -> Claimed {
+async fn claim(pool: &TestPool, params: &Params) -> Claimed {
     claim_on(pool, params).await.expect("one claim pass")
 }
 
@@ -569,8 +569,8 @@ mod budgets {
         .await;
 
         match refused {
-            Err(sqlx::Error::Database(error)) => {
-                assert_eq!(error.code().as_deref(), Some("22023"));
+            Err(sql::Error::Database(error)) => {
+                assert_eq!(Some(error.code().code()), Some("22023"));
                 assert_eq!(
                     error.message(),
                     "horsies_claim: p_routes names a budget class that p_budgets does not hold"
@@ -841,12 +841,12 @@ mod locks {
         }
         let params = Params::new(json!({"ISOLATED": 5}), isolated_routes());
 
-        let mut claimer: Transaction<'_, Postgres> = pool.begin().await.expect("begin the claim");
+        let mut claimer: TestTransaction<'_> = pool.begin().await.expect("begin the claim");
         let claimed = claim_on(&mut *claimer, &params)
             .await
             .expect("the claim inside the open transaction");
         let mut other_worker = pool.begin().await.expect("begin the other worker");
-        let unlocked: i64 = sqlx::query_scalar(
+        let unlocked: i64 = sql::query_scalar(
             "SELECT count(*) FROM (
                  SELECT id FROM horsies_tasks
                  WHERE queue_name = $1 AND status = 'PENDING'
@@ -875,7 +875,7 @@ mod locks {
         let second = seed(&pool, &Seed::pending("ISOLATED").priority(2)).await;
 
         let mut holder = pool.begin().await.expect("begin the holder");
-        sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+        sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
             .bind(head)
             .execute(&mut *holder)
             .await
@@ -917,7 +917,7 @@ mod short_take {
         };
 
         let mut other_claim = pool.begin().await.expect("begin the other claim");
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET status = 'CLAIMED',
                  claimed_by_worker_id = 'other-worker',

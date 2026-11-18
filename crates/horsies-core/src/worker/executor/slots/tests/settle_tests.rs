@@ -329,7 +329,7 @@ fn crashed() -> AttemptEnd {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_task_that_never_reached_a_child_goes_back_to_the_queue() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let claimed = claimed_now();
     seed_claimed(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
@@ -371,7 +371,7 @@ async fn a_release_that_cannot_reach_the_database_is_not_written() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_reported_value_completes_the_task() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
@@ -401,7 +401,7 @@ async fn a_reported_value_completes_the_task() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_lost_child_fails_its_running_task_as_crashed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
@@ -428,7 +428,7 @@ async fn a_lost_child_fails_its_running_task_as_crashed() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let claimed = ClaimedTask {
         kind: TaskKind::WorkflowTask,
         ..claimed_now()
@@ -468,7 +468,7 @@ async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_crash_write_on_a_row_this_claim_does_not_hold_writes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, OTHER_WORKER, claimed.claimed_at).await;
 
@@ -530,7 +530,7 @@ async fn a_write_that_cannot_reach_the_database_is_sent_three_more_times() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_write_error_that_cannot_clear_is_not_sent_again() {
-    let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let url = crate::test_support::migrated_database_url().await;
     let missing = PgConnectOptions::from_str(&url)
         .unwrap()
         .database(&format!("horsies_missing_{}", Uuid::new_v4().simple()));

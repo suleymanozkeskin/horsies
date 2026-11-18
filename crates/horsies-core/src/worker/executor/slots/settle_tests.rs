@@ -339,7 +339,7 @@ const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "
 #[tokio::test]
 #[serial]
 async fn a_reported_result_of_a_shared_run_completes_the_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -381,7 +381,7 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     for (execution, placement, cancel, class_after) in [
         (
             ExecutionClass::SharedAsync,
@@ -459,7 +459,7 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -503,7 +503,7 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
 #[tokio::test]
 #[serial]
 async fn a_loop_kill_fails_the_row_with_its_code() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     for (code, retry, name) in [
         (
             LoopKillCode::TaskBlockedLoop,
@@ -693,7 +693,7 @@ fn loop_kill(code: LoopKillCode, retry: RetryPlacement) -> AttemptEnd {
 #[tokio::test]
 #[serial]
 async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     for (retried_code, end, left) in [
         (
             "TASK_BLOCKED_LOOP",
@@ -740,7 +740,7 @@ async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code()
 #[tokio::test]
 #[serial]
 async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
     let returned = || {
         AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
@@ -771,7 +771,7 @@ async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
 #[tokio::test]
 #[serial]
 async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -812,7 +812,7 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
 #[tokio::test]
 #[serial]
 async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -864,7 +864,7 @@ async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
 #[tokio::test]
 #[serial]
 async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let ends = [
         AttemptEnd::Crashed {
             reason: FailureDetail::cut("the child was lost"),
@@ -923,7 +923,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
 #[tokio::test]
 #[serial]
 async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -1005,7 +1005,7 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
 #[tokio::test]
 #[serial]
 async fn a_task_whose_node_is_not_linked_stays_claimed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let queue = test_queue();
     let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
 

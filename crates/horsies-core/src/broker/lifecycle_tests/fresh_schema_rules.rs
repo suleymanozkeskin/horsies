@@ -7,14 +7,13 @@
 //! and the absence of a DEFAULT partition.
 
 use sha2::{Digest, Sha256};
-use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::support::{assert_refused, cleanup_tasks, pool, seed_task, Constraint, TaskSeed};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::archive::attempts::encode_attempt_snapshot;
-use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
+use crate::core::history::maintenance::coverage::CoverageOutcome;
+use crate::test_support::sql::{self, TestConnection};
 
 /// Levels below a partition root that the tree walk reads: root, class
 /// parent, leaf.
@@ -42,9 +41,9 @@ struct HistoryRow {
 /// Insert `row` into the static forever leaf on `connection`. Returns the
 /// database's answer, so a test can assert a refusal.
 async fn insert_history_row(
-    connection: &mut PgConnection,
+    connection: &mut TestConnection,
     row: HistoryRow,
-) -> Result<u64, sqlx::Error> {
+) -> Result<u64, sql::Error> {
     let snapshot = encode_attempt_snapshot(&[]).expect("encode the empty attempt snapshot");
     let (disposition, version, digest, inline): (
         &str,
@@ -61,7 +60,7 @@ async fn insert_history_row(
         ),
     };
     let result_digest = row.result.map(|payload| Sha256::digest(payload).to_vec());
-    let inserted = sqlx::query(
+    let inserted = sql::query(
         "INSERT INTO horsies_task_history (
             task_id, task_name, queue_name, priority,
             command_fingerprint_version, command_fingerprint,
@@ -119,7 +118,7 @@ async fn a_live_row_carries_both_rerun_ids_or_neither() {
     let task_id = seed_task(&pool, &TaskSeed::pending()).await;
 
     for column in ["rerun_of_task_id", "rerun_root_task_id"] {
-        let refused = sqlx::query(&format!(
+        let refused = sql::query(&format!(
             "UPDATE horsies_tasks SET {column} = $2 WHERE id = $1"
         ))
         .bind(task_id)
@@ -133,7 +132,7 @@ async fn a_live_row_carries_both_rerun_ids_or_neither() {
             Constraint::Named("horsies_tasks_rerun_lineage_pair"),
         );
     }
-    let paired = sqlx::query(
+    let paired = sql::query(
         "UPDATE horsies_tasks SET rerun_of_task_id = $2, rerun_root_task_id = $2 WHERE id = $1",
     )
     .bind(task_id)
@@ -178,7 +177,7 @@ async fn completed_and_workflow_history_rows_refuse_rerun_input() {
 
     let mut transaction = pool.begin().await.expect("begin the control insert");
     let accepted = insert_history_row(
-        transaction.as_mut(),
+        &mut *transaction,
         HistoryRow {
             status: "FAILED",
             kind: "FAIL_RUNNING",
@@ -232,23 +231,23 @@ async fn an_administrative_cancel_refuses_a_stored_result() {
 async fn the_history_and_heartbeat_trees_have_no_default_partition() {
     let pool = pool().await;
     let config = RetentionConfig::default();
-    let mut transaction = pool.begin().await.expect("begin coverage");
-    let coverage = ensure_partition_coverage(
-        &mut transaction,
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
+    let coverage = crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
+        &core,
+        crate::broker::core_rows::StatementLog::Off,
         config.history_leaf_horizon_days,
         config.heartbeat_leaf_horizon_hours,
         &config.registrable_periods(),
-        &StagedLoaderPublisher,
     )
     .await
     .expect("ensure coverage");
+    core.close();
     assert!(
         matches!(coverage, CoverageOutcome::Ensured(_)),
         "{coverage:?}"
     );
-    transaction.commit().await.expect("commit coverage");
 
-    let (members, leaves, defaults): (i64, i64, Vec<String>) = sqlx::query_as(
+    let (members, leaves, defaults): (i64, i64, Vec<String>) = sql::query_as(
         "WITH RECURSIVE tree AS (
              SELECT root.oid AS relid, 0 AS depth
              FROM pg_class AS root

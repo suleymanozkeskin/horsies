@@ -24,7 +24,7 @@ const WORKER: &str = "task-complete-worker";
 
 async fn test_broker() -> PostgresBroker {
     PostgresBroker::from_pool(
-        crate::broker::terminalization_matrix::migrated_pool().await,
+        crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
         crate::ClientFamily::Rust,
     )
 }

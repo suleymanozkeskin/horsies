@@ -15,7 +15,6 @@
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
@@ -25,8 +24,9 @@ use crate::broker::claims::{
 };
 use crate::broker::core_rows::StatementLog;
 use crate::broker::listener::notify_task_queue;
-use crate::broker::pools::unpinged_single_connection_core_pool;
+use crate::broker::pools::unpinged_single_connection_core_pool_for_url;
 use crate::broker::{OrphanSelfHeal, PostgresBroker, StopBeforeStart, StopMove};
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::FinalizingMark;
 
 const QUEUE: &str = "lifecycle_one_statement_writes";
@@ -38,16 +38,16 @@ const A_MINUTE: Duration = Duration::from_secs(60);
 /// trips.
 struct Counted {
     proxy: WireProxy,
-    proxied: PgPool,
+    proxied: TestPool,
     broker: PostgresBroker,
 }
 
 impl Counted {
-    async fn open(pool: &PgPool) -> Self {
-        let upstream = database_options(pool);
-        let proxy = WireProxy::start(&upstream).await;
-        let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-        let broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
+    async fn open(pool: &TestPool) -> Self {
+        let upstream = pool.url();
+        let proxy = WireProxy::start(upstream).await;
+        let proxied = single_session_pool(&proxy.url(upstream)).await;
+        let broker = PostgresBroker::from_test_url(proxied.url(), crate::ClientFamily::Rust);
         Self {
             proxy,
             proxied,
@@ -90,8 +90,8 @@ fn started(outcome: WindowedStart) -> bool {
     matches!(outcome, WindowedStart::Ran(StartOutcome::Started { .. }))
 }
 
-async fn finalizing_at_is_set(pool: &PgPool, task_id: Uuid) -> bool {
-    sqlx::query_scalar("SELECT finalizing_at IS NOT NULL FROM horsies_tasks WHERE id = $1")
+async fn finalizing_at_is_set(pool: &TestPool, task_id: Uuid) -> bool {
+    sql::query_scalar("SELECT finalizing_at IS NOT NULL FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -320,9 +320,9 @@ async fn an_empty_capped_claim_pass_is_one_statement() {
 #[serial]
 async fn the_delayed_retry_wake_is_one_statement() {
     let pool = pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = unpinged_single_connection_core_pool_for_url(&proxy.url(upstream));
     notify_task_queue(&proxied, StatementLog::Off, QUEUE, Uuid::new_v4())
         .await
         .expect("warm up");

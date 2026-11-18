@@ -157,7 +157,7 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn retention_owns_only_worker_state_and_workflow_rows() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut coverage = pool.begin().await.unwrap();
         let outcome = ensure_startup_coverage(coverage.as_mut(), 2, 2, &[], &StagedLoaderPublisher)
             .await
@@ -245,7 +245,7 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn periodic_maintenance_publishes_all_health_and_contains_coverage_failure() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut recovery = RecoveryConfig::default();
         recovery.auto_requeue_stale_claimed = false;
         recovery.auto_fail_stale_running = false;
@@ -308,7 +308,7 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn a_stale_claim_past_its_deadline_is_requeued_then_expired_in_one_pass() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let coverage =
             crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
                 &crate::broker::pools::core_pool_for_test_pool(&pool),
@@ -397,7 +397,7 @@ mod p7_maintenance_tests {
     #[tokio::test]
     #[serial]
     async fn periodic_maintenance_runs_non_phase2_workflow_recovery() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -457,7 +457,7 @@ mod p7_maintenance_tests {
     #[serial]
     async fn periodic_maintenance_creates_ahead_prunes_both_partition_families_and_contains_a_blocker(
     ) {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut recovery = RecoveryConfig::default();
         recovery.auto_requeue_stale_claimed = false;
         recovery.auto_fail_stale_running = false;
@@ -1797,9 +1797,10 @@ fn stale_running_thresholds(
 #[cfg(test)]
 pub(crate) mod on_test_pool {
     use super::{RecoveryBatch, StaleRunningThresholds, StatementLog, ThresholdMs};
+    use crate::test_support::sql::TestDatabaseUrl;
 
     pub(crate) async fn mark_stale_running_as_failed(
-        pool: &sqlx::PgPool,
+        pool: &impl TestDatabaseUrl,
         threshold_secs: f64,
         finalizing_threshold_secs: f64,
         scan_limit: i64,
@@ -1812,20 +1813,20 @@ pub(crate) mod on_test_pool {
             .ok()
             .and_then(RecoveryBatch::new)
             .expect("a test scan limit of 1 to 10000 rows");
-        let core = crate::broker::pools::core_pool_for_test_pool(pool);
+        let core = crate::broker::pools::core_pool_for_test_url(&pool.test_url());
         let recovered =
             super::mark_stale_running_as_failed(&core, StatementLog::Off, thresholds, batch).await;
         core.close();
         recovered
     }
 
-    /// [`super::requeue_stale_claimed`] on a core pool built from a test's
-    /// sqlx pool, with the threshold in seconds.
+    /// [`super::requeue_stale_claimed`] on a core pool on the database of a
+    /// test pool, with the threshold in seconds.
     pub(crate) async fn requeue_stale_claimed(
-        pool: &sqlx::PgPool,
+        pool: &impl TestDatabaseUrl,
         threshold_secs: f64,
     ) -> Result<u64, crate::broker::BrokerError> {
-        let core = crate::broker::pools::core_pool_for_test_pool(pool);
+        let core = crate::broker::pools::core_pool_for_test_url(&pool.test_url());
         let requeued =
             super::requeue_stale_claimed(&core, StatementLog::Off, threshold_of(threshold_secs))
                 .await;
@@ -2272,7 +2273,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_gate_held_by_another_session_skips_the_pass() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut holder = pool.begin().await.expect("begin the holder");
         let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(advisory_key_reaper())
@@ -2381,7 +2382,7 @@ mod tests {
     }
 
     async fn test_pool() -> PgPool {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut coverage = pool.begin().await.expect("begin startup coverage");
         let outcome = ensure_startup_coverage(
             coverage.as_mut(),
