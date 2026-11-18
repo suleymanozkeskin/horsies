@@ -122,6 +122,15 @@ before you upgrade a 0.7 deployment.
   generated union `TaskSendCoreError` plus `TaskSendEventLoopLimit` and
   `TaskSendLoopRunnerFailed`, which only the Python client produces.
 
+- **`OutcomeDecodeError` is generated from the core, and the core builds
+  the error classes of `cancel_task`.** `OutcomeDecodeError` is rendered
+  into `horsies._catalog.lifecycle_errors`, and
+  `horsies.core.lifecycle.outcomes` re-exports it; its name, base, doc and
+  text do not change. A refused or failed `cancel_task` returns the
+  `TaskActionError` class that the core builds, with the same messages.
+  `TaskActionDbOperationFailed.exception` keeps the text of its cause, and
+  `TaskActionStoredDataInvalid.exception` is an `OutcomeDecodeError`.
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async

@@ -7,6 +7,8 @@ import uuid
 from collections.abc import Callable
 from typing import Literal, final
 
+from horsies._catalog.monitoring_errors import TaskActionCoreError
+
 
 class CoreError(Exception):
     """Base of the errors raised at the core boundary."""
@@ -208,7 +210,7 @@ class CoreHandle:
         """One pruning pass on the session-work pool. Writes (DDL and catalog rows); each leaf's
         detach and drop commit alone.
         """
-    def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | CancelRefusedWorkflowTask | CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid]:
+    def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | TaskActionCoreError]:
         """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
         statement. An outcome that contradicts the function raises PanicException.
         """
@@ -1477,57 +1479,6 @@ class TaskCancelledRecord:
     def task_id(self) -> uuid.UUID: ...
     @property
     def was_status(self) -> Literal['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED']: ...
-
-
-@final
-class CancelRefusedWorkflowTask:
-    """The task belongs to a workflow, live or finished. Nothing changed."""
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def current_status(self) -> Literal['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED']: ...
-
-
-@final
-class CancelRefusedStatus:
-    """The task's status does not admit the cancel: a terminal status (an earlier cancel
-    included), or RUNNING without the opt-in. Nothing changed.
-    """
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def current_status(self) -> Literal['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED']: ...
-
-
-@final
-class CancelTaskAbsent:
-    """Neither the live table nor history holds the task. Nothing changed."""
-    @property
-    def task_id(self) -> uuid.UUID: ...
-
-
-@final
-class CancelFailed:
-    """The connect, the client family check or the statement failed. The statement wrote
-    nothing, or it committed and its reply was lost.
-    """
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def retryable(self) -> bool: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
-
-
-@final
-class CancelStoredDataInvalid:
-    """Stored task data does not parse. The cancel refused the task; nothing changed."""
-    @property
-    def task_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
 
 
 @final

@@ -4,15 +4,18 @@
 //! one frozen dataclass per class, the union of each catalog, and the
 //! per-operation unions of `ERROR_UNIONS`, in that order. Also
 //! `_catalog/error_detail.py` with `NoCause`, the field type that several
-//! catalogs share, and one module per `NewType` of `TEXT_NEW_TYPES`.
+//! catalogs share, one module per `NewType` of `TEXT_NEW_TYPES`, and one
+//! module per module of `EXCEPTION_CLASSES` with its `Exception`
+//! subclasses.
 
 use std::collections::BTreeMap;
 
 use horsies_core::catalog::CodeCatalog;
 use horsies_core::error_catalog::{
-    code_subsets, CodeSubset, ErrorCatalog, ErrorClass, ErrorSlot, ErrorUnion, ExceptionType,
-    FieldDefault, RecordClass, RecordField, RecordFieldType, SlotRepr, SlotType, TextNewType,
-    DEFAULT_RETENTION_CLASS, ERROR_CATALOGS, ERROR_RECORDS, ERROR_UNIONS, RETENTION_CLASS_KEY,
+    code_subsets, CodeSubset, ErrorCatalog, ErrorClass, ErrorSlot, ErrorUnion, ExceptionClass,
+    ExceptionType, FieldDefault, RecordClass, RecordField, RecordFieldType, SlotRepr, SlotType,
+    TextNewType, DEFAULT_RETENTION_CLASS, ERROR_CATALOGS, ERROR_RECORDS, ERROR_UNIONS,
+    EXCEPTION_CLASSES, RETENTION_CLASS_KEY,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -73,6 +76,44 @@ fn module_entry<'a>(
         records: Vec::new(),
         unions: Vec::new(),
     })
+}
+
+/// The exception-class modules, in name order, each with its classes in
+/// the order of `EXCEPTION_CLASSES`.
+pub fn exception_modules() -> BTreeMap<&'static str, Vec<ExceptionClass>> {
+    let mut modules: BTreeMap<&'static str, Vec<ExceptionClass>> = BTreeMap::new();
+    for class in EXCEPTION_CLASSES {
+        modules.entry(class.python_module).or_default().push(*class);
+    }
+    modules
+}
+
+/// The text of one exception-class module: an `Exception` subclass per
+/// class, whose body is its doc. It imports nothing.
+pub fn render_exception_module(module: &str, classes: &[ExceptionClass]) -> String {
+    let names: Vec<&str> = classes.iter().map(|class| class.python_class).collect();
+    let mut text = format!("{GENERATED_HEADER}\n");
+    text.push_str(&format!(
+        "\"\"\"Exception classes of the `{module}` area: {}.\"\"\"\n",
+        names.join(", ")
+    ));
+    let exported: Vec<String> = names.iter().copied().map(string_literal).collect();
+    text.push_str(&format!("\n__all__ = [{}]\n", exported.join(", ")));
+    for class in classes {
+        text.push_str("\n\n");
+        text.push_str(&render_exception_class(class));
+    }
+    text
+}
+
+/// One `Exception` subclass. A class without a doc has `pass` as its body.
+fn render_exception_class(class: &ExceptionClass) -> String {
+    let mut text = format!("class {}(Exception):\n", class.python_class);
+    match docstring(class.doc, "    ") {
+        Some(doc) => text.push_str(&doc),
+        None => text.push_str("    pass\n"),
+    }
+    text
 }
 
 /// The text of `_catalog/error_detail.py`.
@@ -583,5 +624,51 @@ mod tests {
         assert!(text.starts_with(GENERATED_HEADER));
         assert!(text.contains("__all__ = ['NoCause']\n"));
         assert!(text.ends_with(" tracker call.\n    \"\"\"\n"), "{text}");
+    }
+
+    /// `OutcomeDecodeError` keeps its name, its base and Python's doc
+    /// (`horsies.core.lifecycle.outcomes`), and its module imports nothing.
+    #[test]
+    fn an_exception_class_is_an_exception_subclass_with_its_doc() {
+        let modules = exception_modules();
+        let classes = &modules["lifecycle_errors"];
+        assert_eq!(
+            render_exception_module("lifecycle_errors", classes),
+            format!(
+                "{GENERATED_HEADER}\n\
+                 \"\"\"Exception classes of the `lifecycle_errors` area: OutcomeDecodeError.\"\"\"\n\
+                 \n__all__ = ['OutcomeDecodeError']\n\
+                 \n\nclass OutcomeDecodeError(Exception):\n\
+                 \x20   \"\"\"The returned row does not satisfy the wire contract.\n\
+                 \n\
+                 \x20   Never raised for a task outcome — only when the database returned\n\
+                 \x20   something this code cannot interpret, which means one side is running\n\
+                 \x20   against a contract the other does not implement.\n\
+                 \x20   \"\"\"\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_class_without_a_doc_has_pass_as_its_body() {
+        let class = ExceptionClass {
+            python_module: "probe_errors",
+            python_class: "ProbeError",
+            doc: "",
+        };
+        assert_eq!(
+            render_exception_class(&class),
+            "class ProbeError(Exception):\n    pass\n"
+        );
+    }
+
+    /// An exception-class module never shares its file with an error module.
+    #[test]
+    fn exception_modules_and_error_modules_have_different_names() {
+        let error_module_names: Vec<&str> = error_modules().into_keys().collect();
+        for module in exception_modules().keys() {
+            assert!(!error_module_names.contains(module), "{module}");
+            assert_ne!(*module, ERROR_DETAIL_MODULE);
+        }
     }
 }

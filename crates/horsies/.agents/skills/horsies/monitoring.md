@@ -175,8 +175,8 @@ and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
 | `NotFound` | 404 | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
-| `StoredDataInvalid` | 500 | Stored data does not parse. Nothing changed |
+| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed; `cause` is the `BrokerError`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
+| `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
 
 `TaskActionErrorCode::EventLoopLimit` is Python's only; no variant has it.
 
