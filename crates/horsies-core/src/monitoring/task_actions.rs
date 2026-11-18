@@ -10,6 +10,9 @@ use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::types::status::TaskStatus;
 use crate::failure_cause::FailureCause;
 
+/// Why a task action did not apply.
+///
+/// Each member names one variant of `TaskActionError`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
