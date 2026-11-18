@@ -4,7 +4,9 @@
 //! instance of its generated class in `horsies._catalog` (for example
 //! `horsies._catalog.monitoring_errors.TaskActionNotFound`): the class is
 //! called with the value's instance slots as keyword arguments. A slot that
-//! holds a code is the member of its generated code enum. The `exception`
+//! holds a code is the member of its generated code enum, and a slot that
+//! holds the payload of a send is the generated record `TaskSendPayload`,
+//! called with the payload's fields. The `exception`
 //! slot is built from the variant's typed cause: the core's class of the
 //! cause (`core_failures`), with the operation that failed as its subject,
 //! or a generated exception class such as `OutcomeDecodeError`.
@@ -16,7 +18,10 @@
 //! a generated module that does not match the core is a defect of the
 //! build, not an outcome.
 
-use horsies_core::error_catalog::{ErrorClassValues, ErrorEnum, ExceptionValue, SlotData};
+use horsies_core::error_catalog::{
+    ErrorClassValues, ErrorEnum, ExceptionValue, RecordValue, SlotData, TASK_SEND_PAYLOAD,
+};
+use horsies_core::TaskSendPayload;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
@@ -92,12 +97,50 @@ fn slot_object<'py>(
     match value {
         SlotData::Str(text) => text.into_bound_py_any(py),
         SlotData::Bool(flag) => flag.into_bound_py_any(py),
+        SlotData::Int(number) => number.into_bound_py_any(py),
+        SlotData::TaskSendPayload(payload) => payload_object(py, payload),
         SlotData::Uuid(id) => id.into_bound_py_any(py),
         SlotData::UuidText(id) => id.to_string().into_bound_py_any(py),
         SlotData::CodeMember { catalog, value } => {
             catalog_class(py, catalog.python_module, catalog.python_class)?.call1((value,))
         }
         SlotData::Exception(exception) => exception_object(py, subject, exception),
+    }
+}
+
+/// The generated record `TaskSendPayload`, called with the payload's fields
+/// by name ([`TaskSendPayload::record_values`]).
+///
+/// Failure exits: those of the class import, and the exception of a
+/// constructor that refuses the values.
+fn payload_object<'py>(py: Python<'py>, payload: &TaskSendPayload) -> PyResult<Bound<'py, PyAny>> {
+    let class = catalog_class(
+        py,
+        TASK_SEND_PAYLOAD.python_module,
+        TASK_SEND_PAYLOAD.python_class,
+    )?;
+    let fields = PyDict::new(py);
+    for field in payload.record_values() {
+        fields.set_item(field.name, record_value_object(py, field.value)?)?;
+    }
+    class.call((), Some(&fields))
+}
+
+/// The Python value of one record field: a `str`, an `int`, an aware
+/// `datetime` in UTC, or `None` for an absent optional value. A retention
+/// class key is its text; `RetentionClassKey` is a `NewType` of `str`.
+fn record_value_object<'py>(
+    py: Python<'py>,
+    value: RecordValue<'_>,
+) -> PyResult<Bound<'py, PyAny>> {
+    match value {
+        RecordValue::Str(text) => text.into_bound_py_any(py),
+        RecordValue::Int(number) => number.into_bound_py_any(py),
+        RecordValue::DateTime(instant) => instant.into_bound_py_any(py),
+        RecordValue::OptionalStr(text) => text.into_bound_py_any(py),
+        RecordValue::OptionalInt(number) => number.into_bound_py_any(py),
+        RecordValue::OptionalDateTime(instant) => instant.into_bound_py_any(py),
+        RecordValue::OptionalRetentionClassKey(key) => key.into_bound_py_any(py),
     }
 }
 
@@ -124,6 +167,7 @@ fn exception_object<'py>(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, TimeZone, Utc};
     use horsies_core::{FailureCause, ServerErrorFacts};
 
     use super::*;
@@ -177,6 +221,46 @@ mod tests {
                     .expect("sqlstate"),
                 "57014"
             );
+        });
+    }
+
+    /// A record value is its Python value: text, an integer, an aware
+    /// `datetime` in UTC, and `None` for an absent optional value.
+    #[test]
+    fn a_record_value_is_its_python_value() {
+        Python::initialize();
+        Python::attach(|py| {
+            let text = record_value_object(py, RecordValue::Str("report")).expect("str");
+            assert_eq!(text.extract::<String>().expect("a str"), "report");
+            let number = record_value_object(py, RecordValue::Int(-7)).expect("int");
+            assert_eq!(number.extract::<i64>().expect("an int"), -7);
+            let absent = record_value_object(py, RecordValue::OptionalInt(None)).expect("None");
+            assert!(absent.is_none());
+            let instant: DateTime<Utc> = Utc
+                .with_ymd_and_hms(2026, 11, 18, 12, 0, 0)
+                .single()
+                .expect("a valid instant");
+            let sent_at =
+                record_value_object(py, RecordValue::DateTime(instant)).expect("datetime");
+            assert_eq!(
+                sent_at
+                    .extract::<DateTime<Utc>>()
+                    .expect("an aware datetime"),
+                instant
+            );
+            let forever = record_value_object(py, RecordValue::OptionalRetentionClassKey(None))
+                .expect("None");
+            assert!(forever.is_none());
+        });
+    }
+
+    /// An integer slot of 64 bits is a Python `int` with the same value.
+    #[test]
+    fn an_int_slot_keeps_its_value() {
+        Python::initialize();
+        Python::attach(|py| {
+            let large = slot_object(py, "send", SlotData::Int(i128::from(u64::MAX))).expect("int");
+            assert_eq!(large.extract::<u64>().expect("an int"), u64::MAX);
         });
     }
 }

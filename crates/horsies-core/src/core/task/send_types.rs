@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::BrokerError;
-use crate::error_catalog::ErrorEnum;
+use crate::core::config::EnqueueRetention;
+use crate::error_catalog::{ErrorEnum, RecordFieldValue, RecordValue};
 use crate::FailureCause;
 
 /// Categorized task send failure codes.
@@ -65,7 +66,7 @@ impl std::fmt::Display for TaskSendErrorCode {
 /// The retry methods extract this payload directly — no user input needed.
 /// A replay carries the same command and `sent_at`, so the exact-id resend
 /// check accepts it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSendPayload {
     pub task_name: String,
     pub queue_name: String,
@@ -79,6 +80,49 @@ pub struct TaskSendPayload {
     pub idempotency_key: Option<String>,
     /// The retention of the send: the default class, forever or a period.
     pub retention: crate::core::config::EnqueueRetention,
+}
+
+impl TaskSendPayload {
+    /// The fields of the Python record `TaskSendPayload`
+    /// (`error_catalog::TASK_SEND_PAYLOAD`), by name, in the record's order.
+    /// The input is its text (Python's `None` stores the same `{}`), and
+    /// the retention is its class key, or `None` for forever. Pure.
+    pub fn record_values(&self) -> Vec<RecordFieldValue<'_>> {
+        let field = |name: &'static str, value: RecordValue<'_>| RecordFieldValue { name, value };
+        let retention_class_key = match self.retention {
+            EnqueueRetention::Forever => None,
+            EnqueueRetention::Default | EnqueueRetention::Period(_) => {
+                Some(self.retention.class_key())
+            }
+        };
+        vec![
+            field("task_name", RecordValue::Str(&self.task_name)),
+            field("queue_name", RecordValue::Str(&self.queue_name)),
+            field("priority", RecordValue::Int(i64::from(self.priority))),
+            field(
+                "input_json",
+                RecordValue::OptionalStr(Some(self.input_json.as_str())),
+            ),
+            field("sent_at", RecordValue::DateTime(self.sent_at)),
+            field("good_until", RecordValue::OptionalDateTime(self.good_until)),
+            field(
+                "enqueue_delay_seconds",
+                RecordValue::OptionalInt(self.enqueue_delay_seconds),
+            ),
+            field(
+                "task_options",
+                RecordValue::OptionalStr(self.task_options.as_deref()),
+            ),
+            field(
+                "idempotency_key",
+                RecordValue::OptionalStr(self.idempotency_key.as_deref()),
+            ),
+            field(
+                "retention_class_key",
+                RecordValue::OptionalRetentionClassKey(retention_class_key),
+            ),
+        ]
+    }
 }
 
 /// Error from task send/schedule operations: one variant per
