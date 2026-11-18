@@ -31,8 +31,15 @@ from tests.perf.__main__ import (
     _observations_for,
     _select_scenarios,
 )
+from datetime import timedelta
+
 from tests.perf.counters import Counts
-from tests.perf.scenarios import PublicCallScenario, Scenario, SingleRowScenario
+from tests.perf.scenarios import (
+    PublicCallScenario,
+    Scenario,
+    SingleRowScenario,
+    WorkerDrainScenario,
+)
 from tests.perf.runner import (
     Conditions,
     Measurement,
@@ -74,6 +81,21 @@ _PUBLIC_CALL = PublicCallScenario(
     cleanup=_never_run,
 )
 """A public call scenario: one implementation, which both sides run."""
+
+_DRAIN = WorkerDrainScenario(
+    name='run-exit-drain',
+    description='a worker drain scenario built for these tests',
+    minimum_throughput_ratio=0.90,
+    task_count=10_000,
+    timeout=timedelta(minutes=10),
+    count_interval=timedelta(milliseconds=100),
+    stop_timeout=timedelta(seconds=60),
+    open_sender=_never_run,
+    start_worker=_never_run,
+    count_terminal=_never_run,
+    cleanup=_never_run,
+)
+"""A worker drain: one implementation, which both sides run."""
 
 
 def _conditions(comparison: str, observations: int = 200) -> Conditions:
@@ -141,6 +163,7 @@ def _control_result(
     verdict: Verdict = Verdict.PASS,
 ) -> RunResult:
     return RunResult(
+        scenario=_SCENARIO,
         conditions=_conditions('existing statement against itself (harness control)'),
         baseline=Measurement(samples_ms=[1.0], counts=baseline),
         candidate=Measurement(samples_ms=[1.0], counts=candidate),
@@ -231,6 +254,7 @@ class TestControlCountChecks:
 
     def test_non_control_comparison_is_not_held_to_count_equality(self) -> None:
         result = RunResult(
+            scenario=_SCENARIO,
             conditions=_conditions('existing statement against function'),
             baseline=Measurement(samples_ms=[1.0], counts=_counts()),
             candidate=Measurement(
@@ -373,6 +397,16 @@ class TestScenarioSelection:
     def test_a_public_call_scenario_is_never_a_candidate(self) -> None:
         assert not _has_candidate(_PUBLIC_CALL)
 
+    def test_all_selects_the_worker_drain(self) -> None:
+        """Claim and finish run through a worker that the CLI of each
+        release starts; the release comparison pairs the drain by name."""
+        drains = {
+            scenario.name
+            for scenario in _select_scenarios('all')
+            if isinstance(scenario, WorkerDrainScenario)
+        }
+        assert drains == {'claim-finish'}
+
     def test_a_selection_of_no_scenario_is_refused(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -436,6 +470,7 @@ class TestPublicCallScenario:
     def test_a_count_disagreement_between_its_sides_is_reported(self) -> None:
         result = dataclasses.replace(
             _control_result(_counts(), _counts(client_statements=201)),
+            scenario=_PUBLIC_CALL,
             conditions=_conditions(_comparison_label(_PUBLIC_CALL, control=False)),
         )
         report = _control_disagreements(result)
@@ -462,3 +497,92 @@ class TestPublicCallScenario:
 
     def test_its_block_is_the_requested_size(self) -> None:
         assert _block_size_for(_PUBLIC_CALL, 100) == 100
+
+
+class TestWorkerDrainScenario:
+    """A worker drain runs one drain of the release on both sides."""
+
+    def test_a_gate_without_control_is_refused(self) -> None:
+        """The gate needs a second implementation; a drain has one. The
+        refusal comes before any connection or worker: port 1 has no server."""
+        with pytest.raises(SystemExit) as raised:
+            perf_main.main(
+                [
+                    '--dsn',
+                    'postgresql://perf@127.0.0.1:1/unused',
+                    '--scenario',
+                    'claim-finish',
+                    '--scale',
+                    'gate',
+                    '--demo-quiesced',
+                ]
+            )
+        assert raised.value.code == 2
+
+    def test_observations_below_the_gate_drains_are_refused(self) -> None:
+        with pytest.raises(SystemExit) as raised:
+            perf_main.main(
+                [
+                    '--dsn',
+                    'postgresql://perf@127.0.0.1:1/unused',
+                    '--scenario',
+                    'claim-finish',
+                    '--scale',
+                    'gate',
+                    '--demo-quiesced',
+                    '--control',
+                    '--observations',
+                    str(perf_main.GATE_DRAINS - 1),
+                ]
+            )
+        assert raised.value.code == 2
+
+    def test_it_is_never_a_candidate(self) -> None:
+        assert not _has_candidate(_DRAIN)
+
+    def test_the_comparison_is_labelled_a_control(self) -> None:
+        """A smoke run does not judge its throughput verdict; a gate does."""
+        assert 'control' in _comparison_label(_DRAIN, control=False)
+        assert 'control' in _comparison_label(_DRAIN, control=True)
+
+    def test_a_count_disagreement_between_its_sides_is_not_reported(self) -> None:
+        """The statements of a worker depend on its timing, so two drains of
+        one release differ; each drain checks its own tasks instead."""
+        result = dataclasses.replace(
+            _control_result(
+                _counts(),
+                _counts(client_statements=401, write_transactions=900),
+            ),
+            scenario=_DRAIN,
+            conditions=_conditions(_comparison_label(_DRAIN, control=True)),
+        )
+        assert _control_disagreements(result) == []
+
+    def test_it_has_no_contract_of_a_real_comparison(self) -> None:
+        report = _contract_violations(
+            scenario=_DRAIN,
+            conditions=_conditions(_comparison_label(_DRAIN, control=True)),
+            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
+            candidate=Measurement(
+                samples_ms=[1.0],
+                counts=_counts(client_statements=400),
+            ),
+            plans=None,
+            control=True,
+        )
+        assert report == ()
+
+    def test_it_takes_the_drain_counts(self) -> None:
+        assert _minimum_observations(_DRAIN, 'gate') == perf_main.GATE_DRAINS
+        assert _minimum_observations(_DRAIN, 'smoke') == perf_main.SMOKE_DRAINS
+
+    def test_its_block_is_one_drain(self) -> None:
+        assert _block_size_for(_DRAIN, 100) == 1
+
+    @pytest.mark.parametrize('verdict', [Verdict.FAIL, Verdict.INCONCLUSIVE])
+    def test_a_smoke_run_does_not_judge_its_throughput(self, verdict: Verdict) -> None:
+        assert _exit_status('smoke', [(verdict, True)]) == 0
+
+    @pytest.mark.parametrize('verdict', [Verdict.FAIL, Verdict.INCONCLUSIVE])
+    def test_a_gate_needs_a_throughput_pass(self, verdict: Verdict) -> None:
+        assert _exit_status('gate', [(verdict, True)]) == 1

@@ -53,6 +53,11 @@ operation. The patch makes these changes:
   `workflow-start` (see "Scenario map"). The runner, the entry point and the
   report change as in the current harness to run them; the report names the
   payload "payload per operation".
+- **Worker drain scenario.** The patch adds `tests/perf/worker_process.py`,
+  `tests/perf/worker_drain.py` and `tests/perf/worker_drain_app.py`, the same
+  files as in the current harness, and the scenario `claim-finish` (see
+  "Claim and finish"). The runner, the entry point, the report and the server
+  counts change as in the current harness to run it.
 
 The patch does not change the unit tests of the 0.7.0 harness
 (`tests/unit/test_perf_run_exit.py`). Some of these tests need a scenario
@@ -61,9 +66,10 @@ them.
 
 ## Scenario map
 
-The scenarios of the current harness call public operations of the library.
-Each one has a v0.7.0 scenario of the same name that runs the same file,
-`tests/perf/public_calls.py`. Every call in that file is public API of both
+The scenarios of the current harness call public operations of the library,
+or drain sent tasks with a worker that the public CLI starts ("Claim and
+finish"). Each one has a v0.7.0 scenario of the same name that runs the same
+files. The calls of `tests/perf/public_calls.py` are public API of both
 releases with the same signature, so a pair measures the same call through
 the product of each release.
 
@@ -79,8 +85,47 @@ the product of each release.
   and after it measures.
 - No plan evidence: the statements are the library's. The server counts are
   the statements that the library sent.
-- Claim and finish have no scenario. No public API of either release claims
-  or finishes a task: the worker does both (#2049).
+
+### Claim and finish
+
+No public API of either release claims or finishes a task: the worker does
+both. The scenario `claim-finish` measures them through a worker that the
+public CLI starts, `horsies worker`, which takes the same arguments in both
+releases. Both harnesses run the same three files: `worker_process.py`
+starts, watches and stops the process, `worker_drain.py` holds the app, the
+sends and the count, and `worker_drain_app.py` is the app module that the
+worker loads.
+
+| Scenario (both releases) | One operation (a drain) | Reported |
+|---|---|---|
+| `claim-finish` | `send()` of 10,000 no-op tasks (not timed), then `horsies worker tests.perf.worker_drain_app:app --profile perf-drain --loglevel WARNING`; the time from the start of the worker process until all 10,000 tasks are COMPLETED or FAILED | tasks per second over the drains of each side |
+
+- The constants are in `worker_drain.py`: `DRAIN_TASK_COUNT` (10,000 tasks),
+  `DRAIN_WORKER_PROFILE` (4 isolated children; a child is not replaced after
+  a count of tasks), `DRAIN_TIMEOUT` (10 minutes), `DRAIN_COUNT_INTERVAL`
+  (100 ms) and `WORKER_STOP_TIMEOUT` (60 seconds).
+- The harness runs the `horsies` script of its own environment, with the
+  root of its checkout as the working directory. The worker gets the `--dsn`
+  of the run in `HORSIES_PERF_DRAIN_DSN`, so each release gets the URL form
+  that it accepts. The worker writes its output to a log file in the
+  temporary directory.
+- The end of a drain is read by one SQL count, the same in both releases:
+  the rows of `horsies_task_history` with the task name `perf.drain.noop`
+  and the status COMPLETED or FAILED, once every 100 ms. The time ends at the
+  start of the count that reads 10,000. It includes the start of the worker
+  process: its imports, its startup checks and the start of its children.
+- After the drain the worker gets SIGTERM and must exit 0. A drain that
+  takes longer than the timeout, a worker that exits before the drain ends,
+  and a worker that does not exit 0 stop the run; the message names the log
+  of the worker.
+- A run deletes the rows of the task, live and in history, before each
+  drain and after the run. Each drain starts a new worker. The first drain
+  of each side is a warmup. A smoke run makes 1 drain for each side, a gate
+  run 10.
+- The server counts are the statements of the worker from its start until
+  the drain ends. The count of the harness is left out (its column alias
+  `perf_harness_read`). The statements of a worker depend on its timing, so
+  the two sides of a run are not held to equal counts.
 
 ### Statement scenarios of the v0.7.0 harness
 
@@ -154,7 +199,8 @@ release: the two schemas have the same table names.
    ```
 
    The current checkout runs in its own environment, with a built
-   `horsies._core`.
+   `horsies._core`. The scenario `claim-finish` runs the `horsies` script of
+   each environment; `uv sync` installs it.
 
 4. Install the two schemas. The two releases accept different URL schemes:
    v0.7.0 needs `postgresql+psycopg://`, the current release accepts

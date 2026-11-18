@@ -24,6 +24,10 @@ harness times the call and counts what the server recorded. The call is the
 same public API in each release, so the harness of each release measures the
 same work through its own product.
 
+A fourth shape drains sent tasks with a worker that the public CLI starts
+(``worker_drain.py``): the worker claims, runs and finishes them, and the
+harness reports the drain as throughput.
+
 Seeded rows carry ids of the column type: one UUIDv7 per scenario, role,
 kind of row and index (``seed_rows``). The ids of one role and kind share
 their leading digits, so a run finds and deletes its own rows by an id range
@@ -36,7 +40,7 @@ import hashlib
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Final, Protocol
 
@@ -52,6 +56,19 @@ from tests.perf.public_calls import (
     delete_started_workflows,
 )
 from tests.perf.statistics import Budget
+from tests.perf.worker_drain import (
+    DRAIN_COUNT_INTERVAL,
+    DRAIN_ISOLATED_CHILDREN,
+    DRAIN_PROFILE_NAME,
+    DRAIN_TASK_COUNT,
+    DRAIN_TIMEOUT,
+    WORKER_STOP_TIMEOUT,
+    DrainSender,
+    count_terminal_tasks,
+    delete_drained_tasks,
+    start_drain_worker,
+)
+from tests.perf.worker_process import StartedWorker, WorkerStartFailed
 
 WORKER_ID = 'perf-harness'
 WORKER_HOSTNAME = 'perf-harness-host'
@@ -338,10 +355,48 @@ class PublicCallScenario:
     cleanup: PublicCleanup
 
 
+type OpenDrainSender = Callable[[str], DrainSender]
+"""Builds the sender of a drain for a database URL. No I/O."""
+
+type StartDrainWorker = Callable[[str], StartedWorker | WorkerStartFailed]
+"""Starts the worker of a drain on a database URL. Starts a process."""
+
+type CountTerminal = Callable[[Connection], int]
+"""Reads the number of tasks of the drain that are terminal, and ends its
+transaction."""
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerDrainScenario:
+    """One drain per measured operation.
+
+    A drain sends ``task_count`` tasks (``open_sender``), then starts one
+    worker (``start_worker``). The operation runs from the start of the
+    worker until ``count_terminal`` reads every task terminal, once every
+    ``count_interval``; a drain that takes longer than ``timeout`` stops the
+    run. Then the worker gets SIGTERM and ``stop_timeout`` to exit 0. Both
+    sides run the same drain: every run is a control run. The statement and
+    transaction counts of a worker depend on its timing, so the sides are not
+    held to equal counts.
+    """
+
+    name: str
+    description: str
+    minimum_throughput_ratio: float
+    task_count: int
+    timeout: timedelta
+    count_interval: timedelta
+    stop_timeout: timedelta
+    open_sender: OpenDrainSender
+    start_worker: StartDrainWorker
+    count_terminal: CountTerminal
+    cleanup: PublicCleanup
+
+
 type StatementScenario = SingleRowScenario | BatchScenario
 """A scenario whose operation is one statement that the harness sends."""
 
-type Scenario = StatementScenario | PublicCallScenario
+type Scenario = StatementScenario | PublicCallScenario | WorkerDrainScenario
 
 
 def payload_of(size_bytes: int) -> str:
@@ -450,6 +505,7 @@ def analyze(connection: Connection) -> None:
 
 PUBLIC_CALL_P50: Final = Budget(fraction=0.10, floor_ms=0.5)
 PUBLIC_CALL_P99: Final = Budget(fraction=0.15, floor_ms=1.5)
+MINIMUM_DRAIN_THROUGHPUT_RATIO: Final = 0.90
 
 SCENARIOS: tuple[Scenario, ...] = (
     PublicCallScenario(
@@ -477,9 +533,31 @@ SCENARIOS: tuple[Scenario, ...] = (
         open_call=WorkflowStartCall,
         cleanup=delete_started_workflows,
     ),
+    WorkerDrainScenario(
+        name='claim-finish',
+        description=(
+            f'claim, run and finish of {DRAIN_TASK_COUNT} sent no-op tasks by '
+            f'one worker that `horsies worker --profile {DRAIN_PROFILE_NAME}` '
+            f'starts ({DRAIN_ISOLATED_CHILDREN} isolated children, not '
+            'recycled). One operation is one drain: the time from the start '
+            'of the worker process until every task is COMPLETED or FAILED, '
+            'read by a count every '
+            f'{DRAIN_COUNT_INTERVAL // timedelta(milliseconds=1)} ms'
+        ),
+        minimum_throughput_ratio=MINIMUM_DRAIN_THROUGHPUT_RATIO,
+        task_count=DRAIN_TASK_COUNT,
+        timeout=DRAIN_TIMEOUT,
+        count_interval=DRAIN_COUNT_INTERVAL,
+        stop_timeout=WORKER_STOP_TIMEOUT,
+        open_sender=DrainSender,
+        start_worker=start_drain_worker,
+        count_terminal=count_terminal_tasks,
+        cleanup=delete_drained_tasks,
+    ),
 )
 """The scenarios of this release: public operations that run on 0.7.0 and on
-this release with the same call."""
+this release with the same call, and the drain of sent tasks by a worker that
+the public CLI starts."""
 
 
 def scenario_by_name(name: str) -> Scenario:
