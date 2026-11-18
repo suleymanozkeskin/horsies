@@ -1,136 +1,89 @@
-"""Test support for code that selects broker resources.
+"""Test-side SQL access to the database of a broker.
 
-Public entry points call ``await broker.select_resources()`` once, and a
-real broker keeps one set per open event loop. A test with a mock broker
-attaches a fake set with ``attach_resources``. A test with a real broker
-reads the running loop's set with ``current_resources`` (sync, for setup and
-assertions) or ``resources_of`` (through the public selection), swaps parts
-of it with ``replaced_resources``, or gives every loop one mocked set with
-``pin_resources``.
+A broker runs every statement in the core and holds no SQLAlchemy engine. A
+test that seeds rows or reads them directly calls ``current_resources(broker)``:
+an engine and a session factory on the broker's ``database_url``, built once
+per broker and kept while the broker lives.
+
+- The engine has no pool (``NullPool``): a session or a connection opens its
+  own database connection and closes it at its end. No connection outlives
+  the event loop that opened it, so the engine serves every event loop of the
+  test process.
+- The engine reads uuid columns as text (``read_uuid_columns_as_text``).
+- The connect arguments are the broker config's ``pooled_connect_args``: the
+  TCP settings, and no prepared statements in PgBouncer transaction mode.
 """
 
 from __future__ import annotations
 
-import asyncio
-import dataclasses
-import threading
-from collections.abc import Generator
-from contextlib import contextmanager
-from typing import Any, assert_never
-from unittest.mock import AsyncMock, MagicMock
+import weakref
+from dataclasses import dataclass
+from typing import Any
 
-from horsies.core.brokers.listener import PostgresListener
-from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.resources import (
-    BrokerResources,
-    EventLoopLimit,
-    ListenerDisabled,
-    ListenerEnabled,
-    ListenerState,
-    SessionEngineShared,
+from psycopg.types.string import TextLoader
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
 )
-from horsies.core.types.result import Err, Ok, is_ok
+from sqlalchemy.pool import NullPool
+
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.utils.url import sqlalchemy_url
 
 
-def fake_resources(
-    *,
-    session_factory: Any = None,
-    engine: Any = None,
-    partition_maintenance: Any = None,
-    listener: ListenerState | None = None,
-) -> BrokerResources:
-    """A resource set of mocks. Each part not given is a fresh ``MagicMock``;
-    the listener defaults to ``ListenerEnabled`` around a ``MagicMock``.
+@dataclass(frozen=True, slots=True)
+class DatabaseAccess:
+    """An engine and a session factory on the database of one broker."""
+
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+
+
+_ACCESS: weakref.WeakKeyDictionary[PostgresBroker, DatabaseAccess] = (
+    weakref.WeakKeyDictionary()
+)
+"""The access of each live broker; an entry goes with its broker."""
+
+
+def _load_uuid_as_text(dbapi_connection: Any, _connection_record: Any) -> None:
+    """The ``connect`` listener: uuid columns of the new connection read as text."""
+    dbapi_connection.driver_connection.adapters.register_loader('uuid', TextLoader)
+
+
+def read_uuid_columns_as_text(engine: AsyncEngine) -> None:
+    """Make every connection of ``engine`` read uuid columns as text.
+
+    The tests compare identity columns with the text of the id. One loader on
+    the driver gives every raw ``text()`` read that presentation. No I/O at
+    registration.
     """
-    return BrokerResources(
-        engine=engine if engine is not None else MagicMock(),
-        session_factory=session_factory if session_factory is not None else MagicMock(),
-        session_engine=SessionEngineShared(),
-        partition_maintenance=(
-            partition_maintenance if partition_maintenance is not None else MagicMock()
-        ),
-        listener=listener if listener is not None else ListenerEnabled(listener=MagicMock()),
+    event.listen(engine.sync_engine, 'connect', _load_uuid_as_text)
+
+
+def _built_access(broker: PostgresBroker) -> DatabaseAccess:
+    """A new engine and session factory for ``broker``. No I/O."""
+    engine = create_async_engine(
+        sqlalchemy_url(broker.config.database_url.get_secret_value()),
+        poolclass=NullPool,
+        connect_args=broker.config.pooled_connect_args,
+    )
+    read_uuid_columns_as_text(engine)
+    return DatabaseAccess(
+        engine=engine,
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
     )
 
 
-def attach_resources(broker: Any, resources: BrokerResources) -> BrokerResources:
-    """Make ``broker.select_resources()`` return ``Ok(resources)``."""
-    broker.select_resources = AsyncMock(return_value=Ok(resources))
-    return resources
-
-
-def attach_loop_limit(
-    broker: Any, loop_limit: EventLoopLimit | None = None,
-) -> EventLoopLimit:
-    """Make ``broker.select_resources()`` return ``Err(loop_limit)``."""
-    chosen = loop_limit or EventLoopLimit(
-        limit=5,
-        held_thread_names=('MainThread',) * 5,
-        current_thread_name='other-thread',
-    )
-    broker.select_resources = AsyncMock(return_value=Err(chosen))
-    return chosen
-
-
-async def resources_of(broker: PostgresBroker) -> BrokerResources:
-    """The real broker's resources for the running loop; fails on the loop limit."""
-    selected = await broker.select_resources()
-    assert is_ok(selected), selected
-    return selected.ok_value
-
-
-def current_resources(broker: PostgresBroker) -> BrokerResources:
-    """The real broker's set for the running event loop, built when absent.
-
-    White-box and sync, for setup and assertions inside a running loop. It
-    never releases the sets of closed loops; the next ``select_resources()``
-    call does.
-    """
-    selected = broker._resources_for_loop(  # pyright: ignore[reportPrivateUsage]
-        asyncio.get_running_loop(), threading.current_thread().name,
-    )
-    assert is_ok(selected), selected
-    return selected.ok_value
-
-
-def pin_resources(broker: PostgresBroker, resources: BrokerResources) -> BrokerResources:
-    """Make every event loop get ``resources`` from the real broker (white-box).
-
-    For unit tests with mocked parts: sets already built are replaced too.
-    """
-    broker._build_resources = lambda: resources  # pyright: ignore[reportAttributeAccessIssue]
-    broker._loop_sets = tuple(  # pyright: ignore[reportPrivateUsage]
-        dataclasses.replace(entry, resources=resources)
-        for entry in broker._loop_sets  # pyright: ignore[reportPrivateUsage]
-    )
-    return resources
-
-
-def listener_of(broker: PostgresBroker) -> PostgresListener:
-    """The real broker's listener; fails when the broker has none."""
-    match current_resources(broker).listener:
-        case ListenerEnabled(listener=listener):
-            return listener
-        case ListenerDisabled():
-            raise AssertionError('this broker was built without a listener')
-        case _ as unexpected:
-            assert_never(unexpected)
-
-
-def _swap_set(broker: PostgresBroker, old: BrokerResources, new: BrokerResources) -> None:
-    broker._loop_sets = tuple(  # pyright: ignore[reportPrivateUsage]
-        dataclasses.replace(entry, resources=new) if entry.resources is old else entry
-        for entry in broker._loop_sets  # pyright: ignore[reportPrivateUsage]
-    )
-
-
-@contextmanager
-def replaced_resources(broker: PostgresBroker, **parts: Any) -> Generator[BrokerResources, None, None]:
-    """Swap parts of the running loop's set for the block, then restore."""
-    original = current_resources(broker)
-    replaced = dataclasses.replace(original, **parts)
-    _swap_set(broker, original, replaced)
-    try:
-        yield replaced
-    finally:
-        _swap_set(broker, replaced, original)
+def current_resources(broker: PostgresBroker) -> DatabaseAccess:
+    """The test-side access to the database of ``broker``, built on the first
+    call for that broker. No I/O: a session connects when it is used."""
+    match _ACCESS.get(broker):
+        case DatabaseAccess() as access:
+            return access
+        case None:
+            access = _built_access(broker)
+            _ACCESS[broker] = access
+            return access

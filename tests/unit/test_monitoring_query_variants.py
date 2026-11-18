@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.monitoring.errors import (
     MonitoringQueryDbOperationFailed,
     MonitoringQueryError,
     MonitoringQueryErrorCode,
-    MonitoringQueryEventLoopLimit,
     MonitoringQueryHistoryContractViolation,
 )
 from tests.union_members import union_members
@@ -25,11 +23,6 @@ pytestmark = [pytest.mark.unit]
 
 MESSAGE_MARKER = 'message-marker-91af'
 CAUSE_MARKER = 'cause-marker-91af'
-LOOP_LIMIT = EventLoopLimit(
-    limit=5,
-    held_thread_names=('MainThread',),
-    current_thread_name='worker-1',
-)
 
 
 def _every_variant(cause: BaseException) -> list[MonitoringQueryError]:
@@ -37,7 +30,6 @@ def _every_variant(cause: BaseException) -> list[MonitoringQueryError]:
     message = f'failed: {MESSAGE_MARKER}'
     return [
         MonitoringQueryDbOperationFailed(message=message, retryable=True, exception=cause),
-        MonitoringQueryEventLoopLimit(message=message, loop_limit=LOOP_LIMIT),
         MonitoringQueryHistoryContractViolation(message=message, exception=cause),
     ]
 
@@ -67,11 +59,6 @@ class TestVariantCatalog:
         assert MESSAGE_MARKER not in text
         assert CAUSE_MARKER not in text
         assert type(error).__name__ in text
-
-    def test_repr_shows_the_loop_limit(self) -> None:
-        error = MonitoringQueryEventLoopLimit(message='x', loop_limit=LOOP_LIMIT)
-
-        assert repr(LOOP_LIMIT) in repr(error)
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError('x')), ids=_variant_id,

@@ -805,8 +805,9 @@ async def _core_messages_holding(
 
 def _register_child_with_a_corrupt_root(app: Horsies) -> str:
     """Register a child definition whose root task has task options that do
-    not parse, so its build raises ``SerializationError``. Returns its
-    definition key."""
+    not parse and a ``good_until``, so its build raises ``SerializationError``
+    when it merges the deadline into the options. Returns its definition
+    key."""
     suffix = uuid.uuid4().hex[:8]
 
     @app.task(task_name=f'web_corrupt_root_{suffix}')
@@ -822,7 +823,11 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
         @classmethod
         def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
             _ = (args, params)
-            node = WorkflowTaskNode(fn=corrupt_root, kwargs={'value': 1})
+            node = WorkflowTaskNode(
+                fn=corrupt_root,
+                kwargs={'value': 1},
+                good_until=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
             return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
     register_workflow_definition(CorruptRootChild)
@@ -866,7 +871,8 @@ async def _seed_paused_parent_of_a_ready_child(
 @pytest.mark.usefixtures('clean_tables')
 class TestResumeOfAChildBuildThatRaises:
     """A resume whose owed child start builds a child that raises: the task
-    options of the child's root do not parse (``SerializationError``).
+    options of the child's root do not parse, and the build merges the
+    root's ``good_until`` into them (``SerializationError``).
 
     Python's resume route let the exception propagate, and Starlette answered
     500 with the text ``Internal Server Error`` and nothing of the exception,

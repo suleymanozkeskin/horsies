@@ -1,6 +1,6 @@
 """``horsies.core.types.core_failure``: the call rule and the retry rule of
-a core boundary error, and the absence of the interim class
-``CoreOperationFailed``.
+a core boundary error, the retry rule of a core failure, and the absence of
+the interim class ``CoreOperationFailed``.
 
 A failure record of the core carries the core's class of the cause
 (``horsies._core.CoreServerError`` and the other ``CoreFailure`` leaf
@@ -18,7 +18,11 @@ import pytest
 
 import horsies
 import horsies._core as core
-from horsies.core.types.core_failure import call_refusal_or_raise, core_error_retryable
+from horsies.core.types.core_failure import (
+    call_refusal_or_raise,
+    core_error_retryable,
+    core_exception_retryable,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -109,3 +113,34 @@ class TestCallRefusalOrRaise:
             _ = call_refusal_or_raise(unknown)
 
         assert raised.value.__cause__ is unknown
+
+
+class TestCoreExceptionRetryable:
+    """The retry rule of the cause of a failed core operation, or of a core
+    boundary error."""
+
+    def test_a_core_failure_keeps_the_core_classification(self) -> None:
+        lost = core.CoreConnectionError('release_claims', 'connection lost', True)
+        closed = core.CoreConnectionError('release_claims', 'the main pool is closed', False)
+        deadlock = core.CoreServerError('release_claims', '40P01', 'deadlock detected', True)
+        unique = core.CoreServerError('release_claims', '23505', 'duplicate key value', False)
+        held = core.CorePreconditionFailed('install_schema', 'the install lock is held', True)
+        family = core.CorePreconditionFailed('install_schema', 'another client family', False)
+        assert core_exception_retryable(lost) is True
+        assert core_exception_retryable(closed) is False
+        assert core_exception_retryable(deadlock) is True
+        assert core_exception_retryable(unique) is False
+        assert core_exception_retryable(held) is True
+        assert core_exception_retryable(family) is False
+
+    def test_a_core_contract_violation_is_not_retryable(self) -> None:
+        broken = core.CoreContractViolation('release_claims', 'ordinality 3 has no answer')
+        assert core_exception_retryable(broken) is False
+
+    def test_a_core_boundary_error_is_retryable_only_when_it_clears(self) -> None:
+        busy = core.TooManyPendingCalls('CoreHandle.release_claims_async', 65_536)
+        stopped = core.CoreStopped('core task', 'panic')
+        forked = core.ForkedAfterCoreStart(100, 101, 'exec the child')
+        assert core_exception_retryable(busy) is True
+        assert core_exception_retryable(stopped) is False
+        assert core_exception_retryable(forked) is False

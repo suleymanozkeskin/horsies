@@ -8,8 +8,7 @@ use crate::FailureCause;
 /// Categorized workflow start failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`
-/// and `EVENT_LOOP_LIMIT` are produced by the Python client only.
+/// (`python/horsies/core/workflows/start_types.py`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "workflow_start", base = "str_enum")]
 pub enum WorkflowStartErrorCode {
@@ -21,13 +20,6 @@ pub enum WorkflowStartErrorCode {
     WorkflowIdConflict,
     /// Infrastructure error: schema init, DB transaction. Conditionally retryable.
     EnqueueFailed,
-    /// A sync start could not run the call on the broker's sync runner: the runner is stopped, its
-    /// thread did not start, or scheduling failed. Nothing ran. Python client only; removed before
-    /// 0.8.0.
-    LoopRunnerFailed,
-    /// The broker already holds resource sets for its limit of open event loops, and this call ran on a
-    /// new one; nothing was written. Python client only; removed before 0.8.0.
-    EventLoopLimit,
     /// A sync or blocking start was called on a thread that runs an event loop or a tokio
     /// runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
     AsyncContext,
@@ -40,8 +32,6 @@ impl std::fmt::Display for WorkflowStartErrorCode {
             Self::ValidationFailed => write!(f, "VALIDATION_FAILED"),
             Self::WorkflowIdConflict => write!(f, "WORKFLOW_ID_CONFLICT"),
             Self::EnqueueFailed => write!(f, "ENQUEUE_FAILED"),
-            Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
-            Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
             Self::AsyncContext => write!(f, "ASYNC_CONTEXT"),
         }
     }
@@ -52,9 +42,8 @@ impl std::fmt::Display for WorkflowStartErrorCode {
 /// of the core produces, each with the facts of its state only. Carried
 /// inside `Err(...)` of a [`WorkflowStartResult`].
 ///
-/// The classes that only the Python client produces are not variants:
-/// `WorkflowStartBrokerNotConfigured`, `WorkflowStartLoopRunnerFailed` and
-/// `WorkflowStartEventLoopLimit`.
+/// The class that only the Python client produces is not a variant:
+/// `WorkflowStartBrokerNotConfigured`.
 #[derive(Debug, Clone)]
 pub enum WorkflowStartError {
     /// Python `WorkflowStartValidationFailed`: the spec, its arguments or
@@ -194,8 +183,7 @@ pub type WorkflowStartResult<T> = Result<T, WorkflowStartError>;
 /// Returns `Ok(workflow_id)` if retry is valid, `Err(WorkflowStartError)`
 /// with `ValidationFailed` code otherwise.
 ///
-/// Mirrors Python's `WorkflowSpec._validate_start_retry(error)`, which also
-/// accepts the Python-only `LOOP_RUNNER_FAILED`.
+/// Mirrors Python's `WorkflowSpec._validate_start_retry(error)`.
 pub fn validate_start_retry(
     error: &WorkflowStartError,
     spec_name: &str,

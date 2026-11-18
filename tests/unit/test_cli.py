@@ -48,10 +48,6 @@ from horsies.core.models.worker_profile import (
     WorkerProfile,
 )
 from horsies.core.types.result import Err, Ok
-from tests.broker_resources_support import (
-    attach_resources,
-    fake_resources,
-)
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 
 
@@ -582,7 +578,6 @@ def _make_mock_broker() -> MagicMock:
     broker = MagicMock()
     broker.config = MagicMock()
     broker.config.database_url = 'postgresql://localhost/test'
-    attach_resources(broker, fake_resources())
     broker.close_async = AsyncMock(return_value=Ok(None))
     broker.ensure_schema_initialized = AsyncMock(return_value=Ok(None))
     return broker

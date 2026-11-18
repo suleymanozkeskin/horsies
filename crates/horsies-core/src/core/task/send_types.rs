@@ -13,9 +13,8 @@ use crate::FailureCause;
 /// Categorized task send failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/models/task_send_types.py`). `EVENT_LOOP_LIMIT`
-/// and `LOOP_RUNNER_FAILED` are produced by the Python client only;
-/// [`TaskSendError`] has no variant for them.
+/// (`python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
+/// one variant per member.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
@@ -44,14 +43,6 @@ pub enum TaskSendErrorCode {
     /// written. Non-retryable — shrink the payload (pass a reference to
     /// external storage) or raise the configured limit.
     PayloadTooLarge,
-    /// The broker already holds resource sets for its limit of open event
-    /// loops, and this send ran on a new one; nothing was written. The retry
-    /// methods refuse it. Python client only; removed before 0.8.0.
-    EventLoopLimit,
-    /// A sync send or schedule could not run the enqueue on the broker's sync
-    /// runner: the runner is stopped, its thread did not start, or scheduling
-    /// failed. Nothing was written. Python client only; removed before 0.8.0.
-    LoopRunnerFailed,
 }
 
 impl std::fmt::Display for TaskSendErrorCode {
@@ -64,8 +55,6 @@ impl std::fmt::Display for TaskSendErrorCode {
             Self::PayloadMismatch => write!(f, "PAYLOAD_MISMATCH"),
             Self::IdempotencyKeyConflict => write!(f, "IDEMPOTENCY_KEY_CONFLICT"),
             Self::PayloadTooLarge => write!(f, "PAYLOAD_TOO_LARGE"),
-            Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
-            Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
         }
     }
 }
@@ -296,10 +285,9 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `python/horsies/core/models/task_send_types.py:201-206`) without the
-    /// Python-only `LOOP_RUNNER_FAILED`: an async context, an enqueue failure
-    /// and a key conflict. A refusal is never replayed, because the same
-    /// input meets the same refusal.
+    /// `python/horsies/core/models/task_send_types.py`): an async context, an
+    /// enqueue failure and a key conflict. A refusal is never replayed,
+    /// because the same input meets the same refusal.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
         match self {
             Self::AsyncContext {

@@ -33,7 +33,6 @@ from horsies._core import (
     ForkedAfterCoreStart,
 )
 from horsies.core.app import Horsies
-from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     declared_taskresult_ok_type,
@@ -376,19 +375,11 @@ def _locate_app(app_locator: str) -> Horsies:
 
 
 def _discard_inherited_broker(app: Horsies) -> None:
-    """Drop any broker that importing the app built in this child.
+    """Drop any broker that importing the app built in this child, without
+    closing it.
 
     ``app.get_broker()`` then builds a new one, after the worker role is set.
     """
-    match getattr(app, '_broker', None):
-        case PostgresBroker() as broker:
-            try:
-                broker.discard_inherited_resources()
-            except Exception as exc:
-                logger.warning('Failed to discard the import-time broker in child: %s', exc)
-        case _:
-            # Importing the app built no broker.
-            pass
     try:
         setattr(app, '_broker', None)
     except Exception as exc:

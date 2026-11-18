@@ -191,9 +191,7 @@ mod tests {
             "NO_TYPE_AVAILABLE",
             "INVALID_JSON_PAYLOAD",
             "INVALID_TASK_OPTIONS",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
-            "LOOP_RUNNER_FAILED",
             "INVALID_INPUT",
             "LISTENER_DISABLED",
             "WAIT_INSIDE_TASK",
@@ -207,8 +205,6 @@ mod tests {
             "PAYLOAD_MISMATCH",
             "IDEMPOTENCY_KEY_CONFLICT",
             "PAYLOAD_TOO_LARGE",
-            "EVENT_LOOP_LIMIT",
-            "LOOP_RUNNER_FAILED",
         ]);
         // python/horsies/core/workflows/start_types.py
         assert_python_members::<WorkflowStartErrorCode>(&[
@@ -216,14 +212,11 @@ mod tests {
             "VALIDATION_FAILED",
             "WORKFLOW_ID_CONFLICT",
             "ENQUEUE_FAILED",
-            "LOOP_RUNNER_FAILED",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
         ]);
         // python/horsies/monitoring/errors.py
         assert_python_members::<MonitoringQueryErrorCode>(&[
             "DB_OPERATION_FAILED",
-            "EVENT_LOOP_LIMIT",
             "HISTORY_CONTRACT_VIOLATION",
         ]);
         // python/horsies/monitoring/task_actions.py
@@ -232,7 +225,6 @@ mod tests {
             "TASK_NOT_CANCELLABLE",
             "TASK_IS_WORKFLOW_TASK",
             "DB_OPERATION_FAILED",
-            "EVENT_LOOP_LIMIT",
             "STORED_DATA_INVALID",
         ]);
     }
@@ -268,7 +260,6 @@ mod tests {
             "WORKFLOW_NOT_FOUND",
             "RESULT_NOT_AVAILABLE",
             "RESULT_NOT_READY",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
             "INVALID_INPUT",
             "WAIT_INSIDE_TASK",
@@ -365,8 +356,6 @@ mod tests {
             "DB_OPERATION_FAILED",
             "STORED_DATA_INVALID",
             "RESUME_RECOVERY_FAILED",
-            "LOOP_RUNNER_FAILED",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
         ]);
     }

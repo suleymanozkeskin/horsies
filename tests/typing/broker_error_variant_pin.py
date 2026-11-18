@@ -28,11 +28,9 @@ from horsies import (
     BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerErrorCode,
-    BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidTaskOptions,
-    BrokerLoopRunnerFailed,
     BrokerOperationError,
     BrokerOperationFailed,
     BrokerPayloadMismatch,
@@ -139,10 +137,10 @@ def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) ->
                     pass
 
 
-async def schema_init_returns_only_operation_and_loop_limit(
+async def schema_init_returns_only_the_operation_failure(
     broker: PostgresBroker,
 ) -> None:
-    declared: Result[None, BrokerOperationFailed | BrokerEventLoopLimit] = (
+    declared: Result[None, BrokerOperationFailed] = (
         await broker.ensure_schema_initialized()
     )
     _ = declared
@@ -171,12 +169,8 @@ def every_enqueue_variant_is_matched(
             return 'task options refused'
         case BrokerInvalidInput():
             return 'input refused'
-        case BrokerEventLoopLimit():
-            return 'loop limit'
         case BrokerAsyncContext():
             return 'async context'
-        case BrokerLoopRunnerFailed():
-            return 'loop runner failed'
         case _ as unreachable:
             assert_never(unreachable)
 

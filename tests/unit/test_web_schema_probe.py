@@ -141,7 +141,7 @@ class TestProbeFailureHandling:
 
 class TestProbeRead:
     """The read is one core call (``CoreHandle.schema_status_async``); its
-    record decides the observation, and no resource set is built."""
+    record decides the observation."""
 
     pytestmark = [asyncio_tests]
 
@@ -185,7 +185,7 @@ class TestProbeRead:
     ) -> None:
         """The state, the version and the expected version come from the core."""
         expected_version = EXPECTED_SCHEMA_VERSION + 7
-        probe, broker, handle = self._probe(
+        probe, _, handle = self._probe(
             self._record(state.value, version, expected_version),
         )
 
@@ -195,25 +195,23 @@ class TestProbeRead:
             state=state, version=version, expected_version=expected_version,
         )
         handle.schema_status_async.assert_awaited_once_with()
-        assert broker._loop_sets == ()
 
     async def test_unknown_is_a_failed_read_not_a_verdict(self) -> None:
         """The core's UNKNOWN is a read that failed: None, and status() keeps
         its rule for a failed read."""
-        probe, broker, _ = self._probe(
+        probe, _, _ = self._probe(
             self._record(SchemaState.UNKNOWN.value, None, EXPECTED_SCHEMA_VERSION),
         )
 
         assert await probe._read() is None
         assert (await probe.status()).state is SchemaState.UNKNOWN
-        assert broker._loop_sets == ()
 
     async def test_a_core_that_cannot_run_the_read_is_a_failed_read(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A core boundary error is a failed read, logged with its type."""
         refused = TooManyPendingCalls('CoreHandle.schema_status_async', 65_536)
-        probe, broker, _ = self._probe(refused)
+        probe, _, _ = self._probe(refused)
 
         with caplog.at_level(logging.WARNING):
             observed = await probe._read()
@@ -223,7 +221,6 @@ class TestProbeRead:
             'Schema version probe failed: TooManyPendingCalls' in record.getMessage()
             for record in caplog.records
         )
-        assert broker._loop_sets == ()
 
     async def test_a_defect_of_the_call_propagates(self) -> None:
         """An exception that is not a CoreError is not a failed read."""

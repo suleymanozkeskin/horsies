@@ -1847,9 +1847,8 @@ class WorkflowSpec(Generic[OutT]):
     ) -> 'Result[str, WorkflowStartValidationFailed]':
         """Check that a retryable start error belongs to this workflow.
 
-        The parameter type admits ``WorkflowStartEnqueueFailed``,
-        ``WorkflowStartAsyncContext`` and ``WorkflowStartLoopRunnerFailed``;
-        each carries the id of its start. Another variant, passed by a caller
+        The parameter type admits ``WorkflowStartEnqueueFailed`` and
+        ``WorkflowStartAsyncContext``; each carries the id of its start. Another variant, passed by a caller
         without a type checker, fails an assertion that names it. Refused: an
         error of another workflow. Returns ``Ok(workflow_id)``.
         """
@@ -1857,17 +1856,12 @@ class WorkflowSpec(Generic[OutT]):
         from horsies.core.workflows.start_types import (
             WorkflowStartAsyncContext,
             WorkflowStartEnqueueFailed,
-            WorkflowStartLoopRunnerFailed,
             WorkflowStartValidationFailed,
         )
         from horsies.core.types.result import Ok as _Ok, Err as _Err
 
         match error:
-            case (
-                WorkflowStartEnqueueFailed()
-                | WorkflowStartAsyncContext()
-                | WorkflowStartLoopRunnerFailed()
-            ):
+            case WorkflowStartEnqueueFailed() | WorkflowStartAsyncContext():
                 pass
             case _ as refused:
                 assert_never(refused)
@@ -1892,9 +1886,8 @@ class WorkflowSpec(Generic[OutT]):
         Safe for transient DB retries within the same deploy.  Cannot
         detect spec changes on collision.
 
-        Accepts ``ENQUEUE_FAILED``, ``ASYNC_CONTEXT`` and
-        ``LOOP_RUNNER_FAILED`` errors (``WorkflowStartRetryable``). The start
-        runs as in ``start()``.
+        Accepts ``ENQUEUE_FAILED`` and ``ASYNC_CONTEXT`` errors
+        (``WorkflowStartRetryable``). The start runs as in ``start()``.
 
         Args:
             error: The retryable error from a previous ``start()`` call.
@@ -1917,8 +1910,8 @@ class WorkflowSpec(Generic[OutT]):
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Async variant of ``retry_start()``.
 
-        It completes the start of an ``ASYNC_CONTEXT`` or ``LOOP_RUNNER_FAILED``
-        error with the error's id.
+        It completes the start of an ``ASYNC_CONTEXT`` error with the error's
+        id.
 
         Args:
             error: The retryable error from a previous ``start()`` or

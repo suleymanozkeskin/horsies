@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import horsies._core as core
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.tasks import OperationalErrorCode, RetrievalCode
 from horsies.core.models.workflow.enums import WorkflowStatus
@@ -30,8 +29,6 @@ from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
     HandleDbOperationFailed,
     HandleErrorCode,
-    HandleEventLoopLimit,
-    HandleLoopRunnerFailed,
     HandleOperationError,
     HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
@@ -65,18 +62,6 @@ def _every_variant(cause: BaseException) -> list[HandleOperationError]:
         ),
         HandleResumeRecoveryFailed(
             message=message, workflow_id=WORKFLOW_ID, exception=cause,
-        ),
-        HandleLoopRunnerFailed(
-            message=message, workflow_id=WORKFLOW_ID, exception=cause,
-        ),
-        HandleEventLoopLimit(
-            message=message,
-            workflow_id=WORKFLOW_ID,
-            loop_limit=EventLoopLimit(
-                limit=5,
-                held_thread_names=('MainThread',),
-                current_thread_name='worker-1',
-            ),
         ),
         HandleAsyncContext(message=message, workflow_id=WORKFLOW_ID),
     ]

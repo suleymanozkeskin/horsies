@@ -13,19 +13,15 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.models.workflow.spec import WorkflowSpec
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Ok, is_ok, is_err
-from horsies.core.utils.loop_runner import LoopRunnerError
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
-    WorkflowStartEventLoopLimit,
     WorkflowStartIdConflict,
-    WorkflowStartLoopRunnerFailed,
     WorkflowStartRetryable,
     WorkflowStartValidationFailed,
 )
@@ -62,12 +58,6 @@ def _retryable_variants(workflow_id: str) -> list[WorkflowStartRetryable]:
             workflow_name='test-wf',
             workflow_id=workflow_id,
         ),
-        WorkflowStartLoopRunnerFailed(
-            message='Loop runner is not running',
-            workflow_name='test-wf',
-            workflow_id=workflow_id,
-            exception=LoopRunnerError('stopped'),
-        ),
     ]
 
 
@@ -87,16 +77,6 @@ def _refused_variants() -> list[WorkflowStartError]:
             workflow_name='test-wf',
             workflow_id='wf-123',
             existing_workflow_name='other-wf',
-        ),
-        WorkflowStartEventLoopLimit(
-            message='loop limit',
-            workflow_name='test-wf',
-            workflow_id='wf-123',
-            loop_limit=EventLoopLimit(
-                limit=5,
-                held_thread_names=('MainThread',),
-                current_thread_name='worker-1',
-            ),
         ),
     ]
 
