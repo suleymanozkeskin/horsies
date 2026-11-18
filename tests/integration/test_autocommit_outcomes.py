@@ -79,8 +79,6 @@ from tests.integration.autocommit_support import (
 from tests.integration.history_seeding import read_attempts
 from tests.integration.round_trip_proxy import RoundTripProxy
 
-from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
-from tests.dualrun.operations.table import Implementation
 from tests.dualrun.reference import claim_caller
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -441,7 +439,6 @@ async def test_a_dead_connection_fails_the_claim_pass_as_retryable(
     direct: ProxiedWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
-    implementation: ImplementationRun,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The claim loop retries a pass that raised a retryable connection
@@ -449,13 +446,9 @@ async def test_a_dead_connection_fails_the_claim_pass_as_retryable(
 
     The test kills the backend of the worker's SQLAlchemy pool, which the
     Python claim statement (kept as the dual-run reference) uses; the core's
-    claim pass runs on its own pool. The core run of ``--dual-run=broker``
-    is skipped."""
-    match implementation:
-        case DualRunCase(implementation=Implementation.CORE):
-            pytest.skip('the test kills the backend of the Python claim statement')
-        case DualRunCase() | SingleRun():
-            pass
+    claim pass runs on its own pool. The test is in
+    ``BROKER_REFERENCE_ONLY_TESTS``: ``--dual-run=broker`` runs it once, on
+    the reference."""
     monkeypatch.setattr(ClaimMixin, '_claim_rows', claim_caller.claim_rows)
     worker = direct.worker
     worker._claim_slot_count = lambda: 1  # type: ignore[method-assign]

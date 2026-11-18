@@ -239,7 +239,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | `EnqueueFailed` | The connect, the schema install, the client family check, the database, or the build of a sub-workflow child failed. `retryable` is the classification of the cause. When the commit reply was lost, a start again with the same id finds the workflow |
 | `AsyncContext` | A blocking start of `horsies::blocking` on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable. See [Blocking API](/horsies/rust/tasks/blocking-api/) |
 
-`WorkflowFunction::retry_start(&error)` starts again with the error's `workflow_id`. It refuses with `ValidationFailed` an error that is not `EnqueueFailed`, an error of another workflow name, and an error with no workflow id. For a template, call `start_with_id(params, workflow_id)` with the error's id. The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#workflow-start-error-codes).
+`WorkflowFunction::retry_start(&error)` starts again with the error's `workflow_id`. It takes an `EnqueueFailed` or an `AsyncContext` error. It refuses with `ValidationFailed` an error with another code, an error of another workflow name, and an error with no workflow id. For a template, call `start_with_id(params, workflow_id)` with the error's id. The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#workflow-start-error-codes).
 
 ## WorkflowHandle
 

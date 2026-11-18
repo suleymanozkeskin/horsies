@@ -1338,6 +1338,8 @@ class PostgresBroker:
                 install_retention = RetentionConfig()
             case RetentionConfig():
                 install_retention = retention
+        # The retention config whose classes the install covers.
+        self._install_retention: RetentionConfig = install_retention
         self._core_handle = CoreHandle(
             dump_producer_manifest(
                 to_producer_manifest(

@@ -48,8 +48,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.process_role import ProcessRole
 from horsies.core.task_decorator import TaskFunction, TaskHandle
 from horsies.core.types.result import Err, Ok
-from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
-from tests.dualrun.operations.table import Implementation
+from tests.dualrun.operations.plugin import ImplementationRun
 from tests.dualrun.reference import enqueue_caller
 from tests.integration.conftest import DB_URL
 
@@ -67,13 +66,12 @@ BACKEND_EXIT_POLL_S: Final = 0.02
 def python_send(
     implementation: ImplementationRun, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Python send in the place of the broker's send methods. The core
-    run of ``--dual-run=broker`` has no Python send to observe: skipped."""
-    match implementation:
-        case DualRunCase(implementation=Implementation.CORE):
-            pytest.skip('these tests observe the Python send, which the core run does not have')
-        case DualRunCase() | SingleRun():
-            pass
+    """The Python send in the place of the broker's send methods. It takes
+    ``implementation`` so that it runs after a dual-run has installed its
+    operations. The core run of ``--dual-run=broker`` has no Python send to
+    observe: these tests are in ``BROKER_REFERENCE_ONLY_TESTS``
+    (``tests/dualrun/operations/broker.py``) and run once, on the reference."""
+    del implementation
     monkeypatch.setattr(PostgresBroker, 'enqueue', enqueue_caller.enqueue)
     monkeypatch.setattr(PostgresBroker, 'enqueue_async', enqueue_caller.enqueue_async)
 

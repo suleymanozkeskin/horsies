@@ -2,8 +2,13 @@
 //! pool (`crates/horsies-core/baseline/0004_lifecycle_functions.sql`):
 //!
 //! - `horsies_unheld_worker_owners`: the liveness read of one pass, the
-//!   owners of CLAIMED and RUNNING rows whose liveness lock no session holds.
-//!   It takes no lock.
+//!   owners of CLAIMED and RUNNING rows whose liveness lock no session holds,
+//!   with the generation of their latest acquisition. It takes no lock.
+//! - `horsies_worker_liveness_generations`: the current generation of the
+//!   owners that two liveness reads judged, read after the later one. It
+//!   takes no lock.
+//! - `horsies_forget_ended_worker_liveness`: one bounded batch of liveness
+//!   rows of ended workers, deleted.
 //! - `horsies_stale_running_scan`: the candidates of one stale RUNNING pass,
 //!   with the facts that the retry decision and the crash result need. It
 //!   takes no lock; each candidate is judged again under its locks.
@@ -27,6 +32,8 @@
 //! Python reference: `mark_stale_tasks_as_failed`
 //! (`python/horsies/core/brokers/postgres.py:3129-3423`) and `requeue_stale_claimed`
 //! (`:3505-3530`).
+
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -146,6 +153,20 @@ static UNHELD_WORKER_OWNERS: TypedStatement = TypedStatement::new(
     &[ParameterType::Int4],
 );
 
+/// `horsies_worker_liveness_generations`. Parameter: the worker ids.
+static LIVENESS_GENERATIONS: TypedStatement = TypedStatement::new(
+    "worker_liveness_generations",
+    "SELECT * FROM horsies_worker_liveness_generations($1)",
+    &[ParameterType::TextArray],
+);
+
+/// `horsies_forget_ended_worker_liveness`. Parameter: batch size.
+static FORGET_ENDED_WORKER_LIVENESS: TypedStatement = TypedStatement::new(
+    "forget_ended_worker_liveness",
+    "SELECT horsies_forget_ended_worker_liveness($1) AS forgotten",
+    &[ParameterType::Int4],
+);
+
 /// `horsies_stale_running_scan`. Parameters in order: evidence, stale
 /// threshold, finalizing threshold (ms), owner, claim bound, batch size.
 static STALE_RUNNING_SCAN: TypedStatement = TypedStatement::new(
@@ -243,12 +264,38 @@ pub(crate) enum StaleRetry {
     },
 }
 
+/// The generation of one acquisition of a worker's liveness lock: a value
+/// of the sequence `horsies_worker_liveness_generation`, which no
+/// acquisition takes twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct LivenessGeneration(pub(crate) i64);
+
+impl std::fmt::Display for LivenessGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// The liveness generation of an owner at one read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerGeneration {
+    /// The generation of the owner's latest recorded acquisition.
+    Recorded(LivenessGeneration),
+    /// The owner has no liveness row: no acquisition is recorded, or its
+    /// row was deleted. No read judges such an owner gone.
+    NotRecorded,
+}
+
 /// A worker that the reaper judged gone: its liveness lock was free in two
-/// reads at least the gone span apart, and no read between them found it
-/// held ([`crate::worker::liveness::OWNER_GONE_SPAN`]).
+/// reads at least the gone span apart, both at one generation, no read
+/// between them found it held or at another generation
+/// ([`crate::worker::liveness::OWNER_GONE_SPAN`]), and a read of the
+/// generations after the later read still found that generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GoneOwner {
     pub(crate) worker_id: String,
+    /// The generation of the owner's last acquisition.
+    pub(crate) generation: LivenessGeneration,
     /// The database time of the first of those reads. Only rows that the
     /// owner claimed before it are recovered by this evidence.
     pub(crate) unheld_since: DateTime<Utc>,
@@ -280,11 +327,13 @@ pub(crate) struct GoneOwnerCandidate {
     pub(crate) claimed_at: DateTime<Utc>,
 }
 
-/// One owner of the liveness read: a worker id, and the database time of
-/// the read.
+/// One owner of the liveness read: a worker id, its generation in the
+/// snapshot of the read (taken before the read of the lock table), and the
+/// database time of the read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnheldOwner {
     pub(crate) worker_id: String,
+    pub(crate) generation: OwnerGeneration,
     pub(crate) read_at: DateTime<Utc>,
 }
 
@@ -355,10 +404,76 @@ pub(crate) async fn read_unheld_owners(
 }
 
 fn unheld_owner(row: &Row, statement: &TypedStatement) -> Result<UnheldOwner, RowDecodeError> {
+    let generation: Option<i64> = column(row, statement, "generation")?;
     Ok(UnheldOwner {
         worker_id: column(row, statement, "worker_id")?,
+        generation: match generation {
+            Some(value) => OwnerGeneration::Recorded(LivenessGeneration(value)),
+            None => OwnerGeneration::NotRecorded,
+        },
         read_at: column(row, statement, "db_now")?,
     })
+}
+
+/// The current liveness generation of each of `worker_ids` that has a
+/// liveness row. A worker with no row is not in the map.
+///
+/// One statement on `pool`, checked out as reserved work, after the
+/// liveness read whose owners it confirms: its snapshot follows that read's
+/// read of the lock table. Reads only; it takes no lock.
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] for a row
+/// that does not have the read's columns.
+pub(crate) async fn read_liveness_generations(
+    pool: &CorePool,
+    log: StatementLog,
+    worker_ids: &[String],
+) -> Result<BTreeMap<String, LivenessGeneration>, BrokerError> {
+    let statement = &LIVENESS_GENERATIONS;
+    let bound = statement.bind().value(&worker_ids).finish();
+    let rows = run_reserved(pool, log, &bound).await?;
+    let generations = read_rows(&rows, statement, worker_generation)?;
+    Ok(generations.into_iter().collect())
+}
+
+fn worker_generation(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<(String, LivenessGeneration), RowDecodeError> {
+    Ok((
+        column(row, statement, "worker_id")?,
+        LivenessGeneration(column(row, statement, "generation")?),
+    ))
+}
+
+/// Delete one bounded batch of liveness rows of ended workers: at most
+/// `batch` rows of workers that own no CLAIMED or RUNNING row and whose
+/// liveness lock no session holds. Returns the number of rows deleted.
+///
+/// One statement on `pool`, checked out as reserved work; it commits alone.
+/// An owner with no row is never judged gone, so a deleted row delays no
+/// recovery that a live row would allow.
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] when the
+/// statement returns no count; [`BrokerError::ClaimContract`] for a count
+/// outside 0 to `batch`.
+pub(crate) async fn forget_ended_worker_liveness(
+    pool: &CorePool,
+    log: StatementLog,
+    batch: RecoveryBatch,
+) -> Result<u32, BrokerError> {
+    let statement = &FORGET_ENDED_WORKER_LIVENESS;
+    let batch_size = batch.get();
+    let bound = statement.bind().value(&batch_size).finish();
+    let row = one_row(run_reserved(pool, log, &bound).await?, statement)?;
+    let forgotten: i32 = column(&row, statement, "forgotten")?;
+    match u32::try_from(forgotten) {
+        Ok(count) if forgotten <= batch_size => Ok(count),
+        Ok(_) | Err(_) => Err(BrokerError::ClaimContract(format!(
+            "{}: deleted {forgotten} rows with a batch of {batch_size}",
+            statement.name(),
+        ))),
+    }
 }
 
 /// Read the candidates of one stale RUNNING pass by the beat age

@@ -697,6 +697,24 @@ _WORKER_STATES: Final = TableRules(
     identity=('worker_id', 'snapshot_at'),
 )
 
+_WORKER_LIVENESS: Final = TableRules(
+    name='horsies_worker_liveness',
+    columns=_columns(
+        ('worker_id', WORKER_ID),
+        (
+            'generation',
+            Ignored(
+                reason=(
+                    'a value of the sequence horsies_worker_liveness_generation, which no '
+                    'seed reset rewinds: it counts the lock acquisitions of every earlier run'
+                ),
+            ),
+        ),
+    ),
+    order_by=('worker_id',),
+    identity=('worker_id',),
+)
+
 _PHASE2_QUARANTINE: Final = TableRules(
     name='horsies_workflow_phase2_quarantine',
     columns=_columns(
@@ -839,6 +857,7 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
         _TASK_ATTEMPTS,
         _HEARTBEATS,
         _WORKER_STATES,
+        _WORKER_LIVENESS,
         _PHASE2_QUARANTINE,
         _PHASE2_PENDING,
         _RECOVERY_FAILURES,
@@ -848,7 +867,7 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
         _SCHEDULE_STATE,
     ),
 )
-"""The rules of the 20 baseline tables, in labelling order."""
+"""The rules of the 21 baseline tables, in labelling order."""
 
 
 # ---- Notifications ----

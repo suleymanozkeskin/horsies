@@ -91,6 +91,11 @@ BROKER_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     ),
 )
 
+_SYNC_SEND_REASON: Final = (
+    'the autouse fixture python_send puts the reference enqueue_caller.enqueue and '
+    'enqueue_async in the place of the broker send methods, and the test observes that send'
+)
+
 BROKER_REFERENCE_ONLY_TESTS: Final[tuple[ReferenceOnlyTest, ...]] = (
     ReferenceOnlyTest(
         node_id=(
@@ -108,6 +113,63 @@ BROKER_REFERENCE_ONLY_TESTS: Final[tuple[ReferenceOnlyTest, ...]] = (
         reason=(
             "warms up through result_caller.get_raw_result_record_async and counts the statements "
             "of the reference's _probe_result_row on the SQLAlchemy engine"
+        ),
+    ),
+    ReferenceOnlyTest(
+        node_id='tests/integration/test_sync_send_caller_thread.py::test_a_producer_send_writes_on_the_calling_thread',
+        reason=_SYNC_SEND_REASON,
+    ),
+    ReferenceOnlyTest(
+        node_id='tests/integration/test_sync_send_caller_thread.py::test_a_keyed_send_writes_on_the_calling_thread',
+        reason=_SYNC_SEND_REASON,
+    ),
+    ReferenceOnlyTest(
+        node_id='tests/integration/test_sync_send_caller_thread.py::test_task_code_in_a_worker_child_stays_on_the_loop_runner',
+        reason=_SYNC_SEND_REASON,
+    ),
+    ReferenceOnlyTest(
+        node_id='tests/integration/test_sync_send_caller_thread.py::test_a_taken_task_id_is_answered_on_the_calling_thread',
+        reason=_SYNC_SEND_REASON,
+    ),
+    ReferenceOnlyTest(
+        node_id='tests/integration/test_sync_send_caller_thread.py::test_a_dead_connection_fails_its_send_as_retryable_then_the_next_send_reconnects',
+        reason=_SYNC_SEND_REASON,
+    ),
+    ReferenceOnlyTest(
+        node_id='tests/integration/test_sync_send_caller_thread.py::test_sends_from_many_threads_each_write_their_row',
+        reason=_SYNC_SEND_REASON,
+    ),
+    ReferenceOnlyTest(
+        node_id='tests/integration/test_sync_send_caller_thread.py::test_close_gives_the_sync_send_connections_back',
+        reason=_SYNC_SEND_REASON,
+    ),
+    ReferenceOnlyTest(
+        node_id=(
+            'tests/integration/test_held_connection.py::test_the_claim_passes_of_a_worker_share_one_checkout'
+        ),
+        reason=(
+            'puts the reference claim_caller.claim_rows in the place of ClaimMixin._claim_rows '
+            "and counts the checkouts of the worker's SQLAlchemy pool, which the reference "
+            'claim statement holds'
+        ),
+    ),
+    ReferenceOnlyTest(
+        node_id=(
+            'tests/integration/test_claim_pass_counts.py::TestClaimPassCounts::test_empty_capped_pass_statement_count'
+        ),
+        reason=(
+            'puts the reference claim_caller.claim_rows in the place of ClaimMixin._claim_rows '
+            'and counts its statements on the SQLAlchemy engine'
+        ),
+    ),
+    ReferenceOnlyTest(
+        node_id=(
+            'tests/integration/test_autocommit_outcomes.py::test_a_dead_connection_fails_the_claim_pass_as_retryable'
+        ),
+        reason=(
+            'puts the reference claim_caller.claim_rows in the place of ClaimMixin._claim_rows '
+            "and kills the backend of the worker's SQLAlchemy pool, which the reference claim "
+            'statement uses'
         ),
     ),
 )

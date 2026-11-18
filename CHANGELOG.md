@@ -342,23 +342,34 @@ written in Rust, on a new baseline schema.
   recovered in about 1.5 to 2 minutes.** Each worker process holds a session
   advisory lock (key `hashtextextended('horsies-worker-liveness:' ||
   worker_id, 0)`) on one connection of its own to the session URL, from
-  before its first claim to the end of its stop. When two reaper passes find
-  the lock of a worker free at least 75 seconds apart, with no pass between
-  them that finds it held, the reaper recovers that worker's RUNNING tasks
+  before its first claim to the end of its stop. Each acquisition of the
+  lock writes a new generation for the worker id in the same transaction,
+  and the worker counts the lock as held again only after that transaction
+  committed. When two reaper passes find the lock of a worker free at least
+  75 seconds apart at one generation, with no pass between them that finds
+  it held or at another generation, and a read after the second pass still
+  finds that generation, the reaper recovers that worker's RUNNING tasks
   (`WORKER_CRASHED`, with a retry when the retry policy allows it) and
   returns its CLAIMED tasks to PENDING, whatever their heartbeats; before,
   they waited for `running_stale_threshold_ms` (default 300 s) and
-  `claimed_stale_threshold_ms`. Only rows that the worker claimed before the
-  first of the two passes are recovered this way, and each statement checks
-  under the row lock that the row is still that worker's claim. A worker
-  that holds a task and whose lock is not held for 60 seconds kills every
-  child that holds a task and exits with the new code 79 (with
-  `auto_fail_stale_running=True`). The lock adds one connection per worker:
-  `check(live=True)`, `HRS-219` and the boot log count it as `liveness lock
-  1`. The baseline functions `horsies_stale_running_scan`,
-  `horsies_finish_stale_attempt` and `horsies_requeue_stale_claims` take an
-  evidence argument (`BEAT_AGE` or `OWNER_GONE`); `horsies_unheld_worker_owners`
-  and `horsies_worker_liveness_key` are new.
+  `claimed_stale_threshold_ms`. A worker that takes its lock again between
+  two passes writes a new generation, so two losses of its lock never count
+  as one loss. Only rows that the worker claimed before the first of the two
+  passes are recovered this way, and each statement checks under the row
+  lock that the row is still that worker's claim. A worker that holds a task
+  and whose lock is not held for 60 seconds kills every child that holds a
+  task and exits with the new code 79 (with `auto_fail_stale_running=True`).
+  The lock adds one connection per worker: `check(live=True)`, `HRS-219` and
+  the boot log count it as `liveness lock 1`. The baseline functions
+  `horsies_stale_running_scan`, `horsies_finish_stale_attempt` and
+  `horsies_requeue_stale_claims` take an evidence argument (`BEAT_AGE` or
+  `OWNER_GONE`). New in the baseline: the table `horsies_worker_liveness`
+  (one generation per worker id), the sequence
+  `horsies_worker_liveness_generation`, and the functions
+  `horsies_worker_liveness_key`, `horsies_take_worker_liveness`,
+  `horsies_unheld_worker_owners`, `horsies_worker_liveness_generations` and
+  `horsies_forget_ended_worker_liveness` (the reaper deletes the generation
+  rows of ended workers at each retention sweep).
 
 ### Fixed
 

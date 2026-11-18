@@ -7,7 +7,11 @@
 //!   process, and sleeps. A test kills it, stops it, cuts its connection, or
 //!   waits for it to fail closed.
 //! - The reaper is [`owner_gone_step`] on the test database, called every
-//!   [`PASS_INTERVAL`] with a span that fits the probe's regain bound.
+//!   [`PASS_INTERVAL`] with a span that fits the probe's regain bound, or at
+//!   the instants that a case names.
+//! - A case refuses new connections to its database ([`ConnectionGate`]) so
+//!   that a probe cannot take its lock again, or holds the liveness row of a
+//!   probe ([`RowBlocker`]) so that its generation write waits.
 //! - Each test has its database of its own, so the liveness read sees only
 //!   the rows of its test.
 
@@ -22,7 +26,7 @@ use super::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
-use crate::db::{CorePool, DEFAULT_SOCKET_SETTINGS};
+use crate::db::{ConnectError, ConnectFailure, CorePool, MaskedUrl, DEFAULT_SOCKET_SETTINGS};
 use crate::worker::recovery::owner_gone::OwnerGoneStep;
 use crate::worker::recovery::{owner_gone_step, UnheldOwners};
 use crate::worker::runner_beats::DispatchRunner;
@@ -45,6 +49,11 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long a probe sleeps when no test ends it.
 const PROBE_LIFETIME: Duration = Duration::from_secs(120);
+
+/// How long before the second read the second loss of the double-loss case
+/// starts: well inside the probe's regain bound, so that the worker lives
+/// at the read and takes its lock again after it.
+const LOSS_TWO_BEFORE_READ: Duration = Duration::from_secs(2);
 
 const PROBE_URL_ENV: &str = "HORSIES_TEST_LIVENESS_PROBE_URL";
 const PROBE_WORKER_ENV: &str = "HORSIES_TEST_LIVENESS_PROBE_WORKER";
@@ -176,6 +185,49 @@ fn the_rule_of_the_config_follows_stale_running_recovery() {
     assert_ne!(
         LIVENESS_LOCK_LOST_EXIT_CODE,
         crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE
+    );
+}
+
+/// A lock that another session holds confirms the hold only while every
+/// earlier session of the worker recorded its acquisition. A failed lock
+/// statement withholds that until the worker takes the lock itself; a
+/// failed connection opened no session and changes nothing.
+#[test]
+fn a_lock_held_elsewhere_confirms_only_while_every_acquisition_is_recorded() {
+    let timed_out = SessionLockFailure::TimedOut {
+        statement: "lock",
+        bound: SESSION_LOCK_STATEMENT_BOUND,
+    };
+    let no_connection = SessionLockFailure::Connect(ConnectError {
+        masked_url: MaskedUrl::for_tests("postgresql://horsies@db.invalid/horsies"),
+        cause: ConnectFailure::TimedOut {
+            bound: Duration::from_secs(5),
+        },
+    });
+
+    assert_eq!(
+        DroppedSessions::Recorded.after_answer(LockTake::HeldElsewhere),
+        (DroppedSessions::Recorded, TakeVerdict::Confirms)
+    );
+    assert_eq!(
+        DroppedSessions::MayHoldUnrecorded.after_answer(LockTake::HeldElsewhere),
+        (DroppedSessions::MayHoldUnrecorded, TakeVerdict::Unconfirmed)
+    );
+    assert_eq!(
+        DroppedSessions::MayHoldUnrecorded.after_answer(LockTake::Taken),
+        (DroppedSessions::Recorded, TakeVerdict::Confirms)
+    );
+    assert_eq!(
+        DroppedSessions::Recorded.after_failed_take(&timed_out),
+        DroppedSessions::MayHoldUnrecorded
+    );
+    assert_eq!(
+        DroppedSessions::Recorded.after_failed_take(&no_connection),
+        DroppedSessions::Recorded
+    );
+    assert_eq!(
+        DroppedSessions::MayHoldUnrecorded.after_failed_take(&no_connection),
+        DroppedSessions::MayHoldUnrecorded
     );
 }
 
@@ -318,6 +370,130 @@ async fn wait_for_holder(pool: &PgPool, worker_id: &str, not: Option<i32>) -> i3
     }
 }
 
+/// End the session of backend `pid`.
+async fn terminate(pool: &PgPool, pid: i32) {
+    let ended: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+        .expect("end the session");
+    assert!(ended, "backend {pid} was not ended");
+}
+
+/// The committed generation of `worker_id`, when it has a liveness row.
+async fn committed_generation(pool: &PgPool, worker_id: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT generation FROM horsies_worker_liveness WHERE worker_id = $1")
+        .bind(worker_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read the liveness row")
+}
+
+/// Wait until the liveness row of `worker_id` holds a committed generation
+/// other than `not` (when given), and return it. The lock appears in the
+/// lock table before the transaction that writes its generation commits.
+async fn wait_for_generation(pool: &PgPool, worker_id: &str, not: Option<i64>) -> i64 {
+    let until = Instant::now() + WAIT;
+    loop {
+        match committed_generation(pool, worker_id).await {
+            Some(generation) if Some(generation) != not => return generation,
+            Some(_) | None => {}
+        }
+        assert!(
+            Instant::now() < until,
+            "no new generation of {worker_id} committed"
+        );
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
+/// New connections to the test database, refused and accepted again over a
+/// connection to the `postgres` database. Open sessions stay open.
+struct ConnectionGate {
+    admin: tokio_postgres::Client,
+    database: String,
+}
+
+impl ConnectionGate {
+    async fn open(pool: &PgPool, url: &str) -> ConnectionGate {
+        let database: String = sqlx::query_scalar("SELECT current_database()::text")
+            .fetch_one(pool)
+            .await
+            .expect("read the test database name");
+        let admin =
+            crate::test_support::connect(&crate::test_support::with_database(url, "postgres"))
+                .await;
+        ConnectionGate { admin, database }
+    }
+
+    async fn refuse_new_connections(&self) {
+        let sql = format!(
+            "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS false",
+            self.database
+        );
+        self.admin
+            .batch_execute(&sql)
+            .await
+            .expect("refuse new connections");
+    }
+
+    async fn accept_new_connections(&self) {
+        let sql = format!(
+            "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS true",
+            self.database
+        );
+        self.admin
+            .batch_execute(&sql)
+            .await
+            .expect("accept new connections");
+    }
+
+    /// End the session of backend `pid`, over the admin connection.
+    async fn terminate(&self, pid: i32) {
+        let ended: bool = self
+            .admin
+            .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+            .await
+            .expect("end the session")
+            .get(0);
+        assert!(ended, "backend {pid} was not ended");
+    }
+}
+
+/// A transaction of the test that holds the liveness row of a worker
+/// (`FOR UPDATE`): the next generation write of that worker waits for it.
+struct RowBlocker {
+    client: tokio_postgres::Client,
+    /// The committed generation of the held row.
+    generation: i64,
+}
+
+impl RowBlocker {
+    async fn hold(url: &str, worker_id: &str) -> RowBlocker {
+        let client = crate::test_support::connect(url).await;
+        client
+            .batch_execute("BEGIN")
+            .await
+            .expect("begin the blocking transaction");
+        let generation: i64 = client
+            .query_one(
+                "SELECT generation FROM horsies_worker_liveness WHERE worker_id = $1 FOR UPDATE",
+                &[&worker_id],
+            )
+            .await
+            .expect("lock the liveness row of the worker")
+            .get(0);
+        RowBlocker { client, generation }
+    }
+
+    async fn release(self) {
+        self.client
+            .batch_execute("ROLLBACK")
+            .await
+            .expect("end the blocking transaction");
+    }
+}
+
 /// One RUNNING and one CLAIMED row of `worker_id`.
 async fn seed_rows(pool: &PgPool, worker_id: &str) -> (Uuid, Uuid) {
     let running = Uuid::new_v4();
@@ -393,6 +569,35 @@ async fn pass(core: &CorePool, memory: &mut UnheldOwners, span: Duration) -> Own
     .expect("the owner-gone step reads the lock table")
 }
 
+/// Run passes every [`PASS_INTERVAL`] until one finds the lock of
+/// `worker_id` free, and return the instant after that pass, which is no
+/// earlier than the end of its read. Panics at a pass that judges an owner
+/// gone.
+async fn read_until_unheld(
+    core: &CorePool,
+    memory: &mut UnheldOwners,
+    span: Duration,
+    worker_id: &str,
+) -> Instant {
+    let until = Instant::now() + WAIT;
+    loop {
+        let step = pass(core, memory, span).await;
+        assert_eq!(step.gone_owners, 0, "{step:?}");
+        if memory
+            .remembered()
+            .iter()
+            .any(|remembered| remembered == worker_id)
+        {
+            return Instant::now();
+        }
+        assert!(
+            Instant::now() < until,
+            "no read found the lock of {worker_id} free"
+        );
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
 /// Run passes every [`PASS_INTERVAL`] for `window`; panics at a pass that
 /// judges an owner gone.
 async fn passes_judge_no_owner(
@@ -410,7 +615,7 @@ async fn passes_judge_no_owner(
 }
 
 // ---------------------------------------------------------------------------
-// The four cases
+// The cases
 // ---------------------------------------------------------------------------
 
 /// A worker process that is killed with RUNNING and CLAIMED rows: its
@@ -425,6 +630,7 @@ async fn a_killed_worker_process_is_recovered_within_the_detection_time() {
     let worker_id = Uuid::new_v4().to_string();
     let mut probe = Probe::start(&url, &worker_id, Duration::from_secs(60));
     let _holder = wait_for_holder(&pool, &worker_id, None).await;
+    let _generation = wait_for_generation(&pool, &worker_id, None).await;
     let (running, claimed) = seed_rows(&pool, &worker_id).await;
     let core = core_pool_for_test_pool(&pool);
     let mut memory = UnheldOwners::default();
@@ -610,4 +816,195 @@ async fn a_stopped_liveness_lock_is_released() {
         tokio::time::sleep(PASS_INTERVAL).await;
     }
     drop(started.holder);
+}
+
+/// The sequence of #1923 on a live worker: a read finds its lock free (loss
+/// 1); the worker takes the lock again with a new generation; the new
+/// connection breaks (loss 2); and the next read, a span after the first,
+/// finds the lock free again, with no read between them. The later read
+/// returns the new generation, so no owner is gone, and the worker runs on
+/// with its rows.
+#[tokio::test]
+#[serial]
+async fn two_losses_with_a_regain_between_two_reads_mark_no_owner_gone() {
+    let pool = migrated_pool().await;
+    let url = migrated_database_url().await;
+    let worker_id = Uuid::new_v4().to_string();
+    let bound = Duration::from_secs(8);
+    let span = bound + Duration::from_secs(1);
+    let mut probe = Probe::start(&url, &worker_id, bound);
+    let first = wait_for_holder(&pool, &worker_id, None).await;
+    let first_generation = wait_for_generation(&pool, &worker_id, None).await;
+    let (running, claimed) = seed_rows(&pool, &worker_id).await;
+    let core = core_pool_for_test_pool(&pool);
+    let mut memory = UnheldOwners::default();
+    let gate = ConnectionGate::open(&pool, &url).await;
+    // This pass opens the connection of the core pool that the reads use
+    // while the database refuses new connections.
+    let held = pass(&core, &mut memory, span).await;
+    assert_eq!(held.gone_owners, 0);
+
+    // Loss 1: the first read finds the lock free.
+    gate.refuse_new_connections().await;
+    gate.terminate(first).await;
+    let first_read_ended = read_until_unheld(&core, &mut memory, span, &worker_id).await;
+    gate.accept_new_connections().await;
+
+    // The regain: a new session takes the lock with a new generation.
+    let second = wait_for_holder(&pool, &worker_id, Some(first)).await;
+    let second_generation = wait_for_generation(&pool, &worker_id, Some(first_generation)).await;
+    let loss_two_at = first_read_ended + span - LOSS_TWO_BEFORE_READ;
+    assert!(
+        Instant::now() < loss_two_at,
+        "the worker took its lock again too late for the sequence"
+    );
+    tokio::time::sleep(loss_two_at.saturating_duration_since(Instant::now())).await;
+
+    // Loss 2, then the second read, a span after the end of the first.
+    gate.refuse_new_connections().await;
+    gate.terminate(second).await;
+    let second_read_at = first_read_ended + span;
+    tokio::time::sleep(second_read_at.saturating_duration_since(Instant::now())).await;
+    let second_read = pass(&core, &mut memory, span).await;
+    gate.accept_new_connections().await;
+
+    assert_eq!(second_read.gone_owners, 0, "{second_read:?}");
+    assert_eq!(
+        memory.remembered(),
+        vec![worker_id.clone()],
+        "the second read found the lock free"
+    );
+    assert!(
+        second_generation > first_generation,
+        "the regain wrote a new, larger generation: {first_generation} then {second_generation}"
+    );
+    let _third = wait_for_holder(&pool, &worker_id, Some(second)).await;
+    core.close();
+    assert!(
+        probe.is_running(),
+        "the worker took its lock again and runs on"
+    );
+    assert_eq!(
+        row_state(&pool, running).await,
+        RowState::Live("RUNNING".to_owned())
+    );
+    assert_eq!(
+        row_state(&pool, claimed).await,
+        RowState::Live("CLAIMED".to_owned())
+    );
+    probe.kill();
+}
+
+/// One loss past the regain bound: the worker cannot take its lock again
+/// and fails closed, so its lock stays free at one generation. Two reads a
+/// span apart judge it gone, and its rows are recovered.
+#[tokio::test]
+#[serial]
+async fn a_single_loss_past_the_bound_marks_the_owner_gone() {
+    let pool = migrated_pool().await;
+    let url = migrated_database_url().await;
+    let worker_id = Uuid::new_v4().to_string();
+    let bound = Duration::from_secs(1);
+    let mut probe = Probe::start(&url, &worker_id, bound);
+    let holder = wait_for_holder(&pool, &worker_id, None).await;
+    let _generation = wait_for_generation(&pool, &worker_id, None).await;
+    let (running, claimed) = seed_rows(&pool, &worker_id).await;
+    let gate = ConnectionGate::open(&pool, &url).await;
+
+    gate.refuse_new_connections().await;
+    gate.terminate(holder).await;
+    let code = probe.exit_code_within(WAIT).await;
+    gate.accept_new_connections().await;
+    assert_eq!(code, Some(LIVENESS_LOCK_LOST_EXIT_CODE));
+
+    let core = core_pool_for_test_pool(&pool);
+    let mut memory = UnheldOwners::default();
+    let first_pass_at = Instant::now();
+    let mut judged: u64 = 0;
+    loop {
+        let step = pass(&core, &mut memory, TEST_SPAN).await;
+        judged += step.gone_owners;
+        let states = (
+            row_state(&pool, running).await,
+            row_state(&pool, claimed).await,
+        );
+        if recovered(&states.0, &states.1) {
+            break;
+        }
+        assert!(
+            first_pass_at.elapsed() < TEST_SPAN + RECOVERY_SLACK,
+            "the rows of the worker were not recovered: {states:?}"
+        );
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+    core.close();
+    assert!(judged > 0, "a pass judged the worker gone");
+}
+
+/// A regain whose generation write does not commit is no regain. The test
+/// holds the liveness row of the worker; after a loss, the new session
+/// takes the lock and its write waits on that row. The worker does not
+/// count the lock while the write waits, and fails closed past its bound
+/// while the new session holds the lock.
+#[tokio::test]
+#[serial]
+async fn a_regain_whose_generation_write_did_not_commit_counts_as_no_regain() {
+    let pool = migrated_pool().await;
+    let url = migrated_database_url().await;
+    let worker_id = Uuid::new_v4().to_string();
+    let bound = Duration::from_secs(2);
+    let mut probe = Probe::start(&url, &worker_id, bound);
+    let first = wait_for_holder(&pool, &worker_id, None).await;
+    let _generation = wait_for_generation(&pool, &worker_id, None).await;
+    let blocker = RowBlocker::hold(&url, &worker_id).await;
+    let held_generation = blocker.generation;
+
+    terminate(&pool, first).await;
+    let _regained = wait_for_holder(&pool, &worker_id, Some(first)).await;
+    let code = probe.exit_code_within(WAIT).await;
+    let generation_at_exit = committed_generation(&pool, &worker_id).await;
+    blocker.release().await;
+
+    assert_eq!(code, Some(LIVENESS_LOCK_LOST_EXIT_CODE));
+    assert_eq!(
+        generation_at_exit,
+        Some(held_generation),
+        "the write of the new session did not commit"
+    );
+}
+
+/// After a lock statement that did not end, a lock that another session
+/// holds confirms nothing. The first new session takes the lock, and its
+/// write waits on the row that the test holds past the statement bound, so
+/// the worker drops it; the server keeps that session, which holds the lock
+/// with no recorded generation. The next session finds the lock held, the
+/// worker does not count it, and it fails closed past its bound.
+#[tokio::test]
+#[serial]
+async fn a_lock_held_by_a_session_whose_write_did_not_end_confirms_nothing() {
+    let pool = migrated_pool().await;
+    let url = migrated_database_url().await;
+    let worker_id = Uuid::new_v4().to_string();
+    let bound = SESSION_LOCK_STATEMENT_BOUND + Duration::from_secs(3);
+    let mut probe = Probe::start(&url, &worker_id, bound);
+    let first = wait_for_holder(&pool, &worker_id, None).await;
+    let _generation = wait_for_generation(&pool, &worker_id, None).await;
+    let blocker = RowBlocker::hold(&url, &worker_id).await;
+    let held_generation = blocker.generation;
+
+    terminate(&pool, first).await;
+    let lost_at = Instant::now();
+    let _unrecorded = wait_for_holder(&pool, &worker_id, Some(first)).await;
+    let code = probe.exit_code_within(WAIT).await;
+    let ended_after = lost_at.elapsed();
+    let generation_at_exit = committed_generation(&pool, &worker_id).await;
+    blocker.release().await;
+
+    assert_eq!(code, Some(LIVENESS_LOCK_LOST_EXIT_CODE));
+    assert!(
+        ended_after > SESSION_LOCK_STATEMENT_BOUND,
+        "the worker ended {ended_after:?} after the loss, before the write of its new session \
+         passed its bound"
+    );
+    assert_eq!(generation_at_exit, Some(held_generation));
 }

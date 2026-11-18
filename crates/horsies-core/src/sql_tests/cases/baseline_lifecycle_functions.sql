@@ -1482,6 +1482,117 @@ SELECT lc_expect(
     'L-a,L-b,L-c,L-e'
 );
 
+-- The liveness generation: horsies_take_worker_liveness, the generation of horsies_unheld_worker_owners,
+-- horsies_worker_liveness_generations and horsies_forget_ended_worker_liveness. Owners M-a to M-d sort after the L
+-- owners and before the w owners (C collation); the block deletes its rows and releases its locks at its end. The
+-- answer of a lock that another session holds is a two-session case (baseline_lifecycle_functions.rs).
+SELECT lc_expect(
+    'take liveness: a free lock is taken',
+    horsies_take_worker_liveness('M-a')::text,
+    'true'
+);
+CREATE TEMP TABLE lc_liveness_first AS
+SELECT generation FROM horsies_worker_liveness WHERE worker_id = 'M-a';
+SELECT lc_expect(
+    'take liveness: the acquisition writes one generation for the worker',
+    (SELECT count(*)::text FROM lc_liveness_first),
+    '1'
+);
+SELECT lc_expect(
+    'take liveness: the session holds the lock of the worker',
+    (SELECT count(*)::text FROM pg_locks l
+     WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 AND l.pid = pg_backend_pid()
+       AND ((l.classid::bigint << 32) | l.objid::bigint) = horsies_worker_liveness_key('M-a')),
+    '1'
+);
+SELECT lc_expect(
+    'take liveness: a lock that this session holds is taken again',
+    horsies_take_worker_liveness('M-a')::text,
+    'true'
+);
+SELECT lc_expect(
+    'take liveness: each acquisition writes a new, larger generation',
+    ((SELECT r.generation FROM horsies_worker_liveness r WHERE r.worker_id = 'M-a')
+     > (SELECT f.generation FROM lc_liveness_first f))::text,
+    'true'
+);
+SELECT lc_expect_sqlstate('take liveness: a NULL worker id',
+    $q$SELECT horsies_take_worker_liveness(NULL)$q$, '22023');
+-- The session took the lock of M-a twice: two releases free it.
+SELECT pg_advisory_unlock(horsies_worker_liveness_key('M-a'));
+SELECT pg_advisory_unlock(horsies_worker_liveness_key('M-a'));
+
+-- e001: RUNNING of M-a (a recorded generation, lock free). e002: CLAIMED of M-b (no liveness row).
+SELECT lc_task('00000000-0000-7000-8000-00000000e001', 'RUNNING', 'M-a');
+SELECT lc_task('00000000-0000-7000-8000-00000000e002', 'CLAIMED', 'M-b');
+SELECT lc_expect(
+    'unheld owners: the generation of the latest acquisition; NULL for an owner with no liveness row',
+    (SELECT string_agg(
+         u.worker_id || ':'
+             || COALESCE((u.generation = (SELECT r.generation FROM horsies_worker_liveness r
+                                          WHERE r.worker_id = u.worker_id))::text, 'null'),
+         ',' ORDER BY u.worker_id COLLATE "C")
+     FROM horsies_unheld_worker_owners(10000) u WHERE u.worker_id LIKE 'M-%'),
+    'M-a:true,M-b:null'
+);
+SELECT lc_expect(
+    'liveness generations: the current generation of each given worker that has a row, once',
+    (SELECT string_agg(
+         g.worker_id || ':'
+             || (g.generation = (SELECT r.generation FROM horsies_worker_liveness r
+                                 WHERE r.worker_id = g.worker_id))::text,
+         ',' ORDER BY g.worker_id COLLATE "C")
+     FROM horsies_worker_liveness_generations(ARRAY['M-b', 'M-a', 'M-a']) g),
+    'M-a:true'
+);
+SELECT lc_expect(
+    'liveness generations: an empty list returns no row',
+    (SELECT count(*)::text FROM horsies_worker_liveness_generations('{}'::text[])),
+    '0'
+);
+SELECT lc_expect_sqlstate('liveness generations: a NULL list',
+    $q$SELECT * FROM horsies_worker_liveness_generations(NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('liveness generations: more than 10000 ids',
+    $q$SELECT * FROM horsies_worker_liveness_generations(array_fill('M-a'::text, ARRAY[10001]))$q$, '22023');
+
+-- M-c and M-d own no row and their locks are free; M-b takes its lock and holds it; M-a owns e001.
+SELECT horsies_take_worker_liveness('M-c');
+SELECT horsies_take_worker_liveness('M-d');
+SELECT pg_advisory_unlock(horsies_worker_liveness_key('M-c'));
+SELECT pg_advisory_unlock(horsies_worker_liveness_key('M-d'));
+SELECT horsies_take_worker_liveness('M-b');
+DELETE FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000e002';
+SELECT lc_expect(
+    'forget liveness: the batch bound counts the deleted rows',
+    horsies_forget_ended_worker_liveness(1)::text,
+    '1'
+);
+SELECT lc_expect(
+    'forget liveness: the batch takes the first ended worker in worker id order',
+    (SELECT string_agg(r.worker_id, ',' ORDER BY r.worker_id COLLATE "C")
+     FROM horsies_worker_liveness r WHERE r.worker_id LIKE 'M-%'),
+    'M-a,M-b,M-d'
+);
+SELECT lc_expect(
+    'forget liveness: a whole batch deletes every ended worker',
+    horsies_forget_ended_worker_liveness(10000)::text,
+    '1'
+);
+SELECT lc_expect(
+    'forget liveness: a worker that owns a CLAIMED or RUNNING row, or whose lock is held, keeps its row',
+    (SELECT string_agg(r.worker_id, ',' ORDER BY r.worker_id COLLATE "C")
+     FROM horsies_worker_liveness r WHERE r.worker_id LIKE 'M-%'),
+    'M-a,M-b'
+);
+SELECT lc_expect_sqlstate('forget liveness: a batch of 0',
+    $q$SELECT horsies_forget_ended_worker_liveness(0)$q$, '22023');
+SELECT lc_expect_sqlstate('forget liveness: a batch over 10000',
+    $q$SELECT horsies_forget_ended_worker_liveness(10001)$q$, '22023');
+SELECT pg_advisory_unlock(horsies_worker_liveness_key('M-b'));
+DELETE FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000e001';
+DELETE FROM horsies_worker_liveness WHERE worker_id LIKE 'M-%';
+DROP TABLE lc_liveness_first;
+
 SELECT lc_expect(
     'stale scan OWNER_GONE: the started rows of the owner claimed before the bound, whatever their beats',
     (SELECT string_agg(right(task_id::text, 4) || ':' || (claimed_at = now() - interval '1 second')::text, ','
