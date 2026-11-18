@@ -14,6 +14,7 @@ __all__ = [
     'MAX_TASK_PAGE_LIMIT',
     'MAX_BREAKDOWN_LIMIT',
     'MAX_WORKFLOW_RUNS_LIMIT',
+    'LIST_ROW_BOUND',
 ]
 
 MONITORING_WINDOW_DEFAULT_SECONDS: Final = 86400
@@ -33,3 +34,8 @@ MAX_BREAKDOWN_LIMIT: Final = 500
 
 MAX_WORKFLOW_RUNS_LIMIT: Final = 200
 """The most runs of one workflow runs list."""
+
+LIST_ROW_BOUND: Final = 10000
+"""The most rows of the workflow names list and of the schedules list; a
+longer list is cut at the bound.
+"""
