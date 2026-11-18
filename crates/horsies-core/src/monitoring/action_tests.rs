@@ -226,45 +226,48 @@ fn action_models_and_task_mapping_serialize_exactly() {
         r#"{"outcome":"cancelled","was_status":"PENDING","warning":null}"#
     );
 
-    let error = |code, status, message: &str| TaskActionError {
-        code,
-        message: message.to_owned(),
-        retryable: false,
-        task_id,
-        current_status: status,
-    };
     let cases = [
         (
-            error(TaskActionErrorCode::TaskNotFound, None, "Task missing"),
+            TaskActionError::NotFound {
+                message: "Task missing".to_owned(),
+                task_id,
+            },
             404,
             r#"{"detail":"Task missing"}"#,
         ),
         (
-            error(TaskActionErrorCode::TaskIsWorkflowTask, None, "workflow"),
+            TaskActionError::WorkflowTask {
+                message: "workflow".to_owned(),
+                task_id,
+                current_status: TaskStatus::Running,
+            },
             400,
             r#"{"code":"TASK_IS_WORKFLOW_TASK"}"#,
         ),
         (
-            error(
-                TaskActionErrorCode::TaskNotCancellable,
-                Some(TaskStatus::Completed),
-                "conflict",
-            ),
+            TaskActionError::NotCancellable {
+                message: "conflict".to_owned(),
+                task_id,
+                current_status: TaskStatus::Completed,
+            },
             409,
             r#"{"code":"TASK_NOT_CANCELLABLE","current_status":"COMPLETED"}"#,
         ),
         (
-            error(TaskActionErrorCode::DbOperationFailed, None, "database"),
+            TaskActionError::DbOperationFailed {
+                message: "database".to_owned(),
+                retryable: true,
+                task_id,
+                cause: crate::FailureCause::Connection,
+            },
             503,
             r#"{"detail":"database"}"#,
         ),
         (
-            error(TaskActionErrorCode::EventLoopLimit, None, "loop limit"),
-            503,
-            r#"{"detail":"loop limit"}"#,
-        ),
-        (
-            error(TaskActionErrorCode::StoredDataInvalid, None, "stored"),
+            TaskActionError::StoredDataInvalid {
+                message: "stored".to_owned(),
+                task_id,
+            },
             500,
             r#"{"detail":"stored"}"#,
         ),
@@ -451,8 +454,8 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
     let task = cancel_task(&broker, Uuid::new_v4(), false)
         .await
         .expect_err("task database failure");
-    assert_eq!(task.code, TaskActionErrorCode::DbOperationFailed);
-    assert!(task.retryable);
+    assert_eq!(task.code(), TaskActionErrorCode::DbOperationFailed);
+    assert!(task.retryable());
     let workflow = pause_workflow_action(&broker, Uuid::new_v4()).await;
     assert_eq!(workflow.status_code(), 503);
     assert!(matches!(workflow.body(), ActionBody::Detail { .. }));
@@ -622,12 +625,9 @@ async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
 /// mapping level: stored data that does not parse is 500, not 503.
 #[test]
 fn stored_data_invalid_is_a_server_error() {
-    let outcome = task_action_outcome(Err(TaskActionError {
-        code: TaskActionErrorCode::StoredDataInvalid,
+    let outcome = task_action_outcome(Err(TaskActionError::StoredDataInvalid {
         message: "stored data does not parse".to_owned(),
-        retryable: false,
         task_id: Uuid::nil(),
-        current_status: None,
     }));
 
     assert_eq!(outcome.status_code(), 500);

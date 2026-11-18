@@ -141,24 +141,22 @@ fn workflow_not_found(workflow_id: Uuid) -> ActionOutcome {
 }
 
 fn task_action_failed(error: TaskActionError) -> ActionOutcome {
-    match error.code {
-        TaskActionErrorCode::TaskNotFound => detail(404, error.message),
-        TaskActionErrorCode::TaskIsWorkflowTask => ActionOutcome {
+    match error {
+        TaskActionError::NotFound { message, .. } => detail(404, message),
+        TaskActionError::WorkflowTask { .. } => ActionOutcome {
             status_code: 400,
             body: ActionBody::Code {
                 code: TaskActionErrorCode::TaskIsWorkflowTask,
             },
         },
-        TaskActionErrorCode::TaskNotCancellable => conflict(
+        TaskActionError::NotCancellable { current_status, .. } => conflict(
             ActionConflictCode::TaskNotCancellable,
-            error.current_status.map(|status| status.to_string()),
+            Some(current_status.to_string()),
         ),
-        TaskActionErrorCode::DbOperationFailed => detail(503, error.message),
-        // Python answers it with 503 too; the core never produces it.
-        TaskActionErrorCode::EventLoopLimit => detail(503, error.message),
+        TaskActionError::DbOperationFailed { message, .. } => detail(503, message),
         // The request was valid, and a repeat gives the same answer until the
         // stored row changes (Python `tests/dualrun/reference/web_routes/actions.py:110-130`).
-        TaskActionErrorCode::StoredDataInvalid => detail(500, error.message),
+        TaskActionError::StoredDataInvalid { message, .. } => detail(500, message),
     }
 }
 
@@ -336,12 +334,10 @@ mod tests {
             conflict(ActionConflictCode::TaskNotCancellable, None).result_word(),
             "TASK_NOT_CANCELLABLE"
         );
-        let workflow_task = TaskActionError {
-            code: TaskActionErrorCode::TaskIsWorkflowTask,
+        let workflow_task = TaskActionError::WorkflowTask {
             message: "a workflow task".to_owned(),
-            retryable: false,
             task_id: Uuid::nil(),
-            current_status: None,
+            current_status: crate::TaskStatus::Pending,
         };
         assert_eq!(
             task_action_failed(workflow_task).result_word(),
