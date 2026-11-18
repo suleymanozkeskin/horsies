@@ -363,6 +363,23 @@ impl ClaimWakes {
     }
 }
 
+/// Runs `settle`, the write of the end of one dispatched run, then takes the
+/// run out of the start check (`count`) and wakes the claim loop
+/// (`capacity_released`, Python `_capacity_released`, which every finalizer
+/// sets). Every end of a run, a success, a failure or a run that reached no
+/// child, ends with this wake, so a free slot or seat is claimed again before
+/// the poll interval. The run leaves the start check before the wake, so the
+/// pass that the wake runs counts without it.
+async fn settle_then_release(
+    settle: impl Future<Output = ()>,
+    count: StartCount,
+    capacity_released: Arc<Notify>,
+) {
+    settle.await;
+    drop(count);
+    capacity_released.notify_one();
+}
+
 /// The next wake of the claim loop: a stop, the end of an outcome write
 /// (`capacity_released`), a child ready after a boot (`board`), a queue
 /// notification, or the poll interval.
@@ -1342,15 +1359,12 @@ impl Worker {
         let submitted = children.submit(claimed);
         let writer = Arc::clone(writer);
         let released = Arc::clone(&self.capacity_released);
-        writes.spawn(async move {
+        let settle = async move {
             let end = attempt_end(submitted).await;
             let settled = writer.settle(&task, end).await;
             tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");
-            // The claim leaves the start check before the wake, so the pass
-            // that the wake runs counts without it.
-            drop(count);
-            released.notify_one();
-        });
+        };
+        writes.spawn(settle_then_release(settle, count, released));
     }
 
     /// The claim loop (Python `run_forever`): one pass per wake; a pass that
@@ -2185,6 +2199,48 @@ mod tests {
             .await
             .expect("local capacity must wake the claim loop before polling");
         assert_eq!(wake, ClaimWake::CapacityReleased);
+    }
+
+    /// Python `test_worker_helpers.py::TestCapacityReleaseWake::test_finalizer_end_sets_the_wake`:
+    /// the write of the end of a dispatched run wakes the claim loop when it
+    /// ends, and not before. The write is the one step of every end of a run
+    /// (a success, a failure, a run that reached no child), so each of them
+    /// frees its slot or seat for the next pass.
+    #[tokio::test]
+    async fn the_end_of_an_outcome_write_wakes_the_claim_wait() {
+        let released = Arc::new(Notify::new());
+        let cancel = CancellationToken::new();
+        let claim_wakes = no_claim_wakes();
+        let board = quiet_board();
+        let (end_the_write, write_ended) = tokio::sync::oneshot::channel::<()>();
+        let write = tokio::spawn(settle_then_release(
+            async move {
+                let _ended = write_ended.await;
+            },
+            StartCount::Unchecked,
+            Arc::clone(&released),
+        ));
+        let wait = wait_for_claim_wake(
+            &cancel,
+            &released,
+            &board,
+            &claim_wakes,
+            Duration::from_secs(60),
+        );
+        tokio::pin!(wait);
+        tokio::task::yield_now().await;
+        assert!(
+            wait.as_mut().now_or_never().is_none(),
+            "no wake while the write runs"
+        );
+
+        end_the_write.send(()).expect("the write waits for its end");
+        let wake = tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("the end of the write must wake the claim loop before polling");
+
+        assert_eq!(wake, ClaimWake::CapacityReleased);
+        write.await.expect("the write task ends");
     }
 
     /// A write that ends during a claim pass leaves the wake set, so the
