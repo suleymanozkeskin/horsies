@@ -28,8 +28,10 @@ from horsies._core import (
     CoreContractViolation,
     CorePreconditionFailed,
     CoreServerError,
+    CoreStopped,
     DatabasePingRecord,
     Enqueued,
+    HandleClosed,
     SendEnqueueFailed,
     SendKeyConflict,
     SendPayloadMismatch,
@@ -115,7 +117,6 @@ from horsies.core.baseline.install import (
     SchemaStatementFailed,
 )
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
-from horsies.core.utils.loop_runner import LoopRunnerError
 from tests.dualrun.reference import broker_monitoring as reference
 from tests.dualrun.reference import enqueue_caller, result_caller
 from tests.broker_resources_support import (
@@ -3505,50 +3506,56 @@ class TestCloseAsync:
 
 @pytest.mark.unit
 class TestClose:
-    """Tests for close (sync): delegates to close_async then stops loop_runner."""
+    """close (sync): the core handle's blocking close on the calling thread,
+    then the stop of the sync runner. The outcomes equal close_async's
+    (``tests/unit/test_sync_facade_blocking_forms.py``)."""
 
-    def test_close_calls_close_async_and_stops_runner(self) -> None:
-        """close() should call close_async via loop_runner then stop it."""
+    @staticmethod
+    def _broker_closing(close: MagicMock) -> tuple[Any, MagicMock]:
         broker = _make_broker()
-        broker._loop_runner = MagicMock()
-        broker._loop_runner.call = MagicMock(return_value=None)
-        broker._loop_runner.stop = MagicMock()
+        handle = MagicMock()
+        handle.close = close
+        broker._core_handle = handle
+        runner = MagicMock()
+        broker._loop_runner = runner
+        return broker, runner
 
-        broker.close()
+    def test_close_calls_the_blocking_core_close_and_stops_the_runner(self) -> None:
+        """close() calls CoreHandle.close on this thread, never the runner, then stops it."""
+        broker, runner = self._broker_closing(MagicMock(return_value=MagicMock(spec=HandleClosed)))
 
-        broker._loop_runner.call.assert_called_once_with(broker.close_async)
-        broker._loop_runner.stop.assert_called_once()
+        result = broker.close()
 
-    def test_close_stops_runner_on_loop_runner_error(self) -> None:
-        """close() returns Err(LOOP_RUNNER_FAILED) and still stops loop_runner."""
-        broker = _make_broker()
-        runner_error = LoopRunnerError('Loop runner is not running')
-        broker._loop_runner = MagicMock()
-        broker._loop_runner.call = MagicMock(side_effect=runner_error)
-        broker._loop_runner.stop = MagicMock()
+        assert result == Ok(None)
+        broker._core_handle.close.assert_called_once_with()
+        broker._core_handle.close_async.assert_not_called()
+        runner.call.assert_not_called()
+        runner.stop.assert_called_once()
+
+    def test_a_core_that_cannot_run_the_close_is_close_failed_and_stops_the_runner(
+        self,
+    ) -> None:
+        """A core boundary error of the blocking close is CLOSE_FAILED with the error."""
+        refused = CoreStopped('CoreHandle.close', 'a background task panicked')
+        broker, runner = self._broker_closing(MagicMock(side_effect=refused))
 
         result = broker.close()
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.LOOP_RUNNER_FAILED
-        assert result.err_value.retryable is False
-        assert result.err_value.exception is runner_error
-        # stop is called in finally block
-        broker._loop_runner.stop.assert_called_once()
+        assert result.err_value.code == BrokerErrorCode.CLOSE_FAILED
+        assert result.err_value.exception is refused
+        runner.stop.assert_called_once()
 
     def test_close_stops_runner_when_an_exception_propagates(self) -> None:
-        """An exception that is not a LoopRunnerError propagates; stop still runs."""
-        broker = _make_broker()
+        """An exception that is not a CoreError propagates; stop still runs."""
         defect = RuntimeError('boom')
-        broker._loop_runner = MagicMock()
-        broker._loop_runner.call = MagicMock(side_effect=defect)
-        broker._loop_runner.stop = MagicMock()
+        broker, runner = self._broker_closing(MagicMock(side_effect=defect))
 
         with pytest.raises(RuntimeError) as exc_info:
             broker.close()
 
         assert exc_info.value is defect
-        broker._loop_runner.stop.assert_called_once()
+        runner.stop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
