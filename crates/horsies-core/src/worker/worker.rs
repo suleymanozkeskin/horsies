@@ -3252,20 +3252,24 @@ mod tests {
                 warning: Some("App preload needs Linux, this is macos. Using exec.".to_owned())
             }
         );
-        assert_eq!(
-            preload_outcome(
-                PreloadMode::App,
-                PreloadStart::Unsupported(PreloadUnsupported::MissingKernelSupport {
-                    reason: "pidfd_open: ENOSYS".to_owned()
-                })
-            ),
-            PreloadOutcome::Exec {
-                warning: Some(
-                    "Child preload cannot run on this host: pidfd_open: ENOSYS. Using exec."
-                        .to_owned()
-                )
-            }
-        );
+        // Python `TestFallbackLog::test_a_linux_host_that_cannot_preload_warns`:
+        // a Linux host without the preload path warns in both modes.
+        for mode in [PreloadMode::App, PreloadMode::Library] {
+            assert_eq!(
+                preload_outcome(
+                    mode,
+                    PreloadStart::Unsupported(PreloadUnsupported::MissingKernelSupport {
+                        reason: "pidfd_open: ENOSYS".to_owned()
+                    })
+                ),
+                PreloadOutcome::Exec {
+                    warning: Some(
+                        "Child preload cannot run on this host: pidfd_open: ENOSYS. Using exec."
+                            .to_owned()
+                    )
+                }
+            );
+        }
     }
 
     #[test]
