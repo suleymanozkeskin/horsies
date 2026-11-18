@@ -843,6 +843,7 @@ Each entry: Title -- summary -> URL
 - Migrating to 0.5.0 and 0.5.2 -- live/history split (schema v34), offline cutover, offline schema v35 upgrade -> /horsies/migrations/migration-to-0-5-0/
 - Migrating to 0.6.0 -- stop-all upgrade rule, schema v52, new settings and flags, required code changes -> /horsies/migrations/migration-to-0-6-0/
 - Migrating to 0.7.0 -- upgrade order: psycopg 3.3.7, worker profiles and the flag to field table, new error code cases, refused result waits inside a task, workflow limits, stop 0.6.x workers before schema v55, exit codes, behaviour changes -> /horsies/migrations/migration-to-0-7-0/
+- Migrating to 0.8.0 -- upgrade order: the database URL without +psycopg (HRS-203), the connection settings that the core reads, the native extension, drain 0.7 and start on a new database, task ids as uuid.UUID, the class of a database failure, ForkedAfterCoreStart and CoreStopped, removed and changed members, new config bounds, web API clients, the worker liveness lock and exit code 79 -> /horsies/migrations/migration-to-0-8-0/
 
 ### Changelog
 - Changelog -- notable changes per release -> /horsies/changelog/
@@ -936,6 +937,7 @@ migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migrati
 migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/
 migration 0.6.0, upgrade from 0.5.x, schema v52, stop all processes -> /horsies/migrations/migration-to-0-6-0/
 migration 0.7.0, worker profiles, removed worker flags, --profile, removed worker_child_pool fields -> /horsies/migrations/migration-to-0-7-0/
+migration 0.8.0, upgrade from 0.7.x, postgresql+psycopg refused, new database, native extension, ForkedAfterCoreStart, liveness lock -> /horsies/migrations/migration-to-0-8-0/
 WorkerProfile, IsolatedChildren, IsolatedRecycle, IsolatedPool, SharedPool, ParentPool, task_send_pool, PoolSize, PoolSizeFromSeats, ExecutorThreads, ExecutorThreadsFromSeats, TaskLimit, MemoryLimit, ClaimLimits, ChildPreload, worker_profiles, --profile -> /horsies/workers/worker-profiles/
 Execution, execution mode, ISOLATED, SHARED_ASYNC, SHARED_THREAD, choose a mode, free-threaded, GIL -> /horsies/workers/execution-modes/
 SharedAsyncChildren, SharedRecycle, cancel_grace_ms, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, on_shared_async_child_start -> /horsies/workers/shared-async-tasks/
