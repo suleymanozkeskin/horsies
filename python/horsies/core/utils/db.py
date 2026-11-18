@@ -56,7 +56,7 @@ from horsies._core import (
     CoreError,
     CorePreconditionFailed,
 )
-from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+from horsies.core.types.core_failure import core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 
 if TYPE_CHECKING:
@@ -270,8 +270,7 @@ def is_retryable_connection_error(exc: BaseException) -> bool:
     """Check whether an exception is a transient connection error worth retrying.
 
     A core failure class carries the core's classification of its cause
-    (``retryable``); a contract violation never clears. A
-    ``CoreOperationFailed`` carries the same classification. A ``CoreError`` is
+    (``retryable``); a contract violation never clears. A ``CoreError`` is
     retryable when its condition clears in this process
     (``core_error_retryable``).
     """
@@ -282,10 +281,6 @@ def is_retryable_connection_error(exc: BaseException) -> bool:
             return retryable
         case CoreContractViolation():
             return False
-        # The interim class of the records that do not raise a core failure
-        # class yet; it leaves with the class itself.
-        case CoreOperationFailed(retryable=retryable):
-            return retryable
         case CoreError() as core_error:
             return core_error_retryable(core_error)
         # Engine pool checkout timeout ("QueuePool limit reached"): transient
