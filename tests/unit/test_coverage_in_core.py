@@ -19,7 +19,6 @@ import pytest
 import horsies._core as core
 from horsies.core.history.maintenance import coverage as coverage_module
 from horsies.core.history.maintenance.coverage import (
-    COVERAGE_SUBJECT,
     CoverageEnsured,
     CoverageEnsureFailed,
     CoverageSerialization,
@@ -30,7 +29,6 @@ from horsies.core.history.maintenance.coverage import (
     maintain_partition_coverage_in_core,
 )
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.reaper import ReaperMixin
 
 pytestmark = [pytest.mark.unit]
@@ -164,17 +162,18 @@ async def test_a_contained_refusal_is_coverage_ensure_failed(
 
 
 @pytest.mark.asyncio
-async def test_a_pass_with_no_outcome_raises_core_operation_failed(
+async def test_a_pass_with_no_outcome_raises_the_record_exception(
     requests: list[dict[str, Any]],
 ) -> None:
-    failed = _record(core.CoverageFailed, message='connection refused', retryable=True)
+    cause = core.CoreConnectionError('ensure_partition_coverage', 'connection refused', True)
+    failed = _record(
+        core.CoverageFailed, message='connection refused', retryable=True, exception=cause,
+    )
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with pytest.raises(core.CoreConnectionError) as raised:
         _ = await _maintain(_handle(failed))
 
-    assert raised.value.subject == COVERAGE_SUBJECT
-    assert raised.value.message == 'connection refused'
-    assert raised.value.retryable is True
+    assert raised.value is cause
     assert len(requests) == 1
 
 
