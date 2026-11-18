@@ -1,6 +1,7 @@
 """The async call form of ``horsies._core``: a call returns a future of the
 calling loop, on asyncio and on uvloop; 1,000 calls in flight add no OS
-thread; a cancelled read is dropped and a cancelled write runs to its end."""
+thread; an idle producer after its first send keeps the threads of the core
+only; a cancelled read is dropped and a cancelled write runs to its end."""
 
 from __future__ import annotations
 
@@ -75,6 +76,22 @@ def test_a_thousand_concurrent_awaits_add_no_os_thread(
     assert integer_of(report, 'max_threads_in_flight') == core_threads, report
     assert integer_of(report, 'min_threads_in_flight') == core_threads, report
     assert integer_of(report_at(report, 'outcomes'), 'DatabasePingRecord') == CONCURRENT_AWAITS
+
+
+def test_an_idle_producer_after_its_first_send_keeps_the_core_threads_only(
+    tmp_path: Path, extension_database: Database,
+) -> None:
+    """The main thread, the runtime workers and the log forwarder; the send
+    starts no thread of the blocking pool and none that stays."""
+    report = _loop_report(
+        run_case(PROGRAM, 'idle_producer_after_first_send', tmp_path, extension_database).report,
+    )
+    core_threads = 1 + RUNTIME_WORKER_THREADS + LOG_FORWARDER_THREADS
+
+    assert text_of(report, 'sent') == 'Enqueued'
+    assert integer_of(report, 'threads_before_send') == 1, report
+    assert integer_of(report, 'threads_after_send') == core_threads, report
+    assert integer_of(report, 'threads_idle') == core_threads, report
 
 
 @pytest.fixture(scope='module')
