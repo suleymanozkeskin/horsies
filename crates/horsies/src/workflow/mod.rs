@@ -27,6 +27,7 @@ pub use function::{
     start_workflow, start_workflow_with, WorkflowCheckBuilderRegistration, WorkflowFunction,
     WorkflowTemplate,
 };
+pub(crate) use function::{start_workflow_as, start_workflow_with_as};
 pub use handle::{NodeResult, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError};
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};

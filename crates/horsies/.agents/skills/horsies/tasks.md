@@ -381,14 +381,17 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 |---|---|---|---|
 | `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
-| `ValidationFailed` | `VALIDATION_FAILED` | `message` | Refused |
-| `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable` | Accepted |
+| `ValidationFailed` | `VALIDATION_FAILED` | `message`, `cause` | Refused |
+| `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` | Accepted |
 | `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
 | `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
 
 - `EnqueueFailed`: the row may or may not exist. `retryable` is the
   classification of the cause.
+- `cause` (`failure_cause()` on every variant): what the send met, a
+  `FailureCause`: the server's error, no answer, a broken read contract, or
+  a failed precondition.
 - `AsyncContext`: a blocking send on a thread that runs a tokio runtime.
   Nothing was written. The async sends never return it.
 - `PayloadMismatch`: the task id exists with another command or key.

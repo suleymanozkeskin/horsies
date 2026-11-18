@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::BrokerError;
+use crate::FailureCause;
 
 /// Categorized task send failure codes.
 ///
@@ -111,17 +112,23 @@ pub enum TaskSendError {
         message: String,
     },
     /// The input or the options were refused before anything was written.
-    /// The retry methods refuse it.
-    ValidationFailed { message: String },
+    /// The retry methods refuse it. `cause` is what refused it (Python
+    /// `TaskSendValidationFailed.exception`).
+    ValidationFailed {
+        message: String,
+        cause: FailureCause,
+    },
     /// The database failed during enqueue. The row may or may not exist.
     /// `retryable` is the driver classification of the cause. A resend of
     /// the same task id and payload is safe: the broker returns the existing
-    /// task for a duplicate.
+    /// task for a duplicate. `cause` is what the enqueue met (Python
+    /// `TaskSendEnqueueFailed.exception`).
     EnqueueFailed {
         task_id: Uuid,
         payload: Box<TaskSendPayload>,
         message: String,
         retryable: bool,
+        cause: FailureCause,
     },
     /// The task id exists with a different command or idempotency key.
     /// Nothing was written. The retry methods refuse it.
@@ -191,11 +198,27 @@ impl TaskSendError {
         match self {
             Self::SendSuppressed { message }
             | Self::AsyncContext { message, .. }
-            | Self::ValidationFailed { message }
+            | Self::ValidationFailed { message, .. }
             | Self::EnqueueFailed { message, .. }
             | Self::PayloadMismatch { message, .. }
             | Self::PayloadTooLarge { message, .. }
             | Self::IdempotencyKeyConflict { message, .. } => message.as_str(),
+        }
+    }
+
+    /// What the send met. A variant without `cause` has the cause of its
+    /// state: a refusal of the call, an existing row or a held key is a
+    /// failed precondition. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::ValidationFailed { cause, .. } | Self::EnqueueFailed { cause, .. } => {
+                cause.clone()
+            }
+            Self::SendSuppressed { .. }
+            | Self::AsyncContext { .. }
+            | Self::PayloadMismatch { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::IdempotencyKeyConflict { .. } => FailureCause::PreconditionFailed,
         }
     }
 
@@ -267,6 +290,9 @@ impl std::error::Error for TaskSendError {}
 /// - every other error is `ENQUEUE_FAILED` with the error's own retryable
 ///   flag; a conflict whose row vanished before the compare is not
 ///   retryable.
+///
+/// `cause` of `VALIDATION_FAILED` and `ENQUEUE_FAILED` is the cause of
+/// `error` ([`BrokerError::failure_cause`]).
 pub fn send_error_from_enqueue(
     task_id: Uuid,
     payload: TaskSendPayload,
@@ -276,9 +302,10 @@ pub fn send_error_from_enqueue(
     match error {
         BrokerError::EnqueueContract(_)
         | BrokerError::Serialization(_)
-        | BrokerError::InvalidIdempotencyReservationWindow(_) => {
-            TaskSendError::ValidationFailed { message }
-        }
+        | BrokerError::InvalidIdempotencyReservationWindow(_) => TaskSendError::ValidationFailed {
+            message,
+            cause: error.failure_cause(),
+        },
         BrokerError::PayloadMismatch { .. } => TaskSendError::PayloadMismatch {
             task_id,
             payload: Box::new(payload),
@@ -317,6 +344,7 @@ pub fn send_error_from_enqueue(
             payload: Box::new(payload),
             message,
             retryable: error.is_retryable(),
+            cause: error.failure_cause(),
         },
     }
 }
@@ -365,6 +393,7 @@ mod tests {
             payload: Box::new(sample_payload()),
             message: "connection refused".to_owned(),
             retryable: true,
+            cause: FailureCause::Connection,
         };
         let display = format!("{}", err);
         // Must NOT contain the sensitive input
@@ -424,6 +453,12 @@ mod tests {
             );
             assert!(!error.retryable(), "{refusal}");
             assert!(error.resend_target().is_none(), "{refusal}");
+            assert_eq!(error.failure_cause(), refusal.failure_cause(), "{refusal}");
+            assert_eq!(
+                error.failure_cause(),
+                FailureCause::PreconditionFailed,
+                "{refusal}"
+            );
         }
     }
 
@@ -481,6 +516,7 @@ mod tests {
 
         assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
         assert!(error.retryable());
+        assert_eq!(error.failure_cause(), FailureCause::Connection);
         let target = error
             .resend_target()
             .expect("an enqueue failure is accepted");

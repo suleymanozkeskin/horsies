@@ -16,8 +16,8 @@ use chrono::Utc;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
-    child_producer, ChildProducer, ClientStartError, ClientStartOutcome, WorkflowError,
-    WorkflowStartError,
+    child_producer, ChildProducer, ClientStartError, ClientStartOutcome, FailureCause,
+    WorkflowError, WorkflowStartError,
 };
 use uuid::Uuid;
 
@@ -96,7 +96,8 @@ impl WorkflowStarter {
         let validation_failed = |message: String| WorkflowStartError::ValidationFailed {
             message,
             workflow_name: spec.name().to_owned(),
-            workflow_id: Some(workflow_id),
+            workflow_id,
+            cause: FailureCause::PreconditionFailed,
         };
         let validation = |error: HorsiesError| validation_failed(error.to_string());
         if spec
@@ -121,6 +122,7 @@ impl WorkflowStarter {
                 retryable: error.is_retryable(),
                 workflow_name: spec.name().to_owned(),
                 workflow_id,
+                cause: error.failure_cause(),
             }
         })?;
         let started = broker
@@ -190,7 +192,8 @@ fn start_error(
             WorkflowStartError::ValidationFailed {
                 message: error.to_string(),
                 workflow_name: workflow_name.to_owned(),
-                workflow_id: Some(workflow_id),
+                workflow_id,
+                cause: error.failure_cause(),
             }
         }
         ClientStartError::SchemaInstall(_)
@@ -204,6 +207,7 @@ fn start_error(
             retryable: error.is_retryable(),
             workflow_name: workflow_name.to_owned(),
             workflow_id,
+            cause: error.failure_cause(),
         },
         ClientStartError::Start(
             WorkflowError::WorkflowNotFound { .. } | WorkflowError::InvalidStatus(_),
@@ -308,7 +312,8 @@ mod tests {
             let failed = start_error(&error, "nightly", Uuid::nil());
             assert_eq!(failed.code(), code, "{error}");
             assert_eq!(failed.workflow_name(), "nightly", "{error}");
-            assert_eq!(failed.workflow_id(), Some(Uuid::nil()), "{error}");
+            assert_eq!(failed.workflow_id(), Uuid::nil(), "{error}");
+            assert_eq!(failed.failure_cause(), error.failure_cause(), "{error}");
         }
     }
 }
