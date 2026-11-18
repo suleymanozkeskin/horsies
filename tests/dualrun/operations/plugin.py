@@ -272,6 +272,17 @@ PAIR_RULES: Final[tuple[PairRule, ...]] = (
             'task; either can take the row first in any run'
         ),
     ),
+    PairRule(
+        node_id=(
+            'tests/integration/test_workflow_start.py::TestWorkflowStart::'
+            'test_concurrent_auto_id_creates_distinct_workflows'
+        ),
+        fact=PairFact.CONCURRENT_STARTS_IN_ANY_ORDER,
+        reason=(
+            'two starts of one spec run at once; the task of either start can '
+            'reach the database first in any run'
+        ),
+    ),
 )
 """The tests whose pairs compare the fact of their rule (``PairRule``)."""
 
