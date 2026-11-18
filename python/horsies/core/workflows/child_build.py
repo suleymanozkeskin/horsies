@@ -57,7 +57,11 @@ from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.retention import queue_retention_class
-from horsies.core.workflows.sql import SubWorkflowParams, TaskNodeFacts
+from horsies.core.workflows.sql import (
+    SubWorkflowParams,
+    TaskNodeFacts,
+    task_node_facts,
+)
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -579,15 +583,20 @@ def task_node_row(
 ) -> NodeRow:
     """The row of a task node of a spec, on ``queue_name`` at ``priority``.
 
-    Raises:
-        SerializationError: the task options do not parse or validate, or the
-            node kwargs do not serialize (a defect).
-    """
-    from horsies.core.workflows.lifecycle import start_task_node_facts
+    The row carries the task options as text and the retention class key of
+    the node's queue. The core reads the retry limit, the execution class and
+    the deadline from the options (``node_task_facts``,
+    ``crates/horsies-core/src/workflow_engine/start.rs``) and refuses options
+    that do not validate.
 
+    Raises:
+        SerializationError: the task options of a node with a ``good_until``
+            do not parse to a JSON object, or the node kwargs do not
+            serialize (a defect).
+    """
     task_options = task_options_with_good_until(node, owner)
-    facts = start_task_node_facts(
-        task_options, node.name, queue_retention_class(broker, queue_name),
+    facts = task_node_facts(
+        queue_retention_class=queue_retention_class(broker, queue_name),
     )
     dependencies, args_from, context = _graph_columns(node)
     return NodeRow(
