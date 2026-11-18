@@ -265,6 +265,7 @@ mod tests {
     use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
     use crate::broker::PostgresBroker;
     use crate::core::config::retention::RetentionConfig;
+    use crate::core::task::execution::Execution;
     use crate::core::OnError;
     use crate::test_support::child_specs::TestChildSpecs;
     use serial_test::serial;
@@ -364,6 +365,47 @@ mod tests {
             "expected fail-closed unresolved-queue error, got: {:?}",
             err
         );
+    }
+
+    /// A task node stores the execution class of its merged task options: no options store `ISOLATED`, and
+    /// a class in the options is read as written (Python
+    /// `tests/unit/test_execution_class.py::TestWorkflowPaths::test_a_fast_path_root_without_options_is_isolated`,
+    /// `::test_a_fast_path_root_reads_its_class`).
+    #[test]
+    fn a_task_node_stores_the_execution_class_of_its_options() {
+        let node = node_with(false, Some(10));
+        let without = node_task_facts(&node, None, None).expect("a node with no options reads");
+        assert_eq!(without.facts.execution, Execution::Isolated);
+        let thread = node_task_facts(
+            &node,
+            Some(r#"{"execution": "SHARED_THREAD", "cancel_grace_ms": null}"#),
+            None,
+        )
+        .expect("a node of the thread class reads");
+        assert_eq!(thread.facts.execution, Execution::SharedThread);
+    }
+
+    /// Task options that are not JSON (an empty text is not "no options") and an execution class that is
+    /// not a class refuse the node with a validation error that names it; no class is guessed (Python
+    /// `tests/unit/test_execution_class.py::TestWorkflowPaths::test_a_fast_path_root_with_empty_options_text_raises`,
+    /// `::test_a_fast_path_root_with_an_invalid_class_raises`).
+    #[test]
+    fn a_task_node_whose_options_or_class_do_not_read_is_refused() {
+        let mut node = node_with(false, Some(10));
+        node.task_name = "class_node".to_owned();
+        for (case, options) in [
+            ("an empty text", ""),
+            ("an unknown class", r#"{"execution": "PARALLEL"}"#),
+        ] {
+            match node_task_facts(&node, Some(options), None) {
+                Ok(_) => panic!("{case}: the node must be refused"),
+                Err(WorkflowError::Validation(message)) => assert!(
+                    message.contains("workflow node 0 (class_node) refused"),
+                    "{case}: {message}"
+                ),
+                Err(other) => panic!("{case}: expected a validation refusal, got {other:?}"),
+            }
+        }
     }
 
     /// A node defined with no list or with an empty list takes no context, and its row stores NULL
