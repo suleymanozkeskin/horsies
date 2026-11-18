@@ -341,12 +341,12 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
     fresh_marks: None,
 ) -> None:
     """The real seat thread, run table and seat program, on a core handle
-    whose pool answers 0.5 s after the ask: the deadline (0.2 s) fires
-    during the wait. The RUNNING update does not run, the body does not run,
-    and the run ends with the timeout; its row stays CLAIMED for the worker
-    to return to the queue."""
+    whose pool answers 1.5 s after the ask: the deadline (1 s, the smallest
+    ``timeout_ms`` of a run frame) fires during the wait. The RUNNING update
+    does not run, the body does not run, and the run ends with the timeout;
+    its row stays CLAIMED for the worker to return to the queue."""
     _ = fresh_marks
-    handle = _SlowHandle(wait_s=0.5)
+    handle = _SlowHandle(wait_s=MIN_TASK_TIMEOUT_MS / 1000 + 0.5)
     writer = _RecordingWriter()
     table = ThreadRunTable(1, writer)
     deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
@@ -357,7 +357,7 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
         'thread_double',
         {'x': 2},
         task_id=uuid.uuid4(),
-        work=thread_work(200),
+        work=thread_work(MIN_TASK_TIMEOUT_MS),
     )
     work = _seat_work(frame)
     with (
@@ -381,7 +381,8 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
     assert RAN == []
     assert handle.started == []
     [deadline_in_ms] = handle.deadlines_in_ms
-    assert deadline_in_ms is not None and 1 <= deadline_in_ms <= 200
+    assert deadline_in_ms is not None
+    assert 1 <= deadline_in_ms <= MIN_TASK_TIMEOUT_MS
     assert [type(item).__name__ for item in writer.frames] == [
         'DeadlineFiredFrame',
         'SharedResultFrame',

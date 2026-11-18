@@ -26,6 +26,7 @@ from typing import Any, NoReturn
 import pytest
 
 from horsies import _core as core
+from horsies.core.models.tasks import MIN_CANCEL_GRACE_MS, MIN_TASK_TIMEOUT_MS
 from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, run_mark, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
@@ -304,7 +305,7 @@ class TestDeadline:
 
         async def scenario() -> None:
             serving = asyncio.ensure_future(seat_loop.serve(inbox))
-            inbox.put(_frame(1, 'hang', timeout_ms=50))
+            inbox.put(_frame(1, 'hang', timeout_ms=DEADLINE_MS))
             await _until(lambda: len(_results(writer)) == 1)
             assert cancelled.is_set()
             inbox.put(stop_frame())
@@ -334,7 +335,7 @@ class TestDeadline:
 
         async def scenario() -> None:
             serving = asyncio.ensure_future(seat_loop.serve(inbox))
-            inbox.put(_frame(1, 'swallow', timeout_ms=30))
+            inbox.put(_frame(1, 'swallow', timeout_ms=DEADLINE_MS))
             await _until(lambda: len(_results(writer)) == 1)
             inbox.put(stop_frame())
             await asyncio.wait_for(serving, RUN_TIMEOUT_S)
@@ -358,7 +359,7 @@ class TestDeadline:
 
         async def scenario() -> None:
             serving = asyncio.ensure_future(seat_loop.serve(inbox))
-            inbox.put(_frame(1, 'hang', timeout_ms=30))
+            inbox.put(_frame(1, 'hang', timeout_ms=DEADLINE_MS))
             inbox.put(_frame(2, 'hold'))
             await _until(lambda: len(_results(writer)) == 1)
             release.set()
@@ -382,9 +383,10 @@ class TestDeadline:
 
         async def scenario() -> None:
             serving = asyncio.ensure_future(seat_loop.serve(inbox))
-            inbox.put(_frame(1, 'quick', timeout_ms=100))
+            inbox.put(_frame(1, 'quick', timeout_ms=DEADLINE_MS))
             await _until(lambda: len(_results(writer)) == 1)
-            await asyncio.sleep(0.2)
+            # Past the deadline: a timer left armed would report it.
+            await asyncio.sleep(DEADLINE_MS / 1000 + 0.2)
             inbox.put(stop_frame())
             await asyncio.wait_for(serving, RUN_TIMEOUT_S)
 
@@ -475,8 +477,14 @@ def _results_of(count: int) -> Callable[[_RecordingWriter], bool]:
     return lambda writer: len(_results(writer)) == count
 
 
-DEADLINE_MS = 50
-GRACE_MS = 80
+DEADLINE_MS = MIN_TASK_TIMEOUT_MS
+"""The deadline of a run that a test lets pass: the smallest ``timeout_ms``
+of a run frame. The core codec refuses a smaller one, as the stored
+``task_options`` reader does, since no stored row holds one."""
+
+GRACE_MS = MIN_CANCEL_GRACE_MS
+"""The cancel grace of a run whose grace a test lets pass: the smallest
+``cancel_grace_ms`` of a run frame, which the core codec bounds the same way."""
 
 
 class TestTheWorkOfARun:
@@ -618,7 +626,8 @@ class TestTheStopOfARun:
 
         async def shielded() -> int:
             async def inner() -> None:
-                await asyncio.sleep(0.04)
+                # Ends 50 ms after T, 150 ms before T + G.
+                await asyncio.sleep(DEADLINE_MS / 1000 + 0.05)
                 inner_done.set()
 
             await asyncio.shield(asyncio.get_running_loop().create_task(inner()))
@@ -626,7 +635,7 @@ class TestTheStopOfARun:
 
         writer = _run_to_end(
             {'shielded': shielded},
-            [_frame(1, 'shielded', 20, 200)],
+            [_frame(1, 'shielded', DEADLINE_MS, 200)],
             _results_of(1),
         )
 
@@ -785,9 +794,11 @@ class TestTheStopOfARun:
             kept.append(loop.create_task(asyncio.Event().wait()))
             return 1
 
+        # The grace after the return is longer than the deadline, so the
+        # work is alive at T and is cancelled after it.
         writer = _run_to_end(
             {'leave': leave_forever},
-            [_frame(1, 'leave', DEADLINE_MS, GRACE_MS)],
+            [_frame(1, 'leave', DEADLINE_MS, 2 * DEADLINE_MS)],
             _results_of(1),
         )
 
@@ -995,7 +1006,7 @@ class TestWorkLeftAfterAReturn:
         as an error."""
 
         async def flush_past_the_deadline() -> None:
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(DEADLINE_MS / 1000 + 0.15)
 
         async def leave() -> int:
             _ = asyncio.get_running_loop().create_task(flush_past_the_deadline())
@@ -1003,7 +1014,7 @@ class TestWorkLeftAfterAReturn:
 
         writer = _run_to_end(
             {'leave': leave},
-            [_frame(1, 'leave', timeout_ms=30, grace_ms=2_000)],
+            [_frame(1, 'leave', timeout_ms=DEADLINE_MS, grace_ms=2_000)],
             _results_of(1),
         )
 

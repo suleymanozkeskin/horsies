@@ -31,6 +31,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
+    MIN_TASK_TIMEOUT_MS,
     Execution,
     OperationalErrorCode,
     TaskError,
@@ -69,6 +70,11 @@ pytestmark = [pytest.mark.unit]
 TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000051')
 SCENARIO_TIMEOUT_S = 5.0
 """The longest wait of a test for an event of the code under test."""
+
+DEADLINE_MS: Final = MIN_TASK_TIMEOUT_MS
+"""The deadline of a run that a test lets pass: the smallest ``timeout_ms``
+of a run frame. The core codec refuses a smaller one, as the stored
+``task_options`` reader does."""
 
 
 APP = Horsies(
@@ -577,7 +583,9 @@ class TestTheMarkerOnTheSeatLoop:
 
         async def scenario(inbox: ParentFrameInbox, writer: _RecordingWriter) -> None:
             sent = time.monotonic()
-            inbox.put(_frame_for(1, 'seat_quick', timeout_ms=300, grace_ms=1000))
+            inbox.put(
+                _frame_for(1, 'seat_quick', timeout_ms=DEADLINE_MS, grace_ms=1000),
+            )
             await _until(lambda: len(writer.results()) == 1)
             took_s.append(time.monotonic() - sent)
 
@@ -588,7 +596,7 @@ class TestTheMarkerOnTheSeatLoop:
         assert _result(_envelope_of(writer.results()[0].end), int).unwrap() == 1
         steps.mark.assert_awaited_once()
         # The end report came when the marker ended (1.5 s), after the
-        # deadline (0.3 s).
+        # deadline (1 s).
         assert took_s[0] >= 1.5
 
     def test_runs_that_timed_out_write_no_marker_in_their_grace(
@@ -611,7 +619,12 @@ class TestTheMarkerOnTheSeatLoop:
         async def scenario(inbox: ParentFrameInbox, writer: _RecordingWriter) -> None:
             for dispatch in range(1, seats + 1):
                 inbox.put(
-                    _frame_for(dispatch, 'seat_waits', timeout_ms=200, grace_ms=100),
+                    _frame_for(
+                        dispatch,
+                        'seat_waits',
+                        timeout_ms=DEADLINE_MS,
+                        grace_ms=MIN_CANCEL_GRACE_MS,
+                    ),
                 )
             await _until(lambda: len(writer.results()) == seats)
 
@@ -676,8 +689,8 @@ class TestTheMarkerOnTheSeatLoop:
                 _frame_for(
                     1,
                     'seat_left_work_ignores_cancel',
-                    timeout_ms=200,
-                    grace_ms=100,
+                    timeout_ms=DEADLINE_MS,
+                    grace_ms=MIN_CANCEL_GRACE_MS,
                 ),
             )
             await _until(lambda: 'RunStuckFrame' in _kinds(writer, 1))

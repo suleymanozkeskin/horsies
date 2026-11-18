@@ -18,6 +18,7 @@ from typing import NoReturn
 import pytest
 
 from horsies import _core as core
+from horsies.core.models.tasks import MIN_TASK_TIMEOUT_MS
 from horsies.core.worker import thread_child
 from horsies.core.worker.child_frames import (
     ChildFrame,
@@ -66,6 +67,11 @@ from tests.fixtures.core_frames import (
 pytestmark = [pytest.mark.unit]
 
 WAIT_S = 10.0
+
+DEADLINE_S = MIN_TASK_TIMEOUT_MS / 1000
+"""The deadline of a run that a test lets pass, in seconds: the smallest
+``timeout_ms`` of a run frame. The core codec refuses a smaller one, as the
+stored ``task_options`` reader does."""
 
 
 class _Exited(Exception):
@@ -671,7 +677,7 @@ class TestTheMarkerOfASeatThread:
         ],
     ) -> None:
         def returns_near_the_deadline() -> str:
-            time.sleep(0.15)
+            time.sleep(DEADLINE_S - 0.05)
             return 'done'
 
         seats, table, writer, program = seats_of(1, {'near': returns_near_the_deadline})
@@ -682,7 +688,7 @@ class TestTheMarkerOfASeatThread:
             _give(
                 table,
                 seats,
-                _frame(1, 'near', work=thread_work(200)),
+                _frame(1, 'near', work=thread_work(MIN_TASK_TIMEOUT_MS)),
             )
             _until(lambda: len(writer.results()) == 1)
         finally:
@@ -700,14 +706,18 @@ class TestTheMarkerOfASeatThread:
         ],
     ) -> None:
         def late() -> str:
-            time.sleep(0.25)
+            time.sleep(DEADLINE_S + 0.15)
             return 'late'
 
         seats, table, writer, program = seats_of(1, {'late': late})
         deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
         deadlines.start()
         try:
-            _give(table, seats, _frame(1, 'late', work=thread_work(100)))
+            _give(
+                table,
+                seats,
+                _frame(1, 'late', work=thread_work(MIN_TASK_TIMEOUT_MS)),
+            )
             _until(lambda: len(writer.results()) == 1)
         finally:
             table.stop()

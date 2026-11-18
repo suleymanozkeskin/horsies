@@ -31,6 +31,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.tasks import (
+    MIN_TASK_TIMEOUT_MS,
     Execution,
     OperationalErrorCode,
     TaskError,
@@ -401,7 +402,7 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     blocker = _frame(blocker_id, claimed_at, thread_work(30_000), dispatch=1)
     blocker_work = _seat_work(blocker)
-    frame = _frame(task_id, claimed_at, thread_work(300), dispatch=2)
+    frame = _frame(task_id, claimed_at, thread_work(MIN_TASK_TIMEOUT_MS), dispatch=2)
     work = _seat_work(frame)
     await session.execute(
         text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
@@ -421,7 +422,9 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
             await asyncio.sleep(LOCK_HELD_S)
             table.add(frame, work)
             seats.give(frame, work)
-            await asyncio.sleep(0.8)
+            # Past the deadline of the run (the smallest timeout_ms of a run
+            # frame), while the seat still waits for the connection.
+            await asyncio.sleep(MIN_TASK_TIMEOUT_MS / 1000 + 0.5)
             assert writer.results() == []
         finally:
             await session.rollback()
