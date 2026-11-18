@@ -586,7 +586,7 @@ impl RunningChildren {
 }
 
 /// The line for the tasks whose children the drain deadline killed, as
-/// `Worker.stop` of `horsies/core/worker/worker.py` at `v0.7.0` wrote it
+/// `Worker.stop` in `core/worker/worker.py` of the `v0.7.0` package wrote it
 /// (`'Drain exceeded %.0fs (hung task?); killed tasks: %s'` with the list of
 /// the task ids), or `None` when it killed none: the line needs an id. Pure.
 fn drain_kill_line(drain: Duration, killed: &[Uuid]) -> Option<String> {

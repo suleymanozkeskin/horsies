@@ -166,7 +166,7 @@ pub enum LeafCreation {
 
 impl LeafInspection {
     /// The name of the state in a pruning pass report: the class name of the
-    /// outcome in `horsies/core/history/outcomes.py` at `v0.7.0`, so a report
+    /// outcome in `core/history/outcomes.py` of the `v0.7.0` package, so a report
     /// keeps the text of the Python 0.7.0 report.
     pub fn outcome_name(&self) -> &'static str {
         match self {

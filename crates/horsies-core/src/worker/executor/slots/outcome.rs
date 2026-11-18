@@ -64,7 +64,7 @@ pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
 /// The start of the message of a crash-recovery write that is sent again
 /// after a database error; the message of the first send follows. The
 /// text is the one of `_retry_finalize_future` in
-/// `horsies/core/worker/finalize.py` at `v0.7.0`.
+/// `core/worker/finalize.py` of the `v0.7.0` package.
 pub const CRASH_RECOVERY_RETRY_PREFIX: &str = "Retry after future-stage finalize error: ";
 /// Sends of the release of a claim that no child took, the first included.
 pub const RELEASE_SENDS: u32 = 3;
