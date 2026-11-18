@@ -1,8 +1,6 @@
 //! The node statuses that the recovery discovery and the partial index of
 //! nonterminal nodes treat as live, and the completion candidate yield of the
-//! global workflow audit. Python: `tests/unit/test_nonterminal_node_predicate.py`
-//! and `tests/unit/test_completion_candidate_yield.py`. Each test names the
-//! Python tests that it ports.
+//! global workflow audit.
 //!
 //! The discovery and audit queries read every workflow, so their tests run
 //! on a database that the test owns.

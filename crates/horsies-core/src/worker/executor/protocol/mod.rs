@@ -1,8 +1,7 @@
 //! The parent-child protocol: one codec for the worker parent, the preload
 //! process and every child, Python or Rust.
 //!
-//! A frame is a header, JSON metadata and a raw body (Python
-//! `core/worker/child_protocol.py`):
+//! A frame is a header, JSON metadata and a raw body:
 //!
 //! - Header: 12 bytes, `>IQ`: the metadata length as an unsigned 32-bit
 //!   number, then the body length as an unsigned 64-bit number, big-endian.

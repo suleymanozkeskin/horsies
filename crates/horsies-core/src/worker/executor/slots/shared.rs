@@ -1,7 +1,5 @@
 //! The pool of one kind of shared children, async or thread: the FIFO of
-//! tasks, the placement of each task on a seat, and the stop (Python
-//! `core/worker/slots.py`, the shared half of `SlotPool`: `submit_shared`,
-//! `_place_shared`, `_place_from`, `shared_async_capacity`).
+//! tasks, the placement of each task on a seat, and the stop.
 //!
 //! Placement runs when a task is submitted, when a seat frees and when a
 //! child opens: the open child with the fewest runs and a free seat takes

@@ -1,6 +1,5 @@
 //! The worker: claims rows, runs each task in a child process of the
-//! executor, and writes how each attempt ended (Python
-//! `core/worker/worker.py`, `Worker.start`, `run_forever`, `stop`).
+//! executor, and writes how each attempt ended.
 //!
 //! User code never runs in the worker process. The worker starts the
 //! children of its profile before any database work, then claims with the
@@ -156,8 +155,7 @@ fn advisory_key_queue(queue: &str) -> i64 {
 /// `queue_max_concurrency` alone, so caps are enforced in both modes.
 /// The lease of every claim: `claim_lease_ms`, or [`DEFAULT_CLAIM_LEASE_MS`]
 /// when it is not set. Every claim is lease-bounded, in hard-cap and soft-cap
-/// mode alike, so a crashed worker's claims become reclaimable (Python
-/// `claiming.py:697-708`).
+/// mode alike, so a crashed worker's claims become reclaimable.
 fn effective_claim_lease_ms(app_config: &AppConfig) -> u32 {
     app_config
         .claim_lease_ms
@@ -587,10 +585,10 @@ impl RunningChildren {
     }
 }
 
-/// Python's line for the tasks whose children the drain deadline killed
-/// (`python/horsies/core/worker/worker.py`, `Worker.stop`: `'Drain exceeded %.0fs
-/// (hung task?); killed tasks: %s'` with the list of the task ids), or
-/// `None` when it killed none: Python logs only a list with an id. Pure.
+/// The line for the tasks whose children the drain deadline killed, as
+/// `Worker.stop` of `horsies/core/worker/worker.py` at `v0.7.0` wrote it
+/// (`'Drain exceeded %.0fs (hung task?); killed tasks: %s'` with the list of
+/// the task ids), or `None` when it killed none: the line needs an id. Pure.
 fn drain_kill_line(drain: Duration, killed: &[Uuid]) -> Option<String> {
     match killed.is_empty() {
         true => None,
@@ -2775,7 +2773,6 @@ mod tests {
         .expect("a valid test worker")
     }
 
-    /// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_no_child_is_refused`.
     #[tokio::test]
     async fn a_worker_with_no_child_is_refused() {
         use crate::worker::executor::protocol::{
@@ -3222,10 +3219,9 @@ mod tests {
         assert_eq!(claimed.input.as_str(), r#"{"n": 1}"#);
     }
 
-    /// Python `Worker.stop` and `test_runner_heartbeat.py::test_stop_ends_the_heartbeat_after_the_children`:
-    /// the claim loop ends, then the pools stop with the drain timeout, then
-    /// the rows held for their queue cap go back to the queue (Python
-    /// `_return_held_rows`), then the outcome writes drain and the batcher
+    /// The stop order: the claim loop ends, then the pools stop with the
+    /// drain timeout, then the rows held for their queue cap go back to the
+    /// queue, then the outcome writes drain and the batcher
     /// closes, then the runner heartbeats stop, then the spawner thread.
     #[test]
     fn the_stop_runs_in_python_order() {
@@ -4377,8 +4373,7 @@ mod tests {
         assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
     }
 
-    /// Python `test_stored_timeout_refusal.py::test_unreadable_options_fail_in_one_claim_and_do_not_retry`:
-    /// stored options that do not parse fail the task before user code runs,
+    /// Stored options that do not parse fail the task before user code runs,
     /// with WORKER_SERIALIZATION_ERROR, and the task does not retry (its
     /// retry policy is inside the unreadable text).
     #[tokio::test]
@@ -4406,8 +4401,7 @@ mod tests {
         );
     }
 
-    /// Python `test_stored_timeout_refusal.py::test_a_refused_timeout_retries_until_max_retries_when_asked`:
-    /// a stored timeout above the limit refuses the run, and a readable
+    /// A stored timeout above the limit refuses the run, and a readable
     /// policy that names WORKER_SERIALIZATION_ERROR still retries it.
     #[tokio::test]
     #[serial]
@@ -4573,8 +4567,7 @@ mod tests {
 
     /// A database error during the failed-attempt write decides neither the
     /// retry nor the failure: phase 1 reports a phase-1 error and writes
-    /// nothing, and the next try sends the same statement (Python
-    /// `core/worker/finalize.py`, `_persist_failed_attempt`). Before, an error
+    /// nothing, and the next try sends the same statement. Before, an error
     /// of the retry write fell through to the terminal failure write.
     #[tokio::test]
     #[serial]

@@ -205,7 +205,8 @@ class TestBulkChildStart:
         fact parse refuses the child's node, the bridge raises
         PanicException, and the parent start rolls back: no parent or child
         row is left. The promotion path, which reads stored rows, fails only
-        the node (see test_workflow_promotion_batched)."""
+        the node (see
+        crates/horsies-core/src/workflow_engine/port_tests/promotion_branches.rs)."""
         child_def = _child_def(app, 2, shape='flat', corrupt_root=True)
         parent_name = f'bulk_parent_corrupt_{uuid.uuid4().hex[:6]}'
         spec = app.workflow(

@@ -1,8 +1,6 @@
 //! The statement of a plain-success batch on the test database
 //! (`worker::finalize_batch::statement`, `horsies_complete_tasks_fused` of
-//! 0004). Python: `tests/integration/test_finalize_batch.py`, and the
-//! connection rows of `tests/unit/test_finalize_batcher.py` that need a
-//! real pool.
+//! 0004), and the connection rows of the batcher that need a real pool.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +34,7 @@ fn batch_of(task_ids: &[Uuid]) -> SuccessBatch {
         .expect("a test batch inside its bound")
 }
 
-/// Python `test_finalize_batch.py`: one statement answers each row with the
+/// One statement answers each row with the
 /// outcome of its own task, in input order, whatever order the function
 /// writes the rows in (task id order).
 #[tokio::test]

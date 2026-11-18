@@ -301,8 +301,7 @@ mod tests {
         }
     }
 
-    /// Python `tests/unit/test_web_path_uuid.py::test_other_text_is_refused_with_the_parse_error`,
-    /// case `sign_that_uuid_UUID_accepts`: Python's `uuid.UUID` reads a sign
+    /// Python's `uuid.UUID` reads a sign
     /// before 31 hex digits; a path id refuses it as a character that is not
     /// a hex digit.
     #[test]

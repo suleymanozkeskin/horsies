@@ -2,12 +2,8 @@
 //! RUNNING, and for a reported result that is not a result envelope, on a
 //! migrated database.
 //!
-//! Python specification: `tests/unit/test_unconfirmed_start_release.py` and
-//! the unconfirmed-start cases of
-//! `tests/integration/test_worker_persist_terminal_state.py` (an
-//! `OWNERSHIP_UNCONFIRMED` stop releases the claim of its dispatch
-//! generation at once; a later claim of the row is not touched), and
-//! `test_worker_persist_terminal_state.py::test_invalid_task_result_structure_marks_error`.
+//! An `OWNERSHIP_UNCONFIRMED` stop releases the claim of its dispatch
+//! generation at once; a later claim of the row is not touched.
 
 use std::sync::Arc;
 
@@ -282,8 +278,7 @@ async fn remove_history(pool: &TestPool, task_id: Uuid) {
         .expect("remove the history row");
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_invalid_task_result_structure_marks_error`:
-/// a reported result that is valid JSON but not a result envelope
+/// A reported result that is valid JSON but not a result envelope
 /// (`{"random": 1}`) fails the task with `WORKER_SERIALIZATION_ERROR`, with
 /// no retry. A plain task owes no phase 2: the row moves to history and no
 /// phase-2 record waits for it.

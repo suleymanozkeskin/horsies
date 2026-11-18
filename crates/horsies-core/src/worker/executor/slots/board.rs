@@ -1,8 +1,6 @@
 //! The board of every slot of a worker, of every kind: the one view the
 //! restart rules read, the first generation and the baselines of its
-//! children, the pool failure, and the stop (Python `core/worker/slots.py`,
-//! `SlotPool._all_slots`, `_record_failure`, `_check_first_generation`,
-//! `_note_ready`, `start`, `wait_new_kind_baseline`).
+//! children, the pool failure, and the stop.
 //!
 //! Slots are numbered across kinds, as in Python: the isolated slots first,
 //! then the shared async slots, then the shared thread slots. "Another

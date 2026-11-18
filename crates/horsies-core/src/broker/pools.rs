@@ -1046,8 +1046,7 @@ mod tests {
 
 #[cfg(test)]
 mod kept_session_tests {
-    //! The session setting of the core pools on the test server (Python
-    //! `tests/integration/test_broker_session_settings.py`): a connection that
+    //! The session setting of the core pools on the test server: a connection that
     //! keeps its session runs `jit = off`, sent once in autocommit when the
     //! connection opens, so a rollback of a transaction on it keeps the
     //! setting. In PgBouncer transaction mode the main pool sets nothing (a
@@ -1131,7 +1130,7 @@ mod kept_session_tests {
         .expect("the pools of the test database build")
     }
 
-    /// Python `test_broker_session_settings.py::test_setting_survives_a_rollback_of_the_first_transaction`.
+    /// The setting survives a rollback of the first transaction.
     /// The connection opens at the first checkout, runs the setting, then the
     /// statement-pooling check; the transaction of the test rolls back after
     /// both, and the setting stays.
@@ -1169,7 +1168,7 @@ mod kept_session_tests {
         assert_eq!(setting, JitSetting::set_off_on_the_session());
     }
 
-    /// Python `test_broker_session_settings.py::test_transaction_mode_runtime_pool_keeps_the_server_setting`.
+    /// The runtime pool in transaction mode keeps the server setting.
     /// The two URLs reach the same server directly and differ only in
     /// `application_name`, so the session URL gets a pool of its own.
     #[tokio::test]

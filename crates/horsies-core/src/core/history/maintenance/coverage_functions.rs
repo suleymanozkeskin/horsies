@@ -3,10 +3,6 @@
 //! probe (`horsies_coverage_probe`), the class registration
 //! (`horsies_register_retention_classes`) and the leaf creation
 //! (`horsies_create_history_leaf`, `horsies_create_heartbeat_leaf`).
-//!
-//! Python: `python/horsies/core/history/maintenance/coverage.py`
-//! (`_probe_complete_coverage`, `_coverage_probe_of`,
-//! `_register_required_classes`, `leaf_creation_of`).
 
 use std::collections::BTreeMap;
 
@@ -608,8 +604,8 @@ mod tests {
     const LEAF: &str = "horsies_task_history_standard_30d_2026_11_17";
     const HEARTBEAT_LEAF: &str = "horsies_heartbeats_2026_11_17_13";
 
-    /// Python `tests/unit/test_coverage_function_rows.py`: every outcome of
-    /// the leaf-creation functions maps onto its `LeafCreation`.
+    /// Every outcome of the leaf-creation functions maps onto its
+    /// `LeafCreation`.
     #[test]
     fn every_leaf_creation_outcome_maps_onto_its_variant() {
         let history = |outcome: &str, conflict: Option<&str>| {
@@ -820,8 +816,7 @@ mod tests {
         ));
     }
 
-    /// Python `test_coverage_function_rows.py::TestCoverageProbeRows`: each
-    /// class reaches the end of its newest leaf, and the probe reports the
+    /// Each class reaches the end of its newest leaf, and the probe reports the
     /// earliest; the forever leaf has no end and does not move it.
     #[test]
     fn history_coverage_is_the_earliest_newest_end_over_the_classes() {

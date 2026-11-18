@@ -1,5 +1,3 @@
-//! Port of Python `tests/integration/test_autocommit_outcomes.py`.
-//!
 //! The fused completion runs as its own transaction. These tests pin what
 //! the caller relies on: a replay and a lost claim write nothing (no history
 //! row, no attempt, no wake), and a lost reply or a dead pooled connection
@@ -265,9 +263,8 @@ async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
     .map(|_parent_advances| ())
 }
 
-/// Python `test_a_dead_connection_fails_phase_two_as_retryable`
-/// (`tests/integration/test_autocommit_outcomes.py:400`): a connection lost
-/// while the phase-2 wake is in flight fails phase 2 as retryable.
+/// A connection lost while the phase-2 wake is in flight fails phase 2 as
+/// retryable.
 ///
 /// The wake of a plain task runs on the broker's main core pool, and the
 /// broker's core pools connect through the proxy (`WireProxy`). The first

@@ -1,5 +1,4 @@
-//! Ports of Python `tests/unit/test_shared_thread_slot_pool.py`: a shared
-//! thread pool driven by scripted children. A thread cannot be cancelled,
+//! A shared thread pool driven by scripted children. A thread cannot be cancelled,
 //! so the first deadline closes its child, and the child is killed once no
 //! run in it has time left.
 

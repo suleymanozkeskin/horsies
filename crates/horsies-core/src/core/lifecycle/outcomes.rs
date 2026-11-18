@@ -981,8 +981,7 @@ mod tests {
         raw
     }
 
-    /// Python `test_lifecycle_outcomes.py::TestBatchOrdinality::test_ordinality_travels_with_the_outcome`:
-    /// each outcome keeps the ordinality of its row, so a caller matches the
+    /// Each outcome keeps the ordinality of its row, so a caller matches the
     /// outcomes of a batch to its inputs by position, not by row order.
     #[test]
     fn the_ordinality_of_each_row_travels_with_its_outcome() {

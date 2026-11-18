@@ -13,11 +13,6 @@
 //!   with one coverage pass ([`covered`]) and seeds its rows. It calls the
 //!   writer with its own SQL and decodes the one outcome row with the
 //!   decoder of the core ([`decode_outcome_row`]).
-//!
-//! The other tests of `tests/integration/test_terminalization_functions.py`
-//! stay in Python. Each runs a call through the Python lifecycle
-//! (`apply_async`, `apply_batch_async`, `apply_sync`, `call_for`,
-//! `batch_call_for`).
 
 use chrono::{DateTime, TimeZone, Utc};
 use tokio_postgres::error::SqlState;

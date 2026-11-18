@@ -1,10 +1,5 @@
 //! The start of the children: the first generation, its baselines, a
-//! degraded start, and the memory baseline guard of each kind (Python
-//! `tests/unit/test_slot_pool.py` `TestBoot`, `TestDownSlots`;
-//! `test_shared_thread_slot_pool.py` `TestNewKindBaseline`;
-//! `test_shared_dispatch.py` `TestSharedMemoryBaseline`,
-//! `TestNewKindBaselineGuard`; `test_thread_dispatch.py`
-//! `TestThreadMemoryBaseline`).
+//! degraded start, and the memory baseline guard of each kind.
 
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;

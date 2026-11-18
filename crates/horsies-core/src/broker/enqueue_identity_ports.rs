@@ -381,12 +381,11 @@ async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
 
 /// `test_same_task_identity_requires_same_key_and_fingerprint`. The keyed
 /// halves are covered by `enqueue_history_tests` (replay, second key). The
-/// prototype refused a resend of a keyed task id with no key; Python's
+/// prototype refused a resend of a keyed task id with no key; the
 /// production exact-id check compares the version-1 fingerprint and
-/// `sent_at` only (`python/horsies/core/brokers/postgres.py:2071-2131`), and the
-/// fingerprint has no key field (`python/horsies/core/history/identity/fingerprint.py:31-50`).
-/// The core keeps the production rule: the resend returns the same task, and
-/// the key binding stays.
+/// `sent_at` only, and the fingerprint has no key field. The core keeps the
+/// production rule: the resend returns the same task, and the key binding
+/// stays.
 #[tokio::test]
 #[serial]
 async fn an_unkeyed_resend_of_a_keyed_task_returns_it_and_keeps_its_key() {
@@ -440,9 +439,7 @@ async fn a_replay_after_the_move_returns_the_moved_task() {
     assert_eq!(history_rows(&pool, first.task_id).await, 1);
 }
 
-/// `tests/dualrun/test_enqueue_task.py`, cases `history.first`,
-/// `history.repeat` and `history.repeat_other`: after a task moved to
-/// history, a `REPEAT` send of the same command answers with its id and
+/// After a task moved to history, a `REPEAT` send of the same command answers with its id and
 /// writes nothing; a `REPEAT` send of another command under the id is a
 /// payload mismatch and writes nothing; a `FIRST` send does not read history
 /// and writes a new live row.
@@ -502,9 +499,8 @@ async fn unkeyed_sends_write_no_reservation() {
 }
 
 /// `test_enqueue_cutover_conversion.py::TestConvertedStatement::test_new_row_carries_real_cutover_values`:
-/// the stored fingerprint is the SHA-256 of Python's version-1 array for the
-/// send (`python/horsies/core/history/identity/fingerprint.py:31-50`; the input
-/// takes the keyword slot, the positional slot is null). The expected bytes
+/// the stored fingerprint is the SHA-256 of the version-1 array for the
+/// send (the input takes the keyword slot, the positional slot is null). The expected bytes
 /// come from the literal array, not from the core's fingerprint code.
 #[tokio::test]
 #[serial]

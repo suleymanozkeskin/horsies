@@ -1,5 +1,4 @@
-//! Port of Python
-//! `tests/integration/test_scheduler_task_options.py::test_a_slot_that_an_earlier_version_enqueued_counts_as_fired`.
+//! A slot that an earlier version enqueued counts as fired.
 //!
 //! A slot's deterministic task id already holds a row whose fingerprint
 //! differs (an earlier version, or a change of the task's options or the

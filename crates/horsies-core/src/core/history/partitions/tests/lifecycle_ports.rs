@@ -1,11 +1,6 @@
 //! Ports of the Python partition lifecycle tests: class registration, leaf
 //! inspection, lock contention, session time zones, DST folds and the
 //! ordering index.
-//!
-//! Python specification: `tests/integration/test_task_history_partition_lifecycle.py`,
-//! `test_task_history_partition_timezones.py`, `test_partition_dst_session.py`,
-//! `test_task_history_ordering_index.py`, `test_task_history_heartbeat_partitions.py`
-//! and the core rows of `test_task_history_partition_lifecycle_prototypes.py`.
 
 use std::time::Instant;
 

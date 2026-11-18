@@ -1862,8 +1862,7 @@ class TestPausedExpiryAge:
     The reaper's paused expiry runs in the core
     (``ReaperMixin._expire_paused_workflows``,
     ``CoreHandle.expire_paused_workflows_async``): it sends
-    ``older_than // timedelta(microseconds=1)`` (pinned in
-    ``test_reaper_workflow_core_calls``), reads the candidates and calls
+    ``older_than // timedelta(microseconds=1)``, reads the candidates and calls
     ``horsies_workflow_expire_paused`` for each, in autocommit.
     """
 

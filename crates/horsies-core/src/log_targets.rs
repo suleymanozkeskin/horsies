@@ -15,15 +15,14 @@
 pub const STALE_RUNNING_PASS: &str = "horsies.broker";
 
 /// The failed attempt writes under the claimed-row rules `REFUSE` and
-/// `RELEASE`. Python logs them on `horsies.lifecycle`
-/// (`horsies.core.worker.failed_attempt`).
+/// `RELEASE`. The Python client logs them on `horsies.lifecycle`.
 pub const FAILED_ATTEMPT: &str = "horsies.lifecycle";
 
-/// Phase 1 of a workflow task's success. Python logs it on
-/// `horsies.lifecycle` (`horsies.core.worker.workflow_success`).
+/// Phase 1 of a workflow task's success. The Python client logs it on
+/// `horsies.lifecycle`.
 pub const WORKFLOW_SUCCESS: &str = "horsies.lifecycle";
 
 /// The outcome of each terminal write of a terminalization command, the
-/// success batch included. Python logs every one on `horsies.lifecycle`
-/// (`horsies.core.lifecycle.persistence`).
+/// success batch included. The Python client logs every one on
+/// `horsies.lifecycle`.
 pub const TERMINALIZATION_OUTCOME: &str = "horsies.lifecycle";

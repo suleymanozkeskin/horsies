@@ -7,9 +7,6 @@
 //! worker process logs one stream at most once per
 //! [`CLASS_COVERAGE_LOG_INTERVAL`], and a failed check at most once per the
 //! same interval.
-//!
-//! Python reference: `python/horsies/core/worker/class_coverage_log.py` and
-//! `ReaperMixin._check_class_coverage` (`python/horsies/core/worker/reaper.py:630-664`).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -23,12 +20,10 @@ use crate::broker::PostgresBroker;
 use crate::core::task::Execution;
 
 /// The least time between two log lines of one stream, or of a failed
-/// check, from one worker process (Python `CLASS_COVERAGE_LOG_INTERVAL_S`,
-/// `class_coverage_log.py:24-26`).
+/// check, from one worker process.
 pub(crate) const CLASS_COVERAGE_LOG_INTERVAL: Duration = Duration::from_secs(300);
 
-/// The log key of one pending stream or of a failed check (Python
-/// `StreamKey` and `CheckFailedKey`, `class_coverage_log.py:29-42`).
+/// The log key of one pending stream or of a failed check.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CoverageLogKey {
     Stream {
@@ -82,9 +77,7 @@ impl UncoveredStream {
         }
     }
 
-    /// The log text (Python `describe_uncovered`,
-    /// `class_coverage_log.py:88-109`). Python quotes the queue name with
-    /// `repr`; here it is in single quotes with no escapes.
+    /// The log text. The queue name is in single quotes with no escapes.
     pub(crate) fn describe(&self) -> String {
         let subject = format!(
             "PENDING {} tasks on queue '{}'",
@@ -104,8 +97,7 @@ impl UncoveredStream {
     }
 
     /// The line of this stream: an error when no live worker serves it, a
-    /// warning when its serving workers have no capacity in service (Python
-    /// `reaper.py:656-660`).
+    /// warning when its serving workers have no capacity in service.
     fn line(&self) -> CoverageLogLine {
         match self.gap {
             CoverageGap::NoServingWorker => CoverageLogLine::Error(self.describe()),
@@ -114,8 +106,7 @@ impl UncoveredStream {
     }
 }
 
-/// What starts a worker that serves `execution` (Python
-/// `_serving_workers_hint`, `class_coverage_log.py:112-125`).
+/// What starts a worker that serves `execution`.
 fn serving_workers_hint(execution: Execution) -> String {
     match execution {
         Execution::Isolated => "Start a worker with isolated children on this queue. A shared \
@@ -144,8 +135,7 @@ impl CoverageLogLine {
     }
 }
 
-/// When this process last logged each key (Python `CoverageLogBound`,
-/// `class_coverage_log.py:45-85`).
+/// When this process last logged each key.
 ///
 /// It holds only the keys logged within the last
 /// [`CLASS_COVERAGE_LOG_INTERVAL`]: the uncovered streams that the checks of
@@ -199,7 +189,7 @@ impl ClassCoverageLog {
     /// The state of a reaper loop that starts at `started_at` and passes
     /// every `check_interval`. The first check is one interval after the
     /// start, so the workers that start with this one have written their
-    /// first snapshot (Python `reaper.py:747-750`).
+    /// first snapshot.
     pub(crate) fn for_reaper_start(started_at: Instant, check_interval: Duration) -> Self {
         Self {
             checks_from: started_at + check_interval,
@@ -213,8 +203,7 @@ impl ClassCoverageLog {
     }
 
     /// The lines that the fleet check read `coverage` gives at `now`, each
-    /// within the bound (Python `_check_class_coverage` after its read,
-    /// `reaper.py:645-664`):
+    /// within the bound:
     /// - a read: one error per unserved stream and one warning per stream
     ///   without capacity in service, in the order of the read;
     /// - a failed read: one warning `Class coverage check failed: <message>`.
@@ -244,8 +233,7 @@ impl ClassCoverageLog {
     }
 }
 
-/// One fleet check of the reaper loop, after its pass (Python
-/// `ReaperMixin._check_class_coverage`, `reaper.py:630-664`).
+/// One fleet check of the reaper loop, after its pass.
 ///
 /// Before the first check time of `log` it reads nothing. Then it reads the
 /// fleet check on the main core pool of `broker`, as reserved work, and logs

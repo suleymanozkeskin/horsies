@@ -1,5 +1,4 @@
-//! The scheduler's statements on `horsies_schedule_state` (Python
-//! `python/horsies/core/scheduler/state.py`, `ScheduleStateManager`):
+//! The scheduler's statements on `horsies_schedule_state`:
 //!
 //! - the due read, the start read and write, the existence heal;
 //! - the fire: the slot tasks and the state move in one statement

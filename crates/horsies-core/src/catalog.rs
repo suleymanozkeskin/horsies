@@ -340,7 +340,7 @@ mod tests {
             "FAILED",
             "SKIPPED",
         ]);
-        // python/horsies/core/history/reads/detail.py
+        // python/horsies/_catalog/history.py
         assert_python_members::<TaskAbsenceReason>(&[
             "PREDATES_RETAINED_HISTORY",
             "WITHIN_RETAINED_HISTORY",

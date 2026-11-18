@@ -554,9 +554,9 @@ async fn seed_baseline_pending_task(pool: &TestPool) -> Uuid {
 const LOCK_WAIT_POLLS: usize = 250;
 const LOCK_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// Python `test_task_lock_order.py` (a monitoring cancel against a
-/// finalize): the cancel (`horsies_cancel_task`) takes the task advisory
-/// lock before the row lock, the order of every move function. While
+/// A monitoring cancel against a finalize: the cancel
+/// (`horsies_cancel_task`) takes the task advisory lock before the row lock,
+/// the order of every move function. While
 /// another transaction holds the advisory lock, the cancel waits for it and
 /// holds no row lock, so the holder can still lock the row. With the row
 /// lock first, the holder's `FOR UPDATE NOWAIT` fails with 55P03 and a

@@ -1,5 +1,4 @@
-//! Ports of Python `tests/integration/test_runner_heartbeat_writer.py` and
-//! of the parent half of
+//! The runner beat writer, and the parent half of Python
 //! `tests/e2e/test_child_isolation.py::test_a_task_that_holds_the_gil_is_not_failed_as_stale`.
 //!
 //! The worker parent writes one statement per interval for every task it

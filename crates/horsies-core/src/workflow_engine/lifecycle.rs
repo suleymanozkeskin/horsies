@@ -517,9 +517,8 @@ enum AfterResumeCommit {
 }
 
 /// The error of a resume that committed and whose work after the commit failed: `RESUME_RECOVERY_FAILED`, not
-/// retryable (the workflow is RUNNING). The message names the failed work as the Python resume did
-/// (`tests/dualrun/reference/workflow_resume_caller.py`); the cause is `error`, so the exception of the
-/// client has the error's own text. Pure.
+/// retryable (the workflow is RUNNING). The message names the failed work; the cause is `error`, so
+/// the exception of the client has the error's own text. Pure.
 fn resume_recovery_failed(
     workflow_id: Uuid,
     failed: AfterResumeCommit,

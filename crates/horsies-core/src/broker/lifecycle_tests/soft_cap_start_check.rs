@@ -1,5 +1,3 @@
-//! Port of Python `tests/integration/test_soft_cap_start_check.py`.
-//!
 //! In soft-cap mode the claim counts only RUNNING rows against a queue's
 //! `max_concurrency`, so passes that follow each other claim rows of a capped
 //! queue while the rows that they claimed before are still CLAIMED. Each pass

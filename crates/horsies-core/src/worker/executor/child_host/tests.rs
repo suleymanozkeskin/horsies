@@ -235,8 +235,7 @@ fn a_blocking_read_takes_one_frame_and_names_the_eof() {
     ));
 }
 
-/// Python `test_isolated_left_work.py::TestMarkerBounds::test_the_parent_waits_past_the_child_bound_after_a_return`,
-/// for the core child: after a body returned with work left, the child
+/// After a body returned with work left, the child
 /// ends that work (the grace and the cancel rounds) and writes the
 /// finalizing marker, whose statement a cancel ends at its bound, before
 /// the parent's backstop kills it.

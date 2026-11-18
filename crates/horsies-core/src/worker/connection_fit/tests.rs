@@ -1,9 +1,7 @@
 //! The worker connection check. Python specification:
-//! `tests/integration/test_worker_connection_check.py` (the two live tests),
-//! `tests/unit/test_worker_profile_fit.py` (`TestReadServerConnectionLimit`,
-//! `TestConnectionNeed`, `TestCheckLiveWorkerConnections`) and
-//! `python/horsies/core/worker/profile_fit.py` (the terms and the texts). The
-//! listener term is the core's one connection per process.
+//! `tests/integration/test_worker_connection_check.py` (the two live tests)
+//! and `tests/unit/test_worker_profile_fit.py`. The listener term is the
+//! core's one connection per process.
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -621,8 +619,7 @@ fn with_application_name(url: &str, application_name: &str) -> String {
 /// listener, the runner heartbeat, the liveness lock and one isolated child
 /// fill the usable slots exactly, so the profile fits with no separate session URL and does
 /// not fit with one. The check reads the limit through `broker` and connects
-/// nothing on the session URL. Python counts no session pool
-/// (`python/horsies/core/worker/profile_fit.py`, `worker_connection_need`).
+/// nothing on the session URL.
 #[tokio::test]
 #[serial]
 async fn a_separate_session_url_counts_its_session_pool_against_the_server() {

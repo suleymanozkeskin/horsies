@@ -472,8 +472,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     cleanup(&pool, task_name, &schedule.name).await;
 }
 
-/// Python `test_scheduler_task_options.py::test_a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task`:
-/// a fired slot stores the task's options text and the retry limit it
+/// A fired slot stores the task's options text and the retry limit it
 /// sets, as a send of the task does (#480). The policy names
 /// `TASK_EXCEPTION`, as the Python task does: a policy with no code does
 /// not validate as Python `RetryPolicy`, and the send refuses it.
@@ -520,8 +519,7 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     cleanup(&pool, &name, &name).await;
 }
 
-/// Python `test_scheduler_task_options.py::TestScheduledRunStoresTheTaskOptions::test_a_slot_stores_the_options_of_its_task`
-/// (the shared-async and shared-thread cases; the isolated case is the test
+/// The shared-async and shared-thread cases (the isolated case is the test
 /// above): a fired slot stores the options text of its task and the
 /// task's execution class, and a shared async task keeps its cancel grace.
 #[tokio::test]
@@ -734,9 +732,7 @@ fn a_fire_plan_at_the_scan_bound_sends_no_slot_and_moves_the_row_to_its_progress
     assert_eq!(plan.skip_to, plan.next_run_at);
 }
 
-/// Python `test_scheduler_service.py::TestCheckScheduleOutcomes::test_a_catch_up_sends_every_due_slot_in_one_fire`
-/// and `test_scheduler_task_options.py::TestScheduledRunStoresTheTaskOptions::test_every_slot_of_a_catch_up_sends_one_command`:
-/// a catch-up fire sends every due slot, moves the row past the last one,
+/// A catch-up fire sends every due slot, moves the row past the last one,
 /// and moves it past the first one when the fire is refused.
 #[test]
 fn a_catch_up_fire_plan_sends_every_due_slot_and_moves_past_the_last() {
@@ -905,9 +901,7 @@ fn the_start_write_holds_the_changed_digests_and_not_the_unchanged_ones() {
     assert_ne!(writes[0].config_hash, stale_digest.to_vec());
 }
 
-/// Python `test_scheduler_task_options.py::TestScheduledRunStoresTheTaskOptions::test_the_fingerprint_covers_the_options_text`
-/// and `test_scheduler_service.py::TestScheduleCommand::test_the_fingerprint_covers_the_text_boot_encoded`:
-/// the send command of a schedule is the command of a send of the same
+/// The send command of a schedule is the command of a send of the same
 /// texts, and its fingerprint covers the options text: the same schedule
 /// with no options has another fingerprint.
 #[test]
@@ -978,8 +972,7 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
         healed.next_run_at > now,
         "healed next_run must be strictly future"
     );
-    // Python `test_schedule_state_rows.py::test_the_heal_creates_a_missing_row_from_the_database_time`:
-    // the first run after the database time, the schedule's digest, no run.
+    // The first run after the database time, the schedule's digest, no run.
     assert_eq!(
         healed.next_run_at,
         next_run_at(&schedules[0].pattern, now, &schedules[0].timezone)
@@ -1014,9 +1007,7 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
 }
 
 /// The start computes a new schedule's first run from the database time
-/// of its read, and stores the schedule's digest (Python
-/// `tests/integration/test_schedule_state_rows.py`,
-/// `test_start_computes_the_first_run_from_the_database_time`).
+/// of its read, and stores the schedule's digest.
 #[tokio::test]
 #[serial]
 async fn initialize_schedules_computes_first_runs_from_the_database_time() {
@@ -1045,7 +1036,7 @@ async fn initialize_schedules_computes_first_runs_from_the_database_time() {
         compute_config_hash(&enabled(&schedule)).to_vec()
     );
     assert_eq!(row.run_count, 0);
-    // Python `test_schedule_state_rows.py::test_scheduler_start_writes_the_config_digest_and_no_last_run`.
+    // The start writes no last run.
     assert_eq!((row.last_run_at, row.last_task_id), (None, None));
 
     core.close();

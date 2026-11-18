@@ -25,8 +25,7 @@ pub(crate) struct CodeBody {
     pub detail: String,
 }
 
-/// The `code` of a 400 body for request text refused before any read
-/// (Python `tests.dualrun.reference.web_routes._common.INVALID_INPUT`).
+/// The `code` of a 400 body for request text refused before any read.
 pub(crate) const INVALID_INPUT: &str = "INVALID_INPUT";
 
 /// The mark of a response that refused request text as `INVALID_INPUT`, in
@@ -386,8 +385,7 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
     }
 }
 
-/// Map a monitoring read failure to its response, as Python
-/// (`tests/dualrun/reference/web_routes/_common.py:103-127`): a database failure is 503, the
+/// Map a monitoring read failure to its response: a database failure is 503, the
 /// dependency failed and the state can clear; stored history data that does
 /// not decode is 500, the request was valid and a repeat gives the same
 /// answer until the stored row changes.

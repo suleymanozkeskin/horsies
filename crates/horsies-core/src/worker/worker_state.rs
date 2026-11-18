@@ -92,8 +92,7 @@ pub struct BudgetColumn {
 }
 
 /// The `class_capacity` column: each budget class maps to its capacity in
-/// service and the classes whose rows it claims (Python
-/// `core/worker/claim_plan.py`, `class_capacity_json`). A class that no
+/// service and the classes whose rows it claims. A class that no
 /// `serves` list names is not served by the worker. Pure.
 pub fn class_capacity_json(budgets: &[BudgetColumn]) -> serde_json::Value {
     let mut capacity = serde_json::Map::new();
@@ -131,8 +130,7 @@ pub fn class_capacity_of(service: &PoolService) -> serde_json::Value {
 }
 
 /// The columns of a worker snapshot that the children and the claim limits
-/// of the worker decide (Python `core/worker/health.py:233-239`, from the
-/// `WorkerConfig` that `execution_settings(profile)` builds).
+/// of the worker decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimColumns {
     /// `processes`: the children of the worker.
@@ -876,8 +874,7 @@ mod tests {
         assert_eq!(class_capacity_json(&[]), serde_json::json!({}));
     }
 
-    /// Python `core/worker/health.py:233-239` with the `WorkerConfig` of
-    /// `execution_settings(profile)`: `processes` is the child count,
+    /// `processes` is the child count,
     /// `max_claim_batch` the per-queue limit or 0, and `max_claim_per_worker`
     /// the claimed limit or else the seat count.
     #[test]
@@ -942,9 +939,8 @@ mod tests {
 
     /// A worker with no queue priorities and no queue caps writes its
     /// snapshot on the baseline: the empty maps are `{}`, and the slot
-    /// health and class capacity columns hold the worker's values (Python
-    /// `core/worker/health.py`, `_update_worker_state`). The old statement
-    /// named neither column and bound NULL for the empty maps, so every
+    /// health and class capacity columns hold the worker's values. The old
+    /// statement named neither column and bound NULL for the empty maps, so every
     /// insert failed and no row landed.
     #[tokio::test]
     #[serial_test::serial]
@@ -1062,8 +1058,7 @@ mod tests {
         &[],
     );
 
-    /// A failed count of claimed rows writes no snapshot (Python counts and
-    /// inserts under one `try`, `core/worker/health.py:201-291`). The old
+    /// A failed count of claimed rows writes no snapshot. The old
     /// loop wrote the snapshot with `tasks_claimed = 0`.
     #[tokio::test]
     #[serial_test::serial]

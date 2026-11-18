@@ -155,13 +155,13 @@ const ENQUEUE_SUBJECT: &str = "enqueue";
 pub type SendOutcome = Outcome<Enqueued>;
 
 /// Enqueue one task. The core's refusals that need no connection run first
-/// (`CheckedSend::check`), as Python's `_prepare_enqueue` ran before its
-/// schema install: a refused send answers `INVALID_INPUT` or
-/// `INVALID_TASK_OPTIONS` with no connect and no statement. Then the schema
-/// is installed once per handle; a failed connect or install is
-/// `ENQUEUE_FAILED`, as Python's enqueue reports it. Writes; a caller that
-/// leaves early sees the outcome as unknown, and a resend of the same
-/// request with the send kind `REPEAT` is safe.
+/// (`CheckedSend::check`), as `_prepare_enqueue` ran before the schema
+/// install (`horsies/core/brokers/postgres.py` at `v0.7.0`): a refused send
+/// answers `INVALID_INPUT` or `INVALID_TASK_OPTIONS` with no connect and no
+/// statement. Then the schema is installed once per handle; a failed connect
+/// or install is `ENQUEUE_FAILED`, as Python's enqueue reports it. Writes; a
+/// caller that leaves early sees the outcome as unknown, and a resend of the
+/// same request with the send kind `REPEAT` is safe.
 pub async fn enqueue_operation(
     connection: BrokerConnection,
     command: Arc<EnqueueCommand>,

@@ -1,4 +1,4 @@
-//! Runner heartbeats of the worker parent (Python `core/worker/runner_heartbeat.py`).
+//! Runner heartbeats of the worker parent.
 //!
 //! - The writer beats every task the worker holds, once per
 //!   `runner_heartbeat_interval_ms`, in one fenced statement, on its own
@@ -175,7 +175,7 @@ struct Registry {
 pub struct RegistryClosed;
 
 /// The dispatches this worker holds: task id, claim generation and the
-/// process that runs each (Python `core/worker/live_dispatches.py`).
+/// process that runs each.
 ///
 /// A dispatch is held from its send until its end is read, a kill is sent
 /// to its child, or its child's exit is seen; the [`HeldDispatch`] guard
@@ -1188,7 +1188,7 @@ mod tests {
         assert_eq!(live.snapshot(), (Vec::new(), Vec::new()));
     }
 
-    /// Python `test_live_dispatches.py`: `close` refuses later holds and
+    /// `close` refuses later holds and
     /// returns what is held, in ticket order; a second close returns
     /// nothing, and a guard dropped after the close changes nothing.
     #[test]
@@ -1227,9 +1227,8 @@ mod tests {
         assert_eq!(kill_held_children(&live), TaskCodeInWorker::Held);
     }
 
-    /// Python `test_runner_heartbeat.py`, the kill of held children: the
-    /// watchdog marks each held child as killed by the worker and kills its
-    /// session through the spawner thread.
+    /// The kill of held children: the watchdog marks each held child as
+    /// killed by the worker and kills its session through the spawner thread.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_fail_closed_stop_marks_and_kills_each_held_child() {
         use crate::worker::executor::supervisor::{
@@ -1299,7 +1298,7 @@ mod tests {
         );
     }
 
-    /// Python `test_runner_heartbeat.py`: the fail-closed window is half the
+    /// The fail-closed window is half the
     /// threshold, and it holds one interval plus the landing allowance at the
     /// smallest threshold the config accepts.
     #[test]
@@ -1467,7 +1466,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Python `test_runner_heartbeat_writer.py`: one statement beats the
+    /// One statement beats the
     /// held RUNNING rows of this worker at their claim generation, and no row
     /// of another generation, another worker, or with the finalizing marker.
     #[tokio::test]

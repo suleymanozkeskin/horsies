@@ -1,5 +1,4 @@
-//! The stop of the outcome writes at the worker stop (Python `Worker.stop`,
-//! `core/worker/worker.py:1142-1212`).
+//! The stop of the outcome writes at the worker stop.
 //!
 //! Order:
 //! 1. Wait for the outcome writes in flight (one task per attempt end), up

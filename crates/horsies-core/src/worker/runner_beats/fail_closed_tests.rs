@@ -1,6 +1,5 @@
 //! The runner beats with real children, writes that fail on demand, and the
-//! isolated slots that hold their tasks (Python
-//! `tests/unit/test_runner_heartbeat.py`).
+//! isolated slots that hold their tasks.
 //!
 //! - A write fails on demand on a pool whose server refuses the connection.
 //! - A write does not return within a test on a pool whose server accepts

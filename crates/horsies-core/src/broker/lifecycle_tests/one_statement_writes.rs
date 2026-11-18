@@ -1,6 +1,4 @@
-//! Port of Python `tests/integration/test_round_trips.py` and of
-//! `test_claim_pass_counts.py::TestClaimPassCounts::test_empty_capped_pass_statement_count`:
-//! the round trips of the one-statement writes of a worker and of its
+//! The round trips of the one-statement writes of a worker and of its
 //! children, counted at the wire.
 //!
 //! Each test calls the broker method that the worker or the child calls
@@ -281,8 +279,7 @@ async fn a_claim_pass_is_one_statement() {
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
-/// Python `tests/integration/test_claim_pass_counts.py::TestClaimPassCounts::test_empty_capped_pass_statement_count`:
-/// a claim pass over three capped queues with nothing to claim takes its
+/// A claim pass over three capped queues with nothing to claim takes its
 /// queue locks, counts the rows in flight and claims in one statement.
 #[tokio::test]
 #[serial]

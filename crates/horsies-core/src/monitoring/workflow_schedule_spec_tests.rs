@@ -3,8 +3,7 @@
 //!
 //! Python specification: `tests/integration/test_monitoring_queries.py`
 //! (`TestWorkflowNames`, `TestListWorkflowRuns`, `TestGetWorkflowRun`,
-//! `TestGetWorkflowNode`, `TestListSchedules`) and
-//! `tests/integration/test_monitoring_query_plans.py`, baseline versions on
+//! `TestGetWorkflowNode`, `TestListSchedules`), baseline versions on
 //! `program/0.8.0`. Each test runs on a database of its own
 //! ([`SpecDatabase`]).
 
@@ -575,8 +574,7 @@ async fn seed_plan_population(pool: &TestPool) {
         .expect("sample the live table");
 }
 
-/// Python `test_monitoring_query_plans.py::test_list_default_sort_plans_on_enqueued_at_index`:
-/// in both directions of the default sort, the page statement inside
+/// In both directions of the default sort, the page statement inside
 /// `horsies_monitoring_task_list` reads the live side on
 /// `idx_horsies_tasks_enqueued_at`, with no sequential scan of the live
 /// table. The task id tie-break is an incremental sort on the index order
@@ -774,8 +772,7 @@ const LAST_DAY_STATS: &str = "SELECT * FROM horsies_monitoring_task_stats(
          now() - interval '1 day', now(), '{}', '{}', '{}', '{}', '{}', FALSE, '{}', '{}'
      )";
 
-/// Python `test_task_history_detail_reads.py::TestPagesFacetsAggregates::test_aggregate_plan_visits_no_out_of_range_leaf`,
-/// on the status counts of `horsies_monitoring_task_stats`: the count
+/// The status counts of `horsies_monitoring_task_stats`: the count
 /// statement is planned with the window bounds as values, so a leaf outside
 /// the window is pruned and the plan does not name it. The current
 /// `standard_30d` leaf and the forever leaf are in the window and read; the

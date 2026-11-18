@@ -15,14 +15,9 @@
 //!
 //! Every statement runs on a core pool, checked out as reserved work. The
 //! core reaper, the core child host and the Python client's handles run the
-//! same functions here.
-//!
-//! Python reference: `PostgresBroker.expire_pending_tasks` and
+//! same functions here: `PostgresBroker.expire_pending_tasks` and
 //! `PostgresBroker.audit_orphaned_workflow_tasks`
-//! (`python/horsies/core/brokers/postgres.py`), the expiry of the child miss
-//! path (`_expire_claimed_task_before_start`,
-//! `python/horsies/core/worker/child_runner.py`), and the orphan self-heal of
-//! the worker's finalize (`python/horsies/core/worker/finalize.py`).
+//! (`python/horsies/core/brokers/postgres.py`).
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;

@@ -1,10 +1,5 @@
 //! The runs in flight on one shared child, the rules of their stop reports,
-//! and the end of each run when its child ends (Python
-//! `core/worker/slots.py`: `DeadlineReport`, `SeatRuns`, `_end_run`,
-//! `_note_deadline`, `_note_stop_report`, `_kill_for_blocked_loop`,
-//! `_out_of_time`, `_deadline_state`, `_outcome_at_loss`,
-//! `_killed_past_deadline`, `place_on_shared_child`, `shared_recycle_reason`;
-//! `core/worker/finalize.py`, the shared backstop times). Pure.
+//! and the end of each run when its child ends. Pure.
 //!
 //! The stop report of a run moves one frame at a time (Python executor
 //! design, section 8.4). A frame outside these rules is a protocol

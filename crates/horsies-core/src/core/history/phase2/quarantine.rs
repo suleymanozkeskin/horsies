@@ -18,8 +18,7 @@ use crate::test_support::sql::{self, TestTransaction};
 #[cfg(test)]
 const QUARANTINE_ONE_SQL: &str = "SELECT verdict, detail FROM horsies_phase2_quarantine_one($1)";
 
-/// The verdicts of `horsies_phase2_quarantine_one`, as Python's vocabulary
-/// (`python/horsies/core/history/phase2/quarantine.py:174-185`).
+/// The verdicts of `horsies_phase2_quarantine_one`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuarantineVerdict {
     Repointed,

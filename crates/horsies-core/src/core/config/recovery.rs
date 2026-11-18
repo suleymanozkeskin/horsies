@@ -574,8 +574,7 @@ mod tests {
         ));
     }
 
-    /// Python `test_runner_heartbeat.py::test_the_smallest_window_holds_one_interval_and_a_landing`
-    /// and the floor rule of `RecoveryConfig._running_threshold_errors`: with
+    /// The floor rule of `RecoveryConfig._running_threshold_errors`: with
     /// `auto_fail_stale_running` on, the smallest threshold is
     /// 2 x (interval + 2,000 ms); one millisecond less is refused.
     #[test]

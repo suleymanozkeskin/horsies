@@ -1,5 +1,4 @@
-//! The verdict of each run of a shared child that the worker kills (Python
-//! `core/worker/shared_stop.py`). Pure.
+//! The verdict of each run of a shared child that the worker kills. Pure.
 //!
 //! A shared child that has no run with time left is killed by the close
 //! and kill path of its slot; its culprit retries isolated

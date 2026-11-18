@@ -1,7 +1,6 @@
-//! Pins of Python's refusal text of a stored retry policy. Each expected
-//! detail is the `detail` that Python's `read_stored_retry_policy`
-//! (`python/horsies/core/utils/retry.py`) gives for the same policy, with
-//! pydantic 2.13.4 and pydantic-core 2.46.4.
+//! Pins of the refusal text of a stored retry policy. Each expected detail
+//! is the `detail` that the Python reader of a stored policy gave for the
+//! same policy, with pydantic 2.13.4 and pydantic-core 2.46.4.
 
 use super::super::{read_stored_options, DelayCap, RetryRule, RunPermit, StoredRetry};
 

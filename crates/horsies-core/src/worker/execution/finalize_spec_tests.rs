@@ -1,9 +1,6 @@
-//! Ports of the parent finalize rows of Python
-//! `tests/integration/test_worker_retry_scheduling.py`,
-//! `tests/integration/test_worker_persist_terminal_state.py`,
-//! `tests/integration/test_worker_load_persisted_task_result.py`,
-//! `tests/integration/test_worker_finalize_workflow_phase.py` (the wake rows)
-//! and `tests/e2e/test_layer1_tasks.py` (sent_at across retries).
+//! The parent finalize rows: retry scheduling, the terminal state, the
+//! result of a replay, the wakes of phase 2, and `sent_at` across retries
+//! (Python `tests/e2e/test_layer1_tasks.py`).
 //!
 //! Each test enters at [`persist_terminal_state`], the worker's phase 1 for a
 //! result of an attempt, and reads the rows it left. The dispatch facts (the
@@ -347,7 +344,7 @@ fn test_queue() -> String {
     )
 }
 
-/// Python `test_worker_retry_scheduling.py::test_a_listed_code_schedules_the_retry`:
+/// A listed code schedules the retry:
 /// PENDING, the retry count up, the owner cleared, `enqueued_at` equal to
 /// `next_retry_at`, one attempt that will retry, and a wake of the queue
 /// after the retry delay, not before.
@@ -401,8 +398,7 @@ async fn a_listed_code_schedules_the_retry_and_wakes_its_queue_after_the_delay()
     cleanup(&pool, &seeded).await;
 }
 
-/// Python `test_worker_retry_scheduling.py::test_good_until_is_judged_under_the_lock`:
-/// the dispatch read `good_until` an hour ahead at the start; it moves into
+/// The dispatch read `good_until` an hour ahead at the start; it moves into
 /// the past before the write. The write judges the value it locks, so the
 /// task fails instead of retrying.
 #[tokio::test]
@@ -443,8 +439,7 @@ async fn good_until_is_judged_under_the_lock() {
     cleanup(&pool, &seeded).await;
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_worker_failure_reaper_already_reclaimed`,
-/// on the failure path: the reaper failed the row first; the worker's
+/// The failure path: the reaper failed the row first; the worker's
 /// failure write is refused, owes nothing and changes nothing.
 #[tokio::test]
 #[serial]
@@ -478,8 +473,7 @@ async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
     cleanup(&pool, &seeded).await;
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_failure_phase1_replay_after_a_lost_reply`
-/// (plain case): a second phase 1 of a committed failure writes nothing,
+/// A plain task: a second phase 1 of a committed failure writes nothing,
 /// and a plain task owes no phase 2 either time.
 #[tokio::test]
 #[serial]
@@ -510,8 +504,7 @@ async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
     cleanup(&pool, &seeded).await;
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_failure_phase1_replay_after_a_lost_reply`
-/// (workflow case): the replay writes nothing, and the workflow task still
+/// A workflow task: the replay writes nothing, and the workflow task still
 /// owes its phase 2 for the committed failure.
 #[tokio::test]
 #[serial]
@@ -546,8 +539,7 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
     cleanup(&pool, &seeded).await;
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_workflow_phase1_replay_loads_the_persisted_result`:
-/// a committed workflow success replays phase 2, not phase 1; the replay
+/// A committed workflow success replays phase 2, not phase 1; the replay
 /// adds no attempt and leaves the committed record as it was.
 #[tokio::test]
 #[serial]
@@ -582,8 +574,7 @@ async fn a_workflow_success_replay_owes_phase_two() {
     cleanup(&pool, &seeded).await;
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_locked_completion_miss_does_not_touch_a_newer_generation`,
-/// entered at the finalize: a workflow success with a stale claim
+/// Entered at the finalize: a workflow success with a stale claim
 /// generation is refused, owes nothing, and leaves the row of the newer
 /// claim RUNNING with no attempt.
 #[tokio::test]
@@ -657,8 +648,7 @@ async fn a_plain_task_owes_no_phase_two() {
     cleanup(&pool, &failed).await;
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_err_workflow_stopped_code_skips`,
-/// changed by decision: `WORKFLOW_STOPPED` is a reserved code and the branch
+/// `WORKFLOW_STOPPED` is a reserved code and the branch
 /// that left the row RUNNING is removed (decisions, "Task returns: one rule
 /// in the core"). No task result can carry the code: it is not a built-in
 /// code and `TaskError::new` refuses it, so no result that reaches
@@ -841,8 +831,7 @@ async fn node_and_phase_two_record(
     .expect("read the node and the phase-2 record")
 }
 
-/// Python `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once[node]`:
-/// phase 2 of a workflow task sends one capacity wake on its queue, in the
+/// Phase 2 of a workflow task sends one capacity wake on its queue, in the
 /// transaction that completes the node (#722). The payload is the constant
 /// `capacity` of the baseline function (`0005_workflow_functions.sql:1972`).
 #[tokio::test]
@@ -887,8 +876,7 @@ async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
     cleanup(&pool, &seeded).await;
 }
 
-/// Python `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once[no_node]`,
-/// for a plain task: its phase 2 is the capacity wake alone, one `capacity`
+/// A plain task: its phase 2 is the capacity wake alone, one `capacity`
 /// wake on its queue (#722).
 #[tokio::test]
 #[serial]
@@ -1011,7 +999,7 @@ async fn the_node_finish_wakes_the_queue_of_the_node_row() {
 
 /// A plain task's phase 2 is the wake alone: a wake that the server refuses
 /// is a phase-2 error that is not retried, because the refusal repeats
-/// (#722; Python `_phase2_error`, `core/worker/finalize.py:1676-1697`).
+/// (#722).
 #[tokio::test]
 #[serial]
 async fn a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried() {
@@ -1050,11 +1038,9 @@ fn with_query_parameter(url: &str, parameter: &str) -> String {
     format!("{url}{separator}{parameter}")
 }
 
-/// Python `test_autocommit_outcomes.py::test_a_dead_connection_fails_phase_two_as_retryable`,
-/// at the consume statement: a transient database error after the wake (a
+/// At the consume statement, a transient database error after the wake (a
 /// lock timeout, SQLSTATE 55P03) is a retryable phase-2 error, the node and
-/// its phase-2 record stay, and the retry completes the node (#865; Python
-/// `core/worker/finalize.py:1645-1697`, `core/utils/db.py:232-247`).
+/// its phase-2 record stay, and the retry completes the node (#865).
 #[tokio::test]
 #[serial]
 async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {

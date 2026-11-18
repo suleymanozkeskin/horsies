@@ -393,9 +393,7 @@ async fn a_start_sends_no_status_event() {
         .expect("clean status event task");
 }
 
-/// Python `tests/integration/test_status_events.py::test_a_completion_sends_the_status_event`
-/// and the move notifications (`core/history/terminalization/move.py`): a
-/// terminal move sends `task_done`, then the `horsies_task_status` event, so
+/// A terminal move sends `task_done`, then the `horsies_task_status` event, so
 /// the web app does not show a finished task as still live.
 #[tokio::test]
 #[serial]

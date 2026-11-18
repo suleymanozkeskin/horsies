@@ -1,11 +1,8 @@
 //! The advance of a parent from its finished child: from a child that is
 //! already COMPLETED, in a recovery pass where one parent's write fails, and
 //! in a phase 2 whose parent write fails once with a connection error.
-//! Python: `tests/integration/test_workflow_denest_propagation.py`.
 //!
-//! Python drives the parent advance after the child's transaction
-//! (`_drive_parent_propagations`), with a retry stage of its own. The core
-//! advances the parent after the commit that ends the child, one
+//! The core advances the parent after the commit that ends the child, one
 //! transaction per level (`horsies_workflow_child_finish`, from phase 2 and
 //! from recovery case 1.6).
 

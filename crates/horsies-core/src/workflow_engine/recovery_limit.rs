@@ -8,9 +8,6 @@
 //! A failure is persistent unless it is a retryable database or connection error. Those clear by themselves and
 //! do not count, so an outage cannot fail a workflow. A panic of a candidate is persistent. The count is stored,
 //! because a count in memory resets at each restart and splits across the workers that take turns at the reaper.
-//!
-//! Python reference: `core/workflows/recovery_limit.py` and `_run_recovery_candidate` in
-//! `core/workflows/recovery.py`.
 
 use std::any::Any;
 use std::future::Future;
@@ -39,7 +36,7 @@ const PANIC_ERROR_TYPE: &str = "Panic";
 
 /// `horsies_workflow_recovery_record_raise(workflow_id, pass_id, case, task_index, error_type, error_detail,
 /// limit)`: counts one persistent raise once per pass, and at the limit writes the recovery limit, in one
-/// statement in autocommit (Python `record_recovery_raise`, `core/workflows/recovery_limit.py`).
+/// statement in autocommit.
 static RECORD_RAISE: TypedStatement = TypedStatement::new(
     "horsies_workflow_recovery_record_raise",
     "SELECT outcome, failed_passes, limit_write_error

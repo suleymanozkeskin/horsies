@@ -1,9 +1,5 @@
 //! The pools of a worker from its profile: the init frame of each child
-//! kind, the recycle limits, the pending limit and the layout of the board
-//! (Python `tests/unit/test_child_pool_wiring.py`,
-//! `tests/unit/test_worker_helpers.py::TestSlotPoolSetup`,
-//! `tests/unit/test_shared_dispatch.py::TestCapacityAndConfig`,
-//! `tests/unit/test_thread_dispatch.py::TestCapacityAndConfig`).
+//! kind, the recycle limits, the pending limit and the layout of the board.
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -75,7 +71,6 @@ const ALL_KINDS: &str = r#"{
     "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 8}
 }"#;
 
-/// Python `test_child_pool_wiring.py::test_each_kind_gets_the_resolved_pool_of_its_setting`.
 #[test]
 fn each_kind_gets_the_resolved_pool_of_its_setting() {
     let profile = profile(serde_json::from_str(ALL_KINDS).expect("test JSON"));
@@ -121,8 +116,7 @@ fn each_kind_gets_the_resolved_pool_of_its_setting() {
     );
 }
 
-/// Python `test_child_pool_wiring.py::test_every_child_of_a_kind_gets_the_same_pool`:
-/// one pool config per kind, whose init frame every slot of the kind sends.
+/// One pool config per kind, whose init frame every slot of the kind sends.
 #[test]
 fn every_child_of_a_kind_gets_the_same_pool() {
     let profile = profile(serde_json::json!({
@@ -169,7 +163,6 @@ fn every_child_of_a_kind_gets_the_same_pool() {
     );
 }
 
-/// Python `test_child_pool_wiring.py::test_the_isolated_default_is_a_pool_of_one_without_a_check`.
 #[test]
 fn the_isolated_default_is_a_pool_of_one_without_a_check() {
     let profile = profile(serde_json::json!({
@@ -186,7 +179,6 @@ fn the_isolated_default_is_a_pool_of_one_without_a_check() {
     assert_eq!(child_layout(&profile).isolated, 2);
 }
 
-/// Python `test_child_pool_wiring.py::test_each_kind_gets_the_task_send_pool_of_its_setting`.
 #[test]
 fn each_kind_gets_the_task_send_pool_of_its_setting() {
     let profile = profile(serde_json::json!({
@@ -211,10 +203,7 @@ fn each_kind_gets_the_task_send_pool_of_its_setting() {
     assert_eq!(sends, [3, 5, 7]);
 }
 
-/// Python `test_worker_helpers.py::TestSlotPoolSetup::test_config_carries_what_a_child_needs`,
-/// `test_shared_dispatch.py::TestCapacityAndConfig::test_the_pool_config_carries_the_shared_children`
-/// and `test_thread_dispatch.py::TestCapacityAndConfig::test_the_pool_config_carries_the_thread_children`:
-/// each pool config carries the launch of the host, the worker id, the
+/// Each pool config carries the launch of the host, the worker id, the
 /// recycle limits of its kind, the pending limit and the kill wait.
 #[test]
 fn the_pool_config_carries_what_a_child_needs() {
@@ -274,11 +263,7 @@ fn the_pool_config_carries_what_a_child_needs() {
     );
 }
 
-/// Python `test_worker_helpers.py::TestSlotPoolSetup::test_pending_limit_covers_the_claim_budget`,
-/// `test_shared_dispatch.py::TestCapacityAndConfig::test_the_pending_limit_counts_the_seats`
-/// and the pending-limit half of
-/// `test_thread_dispatch.py::TestCapacityAndConfig::test_the_seats_and_the_pending_limit_count_the_thread_seats`:
-/// `2 * max(seats + prefetch_buffer, claimed_per_worker)`.
+/// The pending limit: `2 * max(seats + prefetch_buffer, claimed_per_worker)`.
 #[test]
 fn the_pending_limit_covers_the_claim_budget() {
     let isolated = profile(serde_json::json!({

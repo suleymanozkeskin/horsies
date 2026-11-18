@@ -2,9 +2,8 @@
 //! move, the detail read of a moved task, one republish against a stale
 //! reader body, and the reader settings and failure rules.
 //!
-//! Python specification: `tests/integration/test_duplicate_identity_guard.py`,
-//! `test_task_history_detail_reads.py`, `test_task_history_staged_lookup_function.py`,
-//! `test_reader_publication_stamps.py` and `test_task_result_history_fallback.py`.
+//! Python specification: `tests/integration/test_duplicate_identity_guard.py`
+//! and `test_task_result_history_fallback.py`.
 
 use sha2::{Digest, Sha256};
 

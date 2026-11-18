@@ -1,5 +1,4 @@
-//! The claim plan of a worker and the route of each claimed row (Python
-//! `core/worker/claim_plan.py`, `core/worker/dispatch_route.py`). Pure.
+//! The claim plan of a worker and the route of each claimed row. Pure.
 //!
 //! - A class that the worker runs children for is claimed into its own
 //!   budget.

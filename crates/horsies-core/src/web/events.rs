@@ -35,7 +35,7 @@ pub const HEARTBEAT: Duration = Duration::from_secs(15);
 /// The most items one web client can have queued. On overflow, the client's
 /// queued events are dropped and it gets one event with no ids for every
 /// topic ("refresh the whole topic"), so a slow client cannot grow the web
-/// process. Python keeps an unbounded queue (`tests/dualrun/reference/web_events.py:211`).
+/// process.
 pub const SUBSCRIBER_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,8 +479,8 @@ impl EventBroadcaster {
     }
 }
 
-/// The JSON object of one event, as Python's `json.dumps` writes it
-/// (`tests/dualrun/reference/web_routes/events.py`): `{"topic": ..., "ids": [...]}`,
+/// The JSON object of one event, as Python's `json.dumps` writes it:
+/// `{"topic": ..., "ids": [...]}`,
 /// with a space after each `:` and `,`, and every text escaped to ASCII.
 /// Pure.
 pub(crate) fn data_frame(event: &TopicEvent) -> String {
@@ -558,9 +558,8 @@ enum FramesState {
     Ended,
 }
 
-/// One web client's event stream in the frame texts of the wire, as
-/// Python's `/api/events` route writes them
-/// (`tests/dualrun/reference/web_routes/events.py`): `data: <event>\n\n` per event,
+/// One web client's event stream in the frame texts of the wire:
+/// `data: <event>\n\n` per event,
 /// [`HEARTBEAT_FRAME`] after `heartbeat` without an event, and
 /// `data: {"topic": "degraded"}\n\n`, after which the stream ends.
 pub struct EventFrames {
@@ -708,8 +707,7 @@ mod queue_tests {
         items
     }
 
-    /// Python `tests/unit/test_web_event_stream_queue.py::TestRefreshEvents::test_one_event_with_no_ids_per_topic`:
-    /// the refresh is one event with no ids per topic, in the order of the
+    /// The refresh is one event with no ids per topic, in the order of the
     /// topics.
     #[test]
     fn the_refresh_is_one_event_with_no_ids_per_topic() {
@@ -725,9 +723,7 @@ mod queue_tests {
         assert_eq!(refresh_events().len(), CHANNEL_TOPICS.len());
     }
 
-    /// Python `tests/unit/test_web_event_stream_queue.py::TestPushStreamItem`
-    /// (`test_the_queue_is_bounded`, `test_a_queue_at_the_capacity_holds_every_item`):
-    /// the bound is 256 items, and a queue at the bound holds every item it
+    /// The bound is 256 items, and a queue at the bound holds every item it
     /// took, the last one last.
     #[tokio::test]
     async fn a_queue_at_its_bound_of_256_items_holds_every_item() {
@@ -746,7 +742,6 @@ mod queue_tests {
         );
     }
 
-    /// Python `tests/unit/test_web_event_stream_queue.py::TestPushStreamItem::test_an_end_marker_past_the_capacity_stays_after_the_refreshes`.
     #[tokio::test]
     async fn an_end_marker_past_the_bound_stays_after_the_refreshes() {
         let queue = full_queue();
@@ -756,8 +751,7 @@ mod queue_tests {
         assert_eq!(drain(&queue).await, refreshes_then_the_marker());
     }
 
-    /// Python `tests/unit/test_web_event_stream_queue.py::TestPushStreamItem::test_a_dropped_end_marker_is_queued_again_last`:
-    /// an event that overflows a queue that holds the degraded marker drops
+    /// An event that overflows a queue that holds the degraded marker drops
     /// the marker with the events and queues it again after the refresh
     /// events, so the stream still ends.
     #[tokio::test]
@@ -773,8 +767,7 @@ mod queue_tests {
         assert_eq!(drain(&queue).await, refreshes_then_the_marker());
     }
 
-    /// Python `tests/unit/test_web_event_stream_queue.py::TestBroadcasterStreams::test_a_published_event_past_the_capacity_gives_refreshes`:
-    /// a broker with no listener degrades the stream, which holds its
+    /// A broker with no listener degrades the stream, which holds its
     /// marker; events published past the bound leave the refresh events,
     /// then the marker.
     #[tokio::test]

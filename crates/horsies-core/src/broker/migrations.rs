@@ -16,9 +16,7 @@
 //!   migration 1000 with the same checksum rule, so both write the same
 //!   bookkeeping row.
 //!
-//! The install ([`install_schema_on`]; Python reference:
-//! `python/horsies/core/baseline/install.py`, and `_run_fleet_schema_init` in
-//! `python/horsies/core/brokers/postgres.py`):
+//! The install ([`install_schema_on`]):
 //! 1. Read the state of the current schema on a session-work connection, with
 //!    no lock: one statement on an empty database, two otherwise, and a third
 //!    on a database that holds this build's chain (whether its history

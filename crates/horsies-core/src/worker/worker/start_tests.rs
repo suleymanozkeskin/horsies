@@ -384,13 +384,10 @@ async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
     );
 }
 
-/// Python `TestCleanupAfterFailedStart::test_cleans_listener_and_slot_pool`,
-/// `::test_listener_close_error_logged`,
-/// `TestFailedStartCleanup::test_cleanup_cancels_service_tasks` and
-/// `test_runner_heartbeat.py::test_a_failed_start_stops_the_heartbeat`. In
-/// the core the listener, the service loops and the runner heartbeats start
-/// in `Worker::serve`, after the database start. A database start that fails
-/// stops the children that started before it, and starts no listener, no
+/// The cleanup after a failed start. The listener, the service loops and
+/// the runner heartbeats start in `Worker::serve`, after the database start.
+/// A database start that fails stops the children that started before it,
+/// and starts no listener, no
 /// service loop and no runner heartbeat: the run ends with the database
 /// error, the child's process is gone, and the reaper, the first service
 /// loop, never logged its start (`spawn_reaper` logs `reaper started` before

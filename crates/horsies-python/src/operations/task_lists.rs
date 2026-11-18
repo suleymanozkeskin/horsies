@@ -274,8 +274,7 @@ mod tests {
         .expect("the checks pass");
     }
 
-    /// Python `tests/unit/test_broker_task_lists.py::TestStaleList::test_rows_become_the_dicts_of_the_client_statement`:
-    /// a stale row is the dict of Python's public API, with its keys in
+    /// A stale row is the dict of Python's public API, with its keys in
     /// Python's order and the task id as `uuid.UUID`.
     #[test]
     fn a_stale_row_is_the_dict_of_the_python_api() {
@@ -315,8 +314,7 @@ assert type(entry['id']) is uuid.UUID, type(entry['id'])
         );
     }
 
-    /// Python `tests/unit/test_broker_task_lists.py::TestExpiredList::test_rows_become_the_dicts_of_the_client_statement`:
-    /// an expired row is the dict of Python's public API, with its keys in
+    /// An expired row is the dict of Python's public API, with its keys in
     /// Python's order, the task id as `uuid.UUID` and `expired_for` as a
     /// `timedelta`.
     #[test]

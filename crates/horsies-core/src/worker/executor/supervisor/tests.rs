@@ -202,8 +202,7 @@ fn a_child_without_a_frame_is_read_by_its_exit() {
     );
 }
 
-/// Python `BootFailure.describe` with `describe_failure_cause`
-/// (`python/horsies/core/worker/slots.py:777-808`): a child that ended before
+/// The text of a boot failure: a child that ended before
 /// its ready frame names the cause without its loss, and the detail names
 /// the loss and the exit once. The line of a failed attempt and the error
 /// of a pool whose attempts ran out carry this text.
@@ -224,8 +223,7 @@ fn a_child_lost_before_ready_names_its_loss_once() {
     );
 }
 
-/// Python `boot_failure_of` (`python/horsies/core/worker/slots.py:2356-2362`):
-/// a forked child that did not reach the worker is a spawn failure, and the
+/// A forked child that did not reach the worker is a spawn failure, and the
 /// detail names the reparent failure before the loss and the exit. The line
 /// of a failed attempt and the error of a pool whose attempts ran out carry
 /// this text.

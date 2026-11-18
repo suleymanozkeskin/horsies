@@ -1,7 +1,5 @@
 //! The claim pass of a worker from its config, on the test database: the
 //! queue order, the caps and the advisory keys that guard their counts.
-//! Ports of Python `tests/integration/test_claim_function.py`,
-//! `test_claim_lock_scoping.py` and `test_claim_cap_expired.py`.
 //!
 //! Each claimer builds its pass as `Worker::claim_request` does
 //! (`compute_ordered_queues`, `compute_claim_lock_keys`, the priority 100

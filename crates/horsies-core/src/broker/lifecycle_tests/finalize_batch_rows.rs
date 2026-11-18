@@ -1,5 +1,4 @@
-//! Port of Python `tests/integration/test_finalize_batch.py`: the statement
-//! of a plain-success batch (`complete_plain_successes`,
+//! The statement of a plain-success batch (`complete_plain_successes`,
 //! `horsies_complete_tasks_fused` of 0004) on the test database.
 //!
 //! Python enters through the worker's finalizers, which hand their rows to

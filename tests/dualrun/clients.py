@@ -45,7 +45,6 @@ def install_as_a_client(database: DualRunDatabase) -> None:
     statements runs it first, when the other side runs its operation through
     a broker of ``open_broker``: both sides then start their operation from
     the state that the install leaves, and the pair compares the operation.
-    The install itself has its own pair (``tests/dualrun/test_schema_install.py``).
 
     Raises ``AssertionError`` when the broker refuses the schema.
     """

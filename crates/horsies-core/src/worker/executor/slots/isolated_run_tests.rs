@@ -1,5 +1,4 @@
-//! Ports of Python `tests/unit/test_slot_pool.py` rows of `TestTaskRuns`
-//! and `TestLeftWork`: the runs of an isolated slot with scripted children,
+//! The runs of an isolated slot with scripted children,
 //! and the end of a task whose body returned with work left on its loop.
 
 use std::num::{NonZeroU64, NonZeroUsize};

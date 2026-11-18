@@ -14,8 +14,7 @@
 //! A task of a PAUSED or CANCELLED workflow is blocked whether its move
 //! applied or found the row moved on (a lost claim, a task already
 //! terminal): that row belongs to its current owner. A workflow that a
-//! resume made RUNNING before the lock has its tasks dispatched. Python:
-//! `_filter_nonrunnable_workflow_tasks` (`core/worker/claiming.py:649-760`).
+//! resume made RUNNING before the lock has its tasks dispatched.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;

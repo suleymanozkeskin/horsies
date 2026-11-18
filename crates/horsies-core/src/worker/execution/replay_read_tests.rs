@@ -1,10 +1,8 @@
 //! The read of a phase-1 replay (`replay_of_committed_write`) on the
 //! baseline phase-2 record, on the main core pool of the broker. The replay
 //! reads only whether the record exists: the node finish takes the node
-//! status from the record's kind. Python reference:
-//! `core/worker/finalize.py`, `_phase2_of_a_replay` (a replay of a committed
-//! workflow write owes the phase 2 of its committed outcome; a plain task
-//! owes nothing).
+//! status from the record's kind. A replay of a committed workflow write
+//! owes the phase 2 of its committed outcome; a plain task owes nothing.
 
 use serial_test::serial;
 use uuid::Uuid;

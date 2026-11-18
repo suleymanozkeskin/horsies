@@ -253,9 +253,8 @@ fn baseline_file_list_is_the_whole_folder() {
 }
 
 /// Migration 1000 is the listed files as they are on disk, concatenated in
-/// list order, and its checksum is Python's rule
-/// (`python/horsies/core/baseline/migration.py`, `baseline_checksum`):
-/// SHA-384 of the UTF-8 bytes of that text. `BASELINE_SQL_FILE_TEXTS`, which
+/// list order, and its checksum is the SHA-384 of the UTF-8 bytes of that
+/// text. `BASELINE_SQL_FILE_TEXTS`, which
 /// Python reads, holds the same names and texts in the same order.
 #[test]
 fn baseline_is_one_migration_built_from_every_listed_file() {
@@ -1553,11 +1552,10 @@ async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing(
     database.drop().await;
 }
 
-/// The structural signature of one relation (Python
-/// `test_task_history_schema_emission.py`, `RELATION_SCHEMA_SIGNATURE_SQL`):
-/// a hash of its kind, persistence, access method and options; its columns
-/// with their types, defaults and identity; its constraints, indexes and
-/// triggers. `$1` is the relation name.
+/// The structural signature of one relation: a hash of its kind,
+/// persistence, access method and options; its columns with their types,
+/// defaults and identity; its constraints, indexes and triggers. `$1` is the
+/// relation name.
 const RELATION_SCHEMA_SIGNATURE_SQL: &str = "\
 SELECT encode(sha256(convert_to(
     jsonb_build_object(
@@ -1653,8 +1651,7 @@ async fn install_through_a_new_broker(database: &MigrationTestDatabase) {
     broker.close().await;
 }
 
-/// Python `test_task_history_schema_emission.py::TestUpgradedInstallEndpoint::test_reapplication_changes_nothing`:
-/// a second install, by another broker, leaves the structure of the history
+/// A second install, by another broker, leaves the structure of the history
 /// parent, the forever history relation and the key reservation table
 /// unchanged, and the stored version stays the baseline version.
 #[tokio::test]

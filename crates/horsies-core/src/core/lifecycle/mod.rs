@@ -368,8 +368,7 @@ pub(crate) mod tests {
         "notify_payload",
     ];
 
-    /// Python `test_lifecycle_commands.py::TestIllegalStatesAreUnrepresentable::test_batch_fences_belong_only_to_batch_commands`:
-    /// a claim batch fence guards only the commands of a claim batch, which
+    /// A claim batch fence guards only the commands of a claim batch, which
     /// name no single task.
     #[test]
     fn a_batch_fence_guards_only_a_command_of_a_claim_batch() {
@@ -497,8 +496,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Python `test_lifecycle_operations.py::TestEachCommandCarriesTheFenceOfItsWriter::test_the_fence_type_is_the_writer_fence`:
-    /// per command, not per set, the fence is the ownership that its writer
+    /// Per command, not per set, the fence is the ownership that its writer
     /// compares (the `fence` of each writer of `tests/lifecycle_matrix.py`).
     /// The failed attempt and the success of a workflow task have writers of
     /// their own, whose commands hold an `OwnedClaim` by type

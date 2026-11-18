@@ -1,5 +1,4 @@
-//! Port of Python `tests/integration/test_task_lock_order.py`: the task
-//! advisory lock goes before the row lock, on every path.
+//! The task advisory lock goes before the row lock, on every path.
 //!
 //! A transaction that takes the row lock first and the advisory lock later
 //! can deadlock against one that took the advisory lock first (SQLSTATE

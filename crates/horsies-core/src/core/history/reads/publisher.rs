@@ -9,8 +9,6 @@
 //! current readers changes nothing.
 //!
 //! The manifest table, not the reader source, answers `references_leaf`.
-//!
-//! Python: `python/horsies/core/history/reads/publisher.py`.
 
 use crate::broker::core_rows::{column, one_row, query_in, StatementLog};
 use crate::core::history::errors::HistoryError;

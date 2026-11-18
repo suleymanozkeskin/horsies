@@ -9,10 +9,9 @@
 //!   `task_history_terminalization_move::duplicate_identity_fails_closed`.
 //! - `test_workflow_cancel_preserves_coherent_prior_attempt_summary` pins a
 //!   prototype rule (the cancel record keeps the prior attempt's summary)
-//!   that production replaced: Python's
-//!   `test_terminalization_functions.py::TestCancelOwnedNode::test_the_terminal_record_carries_its_own_summary`
-//!   pins the opposite, and the core follows it
-//!   (`terminalization_functions::cancel_owned_node::the_terminal_record_carries_its_own_summary`).
+//!   that production replaced: the core test
+//!   `terminalization_functions::cancel_owned_node::the_terminal_record_carries_its_own_summary`
+//!   pins the opposite.
 //!   The summary half of `test_pairwise_cancel_batch_preserves_summary_and_skips_node`
 //!   is left out for the same reason.
 //! - `test_archive_maintenance_also_refuses_history_replay` and
@@ -362,8 +361,7 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
 /// The node half of `coupled_node_failure_rolls_back_history_and_live_delete`
 /// on the post-claim path: the post-claim abandon of a task of a PAUSED
 /// workflow whose node is already COMPLETED leaves the node COMPLETED with
-/// its task link (#785; Python `RESET_PAUSED_WORKFLOW_TASKS_SQL`,
-/// `python/horsies/core/worker/sql.py:291-296`).
+/// its task link (#785).
 #[tokio::test]
 #[serial]
 async fn post_claim_abandon_keeps_a_finished_node() {

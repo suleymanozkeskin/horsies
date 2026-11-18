@@ -1,5 +1,4 @@
-//! Whether the connections of one worker of a profile fit the server
-//! (Python `python/horsies/core/worker/profile_fit.py`, the connection part).
+//! Whether the connections of one worker of a profile fit the server.
 //!
 //! One worker of a profile opens connections itself: its pool (the resolved
 //! `WorkerProfile.pool`), its session pool when the session URL differs, its
@@ -66,11 +65,10 @@ pub const RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER: u32 = 1;
 /// for the life of the process.
 pub const LIVENESS_LOCK_CONNECTIONS_PER_WORKER: u32 = 1;
 
-/// The longest wait for the server to answer the connection limit read
-/// (Python `CONNECTION_LIMIT_READ_TIMEOUT_S`).
+/// The longest wait for the server to answer the connection limit read.
 pub const CONNECTION_LIMIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Python's statement (`python/horsies/core/worker/profile_fit.py:85-92`).
+/// The statement of the connection limit.
 /// `reserved_connections` exists from PostgreSQL 16; before it, no slot is
 /// reserved for it.
 const CONNECTION_LIMIT_SQL: &str = "\

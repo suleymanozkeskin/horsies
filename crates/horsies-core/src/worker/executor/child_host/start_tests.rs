@@ -496,10 +496,9 @@ async fn a_refused_expiry_before_the_start_is_a_lost_claim() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `test_pause_abandon_after_resume.py::test_child_starts_a_task_resumed_before_its_abandon`
-/// (the start half; the abandon half is
+/// The start half of a resume before the abandon (the abandon half is
 /// `workflow_engine::port_tests::pause_resume_cancel::the_start_abandon_refuses_after_a_committed_resume`)
-/// and `test_shared_lifecycle.py::TestMissedStart::test_a_resume_before_the_stop_starts_the_task_on_the_next_attempt`:
+/// and Python `test_shared_lifecycle.py::TestMissedStart::test_a_resume_before_the_stop_starts_the_task_on_the_next_attempt`:
 /// the start finds the workflow paused, and the workflow is resumed before
 /// the abandon: the miss path answers that the workflow was resumed, and the
 /// next start attempt sets the row and its node RUNNING; the node keeps its

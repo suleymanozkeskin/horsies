@@ -1,7 +1,6 @@
 //! Each field of a child frame and of a preload frame is checked: a frame
 //! whose metadata field is changed is refused as malformed, never read with a
-//! guessed value. Each form of a child frame round trips. Python's version-1
-//! codec had the same checks (`tests/unit/test_child_protocol.py`).
+//! guessed value. Each form of a child frame round trips.
 
 use std::num::NonZeroU64;
 

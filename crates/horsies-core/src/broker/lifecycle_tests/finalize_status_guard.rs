@@ -1,9 +1,9 @@
-//! Port of Python `tests/integration/test_finalize_status_guard.py`.
+//! The status and ownership guards of the finalize writes.
 //!
-//! The rows that a core test already checks are not repeated here:
-//! `test_workflow_success_rejects_stale_claim_generation` is
+//! The rows that another core test checks are not repeated here: the stale
+//! claim generation of a workflow success is
 //! `attempt_writes::tests::a_stale_claim_generation_writes_no_workflow_success`.
-//! `test_in_flight_read_rejects_stale_claim_generation` has no subject in the
+//! A stale claim generation of an in-flight read has no subject in the
 //! core: the core reads no row before the failed-attempt statement
 //! (differences ledger, row 18), and that statement's generation fence is
 //! `attempt_writes::tests::a_stale_claim_generation_writes_no_failure`.

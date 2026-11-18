@@ -1,5 +1,4 @@
-//! A stored timeout that a worker cannot use fails its task in one claim
-//! (Python `tests/integration/test_stored_timeout_refusal.py`).
+//! A stored timeout that a worker cannot use fails its task in one claim.
 //!
 //! A queued row can hold a `timeout_ms` above the bound that a worker runs:
 //! an older version accepted any value of at least 1000. The claim sends the
@@ -152,7 +151,6 @@ fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
         .expect("a step input")
 }
 
-/// Python: `test_stored_timeout_refusal.py::test_a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again`.
 /// The first claim fails the task with `WORKER_SERIALIZATION_ERROR` and the
 /// message of the timeout refusal; its body does not run, and no later
 /// claim takes it.
@@ -187,7 +185,6 @@ async fn a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again() {
     assert_not_claimed_again(&suite, &client, handle.task_id(), &ended).await;
 }
 
-/// Python: `test_stored_timeout_refusal.py::test_a_refused_timeout_fails_its_workflow_node`.
 /// The refused root node fails in one claim, its dependent is skipped and
 /// the workflow fails; no later claim takes the node's task.
 #[tokio::test]

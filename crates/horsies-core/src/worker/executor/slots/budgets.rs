@@ -1,6 +1,4 @@
-//! The capacity in service of each budget, sent with each claim pass
-//! (Python `core/worker/claiming.py`, `_capacity_in_service`;
-//! `core/worker/slots.py`, `capacity_in_service`). Pure.
+//! The capacity in service of each budget, sent with each claim pass. Pure.
 //!
 //! - `ISOLATED`: the isolated slots that are not down.
 //! - A shared class: every seat of a slot that is booting, open or retiring;

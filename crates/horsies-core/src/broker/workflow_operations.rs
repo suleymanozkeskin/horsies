@@ -162,8 +162,8 @@ impl PostgresBroker {
         lifecycle::expire_paused_workflows(self, older_than, i64::from(batch_size.get())).await
     }
 
-    /// One workflow retention pass (Python `ReaperMixin._run_reaper_pass`, the
-    /// workflow part of the retention cleanup, `python/horsies/core/worker/reaper.py`):
+    /// One workflow retention pass (the workflow part of the retention
+    /// cleanup):
     /// batches of `pass.batch_size` until a batch deletes no workflow (the node
     /// budget keeps batches short while a backlog remains, so only an empty
     /// batch means drained), or until `pass.budget` has passed after a batch.

@@ -1,6 +1,4 @@
-//! Slot defects: a failure in the slot's own path, not in its child
-//! (Python `core/worker/slots.py`, `_serve_slot`, `_clear_slot`,
-//! `SLOT_DEFECT_LIMIT`, `SlotDefectsRepeated`).
+//! Slot defects: a failure in the slot's own path, not in its child.
 //!
 //! A defect costs the slot its child and the tasks on that child; the slot
 //! then boots a new child. A slot that hits [`SLOT_DEFECT_LIMIT`] defects

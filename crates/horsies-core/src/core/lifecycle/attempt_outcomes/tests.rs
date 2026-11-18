@@ -1,8 +1,6 @@
-//! Ports of Python `tests/unit/test_failed_attempt.py` (`TestDecodeWrites`,
-//! `TestDecodeRefusals`, `TestDecodeFailsClosed`) and
-//! `tests/unit/test_workflow_success.py` (`TestDecode`,
-//! `TestDecodeFailsClosed`). The column-shape checks need a database row and
-//! are pinned by the writer tests.
+//! The decoding of the failed-attempt and workflow-success outcomes: the
+//! writes, the refusals, and the rows that fail closed. The column-shape
+//! checks need a database row and are pinned by the writer tests.
 
 use chrono::TimeZone;
 
@@ -705,8 +703,7 @@ fn a_stale_row_against_its_outcome_fails_closed() {
     }
 }
 
-/// Python `tests/unit/test_stale_running.py::TestDecodeStaleAttemptRow::test_a_failure_of_a_plain_task_with_a_node_fact_is_refused`:
-/// a node fact on the stale failure of a plain task fails closed and names
+/// A node fact on the stale failure of a plain task fails closed and names
 /// the column.
 #[test]
 fn a_stale_failure_of_a_plain_task_with_a_node_fact_fails_closed() {

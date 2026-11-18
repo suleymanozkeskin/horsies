@@ -1,7 +1,4 @@
-//! Port of Python `tests/integration/test_claim_in_flight_count.py`,
-//! `tests/integration/test_monitoring_query_plans.py::test_claim_streams_plan_on_the_class_indexes`
-//! and `tests/integration/test_claim_pass_counts.py::TestClaimPassCounts::test_merged_counts_match_single_purpose_statements`:
-//! the plans of the statements inside `horsies_claim`, read from
+//! The plans of the statements inside `horsies_claim`, read from
 //! `auto_explain` notices, the dead index entries that the in-flight count
 //! marks, and the counts of `horsies_claim_in_flight`.
 //!
@@ -214,8 +211,7 @@ async fn wait_for_older_transactions(client: &tokio_postgres::Client, delete_xid
     );
 }
 
-/// Python `test_claim_in_flight_count.py::test_the_count_reads_the_status_index_when_most_rows_are_in_flight`:
-/// with statistics that show most rows in flight, the in-flight rows of
+/// With statistics that show most rows in flight, the in-flight rows of
 /// the claim plan as a sequential scan under the default settings, and the
 /// count inside the claim reads the status index (the function turns the
 /// sequential and the bitmap scan off).
@@ -265,8 +261,7 @@ async fn the_count_reads_the_status_index_when_most_rows_are_in_flight() {
     database.drop().await;
 }
 
-/// Python `test_claim_in_flight_count.py::test_a_claim_marks_the_dead_running_entries`:
-/// every task ran and was deleted, so each RUNNING entry of the status
+/// Every task ran and was deleted, so each RUNNING entry of the status
 /// index is dead. Once no transaction from before the delete runs, one
 /// claim (rolled back) marks all of them: a later bitmap scan returns none.
 #[tokio::test]
@@ -298,8 +293,7 @@ async fn a_claim_marks_the_dead_running_entries() {
     database.drop().await;
 }
 
-/// The live rows of the claim stream plan test (Python
-/// `test_monitoring_query_plans.py::_seed_tasks`): 500 RUNNING rows over
+/// The live rows of the claim stream plan test: 500 RUNNING rows over
 /// five task names and a backlog of 2,000 PENDING rows, each with its own
 /// enqueue time, then sampled.
 async fn seed_plan_population(client: &tokio_postgres::Client) {
@@ -338,8 +332,7 @@ async fn seed_plan_population(client: &tokio_postgres::Client) {
         .expect("sample the task table");
 }
 
-/// Python `test_monitoring_query_plans.py::test_claim_streams_plan_on_the_class_indexes`:
-/// each claim stream of a worker with isolated children rides a class
+/// Each claim stream of a worker with isolated children rides a class
 /// index, in the plan phase (`horsies_claim_plan`, the head of each stream)
 /// and in the take phase (`horsies_claim_candidates`, the lock of the
 /// planned rows): the pending arm `horsies_tasks_claim_pending` once, the
@@ -450,9 +443,7 @@ async fn in_flight_counts(
     (row.get(0), row.get(1), row.get(2), row.get(3))
 }
 
-/// Python `test_claim_pass_counts.py::TestClaimPassCounts::test_merged_counts_match_single_purpose_statements`
-/// (the concrete counts; the five Python statements that the merged one
-/// was checked against go with `core/worker/sql.py`): across rows of this
+/// The concrete counts of the claim: across rows of this
 /// worker and of another, live and expired leases, and two queues, the
 /// claim counts the live claims of this worker (2), its RUNNING rows (1),
 /// its rows in flight (3), every row in flight (5: an expired lease and a

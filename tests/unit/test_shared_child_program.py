@@ -47,7 +47,8 @@ app = Horsies(
 
 
 def test_a_shared_child_waits_for_frames_without_spinning(tmp_path: Path) -> None:
-    """Python 0.7.0 `test_shared_slot_pool.py::test_a_production_shared_child_waits_for_frames_without_spinning`:
+    """`tests/unit/test_shared_slot_pool.py::test_a_production_shared_child_waits_for_frames_without_spinning`
+    at `v0.7.0`:
     the real child program runs as ``__main__``. A frame type that it builds
     there must match the one that its seat loop checks (``child_inbox``), or
     the loop spins and never takes a frame. The pool of the child opens

@@ -1,8 +1,6 @@
 //! One shared slot: boot a child, serve runs on its seats, read the stop
 //! reports of each run, kill the child when its rules say so, and give
-//! each run its end (Python `core/worker/slots.py`,
-//! `_run_shared_generation`, `_send_to_seat`, `_kill_past_deadlines`,
-//! `_lose_shared_child`; `core/worker/dispatch.py`, the shared backstops).
+//! each run its end.
 //!
 //! Rules of one child:
 //! - A frame outside the rules of `seat_runs` is a protocol violation: the

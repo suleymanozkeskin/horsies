@@ -466,8 +466,7 @@ async fn the_task_detail_and_the_node_read_are_one_round_trip_each() {
     database.drop().await;
 }
 
-/// Python `test_monitoring_task_detail_absence.py::TestLiveInTheSnapshotOfTheLiveMiss`:
-/// a published detail reader that reports a task live after the live miss
+/// A published detail reader that reports a task live after the live miss
 /// of the same snapshot breaks the history contract. The task detail read
 /// and the read of the node of that task are `HISTORY_CONTRACT_VIOLATION`,
 /// not retryable, and the message names the task and the live miss. A

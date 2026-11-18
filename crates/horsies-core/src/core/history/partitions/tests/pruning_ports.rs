@@ -1,7 +1,5 @@
-//! Ports of the Python pruning driver tests: the declared period decides the
-//! drop, and a leaf inside its period stays.
-//!
-//! Python specification: `tests/integration/test_partition_pruning_driver.py`.
+//! The pruning driver: the declared period decides the drop, and a leaf
+//! inside its period stays.
 
 use chrono::DateTime;
 

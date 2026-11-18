@@ -5,9 +5,7 @@ generated broker class (``BrokerOperationFailed``, ``BrokerInvalidInput``);
 the broker returns the rows, logs a cut list on ``horsies.broker``, and
 returns a failure as it is. The stale threshold is
 checked by the handle before any core call, with Python's rule and text: a
-refused threshold needs no database. The rows and their order are the core's;
-the dual-run pair (``tests/dualrun/test_stale_expired_lists.py``) compares
-them with Python's.
+refused threshold needs no database. The rows and their order are the core's.
 """
 
 from __future__ import annotations

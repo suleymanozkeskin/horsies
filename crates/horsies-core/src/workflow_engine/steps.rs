@@ -742,8 +742,7 @@ pub(crate) async fn phase2_recover(
 /// Advances the parent nodes above child workflows that committed steps
 /// ended: `horsies_workflow_child_finish`, one transaction per level (with
 /// the child starts that the level owes), while the levels name further
-/// ended children. Python: `_drive_parent_propagations`
-/// (`core/worker/finalize.py:2248-2290`).
+/// ended children.
 ///
 /// The owed advances run in order; the advances that a level owes run
 /// before the next advance of the list. At most [`MAX_PARENT_ADVANCES`]

@@ -269,7 +269,6 @@ class Month(str, Enum):
 
 # Canonical ordinals for range/step semantics over enum fields.
 # Weekday is Monday=0..Sunday=6 (Python's date.weekday() convention).
-# scheduler/calculator.py imports these to avoid a second source of truth.
 MONTH_ORDINAL: dict[Month, int] = {
     Month.JANUARY: 1,
     Month.FEBRUARY: 2,

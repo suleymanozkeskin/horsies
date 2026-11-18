@@ -1,6 +1,5 @@
 //! The end of a task of an isolated slot whose child was lost, before and
-//! after its body returned with work left on its loop (Python
-//! `SlotHandle.loss_outcome`, `tests/unit/test_isolated_left_work.py`).
+//! after its body returned with work left on its loop.
 
 use tokio::sync::oneshot;
 

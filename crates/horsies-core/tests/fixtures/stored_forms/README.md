@@ -215,23 +215,25 @@ that it is stored: `stored_as` is `envelope` (the task or node result) or
 `error` (the error object of the workflow error column). `python_writer` and
 `core_writer` name the two writers; `inputs` holds the inputs of a writer that
 the tests call. The texts are Python's encoder output for the data of
-Python's writer; for `TASK_TIMEOUT`, `WORKER_CRASHED` (stale),
-`WORKFLOW_START_INCOMPLETE` and `WORKFLOW_RECOVERY_LIMIT_REACHED` the Python
-test calls the writer itself.
+Python's writer. The Python writers of `TASK_TIMEOUT`, `WORKER_CRASHED`
+(killed child and stale), `WORKFLOW_START_INCOMPLETE` and
+`WORKFLOW_RECOVERY_LIMIT_REACHED` were removed in 0.8.0: their
+`python_writer` names the file that held the writer when the vector was
+made, and the core writer is the only writer.
 
 | Code | `data` keys, in order | Python writer | Core writer |
 |---|---|---|---|
-| `TASK_TIMEOUT` (4 vectors: `cancel_end` `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE`, `KILLED_WITH_CHILD`, and none) | `task_id`, `timeout_ms`, `cancel_end` | `python/horsies/core/worker/shared_stop.py:148` (`timeout_error_data`), `python/horsies/core/worker/dispatch.py:1101` | `crates/horsies-core/src/worker/executor/slots/outcome.rs:243` (`timeout_write`) |
-| `WORKER_CRASHED`, killed child | `task_id`, `worker_id` | `python/horsies/core/worker/dispatch.py:333-339` | `crates/horsies-core/src/worker/executor/slots/outcome.rs:212` (`killed_child_write`) |
-| `WORKER_CRASHED`, stale | `stale_threshold_ms`, `stale_threshold_seconds`, `worker_pid`, `worker_hostname`, `worker_id`, `started_at`, `detected_at` | `python/horsies/core/brokers/stale_running.py:178` (`crash_result_json`) | `crates/horsies-core/src/worker/recovery.rs:1450` (`stale_attempt_command`) |
+| `TASK_TIMEOUT` (4 vectors: `cancel_end` `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE`, `KILLED_WITH_CHILD`, and none) | `task_id`, `timeout_ms`, `cancel_end` | removed in 0.8.0 | `crates/horsies-core/src/worker/executor/slots/outcome.rs:243` (`timeout_write`) |
+| `WORKER_CRASHED`, killed child | `task_id`, `worker_id` | removed in 0.8.0 | `crates/horsies-core/src/worker/executor/slots/outcome.rs:212` (`killed_child_write`) |
+| `WORKER_CRASHED`, stale | `stale_threshold_ms`, `stale_threshold_seconds`, `worker_pid`, `worker_hostname`, `worker_id`, `started_at`, `detected_at` | removed in 0.8.0 | `crates/horsies-core/src/worker/recovery.rs:1450` (`stale_attempt_command`) |
 | `UPSTREAM_SKIPPED` | `dependency_index` | `python/horsies/core/workflows/engine.py:2496-2499` | `crates/horsies-core/src/workflow_engine/args_merge.rs:330`; SQL `horsies_task_error_envelope` |
 | `RESULT_DESERIALIZATION_ERROR`, dependency without a result (2 vectors: an ASCII and a non-ASCII task name in the message) | `dependency_index` | `python/horsies/core/workflows/engine.py:186-193` | `crates/horsies-core/src/workflow_engine/args_merge.rs:345` |
 | `WORKFLOW_OUTPUT_SKIPPED` (2 vectors: an ASCII and a non-ASCII `output_task_name`) | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`crates/horsies-core/baseline/0005_workflow_functions.sql:1309`) |
 | `WORKFLOW_ENQUEUE_FAILED`, `args_from` conflict | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:545-551` | `crates/horsies-core/src/workflow_engine/args_merge.rs:111` (`node_error`); SQL |
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:1068-1078` | `crates/horsies-core/src/workflow_engine/start.rs:193`; SQL |
 | `SUBWORKFLOW_LOAD_FAILED` | `definition_key` | `python/horsies/core/workflows/engine.py:616-619` | `crates/horsies-core/src/workflow_engine/start_statement.rs:707` |
-| `WORKFLOW_RECOVERY_LIMIT_REACHED` | `workflow_id`, `case`, `task_index`, `failed_passes`, `exception_type` | `python/horsies/core/workflows/recovery_limit.py:525` (`recovery_limit_error`) | `crates/horsies-core/src/workflow_engine/recovery_limit.rs:526`; SQL (`0005_workflow_functions.sql:4099`) |
-| `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | `python/horsies/core/workflows/recovery.py:580` (`orphaned_workflow_error`) | `crates/horsies-core/src/workflow_engine/recovery.rs:1748` |
+| `WORKFLOW_RECOVERY_LIMIT_REACHED` | `workflow_id`, `case`, `task_index`, `failed_passes`, `exception_type` | removed in 0.8.0 | `crates/horsies-core/src/workflow_engine/recovery_limit.rs:526`; SQL (`0005_workflow_functions.sql:4099`) |
+| `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | removed in 0.8.0 | `crates/horsies-core/src/workflow_engine/recovery.rs:1748` |
 | `WORKFLOW_EXPIRED` (error object) | `policy`, `older_than_seconds` | `python/horsies/core/workflows/lifecycle.py:845-857` | `crates/horsies-core/src/workflow_engine/lifecycle.rs:300` |
 | `UNHANDLED_EXCEPTION`, with the exception record | `exception_type` | `python/horsies/core/task_decorator.py:2031-2036` | `crates/horsies-core/src/worker/executor/child_host/panic.rs:175` (a Rust panic) |
 

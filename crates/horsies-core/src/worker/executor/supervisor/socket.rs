@@ -2,8 +2,7 @@
 //!
 //! A Unix socket pair gets small default buffers on some systems (8 KiB on
 //! macOS), so a 10 KB frame needs several write and read rounds. Both ends
-//! get [`SOCKET_BUFFER_BYTES`] for sending and receiving (Python
-//! `core/worker/slots.py`, `_socket_pair`).
+//! get [`SOCKET_BUFFER_BYTES`] for sending and receiving.
 
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};

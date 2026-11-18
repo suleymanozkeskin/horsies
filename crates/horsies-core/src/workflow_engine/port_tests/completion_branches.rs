@@ -1,8 +1,6 @@
 //! Phase 2 of a finished workflow task: a paused workflow, a node with no
-//! dependents to read, and the capacity wake. Python:
-//! `tests/unit/test_workflow_engine_coverage.py::TestOnWorkflowTaskComplete`
-//! (Python ran phase 2 in `on_workflow_task_complete`; the core and Python
-//! now run it through `horsies_workflow_node_finish`).
+//! dependents to read, and the capacity wake. Phase 2 runs through
+//! `horsies_workflow_node_finish`.
 //!
 //! Each node runs on [`COMPLETION_QUEUE`], which no other test uses, so a
 //! listener on its channel hears only the test's own notifications.
