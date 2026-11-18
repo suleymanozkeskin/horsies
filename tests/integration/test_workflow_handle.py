@@ -27,6 +27,7 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     WorkflowTaskStatus,
     OnError,
+    HandleDbOperationFailed,
     HandleErrorCode,
     HandleStoredDataInvalid,
 )
