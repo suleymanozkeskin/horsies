@@ -1,10 +1,6 @@
-"""Request identity primitives: task IDs, command fingerprints, scoped keys.
+"""Request identity: the reservation window of an idempotency key.
 
-Task IDs are client-minted UUIDv7 values created during prepared-send
-construction and preserved across uncertain-commit retries. The command
-fingerprint is the version-1 canonical digest that decides replay versus
-conflict for keyed enqueue. Scoped idempotency keys frame the caller's
-exact opaque bytes under the task-name scope.
-
-Everything here is pure computation — no SQL, no I/O beyond entropy.
+The core mints task ids, computes the command fingerprint and hashes the
+scoped idempotency key; this package keeps the client's check of the
+configured reservation window. Pure computation, no SQL and no I/O.
 """
