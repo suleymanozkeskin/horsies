@@ -1,6 +1,7 @@
-//! Port of Python `tests/integration/test_round_trips.py`: the round trips
-//! of the one-statement writes of a worker and of its children, counted at
-//! the wire.
+//! Port of Python `tests/integration/test_round_trips.py` and of
+//! `test_claim_pass_counts.py::TestClaimPassCounts::test_empty_capped_pass_statement_count`:
+//! the round trips of the one-statement writes of a worker and of its
+//! children, counted at the wire.
 //!
 //! Each test calls the broker method that the worker or the child calls
 //! (the Python child calls the same methods through its core handle,
@@ -19,7 +20,9 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::child_writes::WriteDeadline;
-use crate::broker::claims::{StartAttempt, StartMiss, StartOutcome, StartWindow, WindowedStart};
+use crate::broker::claims::{
+    ClaimPassRequest, StartAttempt, StartMiss, StartOutcome, StartWindow, WindowedStart,
+};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::pools::unpinged_single_connection_core_pool;
@@ -276,6 +279,39 @@ async fn a_claim_pass_is_one_statement() {
     assert_eq!(status_of(&pool, task_id).await, "CLAIMED");
     counted.close().await;
     cleanup_tasks(&pool, &[task_id]).await;
+}
+
+/// Python `tests/integration/test_claim_pass_counts.py::TestClaimPassCounts::test_empty_capped_pass_statement_count`:
+/// a claim pass over three capped queues with nothing to claim takes its
+/// queue locks, counts the rows in flight and claims in one statement.
+#[tokio::test]
+#[serial]
+async fn an_empty_capped_claim_pass_is_one_statement() {
+    let pool = pool().await;
+    let counted = Counted::open(&pool).await;
+    let queues: Vec<String> = (0..3)
+        .map(|index| format!("lifecycle_capped_empty_{index}"))
+        .collect();
+    let request = ClaimPassRequest {
+        queues: queues.clone(),
+        queue_priority: queues.iter().cloned().zip(0..).collect(),
+        queue_max_concurrency: queues.iter().map(|queue| (queue.clone(), 4)).collect(),
+        lock_keys: vec![7_340_001, 7_340_002, 7_340_003],
+        ..claim_request(QUEUE)
+    };
+    let _warm_up = counted.broker.claim_pass(&request).await.expect("warm up");
+
+    counted.proxy.reset_round_trips();
+    let pass = counted
+        .broker
+        .claim_pass(&request)
+        .await
+        .expect("the claim");
+    let round_trips = counted.proxy.round_trips();
+
+    assert_eq!(round_trips, 1);
+    assert!(pass.claimed.is_empty(), "{:?}", pass.take);
+    counted.close().await;
 }
 
 /// Python `test_the_delayed_retry_wake_is_one_statement`: the wake of a
