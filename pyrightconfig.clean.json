@@ -22,6 +22,7 @@
     "tests/typing/handle_error_variant_pin.py",
     "python/horsies/core/models/workflow/handle_types.py",
     "tests/unit/test_workflow_handle_error_variants.py",
+    "tests/unit/test_workflow_handle_for_id.py",
     "tests/unit/test_docs_enum_lists.py",
     "tests/typing/monitoring_error_variant_pin.py",
     "tests/typing/monitoring_page_pin.py",

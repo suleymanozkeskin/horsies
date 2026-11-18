@@ -282,7 +282,7 @@ async def start_workflow_async(
     ):
         case Err(err_value=refused):
             return Err(refused)
-        case Ok(ok_value=request):
+        case Ok(ok_value=(request, workflow_key)):
             pass
         case _ as unreachable:
             assert_never(unreachable)
@@ -290,7 +290,7 @@ async def start_workflow_async(
         outcome = await broker._core_handle.start_workflow_async(request)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(_start_call_failed(spec, wf_id, call_refusal_or_raise(exc)))
-    return _start_answer(spec, broker, wf_id, outcome)
+    return _start_answer(spec, broker, wf_id, workflow_key, outcome)
 
 
 def _start_request(
@@ -300,10 +300,10 @@ def _start_request(
     wf_id: str,
     sent_at: datetime,
     resend_on_transient_err: bool,
-) -> Result[WorkflowStartRequest, WorkflowStartValidationFailed]:
-    """The start request of ``spec`` under ``wf_id``, or the validation that
-    refuses it. No I/O. ``workflow_id`` is the id that the caller gave, if
-    any: only a given id is checked to be a UUID.
+) -> Result[tuple[WorkflowStartRequest, uuid.UUID], WorkflowStartValidationFailed]:
+    """The start request of ``spec`` under ``wf_id`` and the UUID that it
+    sends, or the validation that refuses it. No I/O. ``workflow_id`` is the
+    id that the caller gave, if any: only a given id is checked to be a UUID.
 
     The prevalidation and the spec as data of ``start_workflow`` and
     ``start_workflow_async``. A ``WorkflowValidationError`` of the checks,
@@ -380,11 +380,15 @@ def _start_request(
             ))
         case _ as unreachable:
             assert_never(unreachable)
-    return Ok(WorkflowStartRequest(
-        spec_json=spec_json,
-        workflow_id=uuid.UUID(wf_id),
-        sent_at=sent_at,
-        resend_on_transient_err=resend_on_transient_err,
+    workflow_key = uuid.UUID(wf_id)
+    return Ok((
+        WorkflowStartRequest(
+            spec_json=spec_json,
+            workflow_id=workflow_key,
+            sent_at=sent_at,
+            resend_on_transient_err=resend_on_transient_err,
+        ),
+        workflow_key,
     ))
 
 
@@ -411,11 +415,14 @@ def _start_answer(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
     wf_id: str,
+    workflow_key: uuid.UUID,
     outcome: WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed,
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """The answer of ``start_workflow`` and ``start_workflow_async`` for the
     core's start record. Pure apart from the WARNING log of an existing
-    workflow and the type lookups of the handle's output type."""
+    workflow and the type lookups of the handle's output type. The handle
+    holds ``workflow_key``, the UUID that the start sent; the errors carry
+    ``wf_id`` as given."""
     from horsies._core import (
         WorkflowExists,
         WorkflowIdTaken,
@@ -453,7 +460,7 @@ def _start_answer(
     return Ok(cast(
         'WorkflowHandle[OutT]',
         WorkflowHandle(
-            workflow_id=wf_id,
+            workflow_id=workflow_key,
             broker=broker,
             out_type=(
                 _resolve_source_node_ok_type(spec.output)
@@ -527,7 +534,7 @@ def start_workflow(
     ):
         case Err(err_value=refused):
             return Err(refused)
-        case Ok(ok_value=request):
+        case Ok(ok_value=(request, workflow_key)):
             pass
         case _ as unreachable:
             assert_never(unreachable)
@@ -535,12 +542,12 @@ def start_workflow(
         outcome = broker._core_handle.start_workflow(request)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(_start_call_failed(spec, wf_id, call_refusal_or_raise(exc)))
-    return _start_answer(spec, broker, wf_id, outcome)
+    return _start_answer(spec, broker, wf_id, workflow_key, outcome)
 
 
 async def pause_workflow(
     broker: 'PostgresBroker',
-    workflow_id: str,
+    workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """Pause a running workflow.
 
@@ -561,7 +568,8 @@ async def pause_workflow(
 
     Args:
         broker: PostgreSQL broker for database operations.
-        workflow_id: The workflow ID to pause.
+        workflow_id: The workflow ID to pause: a ``UUID``
+            (``WorkflowHandle.for_id`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was paused.
@@ -569,7 +577,7 @@ async def pause_workflow(
         ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
         ``Err(HandleDbOperationFailed)`` on a database error or a core
         boundary error; the statement wrote nothing, or its commit outcome
-        is unknown. An id that is not a UUID is not retryable.
+        is unknown.
         ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
 
     Raises:
@@ -583,16 +591,10 @@ async def pause_workflow(
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
-        workflow_uuid,
     )
 
-    match workflow_uuid(workflow_id, WorkflowOperation.PAUSE):
-        case Err(not_an_id):
-            return Err(not_an_id)
-        case Ok(workflow_key):
-            pass
     try:
-        record = await broker._core_handle.pause_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
+        record = await broker._core_handle.pause_workflow_async(workflow_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(core_call_error(
             call_refusal_or_raise(exc), workflow_id, WorkflowOperation.PAUSE,
@@ -602,7 +604,7 @@ async def pause_workflow(
 
 def pause_workflow_blocking(
     broker: 'PostgresBroker',
-    workflow_id: str,
+    workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """The blocking form of ``pause_workflow()``: ``CoreHandle.pause_workflow``
     on the calling thread, with the GIL released, and the same outcomes. A
@@ -619,16 +621,10 @@ def pause_workflow_blocking(
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
-        workflow_uuid,
     )
 
-    match workflow_uuid(workflow_id, WorkflowOperation.PAUSE):
-        case Err(not_an_id):
-            return Err(not_an_id)
-        case Ok(workflow_key):
-            pass
     try:
-        record = broker._core_handle.pause_workflow(workflow_key)  # pyright: ignore[reportPrivateUsage]
+        record = broker._core_handle.pause_workflow(workflow_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(core_call_error(
             call_refusal_or_raise(exc), workflow_id, WorkflowOperation.PAUSE,
@@ -637,7 +633,7 @@ def pause_workflow_blocking(
 
 
 def _pause_answer(
-    workflow_id: str,
+    workflow_id: uuid.UUID,
     record: (
         WorkflowPaused
         | WorkflowNotRunning
@@ -665,7 +661,7 @@ def _pause_answer(
         case WorkflowAbsent():
             return Err(HandleWorkflowNotFound(
                 message=f'Workflow {workflow_id} not found',
-                workflow_id=workflow_id,
+                workflow_id=str(workflow_id),
             ))
         case HandleDbOperationFailed() | HandleStoredDataInvalid():
             return Err(record)
@@ -675,7 +671,7 @@ def _pause_answer(
 
 def pause_workflow_sync(
     broker: 'PostgresBroker',
-    workflow_id: str,
+    workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """Pause a running workflow synchronously.
 
@@ -685,7 +681,8 @@ def pause_workflow_sync(
 
     Args:
         broker: PostgreSQL broker for database operations.
-        workflow_id: The workflow ID to pause.
+        workflow_id: The workflow ID to pause: a ``UUID``
+            (``WorkflowHandle.for_id`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was paused.
@@ -703,14 +700,14 @@ def pause_workflow_sync(
                 f'pause_workflow_sync for workflow {workflow_id}',
                 'pause_workflow(broker, workflow_id)',
             ),
-            workflow_id=workflow_id,
+            workflow_id=str(workflow_id),
         ))
     return pause_workflow_blocking(broker, workflow_id)
 
 
 async def resume_workflow(
     broker: 'PostgresBroker',
-    workflow_id: str,
+    workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """Resume a paused workflow and its paused descendants.
 
@@ -728,7 +725,8 @@ async def resume_workflow(
 
     Args:
         broker: PostgreSQL broker for database operations.
-        workflow_id: The workflow ID to resume.
+        workflow_id: The workflow ID to resume: a ``UUID``
+            (``WorkflowHandle.for_id`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was resumed.
@@ -737,7 +735,7 @@ async def resume_workflow(
         ``Err(HandleDbOperationFailed)`` on a database error before the
         resume commits, a child build that the core could not run, or a
         core boundary error; the transaction rolled back, or its commit
-        outcome is unknown. An id that is not a UUID is not retryable.
+        outcome is unknown.
         ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
         ``Err(HandleResumeRecoveryFailed)`` when the resume committed and the
         parent advance or the recovery pass after it failed; the workflow
@@ -759,16 +757,10 @@ async def resume_workflow(
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
-        workflow_uuid,
     )
 
-    match workflow_uuid(workflow_id, WorkflowOperation.RESUME):
-        case Err(not_an_id):
-            return Err(not_an_id)
-        case Ok(workflow_key):
-            pass
     try:
-        record = await broker._core_handle.resume_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
+        record = await broker._core_handle.resume_workflow_async(workflow_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(core_call_error(
             call_refusal_or_raise(exc), workflow_id, WorkflowOperation.RESUME,
@@ -778,7 +770,7 @@ async def resume_workflow(
 
 def resume_workflow_blocking(
     broker: 'PostgresBroker',
-    workflow_id: str,
+    workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """The blocking form of ``resume_workflow()``: ``CoreHandle.resume_workflow``
     on the calling thread, with the GIL released, and the same outcomes and
@@ -797,16 +789,10 @@ def resume_workflow_blocking(
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
-        workflow_uuid,
     )
 
-    match workflow_uuid(workflow_id, WorkflowOperation.RESUME):
-        case Err(not_an_id):
-            return Err(not_an_id)
-        case Ok(workflow_key):
-            pass
     try:
-        record = broker._core_handle.resume_workflow(workflow_key)  # pyright: ignore[reportPrivateUsage]
+        record = broker._core_handle.resume_workflow(workflow_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return Err(core_call_error(
             call_refusal_or_raise(exc), workflow_id, WorkflowOperation.RESUME,
@@ -815,7 +801,7 @@ def resume_workflow_blocking(
 
 
 def _resume_answer(
-    workflow_id: str,
+    workflow_id: uuid.UUID,
     record: (
         WorkflowResumed
         | WorkflowNotPaused
@@ -841,7 +827,7 @@ def _resume_answer(
         case WorkflowAbsent():
             return Err(HandleWorkflowNotFound(
                 message=f'Workflow {workflow_id} not found',
-                workflow_id=workflow_id,
+                workflow_id=str(workflow_id),
             ))
         case (
             HandleDbOperationFailed()
@@ -855,7 +841,7 @@ def _resume_answer(
 
 def resume_workflow_sync(
     broker: 'PostgresBroker',
-    workflow_id: str,
+    workflow_id: uuid.UUID,
 ) -> HandleResult[bool]:
     """Resume a paused workflow synchronously.
 
@@ -866,7 +852,8 @@ def resume_workflow_sync(
 
     Args:
         broker: PostgreSQL broker for database operations.
-        workflow_id: The workflow ID to resume.
+        workflow_id: The workflow ID to resume: a ``UUID``
+            (``WorkflowHandle.for_id`` parses a text).
 
     Returns:
         ``Ok(True)`` if workflow was resumed.
@@ -884,7 +871,7 @@ def resume_workflow_sync(
                 f'resume_workflow_sync for workflow {workflow_id}',
                 'resume_workflow(broker, workflow_id)',
             ),
-            workflow_id=workflow_id,
+            workflow_id=str(workflow_id),
         ))
     return resume_workflow_blocking(broker, workflow_id)
 

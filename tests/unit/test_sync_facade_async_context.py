@@ -15,6 +15,8 @@ fails on the connection, so the code and nothing-ran assertions fail.
 
 from __future__ import annotations
 
+import uuid
+
 import asyncio
 import threading
 from collections.abc import Callable, Generator
@@ -293,7 +295,7 @@ def test_workflow_handle_wrap_method_returns_async_context(
 ) -> None:
     broker = app.get_broker()
     handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=WORKFLOW_ID, broker=broker,
+        workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker,
     )
 
     result = _inside_loop(getattr(handle, name))
@@ -318,7 +320,7 @@ def test_workflow_handle_fold_method_returns_async_context(
 ) -> None:
     broker = app.get_broker()
     handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=WORKFLOW_ID, broker=broker,
+        workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker,
     )
 
     result = _inside_loop(lambda: FOLD_CALLS[name](handle))
@@ -523,7 +525,7 @@ def test_run_sync_with_a_stopped_loop_on_the_thread_runs(app: Horsies) -> None:
 
 
 def _workflow_handle(broker: PostgresBroker) -> WorkflowHandle[Any]:
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
 NODE_KEY: NodeKey[Any] = NodeKey('node-1')
@@ -635,12 +637,12 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
         WorkflowStartErrorCode.ENQUEUE_FAILED,
     ),
     'pause_workflow_sync': BlockingSite(
-        lambda app, broker: pause_workflow_sync(broker, WORKFLOW_ID),
+        lambda app, broker: pause_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
         'pause_workflow',
         HandleErrorCode.DB_OPERATION_FAILED,
     ),
     'resume_workflow_sync': BlockingSite(
-        lambda app, broker: resume_workflow_sync(broker, WORKFLOW_ID),
+        lambda app, broker: resume_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
         'resume_workflow',
         HandleErrorCode.DB_OPERATION_FAILED,
     ),
@@ -781,11 +783,11 @@ ASYNC_TWINS: dict[str, tuple[Callable[[Horsies], Any], str]] = {
     ),
     'WorkflowHandle.result_for': (_workflow_result_for, 'handle.result_for_async('),
     'pause_workflow_sync': (
-        lambda app: pause_workflow_sync(app.get_broker(), WORKFLOW_ID),
+        lambda app: pause_workflow_sync(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
         'pause_workflow(broker, workflow_id)',
     ),
     'resume_workflow_sync': (
-        lambda app: resume_workflow_sync(app.get_broker(), WORKFLOW_ID),
+        lambda app: resume_workflow_sync(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
         'resume_workflow(broker, workflow_id)',
     ),
     'WorkflowSpec.start': (lambda app: _spec(app).start(WORKFLOW_ID), 'spec.start_async('),

@@ -407,20 +407,20 @@ class TestWorkflowHandle:
     ) -> None:
         method, run = _HANDLE_CALLS[form]
         call = _raising(broker, method, refusal)
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=_WORKFLOW_ID, broker=broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(_WORKFLOW_ID), broker=broker)
 
         _assert_raises_once(refusal, call, lambda: run(handle))
 
 
 _LIFECYCLE_CALLS: Final[dict[str, tuple[str, BrokerCall]]] = {
     'pause_workflow': (
-        'pause_workflow_async', lambda b: asyncio.run(pause_workflow(b, _WORKFLOW_ID)),
+        'pause_workflow_async', lambda b: asyncio.run(pause_workflow(b, uuid.UUID(_WORKFLOW_ID))),
     ),
-    'pause_workflow_sync': ('pause_workflow', lambda b: pause_workflow_sync(b, _WORKFLOW_ID)),
+    'pause_workflow_sync': ('pause_workflow', lambda b: pause_workflow_sync(b, uuid.UUID(_WORKFLOW_ID))),
     'resume_workflow': (
-        'resume_workflow_async', lambda b: asyncio.run(resume_workflow(b, _WORKFLOW_ID)),
+        'resume_workflow_async', lambda b: asyncio.run(resume_workflow(b, uuid.UUID(_WORKFLOW_ID))),
     ),
-    'resume_workflow_sync': ('resume_workflow', lambda b: resume_workflow_sync(b, _WORKFLOW_ID)),
+    'resume_workflow_sync': ('resume_workflow', lambda b: resume_workflow_sync(b, uuid.UUID(_WORKFLOW_ID))),
 }
 
 

@@ -193,8 +193,8 @@ class TestContainerKwargsAtStart:
 
         handle = await start_ok(spec, broker)
 
-        assert await _node_kwargs(session, handle.workflow_id, 0) == {'value': wire}
-        assert await _enqueued_kwargs(session, handle.workflow_id, 0) == {'value': wire}
+        assert await _node_kwargs(session, str(handle.workflow_id), 0) == {'value': wire}
+        assert await _enqueued_kwargs(session, str(handle.workflow_id), 0) == {'value': wire}
 
     async def test_a_sub_workflow_node_and_its_children_store_their_kwargs(
         self,
@@ -219,7 +219,7 @@ class TestContainerKwargsAtStart:
 
             handle = await start_ok(spec, broker)
 
-            assert await _node_kwargs(session, handle.workflow_id, 0) == {'values': [1, 2]}
+            assert await _node_kwargs(session, str(handle.workflow_id), 0) == {'values': [1, 2]}
             child_row = (
                 await session.execute(
                     text("""

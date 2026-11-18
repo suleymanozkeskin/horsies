@@ -199,7 +199,7 @@ async def test_wide_fanin_join_does_not_create_orphaned_join_tasks(
         handle = await start_ok_in_thread(wf_tasks.spec_wide_fanin_join)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory,
-            handle.workflow_id,
+            str(handle.workflow_id),
             timeout_s=30.0,
         )
 

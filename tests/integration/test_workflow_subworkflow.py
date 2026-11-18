@@ -341,7 +341,7 @@ class TestSubworkflowIntegration:
 
         # Complete the child workflow's inner task (returns int 42).
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=42),
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=42),
         )
 
         # result_for must decode via the workflow's definition_key (int),
@@ -374,10 +374,10 @@ class TestSubworkflowIntegration:
         unregister_workflow_spec(spec.name)
 
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=4)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=4)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
@@ -408,10 +408,10 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=-1)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=-1)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, result_json = row
         assert status == 'FAILED'
@@ -448,7 +448,7 @@ class TestSubworkflowIntegration:
         assert parent_depth.scalar_one() == 0
 
         # Check child depth
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         child_id = row[1]
         assert isinstance(child_id, str)
@@ -480,7 +480,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Get child workflow ID
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         child_id = row[1]
         assert isinstance(child_id, str)
@@ -491,7 +491,7 @@ class TestSubworkflowIntegration:
             {'wf_id': child_id},
         )
         root_id = child_row.scalar_one()
-        assert root_id == handle.workflow_id
+        assert root_id == str(handle.workflow_id)
 
     # -----------------------------------------------------------------
     # New: error / non-happy paths
@@ -525,7 +525,7 @@ class TestSubworkflowIntegration:
         assert parent_depth_row.scalar_one() == 0
 
         # Middle workflow: depth = 1
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         middle_id = row[1]
         assert isinstance(middle_id, str)
@@ -537,7 +537,7 @@ class TestSubworkflowIntegration:
         middle_info = middle_depth_row.fetchone()
         assert middle_info is not None
         assert middle_info[0] == 1
-        assert middle_info[1] == handle.workflow_id
+        assert middle_info[1] == str(handle.workflow_id)
 
         # Grandchild workflow: depth = 2, same root
         grandchild_row = await session.execute(
@@ -559,7 +559,7 @@ class TestSubworkflowIntegration:
         grandchild_info = grandchild_depth_row.fetchone()
         assert grandchild_info is not None
         assert grandchild_info[0] == 2
-        assert grandchild_info[1] == handle.workflow_id
+        assert grandchild_info[1] == str(handle.workflow_id)
 
 
 # =============================================================================

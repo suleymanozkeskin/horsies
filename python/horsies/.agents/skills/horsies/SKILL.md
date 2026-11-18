@@ -230,11 +230,18 @@ All methods have `_async()` variants.
 
 ### Reconnect to an Existing Workflow
 
-```python
-from horsies import WorkflowHandle
+`WorkflowHandle.for_id(text, broker)` parses a workflow id text once, at the
+boundary: `Ok(handle)`, or `Err(HandleInvalidWorkflowId)` for text that is not
+a UUID (no handle is built).
 
-handle = WorkflowHandle(workflow_id="known-uuid", broker=app.get_broker())
-result = handle.get(timeout_ms=30_000)
+```python
+from horsies import Err, Ok, WorkflowHandle
+
+match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_broker()):
+    case Ok(ok_value=handle):
+        result = handle.get(timeout_ms=30_000)
+    case Err(err_value=invalid):
+        print(invalid.message)  # the text is not a UUID
 ```
 
 ### Direct Result Access by Task ID

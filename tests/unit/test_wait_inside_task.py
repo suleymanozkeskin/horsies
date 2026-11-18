@@ -10,6 +10,8 @@ and label assertions fail.
 
 from __future__ import annotations
 
+import uuid
+
 import asyncio
 from collections.abc import Callable, Generator
 from typing import Any
@@ -95,7 +97,7 @@ def _refused_code(result: TaskResult[Any, TaskError]) -> object:
 
 
 def _workflow_handle(app: Horsies) -> WorkflowHandle[Any]:
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=app.get_broker())
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=app.get_broker())
 
 
 def _task_get(app: Horsies, timeout_ms: int | None) -> TaskResult[Any, TaskError]:

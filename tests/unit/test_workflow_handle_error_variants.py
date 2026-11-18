@@ -162,7 +162,7 @@ def _handle_answering(method: str, answer: object) -> WorkflowHandle[Any]:
     """A handle whose core handle answers ``method`` with ``answer``."""
     broker = MagicMock()
     setattr(broker._core_handle, method, AsyncMock(return_value=answer))
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
 class TestStoredWorkflowStatus:
@@ -229,7 +229,7 @@ def _handle_with_core_answer(
     answer: object = None, *, raises: BaseException | None = None,
 ) -> WorkflowHandle[Any]:
     """A handle on ``_core_broker``."""
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=_core_broker(answer, raises=raises))
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=_core_broker(answer, raises=raises))
 
 
 class TestCancelOutcome:
@@ -241,7 +241,7 @@ class TestCancelOutcome:
     )
     async def test_a_cancelled_or_terminal_workflow_is_ok(self, record_class: type) -> None:
         broker = _core_broker(_cancel_record(record_class))
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
         result = await handle.cancel_async()
 
@@ -535,7 +535,7 @@ class TestStoredWorkflowResult:
             + ',"err":null}'
         )
         broker = MagicMock()
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
         handle.out_type = int
 
         result = handle._completed_result(stored)

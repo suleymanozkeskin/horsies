@@ -142,7 +142,7 @@ class TestWorkflowHandleStatus:
     ) -> None:
         """status_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow_id."""
         handle = WorkflowHandle(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
@@ -185,7 +185,7 @@ class TestWorkflowHandleGet:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='pause')),
         )
@@ -275,7 +275,7 @@ class TestWorkflowHandleGet:
     ) -> None:
         """get_async() returns TaskResult(err=WORKFLOW_NOT_FOUND) for nonexistent workflow."""
         handle = WorkflowHandle(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
@@ -1207,7 +1207,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """cancel_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow."""
         handle = WorkflowHandle(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
@@ -1333,7 +1333,7 @@ class TestWorkflowHandlePauseResume:
     ) -> None:
         """pause_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow."""
         handle = WorkflowHandle(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
@@ -1349,7 +1349,7 @@ class TestWorkflowHandlePauseResume:
     ) -> None:
         """resume_async() returns Err(WORKFLOW_NOT_FOUND) for nonexistent workflow."""
         handle = WorkflowHandle(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
@@ -1464,10 +1464,10 @@ class TestWorkflowHandleInfraErrors:
 
         assert is_err(status_r)
         assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
-        assert status_r.err_value.workflow_id == handle.workflow_id
+        assert status_r.err_value.workflow_id == str(handle.workflow_id)
         assert status_r.err_value.retryable is True
         _assert_failed_connect(
-            status_r.err_value, 'Status', 'workflow_status', handle.workflow_id,
+            status_r.err_value, 'Status', 'workflow_status', str(handle.workflow_id),
         )
 
     async def test_get_db_error_returns_taskresult_broker_error(
@@ -1548,7 +1548,7 @@ class TestWorkflowHandleInfraErrors:
         assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert cancel_r.err_value.retryable is True
         _assert_failed_connect(
-            cancel_r.err_value, 'Cancel', 'cancel_workflow', handle.workflow_id,
+            cancel_r.err_value, 'Cancel', 'cancel_workflow', str(handle.workflow_id),
         )
         status = (
             await session.execute(
@@ -1574,9 +1574,9 @@ class TestWorkflowHandleInfraErrors:
 
         assert is_err(results_r)
         assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
-        assert results_r.err_value.workflow_id == handle.workflow_id
+        assert results_r.err_value.workflow_id == str(handle.workflow_id)
         _assert_failed_connect(
-            results_r.err_value, 'Results', 'workflow_node_results', handle.workflow_id,
+            results_r.err_value, 'Results', 'workflow_node_results', str(handle.workflow_id),
         )
 
     async def test_handle_methods_do_not_leak_db_exceptions(
@@ -1586,7 +1586,7 @@ class TestWorkflowHandleInfraErrors:
     ) -> None:
         """No handle method leaks exceptions (except result_for with None node_id)."""
         handle = WorkflowHandle(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
@@ -1701,7 +1701,7 @@ class TestListenerFallbackContract:
         assert not wait.done(), (
             f'the wait answered before the workflow ended: {wait.result()!r}'
         )
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=100))
         result = await asyncio.wait_for(wait, timeout=WAIT_ANSWER_BOUND_S)
 
         assert result.is_ok(), f'Expected Ok, got {result}'
@@ -1757,11 +1757,11 @@ async def _paused_workflow(
     await finish_task(
         session,
         broker,
-        handle.workflow_id,
+        str(handle.workflow_id),
         0,
         TaskResult(err=TaskError(error_code='FAIL', message='pause')),
     )
-    return handle.workflow_id
+    return str(handle.workflow_id)
 
 
 def _expiry_error_json(older_than: timedelta) -> str:

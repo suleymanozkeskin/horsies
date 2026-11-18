@@ -130,7 +130,7 @@ class TestEnqueuedFailureConversion:
         await session.commit()
 
         # Verify B is READY
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'READY'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'READY'
 
         # Resume workflow
         resume_r = await handle.resume_async()
@@ -139,7 +139,7 @@ class TestEnqueuedFailureConversion:
         assert resumed is True
 
         # B should now be ENQUEUED
-        b_status = await _get_task_status(session, handle.workflow_id, 1)
+        b_status = await _get_task_status(session, str(handle.workflow_id), 1)
         assert b_status == 'ENQUEUED', f'Expected ENQUEUED but got {b_status}'
 
         # Verify task_id was created
@@ -173,7 +173,7 @@ class TestEnqueuedFailureConversion:
         handle = await start_ok(spec, broker)
 
         # Workflow is RUNNING
-        assert await _get_workflow_status(session, handle.workflow_id) == 'RUNNING'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'RUNNING'
 
         # Resume should be no-op (returns False)
         resume_r = await handle.resume_async()
@@ -182,7 +182,7 @@ class TestEnqueuedFailureConversion:
         assert resumed is False
 
         # Status unchanged
-        assert await _get_workflow_status(session, handle.workflow_id) == 'RUNNING'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'RUNNING'
 
 
 @pytest.mark.integration

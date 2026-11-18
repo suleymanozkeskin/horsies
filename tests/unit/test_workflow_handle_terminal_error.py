@@ -10,6 +10,8 @@ read.
 
 from __future__ import annotations
 
+import uuid
+
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -49,7 +51,7 @@ def _handle(status: WorkflowStatus, error_row: Any) -> WorkflowHandle[Any]:
             record.error_json = error_row.error
     broker = MagicMock()
     broker._core_handle.wait_workflow_result_async = AsyncMock(return_value=record)
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
 class TestNoStoredError:

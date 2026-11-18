@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -207,7 +208,7 @@ class TestWorkflowStart:
         custom_id = '11111111-2222-4333-8444-555555555555'
         handle = await start_ok(spec, broker, custom_id)
 
-        assert handle.workflow_id == custom_id
+        assert handle.workflow_id == uuid.UUID(custom_id)
 
         # Verify in database
         result = await session.execute(
@@ -491,7 +492,7 @@ class TestWorkflowStart:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
         await session.commit()
 
         # Verify B task row has retry settings
@@ -597,8 +598,8 @@ class TestWorkflowStart:
             start_ok(spec, broker, custom_id),
             start_ok(spec, broker, custom_id),
         )
-        assert handle_1.workflow_id == custom_id
-        assert handle_2.workflow_id == custom_id
+        assert handle_1.workflow_id == uuid.UUID(custom_id)
+        assert handle_2.workflow_id == uuid.UUID(custom_id)
 
         # Exactly one workflow record and one task graph must exist.
         wf_count = await session.execute(
@@ -647,8 +648,8 @@ class TestWorkflowStart:
             },
         )
         assert {row[0] for row in rows.fetchall()} == {
-            handle_1.workflow_id,
-            handle_2.workflow_id,
+            str(handle_1.workflow_id),
+            str(handle_2.workflow_id),
         }
 
         # Two separate workflow rows with the same workflow name

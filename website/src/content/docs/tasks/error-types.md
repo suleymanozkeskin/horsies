@@ -253,6 +253,8 @@ The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAIL
 
 `HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
+`WorkflowHandle.for_id(text, broker)` returns `HandleInvalidWorkflowId` for a workflow id text that is not a UUID: `message`, `workflow_id_text` and `exception` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `HandleOperationError` variant and has no `HandleErrorCode`.
+
 ## User-Defined Error Codes
 
 Domain-specific errors use string codes:

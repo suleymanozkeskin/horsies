@@ -88,7 +88,7 @@ class TestBatchedStartShape:
         spec = _fanout_spec(app, 3, with_dependent=True)
         result = await start_workflow_async(spec, broker)
         assert not is_err(result), result
-        wf_id = result.ok_value.workflow_id
+        wf_id = str(result.ok_value.workflow_id)
 
         rows = (
             await session.execute(
@@ -135,7 +135,7 @@ class TestBatchedStartShape:
         assert not is_err(first)
         second = await start_workflow_async(spec, broker, workflow_id=wf_id)
         assert not is_err(second)
-        assert second.ok_value.workflow_id == wf_id
+        assert second.ok_value.workflow_id == uuid.UUID(wf_id)
 
         n_nodes = (
             await session.execute(

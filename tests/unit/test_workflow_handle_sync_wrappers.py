@@ -42,7 +42,7 @@ def _make_handle(method: str, answer: object) -> tuple[WorkflowHandle[Any], Magi
             setattr(broker._core_handle, method, MagicMock(side_effect=answer))
         case _:
             setattr(broker._core_handle, method, MagicMock(return_value=answer))
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker), broker
+    return WorkflowHandle(workflow_id=WORKFLOW_KEY, broker=broker), broker
 
 
 # =============================================================================

@@ -84,7 +84,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         broker = MagicMock()
         broker._core_handle.pause_workflow.return_value = _record(core.WorkflowPaused)
 
-        result = pause_workflow_sync(broker, WORKFLOW_ID)
+        result = pause_workflow_sync(broker, WORKFLOW_KEY)
 
         assert is_ok(result)
         broker._core_handle.pause_workflow.assert_called_once_with(WORKFLOW_KEY)
@@ -94,7 +94,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         broker = MagicMock()
         broker._core_handle.resume_workflow.return_value = _record(core.WorkflowResumed)
 
-        result = resume_workflow_sync(broker, WORKFLOW_ID)
+        result = resume_workflow_sync(broker, WORKFLOW_KEY)
 
         assert is_ok(result)
         broker._core_handle.resume_workflow.assert_called_once_with(WORKFLOW_KEY)
@@ -106,7 +106,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         read.status = 'RUNNING'
         broker._core_handle.workflow_status.return_value = read
         handle: WorkflowHandle[Any] = WorkflowHandle(
-            workflow_id=WORKFLOW_ID, broker=broker,
+            workflow_id=WORKFLOW_KEY, broker=broker,
         )
 
         result = handle.status()
@@ -119,7 +119,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         broker = MagicMock()
         broker._core_handle.wait_workflow_result.return_value = _record(core.WaitTimedOut)
         handle: WorkflowHandle[Any] = WorkflowHandle(
-            workflow_id=WORKFLOW_ID, broker=broker,
+            workflow_id=WORKFLOW_KEY, broker=broker,
         )
 
         result = handle.get(timeout_ms=5)

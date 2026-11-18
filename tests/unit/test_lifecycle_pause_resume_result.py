@@ -38,6 +38,7 @@ WORKFLOW_ID = 'wf-1'
 
 
 PAUSE_WORKFLOW_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e03'
+PAUSE_WORKFLOW_KEY = uuid.UUID(PAUSE_WORKFLOW_ID)
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:
@@ -70,7 +71,7 @@ class TestPauseWorkflowResult:
         from horsies.core.workflows.lifecycle import pause_workflow
 
         broker = _pause_broker(_record(core.WorkflowPaused))
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is True
@@ -84,7 +85,7 @@ class TestPauseWorkflowResult:
         from horsies.core.workflows.lifecycle import pause_workflow
 
         broker = _pause_broker(_record(core.WorkflowNotRunning))
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is False
@@ -95,7 +96,7 @@ class TestPauseWorkflowResult:
         from horsies.core.workflows.lifecycle import pause_workflow
 
         broker = _pause_broker(_record(core.WorkflowAbsent))
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
@@ -121,7 +122,7 @@ class TestPauseWorkflowResult:
             ),
         )
         broker = _pause_broker(failed)
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is failed
@@ -141,7 +142,7 @@ class TestPauseWorkflowResult:
             ),
         )
         broker = _pause_broker(invalid)
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is invalid
@@ -154,7 +155,7 @@ class TestPauseWorkflowResult:
 
         refused = core.TooManyPendingCalls('CoreHandle.pause_workflow_async', 64)
         broker = _pause_broker(raises=refused)
-        result = await pause_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await pause_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
@@ -162,20 +163,6 @@ class TestPauseWorkflowResult:
         assert err.exception is refused
         assert err.retryable is True
 
-    @pytest.mark.asyncio(loop_scope='function')
-    async def test_pause_id_that_is_not_a_uuid_calls_nothing(self) -> None:
-        """An id text that is not a UUID -> Err(HandleDbOperationFailed), not
-        retryable, and no core call."""
-        from horsies.core.workflows.lifecycle import pause_workflow
-
-        broker = _pause_broker(_record(core.WorkflowPaused))
-        result = await pause_workflow(broker, WORKFLOW_ID)
-
-        assert is_err(result)
-        err = result.err_value
-        assert isinstance(err, HandleDbOperationFailed)
-        assert err.retryable is False
-        broker._core_handle.pause_workflow_async.assert_not_awaited()
 
 
 # ===========================================================================
@@ -203,7 +190,7 @@ class TestResumeThroughCore:
         from horsies.core.workflows.lifecycle import resume_workflow
 
         broker = _resume_broker(_record(core.WorkflowResumed))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is True
@@ -216,7 +203,7 @@ class TestResumeThroughCore:
         from horsies.core.workflows.lifecycle import resume_workflow
 
         broker = _resume_broker(_record(core.WorkflowNotPaused))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is False
@@ -226,7 +213,7 @@ class TestResumeThroughCore:
         from horsies.core.workflows.lifecycle import resume_workflow
 
         broker = _resume_broker(_record(core.WorkflowAbsent))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert isinstance(result.err_value, HandleWorkflowNotFound)
@@ -248,7 +235,7 @@ class TestResumeThroughCore:
             ),
         )
         broker = _resume_broker(recovery_failed)
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is recovery_failed
@@ -272,29 +259,17 @@ class TestResumeThroughCore:
             ),
         )
         broker = _resume_broker(failed)
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert result.err_value is failed
-
-    @pytest.mark.asyncio(loop_scope='function')
-    async def test_an_id_that_is_not_a_uuid_makes_no_core_call(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
-
-        broker = _resume_broker(_record(core.WorkflowResumed))
-        result = await resume_workflow(broker, 'wf-1')
-
-        assert is_err(result)
-        assert isinstance(result.err_value, HandleDbOperationFailed)
-        assert result.err_value.retryable is False
-        broker._core_handle.resume_workflow_async.assert_not_awaited()
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_core_boundary_error_returns_db_operation_failed(self) -> None:
         from horsies.core.workflows.lifecycle import resume_workflow
 
         broker = _resume_broker(raises=core.TooManyPendingCalls('too many calls'))
-        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         assert isinstance(result.err_value, HandleDbOperationFailed)
@@ -338,7 +313,7 @@ class TestPauseSyncWrapper:
         from horsies.core.workflows.lifecycle import pause_workflow_sync
 
         broker = _blocking_broker('pause_workflow', _record(core.WorkflowPaused))
-        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is True
@@ -353,7 +328,7 @@ class TestPauseSyncWrapper:
 
         refused = core.TooManyPendingCalls('CoreHandle.pause_workflow', 64)
         broker = _blocking_broker('pause_workflow', refused)
-        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
@@ -369,7 +344,7 @@ class TestPauseSyncWrapper:
         defect = RuntimeError('boom')
         broker = _blocking_broker('pause_workflow', defect)
         with pytest.raises(RuntimeError) as exc_info:
-            pause_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+            pause_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
 
         assert exc_info.value is defect
 
@@ -384,7 +359,7 @@ class TestResumeSyncWrapper:
         from horsies.core.workflows.lifecycle import resume_workflow_sync
 
         broker = _blocking_broker('resume_workflow', _record(core.WorkflowNotPaused))
-        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_ok(result)
         assert result.ok_value is False
@@ -399,7 +374,7 @@ class TestResumeSyncWrapper:
 
         refused = core.TooManyPendingCalls('CoreHandle.resume_workflow', 64)
         broker = _blocking_broker('resume_workflow', refused)
-        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
 
         assert is_err(result)
         err = result.err_value
@@ -415,6 +390,6 @@ class TestResumeSyncWrapper:
         defect = RuntimeError('boom')
         broker = _blocking_broker('resume_workflow', defect)
         with pytest.raises(RuntimeError) as exc_info:
-            resume_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+            resume_workflow_sync(broker, PAUSE_WORKFLOW_KEY)
 
         assert exc_info.value is defect

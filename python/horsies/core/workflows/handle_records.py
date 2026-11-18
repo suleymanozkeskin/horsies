@@ -3,11 +3,12 @@
 A workflow operation of the handle (pause, cancel, resume, and the reads)
 runs through ``horsies._core``. The core answers with one record per
 outcome; a failure is the generated ``HandleOperationError`` class, which
-the core builds with its message, and the client returns it as it is. These
-functions build the handle errors that never reach the core: a core
-boundary error raised by the call, and a workflow id text that is not a
-UUID. The calls raise ``ForkedAfterCoreStart`` and ``CoreStopped``
-(``call_refusal_or_raise``): no handle error names them.
+the core builds with its message, and the client returns it as it is.
+``core_call_error`` builds the handle error that never reaches the core: a
+core boundary error raised by the call. The calls raise
+``ForkedAfterCoreStart`` and ``CoreStopped`` (``call_refusal_or_raise``):
+no handle error names them. The workflow id is a ``UUID`` before any call
+(``WorkflowHandle.for_id``).
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from typing import assert_never
 
 from horsies.core.models.workflow.handle_types import HandleDbOperationFailed
 from horsies.core.types.core_failure import CoreCallRefusal, core_error_retryable
-from horsies.core.types.result import Err, Ok, Result
 
 
 class WorkflowOperation(Enum):
@@ -63,44 +63,22 @@ def _label(operation: WorkflowOperation) -> str:
             assert_never(unreachable)
 
 
-def workflow_uuid(
-    workflow_id: str,
-    operation: WorkflowOperation,
-) -> Result[uuid.UUID, HandleDbOperationFailed]:
-    """The workflow id text as a UUID. Pure.
-
-    Text that is not a UUID is ``DB_OPERATION_FAILED``, not retryable: the
-    database refused it with SQLSTATE 22P02 when the statement took the text,
-    and the public result stays the same.
-    """
-    try:
-        return Ok(uuid.UUID(workflow_id))
-    except ValueError as exc:
-        return Err(HandleDbOperationFailed(
-            message=(
-                f'{_label(operation)} failed for workflow {workflow_id}: '
-                f'the id is not a UUID: {exc}'
-            ),
-            retryable=False,
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-
-
 def core_call_error(
     exc: CoreCallRefusal,
-    workflow_id: str,
+    workflow_id: uuid.UUID,
     operation: WorkflowOperation,
 ) -> HandleDbOperationFailed:
     """The handle error of a core boundary error raised by the call: nothing
     ran (``TooManyPendingCalls``, ``CoreStartFailed``), or the outcome is
-    unknown (``CoreCallTimedOut``). Retryable by ``core_error_retryable``. Pure."""
+    unknown (``CoreCallTimedOut``). Retryable by ``core_error_retryable``.
+    The id in the message and in ``workflow_id`` is the canonical text of the
+    UUID. Pure."""
     return HandleDbOperationFailed(
         message=(
             f'{_label(operation)} failed for workflow {workflow_id}: '
             f'{type(exc).__name__}: {exc}'
         ),
         retryable=core_error_retryable(exc),
-        workflow_id=workflow_id,
+        workflow_id=str(workflow_id),
         exception=exc,
     )
