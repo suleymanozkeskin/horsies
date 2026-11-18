@@ -4,6 +4,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::broker::class_coverage::ClassReadRefused;
+use crate::broker::health::WorkerStateUnreadable;
+use crate::broker::process_listener::ListenError;
+use crate::broker::BrokerError;
 use crate::core::codec::{check_json_text, StrictJsonError};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::{TaskInfo, TaskStatus};
@@ -133,11 +137,14 @@ impl BrokerOperationFailedCode {
 /// `BrokerNotAttached`, `BrokerNoTypeAvailable`, `BrokerEventLoopLimit` and
 /// `BrokerLoopRunnerFailed`.
 ///
-/// `cause` is what the operation met: the server's error, no answer, a
-/// broken read contract, or a failed precondition (a refused argument
-/// included). A variant without `cause` has the cause of its state
-/// ([`Self::failure_cause`]). A variant without `retryable` never clears.
-#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+/// `cause` is the typed cause of the variant's `exception`
+/// (`ErrorClassValues`): the [`BrokerOperationSource`] that a failed
+/// operation met, or the [`BrokerCheckCause`] of a variant whose
+/// `exception` may be `NoCause()`. A variant without `cause` has the cause
+/// of its state ([`Self::failure_cause`]). A variant without `retryable`
+/// never clears. The constructors of the operation codes build Python's
+/// message of each operation.
+#[derive(Debug, horsies_core_derive::ErrorCatalog, horsies_core_derive::ErrorClassValues)]
 #[error_catalog(
     module = "broker_errors",
     code = "BrokerErrorCode",
@@ -163,8 +170,9 @@ pub enum BrokerOperationError {
         message: String,
         #[error_slot(python = "Bool")]
         retryable: bool,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// What the operation met.
+        #[error_slot(cause)]
+        cause: BrokerOperationSource,
     },
     /// The enqueue write failed or could not be confirmed. The row may or may not exist.
     ///
@@ -182,8 +190,10 @@ pub enum BrokerOperationError {
         message: String,
         #[error_slot(python = "Bool")]
         retryable: bool,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// The broker error of the write, or the check that found the
+        /// conflicting row gone.
+        #[error_slot(cause)]
+        cause: BrokerCheckCause,
     },
     /// The task id holds a different command or ``sent_at``, or its live row a
     /// different idempotency key. Nothing was written. The same enqueue fails
@@ -228,8 +238,9 @@ pub enum BrokerOperationError {
     InvalidJsonPayload {
         #[error_slot(python = "Str", hidden)]
         message: String,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// The error that refused the value, or the check of the core.
+        #[error_slot(cause)]
+        cause: BrokerCheckCause,
     },
     /// The task options are not valid JSON or carry a retry limit that cannot be stored.
     ///
@@ -245,8 +256,9 @@ pub enum BrokerOperationError {
     InvalidTaskOptions {
         #[error_slot(python = "Str", hidden)]
         message: String,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// The error that refused the value, or the check of the core.
+        #[error_slot(cause)]
+        cause: BrokerCheckCause,
     },
     /// An argument of the call was refused before anything ran. Nothing was written.
     ///
@@ -262,8 +274,9 @@ pub enum BrokerOperationError {
     InvalidInput {
         #[error_slot(python = "Str", hidden)]
         message: String,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// The error that refused the value, or the check of the core.
+        #[error_slot(cause)]
+        cause: BrokerCheckCause,
     },
     /// A sync facade was called on a thread that runs an event loop. Nothing ran.
     ///
@@ -349,16 +362,23 @@ impl BrokerOperationError {
         }
     }
 
-    /// The cause of the failure: the variant's `cause`, else the cause of
-    /// its state. A refused key, a refused thread, a missing listener and a
-    /// wait in a task process are failed preconditions. Pure.
+    /// The cause of the failure: the cause of the variant's `cause`, else
+    /// the cause of its state. A check of the core that refused stored JSON
+    /// is a broken read contract; a check that refused an argument, the task
+    /// options or an enqueue whose row was gone is a failed precondition. A
+    /// refused key, a refused thread, a missing listener and a wait in a
+    /// task process are failed preconditions. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::OperationFailed { cause, .. }
-            | Self::EnqueueFailed { cause, .. }
-            | Self::InvalidJsonPayload { cause, .. }
+            Self::OperationFailed { cause, .. } => cause.failure_cause(),
+            Self::InvalidJsonPayload { cause, .. } => {
+                cause.failure_cause_or(FailureCause::ContractViolation)
+            }
+            Self::EnqueueFailed { cause, .. }
             | Self::InvalidTaskOptions { cause, .. }
-            | Self::InvalidInput { cause, .. } => cause.clone(),
+            | Self::InvalidInput { cause, .. } => {
+                cause.failure_cause_or(FailureCause::PreconditionFailed)
+            }
             Self::PayloadMismatch { .. }
             | Self::IdempotencyKeyConflict { .. }
             | Self::AsyncContext { .. }
@@ -380,7 +400,247 @@ impl std::fmt::Display for BrokerOperationError {
     }
 }
 
-impl std::error::Error for BrokerOperationError {}
+impl std::error::Error for BrokerOperationError {
+    /// The variant's `cause`, when it has one and it is an error.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::OperationFailed { cause, .. } => Some(cause),
+            Self::EnqueueFailed { cause, .. }
+            | Self::InvalidJsonPayload { cause, .. }
+            | Self::InvalidTaskOptions { cause, .. }
+            | Self::InvalidInput { cause, .. } => cause.error(),
+            Self::PayloadMismatch { .. }
+            | Self::IdempotencyKeyConflict { .. }
+            | Self::AsyncContext { .. }
+            | Self::ListenerDisabled { .. }
+            | Self::WaitInsideTask { .. } => None,
+        }
+    }
+}
+
+impl BrokerOperationError {
+    /// `code` failed with `source`, with the message `message`; the retry
+    /// rule is the source's. The constructors below give Python's message of
+    /// each operation; a client uses this one for a failure of its own (a
+    /// process runtime that did not start, the connect before a read). Pure.
+    pub fn operation_failed(
+        code: BrokerOperationFailedCode,
+        message: String,
+        source: BrokerOperationSource,
+    ) -> Self {
+        Self::OperationFailed {
+            code,
+            message,
+            retryable: source.is_retryable(),
+            cause: source,
+        }
+    }
+
+    /// `SCHEMA_INIT_FAILED`: the schema install failed with `error`
+    /// (Python: `Schema initialization failed: {error}`). Pure.
+    pub fn schema_init_failed(error: BrokerError) -> Self {
+        Self::operation_failed(
+            BrokerOperationFailedCode::SchemaInitFailed,
+            format!("Schema initialization failed: {error}"),
+            BrokerOperationSource::Broker(error),
+        )
+    }
+
+    /// `TASK_INFO_QUERY_FAILED` of `get_task_info` for `task_id` (Python:
+    /// `get_task_info failed for {task_id}: {source}`). Pure.
+    pub fn task_info_query_failed(task_id: Uuid, source: BrokerOperationSource) -> Self {
+        Self::operation_failed(
+            BrokerOperationFailedCode::TaskInfoQueryFailed,
+            format!("get_task_info failed for {task_id}: {source}"),
+            source,
+        )
+    }
+
+    /// `INVALID_JSON_PAYLOAD` of `get_task_info` for `task_id`: a stored
+    /// result that fails its check, with the check's text `detail` (Python:
+    /// `get_task_info failed for {task_id}: {detail}`). Pure.
+    pub fn task_info_invalid_json(
+        task_id: Uuid,
+        detail: &dyn std::fmt::Display,
+        cause: BrokerCheckCause,
+    ) -> Self {
+        Self::InvalidJsonPayload {
+            message: format!("get_task_info failed for {task_id}: {detail}"),
+            cause,
+        }
+    }
+
+    /// `TASK_INFO_QUERY_FAILED` of `get_raw_result_record` for `task_id`
+    /// (Python: `Broker error while retrieving task {task_id}: {error}`).
+    /// Pure.
+    pub fn raw_result_query_failed(task_id: Uuid, error: BrokerError) -> Self {
+        Self::operation_failed(
+            BrokerOperationFailedCode::TaskInfoQueryFailed,
+            format!("Broker error while retrieving task {task_id}: {error}"),
+            BrokerOperationSource::Broker(error),
+        )
+    }
+
+    /// `MONITORING_QUERY_FAILED` of the read `operation` (Python:
+    /// `{operation} failed: {source}`). Pure.
+    pub fn monitoring_query_failed(operation: &str, source: BrokerOperationSource) -> Self {
+        Self::operation_failed(
+            BrokerOperationFailedCode::MonitoringQueryFailed,
+            format!("{operation} failed: {source}"),
+            source,
+        )
+    }
+
+    /// `MONITORING_QUERY_FAILED` of the class read `operation` that stored
+    /// data or a bound refused, not retryable (Python: `{operation} refused:
+    /// {refused}`). Pure.
+    pub fn monitoring_query_refused(operation: &str, refused: ClassReadRefused) -> Self {
+        Self::operation_failed(
+            BrokerOperationFailedCode::MonitoringQueryFailed,
+            format!("{operation} refused: {refused}"),
+            BrokerOperationSource::ClassRead(refused),
+        )
+    }
+
+    /// `DB_PING_FAILED`: the ping met `error` (Python: `ping_database failed:
+    /// {error}`). Pure.
+    pub fn db_ping_failed(error: BrokerError) -> Self {
+        Self::operation_failed(
+            BrokerOperationFailedCode::DbPingFailed,
+            format!("ping_database failed: {error}"),
+            BrokerOperationSource::Broker(error),
+        )
+    }
+
+    /// `WORKER_PING_FAILED`: the step `step` of the ping met `source`, with
+    /// the step's Python message ([`WorkerPingStep::message`]). Pure.
+    pub fn worker_ping_failed(step: WorkerPingStep, source: BrokerOperationSource) -> Self {
+        Self::operation_failed(
+            BrokerOperationFailedCode::WorkerPingFailed,
+            step.message(&source),
+            source,
+        )
+    }
+
+    /// `INVALID_INPUT`: a check of the core refused an argument before
+    /// anything ran; `message` names the argument and the rule. Pure.
+    pub fn invalid_input(message: String) -> Self {
+        Self::InvalidInput {
+            message,
+            cause: BrokerCheckCause::Check,
+        }
+    }
+}
+
+/// A step of a worker ping that can fail, with the start of Python's
+/// message of its `WORKER_PING_FAILED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPingStep {
+    /// The NOTIFY of the ping (or the connect before it).
+    Notify,
+    /// The subscription of the reply channel.
+    ReplySubscribe,
+    /// The encode of the ping request.
+    PayloadEncode,
+    /// The wait for the replies.
+    ReplyWait,
+}
+
+impl WorkerPingStep {
+    /// Python's message of a failure of this step with the cause `source`.
+    /// Pure.
+    pub fn message(self, source: &dyn std::fmt::Display) -> String {
+        match self {
+            Self::Notify => format!("ping_workers failed: {source}"),
+            Self::ReplySubscribe => format!("ping_workers reply subscribe failed: {source}"),
+            Self::PayloadEncode => format!("ping_workers payload encode failed: {source}"),
+            Self::ReplyWait => format!("ping_workers reply wait failed: {source}"),
+        }
+    }
+}
+
+/// What a failed broker operation met: the cause of
+/// [`BrokerOperationError::OperationFailed`]. The client builds the
+/// exception of the class from it: the core's class of the cause, with the
+/// cause's own text (`ExceptionCause`).
+#[derive(Debug, thiserror::Error)]
+pub enum BrokerOperationSource {
+    /// A connect, a statement or a row decode of the broker failed.
+    #[error(transparent)]
+    Broker(#[from] BrokerError),
+    /// A class read met stored data that it cannot decide on, or a bound
+    /// that it reached. The same rows give the same answer.
+    #[error(transparent)]
+    ClassRead(#[from] ClassReadRefused),
+    /// A stored worker snapshot row does not read. The same row gives the
+    /// same answer.
+    #[error(transparent)]
+    Snapshot(#[from] WorkerStateUnreadable),
+    /// The broker's listener refused the reply subscription of a worker
+    /// ping.
+    #[error(transparent)]
+    Listen(#[from] ListenError),
+    /// The task was absent from the live table and live in the history read
+    /// on each of the `passes` reads of a task info: a send of the id
+    /// committed between the two statements every time. A later read can
+    /// succeed.
+    #[error(
+        "task {task_id} was absent from the live table and live in the history read on \
+         {passes} passes in a row"
+    )]
+    TaskInfoMoved { task_id: Uuid, passes: u32 },
+    /// A client could not read an argument as the value that the operation
+    /// takes (Python: the exception of the conversion, for example the
+    /// window of a worker ping that is not a number of seconds). The text is
+    /// the client's. The same argument gives the same failure.
+    #[error("{0}")]
+    ArgumentUnreadable(String),
+}
+
+impl BrokerOperationSource {
+    /// Whether the condition may clear: the error's own rule; stored data
+    /// that does not read never clears; a task that moved may be read
+    /// again. Pure.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Broker(error) => error.is_retryable(),
+            Self::Listen(error) => error.is_retryable(),
+            Self::ClassRead(_) | Self::Snapshot(_) | Self::ArgumentUnreadable(_) => false,
+            Self::TaskInfoMoved { .. } => true,
+        }
+    }
+}
+
+/// The cause of a broker failure whose `exception` may be `NoCause()`: the
+/// broker error that refused the value, or a check of the core that found
+/// the failure with no error. Python builds `NoCause()` for a check.
+#[derive(Debug, thiserror::Error)]
+pub enum BrokerCheckCause {
+    /// The error that refused the value.
+    #[error(transparent)]
+    Error(#[from] BrokerError),
+    /// A check of the core refused the value; no error was raised.
+    #[error("a check of the core refused the value")]
+    Check,
+}
+
+impl BrokerCheckCause {
+    /// The cause of the error, or `check` for a check of the core. Pure.
+    pub fn failure_cause_or(&self, check: FailureCause) -> FailureCause {
+        match self {
+            Self::Error(error) => error.failure_cause(),
+            Self::Check => check,
+        }
+    }
+
+    /// The error, when the cause is one. Pure.
+    pub fn error(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Error(error) => Some(error),
+            Self::Check => None,
+        }
+    }
+}
 
 /// Result type for broker operations.
 ///
@@ -510,12 +770,9 @@ mod tests {
 
     #[test]
     fn broker_operation_error_display() {
-        let err = BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::SchemaInitFailed,
-            message: "connection refused".to_owned(),
-            retryable: true,
-            cause: FailureCause::Connection,
-        };
+        let err = BrokerOperationError::schema_init_failed(BrokerError::ConnectionFailed(
+            "connection refused".to_owned(),
+        ));
         let s = format!("{}", err);
         assert!(s.contains("SCHEMA_INIT_FAILED"));
         assert!(s.contains("connection refused"));
@@ -526,23 +783,21 @@ mod tests {
     /// keep theirs.
     #[test]
     fn each_variant_has_the_code_of_its_python_class() {
-        let cause = FailureCause::PreconditionFailed;
         let message = || "m".to_owned();
         let cases = [
             (
-                BrokerOperationError::OperationFailed {
-                    code: BrokerOperationFailedCode::WorkerPingFailed,
-                    message: message(),
-                    retryable: true,
-                    cause: cause.clone(),
-                },
+                BrokerOperationError::operation_failed(
+                    BrokerOperationFailedCode::WorkerPingFailed,
+                    message(),
+                    BrokerOperationSource::Broker(BrokerError::ListenerClosed),
+                ),
                 BrokerErrorCode::WorkerPingFailed,
             ),
             (
                 BrokerOperationError::EnqueueFailed {
                     message: message(),
                     retryable: true,
-                    cause: cause.clone(),
+                    cause: BrokerCheckCause::Check,
                 },
                 BrokerErrorCode::EnqueueFailed,
             ),
@@ -560,21 +815,21 @@ mod tests {
             (
                 BrokerOperationError::InvalidJsonPayload {
                     message: message(),
-                    cause: cause.clone(),
+                    cause: BrokerCheckCause::Check,
                 },
                 BrokerErrorCode::InvalidJsonPayload,
             ),
             (
                 BrokerOperationError::InvalidTaskOptions {
                     message: message(),
-                    cause: cause.clone(),
+                    cause: BrokerCheckCause::Check,
                 },
                 BrokerErrorCode::InvalidTaskOptions,
             ),
             (
                 BrokerOperationError::InvalidInput {
                     message: message(),
-                    cause: cause.clone(),
+                    cause: BrokerCheckCause::Check,
                 },
                 BrokerErrorCode::InvalidInput,
             ),
@@ -601,16 +856,9 @@ mod tests {
     /// other variant never clears.
     #[test]
     fn only_a_failed_operation_or_enqueue_can_be_retryable() {
-        let failed = BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::DbPingFailed,
-            message: "lost".to_owned(),
-            retryable: true,
-            cause: FailureCause::Connection,
-        };
-        let refused = BrokerOperationError::InvalidInput {
-            message: "bad".to_owned(),
-            cause: FailureCause::PreconditionFailed,
-        };
+        let failed =
+            BrokerOperationError::db_ping_failed(BrokerError::ConnectionFailed("lost".to_owned()));
+        let refused = BrokerOperationError::invalid_input("bad".to_owned());
         let async_context = BrokerOperationError::AsyncContext {
             message: "loop".to_owned(),
         };
@@ -618,9 +866,89 @@ mod tests {
         assert!(!refused.retryable());
         assert!(!async_context.retryable());
         assert_eq!(failed.failure_cause(), FailureCause::Connection);
+        assert_eq!(refused.failure_cause(), FailureCause::PreconditionFailed);
         assert_eq!(
             async_context.failure_cause(),
             FailureCause::PreconditionFailed
+        );
+    }
+
+    /// Each constructor of an operation code gives Python's message of the
+    /// operation, the code, and the retry rule of its cause.
+    #[test]
+    fn each_operation_code_constructor_gives_python_s_message() {
+        let task_id = Uuid::from_u128(7);
+        let refused = || BrokerError::ConnectionFailed("refused".to_owned());
+        let cases = [
+            (
+                BrokerOperationError::schema_init_failed(refused()),
+                BrokerErrorCode::SchemaInitFailed,
+                "Schema initialization failed: connection failed: refused".to_owned(),
+            ),
+            (
+                BrokerOperationError::task_info_query_failed(
+                    task_id,
+                    BrokerOperationSource::Broker(refused()),
+                ),
+                BrokerErrorCode::TaskInfoQueryFailed,
+                format!("get_task_info failed for {task_id}: connection failed: refused"),
+            ),
+            (
+                BrokerOperationError::raw_result_query_failed(task_id, refused()),
+                BrokerErrorCode::TaskInfoQueryFailed,
+                format!("Broker error while retrieving task {task_id}: connection failed: refused"),
+            ),
+            (
+                BrokerOperationError::monitoring_query_failed(
+                    "list_worker_states",
+                    BrokerOperationSource::Broker(refused()),
+                ),
+                BrokerErrorCode::MonitoringQueryFailed,
+                "list_worker_states failed: connection failed: refused".to_owned(),
+            ),
+            (
+                BrokerOperationError::db_ping_failed(refused()),
+                BrokerErrorCode::DbPingFailed,
+                "ping_database failed: connection failed: refused".to_owned(),
+            ),
+            (
+                BrokerOperationError::worker_ping_failed(
+                    WorkerPingStep::Notify,
+                    BrokerOperationSource::Broker(refused()),
+                ),
+                BrokerErrorCode::WorkerPingFailed,
+                "ping_workers failed: connection failed: refused".to_owned(),
+            ),
+        ];
+        for (error, code, message) in cases {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), message);
+            assert!(error.retryable());
+            assert_eq!(error.failure_cause(), FailureCause::Connection);
+            assert!(std::error::Error::source(&error).is_some());
+        }
+        let refused_argument = BrokerOperationError::invalid_input("bad".to_owned());
+        assert!(std::error::Error::source(&refused_argument).is_none());
+    }
+
+    /// Python's message of each failing step of a worker ping.
+    #[test]
+    fn each_worker_ping_step_has_python_s_message() {
+        assert_eq!(
+            WorkerPingStep::Notify.message(&"x"),
+            "ping_workers failed: x"
+        );
+        assert_eq!(
+            WorkerPingStep::ReplySubscribe.message(&"x"),
+            "ping_workers reply subscribe failed: x"
+        );
+        assert_eq!(
+            WorkerPingStep::PayloadEncode.message(&"x"),
+            "ping_workers payload encode failed: x"
+        );
+        assert_eq!(
+            WorkerPingStep::ReplyWait.message(&"x"),
+            "ping_workers reply wait failed: x"
         );
     }
 

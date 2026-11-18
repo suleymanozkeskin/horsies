@@ -20,7 +20,6 @@ import psycopg
 from horsies._catalog import broker_bounds
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
-    BrokerFailure,
     ClassCoverageRecord,
     ClassReportRecord,
     CoreError,
@@ -631,41 +630,6 @@ def _monitoring_call_failed(
     )
 
 
-def _monitoring_read_failed(
-    operation: str, failure: BrokerFailure,
-) -> Err[BrokerInvalidInput | BrokerOperationFailed]:
-    """The error of a monitoring read whose core answer is a failure record.
-
-    - ``INVALID_INPUT``: ``BrokerInvalidInput`` with the core's text. Nothing
-      ran.
-    - ``MONITORING_QUERY_FAILED``: ``BrokerOperationFailed`` with the core's
-      text and retryable flag; ``exception`` is the core's exception of the
-      cause (a ``CoreFailure`` leaf class). Nothing changed: a read writes
-      nothing.
-
-    Another code contradicts the read's catalog: ``AssertionError``.
-    """
-    match failure:
-        case BrokerFailure(code='INVALID_INPUT', message=message):
-            return Err(BrokerInvalidInput(message=message, exception=NoCause()))
-        case BrokerFailure(
-            code='MONITORING_QUERY_FAILED',
-            message=message,
-            retryable=retryable,
-            exception=exception,
-        ):
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.MONITORING_QUERY_FAILED,
-                    message=message,
-                    retryable=retryable,
-                    exception=exception,
-                ),
-            )
-        case BrokerFailure(code=code):
-            raise AssertionError(f'the core {operation} answered the code {code}')
-
-
 def _database_ping_call_failed(exc: CoreCallRefusal) -> Err[BrokerOperationFailed]:
     """The ping's error for a core boundary error: ``DB_PING_FAILED`` with
     the error, retryable by ``core_error_retryable``. Nothing changed."""
@@ -680,34 +644,23 @@ def _database_ping_call_failed(exc: CoreCallRefusal) -> Err[BrokerOperationFaile
 
 
 def _database_ping_answer(
-    outcome: DatabasePingRecord | BrokerFailure,
+    outcome: DatabasePingRecord | BrokerOperationFailed,
 ) -> BrokerResult[DatabasePing]:
     """The answer of the core's database ping. Pure.
 
     - ``DatabasePingRecord``: ``Ok(DatabasePing)`` with its latency.
-    - ``BrokerFailure`` with ``DB_PING_FAILED``: ``BrokerOperationFailed``
-      with the core's text, retryable flag and exception.
+    - ``BrokerOperationFailed`` with ``DB_PING_FAILED``: the core's class as
+      it is, with Python's message (``ping_database failed: {error}``) and
+      the core's exception of the cause.
 
-    Another code contradicts the ping's catalog: ``AssertionError``.
+    Another operation code contradicts the ping's catalog: ``AssertionError``.
     """
     match outcome:
         case DatabasePingRecord(latency_ms=latency_ms):
             return Ok(DatabasePing(latency_ms=latency_ms))
-        case BrokerFailure(
-            code='DB_PING_FAILED',
-            message=message,
-            retryable=retryable,
-            exception=exception,
-        ):
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.DB_PING_FAILED,
-                    message=f'ping_database failed: {message}',
-                    retryable=retryable,
-                    exception=exception,
-                ),
-            )
-        case BrokerFailure(code=code):
+        case BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
             raise AssertionError(f'the core database ping answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
@@ -728,17 +681,21 @@ def _worker_ping_call_failed(exc: CoreCallRefusal) -> Err[BrokerOperationFailed]
 
 
 def _worker_ping_answer(
-    outcome: WorkerPongsRecord | BrokerFailure,
+    outcome: (
+        WorkerPongsRecord
+        | BrokerOperationFailed
+        | BrokerInvalidInput
+        | BrokerListenerDisabled
+    ),
 ) -> BrokerResult[list[WorkerPong]]:
     """The answer of the core's worker ping. Pure.
 
     - ``WorkerPongsRecord``: one ``WorkerPong`` per reply, in reply order.
-    - ``BrokerFailure``: ``INVALID_INPUT`` (``BrokerInvalidInput``),
-      ``LISTENER_DISABLED`` (``BrokerListenerDisabled``), or
-      ``WORKER_PING_FAILED`` (``BrokerOperationFailed`` with the core's text,
-      retryable flag and exception).
+    - The core's class as it is: ``BrokerInvalidInput`` (``NoCause()``),
+      ``BrokerListenerDisabled``, or ``BrokerOperationFailed`` with
+      ``WORKER_PING_FAILED`` and the core's exception of the cause.
 
-    Another code contradicts the ping's catalog: ``AssertionError``.
+    Another operation code contradicts the ping's catalog: ``AssertionError``.
     """
     match outcome:
         case WorkerPongsRecord(pongs=pongs):
@@ -753,82 +710,83 @@ def _worker_ping_answer(
                     for pong in pongs
                 ],
             )
-        case BrokerFailure(code='INVALID_INPUT', message=message):
-            return Err(BrokerInvalidInput(message=message, exception=NoCause()))
-        case BrokerFailure(code='LISTENER_DISABLED', message=message):
-            return Err(BrokerListenerDisabled(message=message))
-        case BrokerFailure(
-            code='WORKER_PING_FAILED',
-            message=message,
-            retryable=retryable,
-            exception=exception,
-        ):
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.WORKER_PING_FAILED,
-                    message=message,
-                    retryable=retryable,
-                    exception=exception,
-                ),
-            )
-        case BrokerFailure(code=code):
+        case BrokerInvalidInput() | BrokerListenerDisabled():
+            return Err(outcome)
+        case BrokerOperationFailed(code=BrokerErrorCode.WORKER_PING_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
             raise AssertionError(f'the core worker ping answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
 
 
 def _worker_states_answer(
-    operation: str, outcome: WorkerStatesRecord | BrokerFailure,
+    outcome: WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput,
 ) -> BrokerResult[list[WorkerStateSnapshot]]:
     """The answer of a read of worker state snapshots (the latest per worker,
-    or the history of one worker). Pure."""
+    or the history of one worker). A failure is the core's class as it is:
+    ``BrokerInvalidInput`` for a refused history limit (nothing ran), or
+    ``BrokerOperationFailed`` with ``MONITORING_QUERY_FAILED``. Pure."""
     match outcome:
         case WorkerStatesRecord(states=states):
             return Ok([worker_state_snapshot(state) for state in states])
-        case BrokerFailure() as failure:
-            return _monitoring_read_failed(operation, failure)
+        case BrokerInvalidInput():
+            return Err(outcome)
+        case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
+            raise AssertionError(f'the core worker state read answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
 
 
 def _worker_state_answer(
-    outcome: WorkerStateRecord | WorkerStateAbsent | BrokerFailure,
+    outcome: WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed,
 ) -> BrokerResult[WorkerStateSnapshot | None]:
     """The answer of the read of one worker's latest snapshot: ``Ok(None)``
-    for a worker with no snapshot. Pure."""
+    for a worker with no snapshot; a failure is the core's class as it is.
+    Pure."""
     match outcome:
         case WorkerStateRecord() as state:
             return Ok(worker_state_snapshot(state))
         case WorkerStateAbsent():
             return Ok(None)
-        case BrokerFailure() as failure:
-            return _monitoring_read_failed('get_worker_state', failure)
+        case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
+            raise AssertionError(f'the core monitoring read answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
 
 
 def _class_coverage_answer(
-    outcome: ClassCoverageRecord | BrokerFailure,
+    outcome: ClassCoverageRecord | BrokerOperationFailed,
 ) -> BrokerResult[ClassCoverage]:
-    """The answer of the fleet check. Pure."""
+    """The answer of the fleet check; a failure is the core's class as it
+    is. Pure."""
     match outcome:
         case ClassCoverageRecord() as coverage:
             return Ok(class_coverage_of(coverage))
-        case BrokerFailure() as failure:
-            return _monitoring_read_failed('get_class_coverage', failure)
+        case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
+            raise AssertionError(f'the core monitoring read answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
 
 
 def _class_report_answer(
-    outcome: ClassReportRecord | BrokerFailure,
+    outcome: ClassReportRecord | BrokerOperationFailed,
 ) -> BrokerResult[ClassReport]:
-    """The answer of the class report. Pure."""
+    """The answer of the class report; a failure is the core's class as it
+    is. Pure."""
     match outcome:
         case ClassReportRecord() as report:
             return Ok(class_report_of(report))
-        case BrokerFailure() as failure:
-            return _monitoring_read_failed('get_class_report', failure)
+        case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
+            raise AssertionError(f'the core monitoring read answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1169,52 +1127,37 @@ def _task_info_of_record(record: TaskInfoRecord) -> BrokerResult[TaskInfo]:
 
 
 def _task_info_result(
-    task_id: UUID, outcome: TaskInfoRecord | TaskInfoNotFound | BrokerFailure,
+    outcome: (
+        TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload
+    ),
 ) -> BrokerResult[TaskInfo | None]:
     """The result of one core task info read. Pure.
 
     - ``TaskInfoRecord``: ``Ok(TaskInfo)``, or ``INVALID_JSON_PAYLOAD`` for a
       stored result that does not read.
     - ``TaskInfoNotFound``: ``Ok(None)``.
-    - ``BrokerFailure(TASK_INFO_QUERY_FAILED)``: the connect, the install
-      or a read failed; ``retryable`` is the core's classification.
-    - ``BrokerFailure(INVALID_JSON_PAYLOAD)``: the core found stored data
-      that does not read, for example a history result whose digest
-      differs; not retryable.
+    - The core's class as it is, with Python's message
+      (``get_task_info failed for {task_id}: {error}``):
+      ``BrokerOperationFailed`` with ``TASK_INFO_QUERY_FAILED`` (the connect,
+      the install or a read failed; ``retryable`` is the core's
+      classification), or ``BrokerInvalidJsonPayload`` (stored data that
+      does not read, for example a history result whose digest differs; not
+      retryable).
 
-    Each failure's ``exception`` is the core's exception of the cause (a
-    ``CoreFailure`` leaf class). Another code contradicts the core's catalog
-    of the read: ``AssertionError``.
+    Each failure's ``exception`` is the core's exception of the cause, or
+    ``NoCause()`` for a check of the core. Another operation code contradicts
+    the read's catalog: ``AssertionError``.
     """
     match outcome:
         case TaskInfoRecord() as record:
             return _task_info_of_record(record)
         case TaskInfoNotFound():
             return Ok(None)
-        case BrokerFailure(
-            code='TASK_INFO_QUERY_FAILED',
-            message=message,
-            retryable=retryable,
-            exception=exception,
-        ):
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                    message=f'get_task_info failed for {task_id}: {message}',
-                    retryable=retryable,
-                    exception=exception,
-                ),
-            )
-        case BrokerFailure(
-            code='INVALID_JSON_PAYLOAD', message=message, exception=exception,
-        ):
-            return Err(
-                BrokerInvalidJsonPayload(
-                    message=f'get_task_info failed for {task_id}: {message}',
-                    exception=exception,
-                ),
-            )
-        case BrokerFailure(code=code):
+        case BrokerInvalidJsonPayload():
+            return Err(outcome)
+        case BrokerOperationFailed(code=BrokerErrorCode.TASK_INFO_QUERY_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
             raise AssertionError(f'the core task info read answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
@@ -2264,8 +2207,9 @@ class PostgresBroker:
         (``tests/dualrun/reference/install_caller.py``) runs it.
 
         Raises:
-            CoreFailure: the core reported ``SCHEMA_INIT_FAILED``; the
-                exception is the core's exception of the cause, with the
+            CoreFailure: the core answered ``BrokerOperationFailed`` with
+                ``SCHEMA_INIT_FAILED``; the exception is the core's exception
+                of the cause, with the
                 core's classification as ``retryable`` where the cause may
                 clear. The broker keeps nothing, so the next call installs
                 again.
@@ -2276,9 +2220,11 @@ class PostgresBroker:
         match await self._core_handle.install_schema_async():
             case SchemaInstalled() | SchemaInstallNotRun():
                 self._initialized = True
-            case BrokerFailure(code='SCHEMA_INIT_FAILED', exception=exception):
+            case BrokerOperationFailed(
+                code=BrokerErrorCode.SCHEMA_INIT_FAILED, exception=exception,
+            ):
                 raise exception
-            case BrokerFailure(code=code):
+            case BrokerOperationFailed(code=code):
                 raise AssertionError(f'the core schema install answered the code {code}')
             case _ as unreachable:
                 assert_never(unreachable)
@@ -2884,7 +2830,13 @@ class PostgresBroker:
     def _raw_result_of_outcome(
         self,
         task_id: UUID,
-        outcome: RawResultRecordRecord | RawResultAbsent | BrokerFailure,
+        outcome: (
+            RawResultRecordRecord
+            | RawResultAbsent
+            | BrokerOperationFailed
+            | BrokerInvalidJsonPayload
+            | BrokerInvalidInput
+        ),
     ) -> BrokerResult[RawResultRecord | None]:
         """The result of one core result read.
 
@@ -2892,13 +2844,15 @@ class PostgresBroker:
           is read with the strict JSON reader (``INVALID_JSON_PAYLOAD`` when
           it does not read as an object or null).
         - ``RawResultAbsent``: ``Ok(None)``.
-        - ``BrokerFailure(INVALID_JSON_PAYLOAD)``: ``BrokerInvalidJsonPayload``.
-        - ``BrokerFailure(TASK_INFO_QUERY_FAILED)``: ``BrokerOperationFailed``,
-          logged on ``horsies.broker``.
+        - ``BrokerInvalidJsonPayload``: the core's class as it is.
+        - ``BrokerOperationFailed`` with ``TASK_INFO_QUERY_FAILED``: the
+          core's class as it is, with Python's message (``Broker error while
+          retrieving task {task_id}: {error}``), logged on
+          ``horsies.broker``.
 
-        Each failure's ``exception`` is the core's exception of the cause.
-        Another code contradicts the core's catalog of the read, for example
-        ``INVALID_INPUT`` for a limit that the check above admitted:
+        Each failure's ``exception`` is the core's exception of the cause, or
+        ``NoCause()`` for a check of the core. ``BrokerInvalidInput`` for a
+        limit that the check above admitted contradicts that check:
         ``AssertionError``.
         """
         match outcome:
@@ -2922,31 +2876,24 @@ class PostgresBroker:
                 ))
             case RawResultAbsent():
                 return Ok(None)
-            case BrokerFailure(
-                code='INVALID_JSON_PAYLOAD', message=message, exception=exception,
-            ):
-                return Err(BrokerInvalidJsonPayload(message=message, exception=exception))
-            case BrokerFailure(
-                code='TASK_INFO_QUERY_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=exception,
+            case BrokerInvalidJsonPayload():
+                return Err(outcome)
+            case BrokerOperationFailed(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED, message=message,
             ):
                 self.logger.error(
                     'Broker error while retrieving raw task result record for task %s: %s',
                     task_id,
                     message,
                 )
-                return Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                        message=f'Broker error while retrieving task {task_id}: {message}',
-                        retryable=retryable,
-                        exception=exception,
-                    ),
-                )
-            case BrokerFailure(code=code):
+                return Err(outcome)
+            case BrokerOperationFailed(code=code):
                 raise AssertionError(f'the core result read answered the code {code}')
+            case BrokerInvalidInput():
+                raise AssertionError(
+                    'the core result read answered the code INVALID_INPUT for a limit that '
+                    'the check admitted',
+                )
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -3086,10 +3033,15 @@ class PostgresBroker:
     def _task_list_answer(
         self,
         operation: str,
-        outcome: TaskListComplete | TaskListTruncated | BrokerFailure,
+        outcome: (
+            TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput
+        ),
     ) -> BrokerResult[list[dict[str, Any]]]:
         """The answer of a task list from the core's record; a cut list logs a
-        warning that names ``operation`` and the bound."""
+        warning that names ``operation`` and the bound. A failure is the
+        core's class as it is: ``BrokerInvalidInput`` for a refused threshold
+        (nothing ran), or ``BrokerOperationFailed`` with
+        ``MONITORING_QUERY_FAILED``."""
         match outcome:
             case TaskListComplete(rows=rows):
                 return Ok(rows)
@@ -3098,8 +3050,12 @@ class PostgresBroker:
                     '%s returned the first %d rows; more rows match', operation, bound,
                 )
                 return Ok(rows)
-            case BrokerFailure() as failure:
-                return _monitoring_read_failed(operation, failure)
+            case BrokerInvalidInput():
+                return Err(outcome)
+            case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
+                return Err(outcome)
+            case BrokerOperationFailed(code=code):
+                raise AssertionError(f'the core {operation} answered the code {code}')
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -3234,7 +3190,7 @@ class PostgresBroker:
             outcome = await self._core_handle.worker_states_async()
         except CoreError as exc:
             return _monitoring_call_failed('list_worker_states', call_refusal_or_raise(exc))
-        return _worker_states_answer('list_worker_states', outcome)
+        return _worker_states_answer(outcome)
 
     def _list_worker_states_blocking(self) -> BrokerResult[list[WorkerStateSnapshot]]:
         """The blocking form of ``list_worker_states_async``, for
@@ -3250,7 +3206,7 @@ class PostgresBroker:
             outcome = self._core_handle.worker_states()
         except CoreError as exc:
             return _monitoring_call_failed('list_worker_states', call_refusal_or_raise(exc))
-        return _worker_states_answer('list_worker_states', outcome)
+        return _worker_states_answer(outcome)
 
     async def get_worker_state_async(
         self,
@@ -3310,7 +3266,7 @@ class PostgresBroker:
             )
         except CoreError as exc:
             return _monitoring_call_failed('get_worker_state_history', call_refusal_or_raise(exc))
-        return _worker_states_answer('get_worker_state_history', outcome)
+        return _worker_states_answer(outcome)
 
     def _get_worker_state_history_blocking(
         self, worker_id: str, *, limit: int | None,
@@ -3330,7 +3286,7 @@ class PostgresBroker:
             )
         except CoreError as exc:
             return _monitoring_call_failed('get_worker_state_history', call_refusal_or_raise(exc))
-        return _worker_states_answer('get_worker_state_history', outcome)
+        return _worker_states_answer(outcome)
 
     async def get_class_coverage_async(self) -> BrokerResult[ClassCoverage]:
         """The fleet check: for each (queue, class) with PENDING rows, whether
@@ -4062,7 +4018,7 @@ class PostgresBroker:
             )
         except CoreError as exc:
             return _task_info_core_error(task_id, call_refusal_or_raise(exc))
-        return _task_info_result(task_id, outcome)
+        return _task_info_result(outcome)
 
     def get_task_info(
         self,
@@ -4094,7 +4050,7 @@ class PostgresBroker:
             )
         except CoreError as exc:
             return _task_info_core_error(task_id, call_refusal_or_raise(exc))
-        return _task_info_result(task_id, outcome)
+        return _task_info_result(outcome)
 
     def close(self) -> BrokerResult[None]:
         """The blocking form of ``close_async``: the core handle's close

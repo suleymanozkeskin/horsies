@@ -28,7 +28,7 @@ use tokio_postgres::error::{DbError, SqlState};
 use crate::broker::partition_maintenance::{CoveragePassError, PrunePassError};
 use crate::broker::process_listener::ListenError;
 use crate::broker::workflow_start::ClientStartError;
-use crate::broker::BrokerError;
+use crate::broker::{BrokerError, BrokerOperationSource};
 use crate::core::history::errors::HistoryError;
 use crate::db::{
     CheckoutFailure, ConnectError, ConnectFailure, ListenerStartFailure, NotSentCause,
@@ -299,6 +299,27 @@ impl BrokerError {
             | Self::InvalidClaimArgument(_)
             | Self::PoolSettings(_)
             | Self::ProcessRuntime(_) => FailureCause::PreconditionFailed,
+        }
+    }
+}
+
+impl BrokerOperationSource {
+    /// The cause of what a failed broker operation met. Pure.
+    ///
+    /// - A broker error or a refused subscription: its own cause.
+    /// - Stored data that a class read or a snapshot read cannot read:
+    ///   [`FailureCause::ContractViolation`].
+    /// - A task that moved between the two reads of a task info on every
+    ///   pass, and an argument that a client could not read:
+    ///   [`FailureCause::PreconditionFailed`].
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::Broker(error) => error.failure_cause(),
+            Self::Listen(error) => error.failure_cause(),
+            Self::ClassRead(_) | Self::Snapshot(_) => FailureCause::ContractViolation,
+            Self::TaskInfoMoved { .. } | Self::ArgumentUnreadable(_) => {
+                FailureCause::PreconditionFailed
+            }
         }
     }
 }

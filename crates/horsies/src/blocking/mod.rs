@@ -52,10 +52,12 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, thread_role, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
-    ClassCoverage, ClassReport, DatabasePing, FailureCause, ProcessRole, SendKind, TaskSendError,
-    ThreadRole, WorkerPong, WorkerStateSnapshot,
+    process_role, thread_role, BrokerError, BrokerErrorCode, BrokerOperationError,
+    BrokerOperationFailedCode, BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing,
+    FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
+    WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -355,7 +357,8 @@ fn block_read<V>(
 }
 
 /// Run a health read on the process runtime, or answer why it cannot run.
-/// A runtime that did not start has the broker code `code` of the read.
+/// A runtime that did not start has the broker code `code` of the read,
+/// retryable, with the refusal as its cause.
 ///
 /// # Panics
 ///
@@ -371,12 +374,16 @@ fn block_health<V>(
         Place::AsyncContext => Err(BrokerOperationError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
         }),
-        Place::RuntimeStartFailed(failed) => Err(BrokerOperationError::OperationFailed {
+        Place::RuntimeStartFailed(failed) => Err(BrokerOperationError::operation_failed(
             code,
-            message: format!("the read did not start: {failed}"),
-            retryable: true,
-            cause: FailureCause::PreconditionFailed,
-        }),
+            format!("the read did not start: {failed}"),
+            BrokerOperationSource::Broker(BrokerError::ProcessRuntime(
+                ProcessRuntimeRefusal::StartFailed {
+                    cause: failed.cause,
+                    os_error: failed.os_error,
+                },
+            )),
+        )),
     }
 }
 

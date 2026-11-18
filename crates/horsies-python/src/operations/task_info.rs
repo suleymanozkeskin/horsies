@@ -3,9 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{
-    BrokerErrorCode, ExecutionClass, StoredEnvelopeText, TaskAttemptInfo, TaskInfo, TaskInfoRead,
-};
+use horsies_core::{ExecutionClass, StoredEnvelopeText, TaskAttemptInfo, TaskInfo, TaskInfoRead};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -187,10 +185,12 @@ pub async fn task_info_operation(
     let broker = match connection.initialized_broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return TaskInfoOutcome::Failed(BrokerFailure::from_broker_error(
+            return TaskInfoOutcome::Failed(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerErrorCode::TaskInfoQueryFailed,
-                &error,
+                horsies_core::BrokerOperationError::task_info_query_failed(
+                    task_id,
+                    horsies_core::BrokerOperationSource::Broker(error),
+                ),
             ))
         }
     };

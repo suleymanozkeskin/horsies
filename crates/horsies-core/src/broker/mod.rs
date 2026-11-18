@@ -87,8 +87,9 @@ pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
 pub use result_types::{
-    BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode, BrokerResult, RawResultRead,
-    RawResultRecord, StoredEnvelopeRefused, StoredEnvelopeText, TaskInfoRead,
+    BrokerCheckCause, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
+    BrokerOperationSource, BrokerResult, RawResultRead, RawResultRecord, StoredEnvelopeRefused,
+    StoredEnvelopeText, TaskInfoRead, WorkerPingStep,
 };
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow};

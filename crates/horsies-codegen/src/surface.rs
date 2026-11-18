@@ -8,7 +8,7 @@
 //! the type comes from the core catalog itself.
 
 use horsies_core::catalog::{CodeCatalog, CodeEnum};
-use horsies_core::{BrokerErrorCode, TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
+use horsies_core::{TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
 
 /// The type text of an annotation.
 #[derive(Clone, Copy, Debug)]
@@ -414,13 +414,14 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
 ];
 
-const PING_OUTCOME: &str = "DatabasePingRecord | BrokerFailure";
-const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFailure";
+const PING_OUTCOME: &str = "DatabasePingRecord | BrokerOperationFailed";
+const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed";
 const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendAsyncContext | \
      SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | \
      SendKeyConflict";
-const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailure";
-const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerFailure";
+const TASK_INFO_OUTCOME: &str =
+    "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -948,12 +949,15 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
 /// A failed monitoring read is a generated class of
 /// `horsies._catalog.monitoring_errors`, built in Rust.
 const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringQueryCoreError";
-const PING_WORKERS_OUTCOME: &str = "WorkerPongsRecord | BrokerFailure";
-const WORKER_STATES_OUTCOME: &str = "WorkerStatesRecord | BrokerFailure";
-const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerFailure";
-const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerFailure";
-const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerFailure";
-const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFailure";
+const PING_WORKERS_OUTCOME: &str =
+    "WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled";
+const WORKER_STATES_OUTCOME: &str =
+    "WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput";
+const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
+const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerOperationFailed";
+const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerOperationFailed";
+const TASK_LIST_OUTCOME: &str =
+    "TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
 const MONITORING_DETAIL_OUTCOME: &str =
     "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
@@ -1353,21 +1357,6 @@ const ARGUMENT_CLASSES: &[StubClass] = &[
 ];
 
 const RECORD_CLASSES: &[StubClass] = &[
-    StubClass {
-        name: "BrokerFailure",
-        doc: "An expected failure of a broker operation.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            StubProperty {
-                name: "code",
-                annotation: TypeText::WireValuesOf(<BrokerErrorCode as CodeEnum>::CATALOG),
-            },
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
     StubClass {
         name: "DatabasePingRecord",
         doc: "The round trip of one database ping.",
@@ -3857,6 +3846,15 @@ const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
 
 /// The generated classes of `horsies._catalog` that the annotations name.
 const IMPORTS: &[StubImport] = &[
+    StubImport {
+        module: "horsies._catalog.broker_errors",
+        names: &[
+            "BrokerInvalidInput",
+            "BrokerInvalidJsonPayload",
+            "BrokerListenerDisabled",
+            "BrokerOperationFailed",
+        ],
+    },
     StubImport {
         module: "horsies._catalog.monitoring_errors",
         names: &["MonitoringQueryCoreError", "TaskActionCoreError"],

@@ -31,11 +31,10 @@ use crate::broker::class_coverage::{
 use crate::broker::core_rows::{column, one_row};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::result_types::{BrokerOperationError, BrokerOperationFailedCode, BrokerResult};
+use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
-use crate::failure_cause::FailureCause;
 
 /// The most snapshot rows inside the live window that a read takes. A worker
 /// writes `WORKER_STATE_LIVE_WINDOW_S` / snapshot interval rows into the
@@ -259,7 +258,7 @@ impl PostgresBroker {
         let row = self
             .coverage_row(CheckoutClass::Batch)
             .await
-            .map_err(|error| class_statement_failed("get_class_coverage", &error))?;
+            .map_err(|error| class_statement_failed("get_class_coverage", error))?;
         coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
     }
 
@@ -279,7 +278,7 @@ impl PostgresBroker {
         let row = self
             .report_row()
             .await
-            .map_err(|error| class_statement_failed("get_class_report", &error))?;
+            .map_err(|error| class_statement_failed("get_class_report", error))?;
         report_from_row(row).map_err(|cause| class_read_refused("get_class_report", &cause))
     }
 
@@ -345,7 +344,7 @@ pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> BrokerResult
     let row = broker
         .coverage_row(CheckoutClass::Reserved)
         .await
-        .map_err(|error| class_statement_failed("get_class_coverage", &error))?;
+        .map_err(|error| class_statement_failed("get_class_coverage", error))?;
     coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
 }
 
@@ -353,25 +352,15 @@ pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> BrokerResult
 /// row did not read. `retryable` is the statement layer's classification
 /// ([`BrokerError::is_retryable`]); a row that does not read is not
 /// retryable.
-fn class_statement_failed(operation: &str, error: &BrokerError) -> BrokerOperationError {
-    BrokerOperationError::OperationFailed {
-        code: BrokerOperationFailedCode::MonitoringQueryFailed,
-        message: format!("{operation} failed: {error}"),
-        retryable: error.is_retryable(),
-        cause: error.failure_cause(),
-    }
+fn class_statement_failed(operation: &str, error: BrokerError) -> BrokerOperationError {
+    BrokerOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
 }
 
 /// Stored data that a class read cannot decide on, or a bound it reached.
 /// Not retryable: the same rows give the same answer. Nothing changed
 /// (Python `_class_read_refused`, `postgres.py:408-421`).
 fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> BrokerOperationError {
-    BrokerOperationError::OperationFailed {
-        code: BrokerOperationFailedCode::MonitoringQueryFailed,
-        message: format!("{operation} refused: {cause}"),
-        retryable: false,
-        cause: FailureCause::ContractViolation,
-    }
+    BrokerOperationError::monitoring_query_refused(operation, cause.clone())
 }
 
 /// The fleet check from its statement row, checked in Python's order: the
