@@ -2369,9 +2369,9 @@ mod tests {
 
     /// A broker on a loopback port where no server listens: every statement
     /// of its core pools fails at the checkout with a refused connection,
-    /// which is retryable. A closed sqlx pool does not stop the phase-1
-    /// writes: they run on the core pools, and `PostgresBroker::close` leaves
-    /// those pools to reopen at the next statement.
+    /// which is retryable. The phase-1 writes run on the core pools, and
+    /// `PostgresBroker::close` leaves those pools to reopen at the next
+    /// statement.
     fn unreachable_broker() -> PostgresBroker {
         let pool = TestPoolOptions::new().connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
         PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
@@ -2776,8 +2776,6 @@ mod tests {
     }
 
     /// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_no_child_is_refused`.
-    /// A Tokio test: a lazy sqlx pool starts its reaper task at construction,
-    /// which needs a Tokio context.
     #[tokio::test]
     async fn a_worker_with_no_child_is_refused() {
         use crate::worker::executor::protocol::{
@@ -5072,8 +5070,8 @@ mod tests {
         database.drop().await;
     }
 
-    /// The startup coverage runs on the core pools: with the sqlx main pool
-    /// closed, the database start still completes.
+    /// The startup coverage runs on the core pools of a broker with a
+    /// separate session URL: the database start completes.
     #[tokio::test]
     #[serial]
     async fn startup_coverage_runs_on_the_session_pool() {
@@ -5102,7 +5100,6 @@ mod tests {
         )
         .await
         .expect("connect broker with a separate session pool");
-        broker.pool().close().await;
         let worker = start_test_worker(broker, main_url);
 
         worker

@@ -112,7 +112,6 @@ async fn a_split_session_url_passes_the_session_check_on_its_own_connection() {
     assert!(backends_named(&database, &main_name).await >= 1);
     assert!(backends_named(&database, &session_name).await >= 1);
     broker.close().await;
-    assert!(broker.pool().is_closed());
     drop(broker);
     database.drop().await;
 }

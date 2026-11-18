@@ -14,8 +14,7 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::periods::RetentionDays;
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 
-/// The sessions of the pools of [`migrated_pool`] and
-/// [`sqlx_migrated_pool`].
+/// The sessions of the pool of [`migrated_pool`].
 const POOL_CONNECTIONS: u32 = 5;
 
 /// The database of the running test (`crate::test_support::database_of_this_test`),
@@ -23,17 +22,6 @@ const POOL_CONNECTIONS: u32 = 5;
 pub(crate) async fn migrated_pool() -> TestPool {
     let database = crate::test_support::database_of_this_test().await;
     TestPoolOptions::new()
-        .max_connections(POOL_CONNECTIONS)
-        .connect(database.url())
-        .await
-        .expect("connect the database of this test")
-}
-
-/// [`migrated_pool`] as a sqlx pool, for the test modules that still hold
-/// one.
-pub(crate) async fn sqlx_migrated_pool() -> sqlx::PgPool {
-    let database = crate::test_support::database_of_this_test().await;
-    sqlx::postgres::PgPoolOptions::new()
         .max_connections(POOL_CONNECTIONS)
         .connect(database.url())
         .await

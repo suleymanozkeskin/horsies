@@ -1,9 +1,6 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Timelike, Utc};
-use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::ConnectOptions;
-use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -32,7 +29,7 @@ use crate::broker::enqueue_task::{
     decode_enqueue_outcome, enqueue_result, EnqueueKey, EnqueueStart, EnqueueTaskOutcome, SendKind,
     ENQUEUE_TASK,
 };
-use crate::broker::error::{is_retryable_sqlx_error, BrokerError, EnqueueRefusal};
+use crate::broker::error::{BrokerError, EnqueueRefusal};
 use crate::broker::health::{
     checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
     read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
@@ -69,7 +66,7 @@ use crate::broker::pools::{
 };
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, NotSentCause, ParameterType, Row,
-    StatementBound, StatementFailure, TypedStatement, WORKER_RESERVED_CONNECTIONS,
+    StatementBound, StatementFailure, TypedStatement,
 };
 
 /// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
@@ -681,159 +678,6 @@ static SESSION_CHECK_NOTIFY: TypedStatement = TypedStatement::new(
     &[ParameterType::Text],
 );
 
-/// A pooled connection that waited in the pool for longer than this is
-/// pinged before use when `pool_pre_ping` is on (Python
-/// `PRE_PING_AFTER_IDLE_S`, `python/horsies/core/defaults.py:28`). A connection used
-/// again within this time, and a new connection, are used with no ping.
-pub(crate) const PRE_PING_AFTER_IDLE: Duration = crate::db::DEFAULT_IDLE_PING_AFTER;
-
-/// Connect options for every broker pool, including the runtime pool in
-/// PgBouncer transaction mode.
-///
-/// The SQLx statement cache keeps its default capacity in every mode. SQLx
-/// prepares each query under a statement name whether or not the cache is
-/// enabled; with a capacity of zero it uses a new name for every execution and
-/// never closes it, so a pooler that tracks prepared statements holds one entry
-/// per execution until the client disconnects. With the cache, a connection
-/// holds at most the cache capacity and closes the oldest name on eviction.
-/// PgBouncer transaction mode therefore requires `max_prepared_statements > 0`.
-fn pg_connect_options(database_url: &str, echo: bool) -> Result<PgConnectOptions, BrokerError> {
-    let mut connect_options = PgConnectOptions::from_str(database_url).map_err(|error| {
-        BrokerError::InvalidConnectionSettings(
-            crate::core::config::PostgresConfigError::UnparseableUrl(error.to_string()),
-        )
-    })?;
-
-    if echo {
-        connect_options = connect_options.log_statements(log::LevelFilter::Debug);
-    } else {
-        connect_options = connect_options.log_statements(log::LevelFilter::Off);
-    }
-
-    Ok(connect_options)
-}
-
-/// Session setting for every Horsies connection that keeps its session: the
-/// statement layer's rule ([`crate::db::KEPT_SESSION_SETUP_SQL`]), so the
-/// sqlx pools and the core pools set the same session.
-const DISABLE_JIT_SQL: &str = crate::db::KEPT_SESSION_SETUP_SQL;
-
-/// Whether a pool's connections keep their own session settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionSettings {
-    /// A direct or session-capable connection: a `SET` holds for the session.
-    Kept,
-    /// PgBouncer transaction mode: server sessions are shared, so a session
-    /// `SET` would leak to other clients. JIT stays as the server configures it.
-    NotKept,
-}
-
-fn session_settings(config: &PostgresConfig) -> SessionSettings {
-    match config.pgbouncer_transaction_mode {
-        true => SessionSettings::NotKept,
-        false => SessionSettings::Kept,
-    }
-}
-
-fn with_session_settings(options: PgPoolOptions, settings: SessionSettings) -> PgPoolOptions {
-    match settings {
-        SessionSettings::NotKept => options,
-        SessionSettings::Kept => options.after_connect(|connection, _| {
-            Box::pin(async move {
-                sqlx::query(DISABLE_JIT_SQL).execute(connection).await?;
-                Ok(())
-            })
-        }),
-    }
-}
-
-/// With `pool_pre_ping` on, ping a pooled connection at checkout when it
-/// waited in the pool for longer than [`PRE_PING_AFTER_IDLE`]. A ping that
-/// fails closes that connection, and the checkout takes another one or opens
-/// a new one (Python `register_idle_ping`, `python/horsies/core/utils/db.py:165-222`).
-/// With it off, a dead pooled connection shows at its first statement as a
-/// retryable error.
-fn with_idle_ping(options: PgPoolOptions, pool_pre_ping: bool) -> PgPoolOptions {
-    let options = options.test_before_acquire(false);
-    match pool_pre_ping {
-        false => options,
-        true => options.before_acquire(|connection, metadata| {
-            Box::pin(async move {
-                if metadata.idle_for > PRE_PING_AFTER_IDLE {
-                    sqlx::Connection::ping(connection).await?;
-                }
-                Ok(true)
-            })
-        }),
-    }
-}
-
-/// The options shared by the runtime and the session pool, as Python builds
-/// both engines from one engine config (`python/horsies/core/brokers/postgres.py:
-/// 1343-1376`): `pool_size + max_overflow` connections, `pool_timeout` for a
-/// checkout, `pool_recycle` as the age at which a connection is retired, and
-/// the idle ping.
-fn pooled_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_idle_ping(
-        PgPoolOptions::new()
-            .max_connections(config.pool_size + config.max_overflow)
-            .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .max_lifetime(connection_lifetime(config.pool_recycle))
-            .idle_timeout(None),
-        config.pool_pre_ping,
-    )
-}
-
-/// The age at which the pool retires a connection, or `None` to keep it.
-fn connection_lifetime(recycle: crate::manifest::PoolRecycle) -> Option<Duration> {
-    match recycle {
-        crate::manifest::PoolRecycle::Never => None,
-        crate::manifest::PoolRecycle::AfterSeconds { seconds } => {
-            Some(Duration::from_secs(u64::from(seconds.get())))
-        }
-    }
-}
-
-fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(pooled_options(config), session_settings(config))
-}
-
-/// The session pool's URL is direct or session-capable (it carries LISTEN).
-/// It is sized as the runtime pool, as Python's session engine.
-fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(pooled_options(config), SessionSettings::Kept)
-}
-
-/// The runtime pool of a worker broker: the batch users get
-/// `pool_size + max_overflow - WORKER_RESERVED_CONNECTIONS` connections, as
-/// the worker profile pool's batch limit. The reaper and the per-task writes
-/// check out the reserve of the worker profile core pool.
-fn pg_worker_runtime_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    let batch_limit = config
-        .pool_size
-        .saturating_add(config.max_overflow)
-        .saturating_sub(WORKER_RESERVED_CONNECTIONS.get());
-    pg_pool_options(config).max_connections(batch_limit)
-}
-
-fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
-    // String-sniff deliberately: PgBouncer prepared-statement tracking failures
-    // do not have one stable SQLSTATE across "missing prepared statement",
-    // "already exists", and protocol-level variants.
-    err.to_string()
-        .to_lowercase()
-        .contains("prepared statement")
-}
-
-fn prepared_statement_tracking_error(err: sqlx::Error) -> BrokerError {
-    BrokerError::ConnectionFailed(format!(
-        "PgBouncer transaction mode requires protocol prepared-statement tracking \
-         (PgBouncer max_prepared_statements > 0). Configure PgBouncer prepared \
-         statement support, or use a direct/session-capable database_url for Rust \
-         SQLx clients: {err}",
-    ))
-}
-
 // ---------------------------------------------------------------------------
 // PostgresBroker
 // ---------------------------------------------------------------------------
@@ -1045,18 +889,9 @@ impl<'a> CheckedSend<'a> {
 
 /// PostgreSQL-backed task broker.
 ///
-/// Two sets of pools on the same URLs:
-/// - `core`: the statement layer's pools ([`crate::db::CorePool`], one per
-///   role). The broker's own moved call sites run on them.
-/// - `pool` and `session_pool`: sqlx pools. They are the adapter for the
-///   call sites that have not moved to the statement layer yet: the broker's
-///   lifecycle statements, the worker, the workflow engine, the scheduler,
-///   the web layer and the listeners, which borrow them through
-///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`]. The
-///   schema install runs on the core pools.
-///
-/// No pool connects when the broker is built: each opens its first
-/// connection at its first checkout.
+/// Every statement runs on the statement layer's pools (`core`:
+/// [`crate::db::CorePool`], one per role). No pool connects when the broker
+/// is built: each opens its first connection at its first checkout.
 ///
 /// Every LISTEN of the broker goes through the process listener of its
 /// session URL: one connection, shared with the other brokers of the process
@@ -1064,8 +899,6 @@ impl<'a> CheckedSend<'a> {
 pub struct PostgresBroker {
     core: CoreHandle,
     statement_log: StatementLog,
-    pool: PgPool,
-    session_pool: PgPool,
     pgbouncer_transaction_mode: bool,
     retain_rerun_input_default: bool,
     idempotency_reservation_window_micros: i64,
@@ -1089,109 +922,6 @@ pub struct PostgresBroker {
 }
 
 impl PostgresBroker {
-    /// Construct a test broker of `family` on the database of a test's sqlx
-    /// pool. The sqlx pool is the adapter pool; the core pools connect to the
-    /// same database ([`crate::broker::pools::handle_for_test_pool`]).
-    ///
-    /// The broker has no session URL, so it has no listener: result waits
-    /// poll, and an operation that needs a listener is refused with
-    /// [`ListenError::NoSessionUrl`]. Use
-    /// [`from_pool_and_session_url`](Self::from_pool_and_session_url) for a
-    /// broker with a listener.
-    #[cfg(test)]
-    pub fn from_pool(pool: PgPool, family: ClientFamily) -> Self {
-        Self::from_pool_with_schema_initialization_mode(
-            pool,
-            SchemaInitializationMode::MigrateAndValidate,
-            ProcessListener::without_session_url(),
-            family,
-        )
-    }
-
-    /// Construct a test broker of `family` on the database of a test's sqlx
-    /// pool, with its listener on `session_url`: the process listener of that
-    /// URL, which opens its connection at the first subscription with the
-    /// default socket settings (`DEFAULT_SOCKET_SETTINGS`). The URL is parsed
-    /// then.
-    #[cfg(test)]
-    pub fn from_pool_and_session_url(
-        pool: PgPool,
-        session_url: &str,
-        family: ClientFamily,
-    ) -> Self {
-        Self::from_pool_with_schema_initialization_mode(
-            pool,
-            SchemaInitializationMode::MigrateAndValidate,
-            ProcessListener::on_session_url(session_url, DEFAULT_SOCKET_SETTINGS),
-            family,
-        )
-    }
-
-    /// Construct a test monitoring broker of `family` that never applies
-    /// migrations or checks the fleet cutover gate. It has no session URL, so
-    /// it has no listener.
-    #[cfg(test)]
-    pub fn from_pool_observe_only(pool: PgPool, family: ClientFamily) -> Self {
-        Self::from_pool_with_schema_initialization_mode(
-            pool,
-            SchemaInitializationMode::ObserveOnly,
-            ProcessListener::without_session_url(),
-            family,
-        )
-    }
-
-    #[cfg(test)]
-    fn from_pool_with_schema_initialization_mode(
-        pool: PgPool,
-        schema_initialization_mode: SchemaInitializationMode,
-        listener: ProcessListener,
-        family: ClientFamily,
-    ) -> Self {
-        Self {
-            core: crate::broker::pools::handle_for_test_pool(&pool),
-            statement_log: StatementLog::Off,
-            session_pool: pool.clone(),
-            pool,
-            pgbouncer_transaction_mode: false,
-            retain_rerun_input_default: false,
-            idempotency_reservation_window_micros: IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
-            listener,
-            schema_initialized: tokio::sync::OnceCell::new(),
-            schema_initialization_mode,
-            install_coverage: default_install_coverage(),
-            client_family: family,
-            client_family_admitted: tokio::sync::OnceCell::new(),
-            result_reader: ResultReaderSeen::default(),
-        }
-    }
-
-    /// Construct a test broker of `family` with an explicit keyed-enqueue
-    /// reservation window. `None` selects the 24-hour contract default.
-    #[cfg(test)]
-    pub fn from_pool_with_idempotency_reservation_window(
-        pool: PgPool,
-        window: Option<chrono::Duration>,
-        family: ClientFamily,
-    ) -> Result<Self, BrokerError> {
-        Self::from_pool_with_enqueue_policy(pool, false, window, family)
-    }
-
-    /// Construct a test broker of `family` with both enqueue-time broker
-    /// policies.
-    #[cfg(test)]
-    pub fn from_pool_with_enqueue_policy(
-        pool: PgPool,
-        retain_rerun_input_default: bool,
-        window: Option<chrono::Duration>,
-        family: ClientFamily,
-    ) -> Result<Self, BrokerError> {
-        let micros = idempotency_reservation_window_micros(window)?;
-        let mut broker = Self::from_pool(pool, family);
-        broker.retain_rerun_input_default = retain_rerun_input_default;
-        broker.idempotency_reservation_window_micros = micros;
-        Ok(broker)
-    }
-
     /// Construct a test broker of `family` on the test database of `url`:
     /// the core pools of [`crate::broker::pools::handle_for_test_url`].
     ///
@@ -1241,9 +971,7 @@ impl PostgresBroker {
         )
     }
 
-    /// The test broker on `url`. Its sqlx adapter fields hold a pool that
-    /// connects at its first use; a test built from the URL never borrows
-    /// it.
+    /// The test broker on `url`.
     #[cfg(test)]
     fn from_test_url_with_schema_initialization_mode(
         url: &str,
@@ -1251,14 +979,9 @@ impl PostgresBroker {
         listener: ProcessListener,
         family: ClientFamily,
     ) -> Self {
-        let adapter = PgPoolOptions::new().connect_lazy_with(
-            pg_connect_options(url, false).expect("sqlx parses the test database URL"),
-        );
         Self {
             core: crate::broker::pools::handle_for_test_url(url),
             statement_log: StatementLog::Off,
-            session_pool: adapter.clone(),
-            pool: adapter,
             pgbouncer_transaction_mode: false,
             retain_rerun_input_default: false,
             idempotency_reservation_window_micros: IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
@@ -1388,10 +1111,8 @@ impl PostgresBroker {
         .await
     }
 
-    /// Checks the config and builds the core pools and the sqlx adapter
-    /// pools of a broker of `family`. Opens no connection: each pool connects
-    /// at its first checkout, so a broker whose operations all run on the
-    /// core pools holds no adapter connection.
+    /// Checks the config and builds the core pools of a broker of `family`.
+    /// Opens no connection: each pool connects at its first checkout.
     async fn connect_with_profile(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
@@ -1400,25 +1121,9 @@ impl PostgresBroker {
     ) -> Result<Self, BrokerError> {
         config.validate()?;
         let core = CoreHandle::open(config, profile)?;
-        let connect_options = pg_connect_options(&config.database_url, config.echo)?;
-        let runtime_options = match profile {
-            PoolProfile::Producer | PoolProfile::Child { .. } => pg_pool_options(config),
-            PoolProfile::Worker => pg_worker_runtime_pool_options(config),
-        };
-        let pool = runtime_options.connect_lazy_with(connect_options);
-
-        let session_pool = if config.effective_session_database_url() == config.database_url {
-            pool.clone()
-        } else {
-            let session_options =
-                pg_connect_options(config.effective_session_database_url(), config.echo)?;
-            pg_session_pool_options(config).connect_lazy_with(session_options)
-        };
         Ok(Self {
             core,
             statement_log: StatementLog::from_echo(config.echo),
-            pool,
-            session_pool,
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
             retain_rerun_input_default: config.retain_rerun_input_default,
             idempotency_reservation_window_micros: IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
@@ -1452,7 +1157,7 @@ impl PostgresBroker {
     /// Connect a broker of `family` with the schema behaviour and the
     /// keyed-enqueue reservation window of a client manifest, with the pools
     /// of `profile`: a producer, a worker process (the main URL pool keeps
-    /// [`WORKER_RESERVED_CONNECTIONS`] free from batch checkouts), or a
+    /// [`crate::db::WORKER_RESERVED_CONNECTIONS`] free from batch checkouts), or a
     /// worker's child. The window is checked before any database connection
     /// is attempted.
     pub async fn connect_with_policies(
@@ -1642,20 +1347,6 @@ impl PostgresBroker {
         self.schema_initialization_mode
     }
 
-    /// The sqlx pool on `database_url`: the adapter for call sites that
-    /// have not moved to the statement layer. Moved call sites use the core
-    /// pools.
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
-    }
-
-    /// The sqlx pool on the session URL, used for partition maintenance and
-    /// LISTEN/NOTIFY: the adapter for call sites that have not moved to the
-    /// statement layer.
-    pub fn session_pool(&self) -> &PgPool {
-        &self.session_pool
-    }
-
     /// The open core pools, for a lifecycle writer that runs on the main
     /// core pool ([`crate::broker::attempt_writes`]) or a workflow step
     /// (`workflow_engine::steps`), and the token of its write:
@@ -1689,8 +1380,7 @@ impl PostgresBroker {
     ///
     /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the
     /// moved call sites are producer and monitoring work, never the reaper or
-    /// a per-task write. Bound: the connection's own timeouts, as the sqlx
-    /// path.
+    /// a per-task write. Bound: the connection's own timeouts.
     ///
     /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
     /// its pools again; [`BrokerError::Statement`].
@@ -2414,9 +2104,6 @@ impl PostgresBroker {
     ///   the pools close and the handle is `Idle`. The next operation opens
     ///   new core pools. A read in flight that checks out again fails with
     ///   `PoolClosed`.
-    /// - The sqlx main pool closes as before and does not reopen; the call
-    ///   sites that still borrow it through [`PostgresBroker::pool`] fail
-    ///   after a close.
     ///
     /// Writes that did not end within the bound are logged with their count;
     /// their outcome is unknown.
@@ -2432,7 +2119,6 @@ impl PostgresBroker {
                 );
             }
         }
-        self.pool.close().await;
     }
 
     // -----------------------------------------------------------------------
@@ -4605,88 +4291,6 @@ mod terminal_at_stamp_tests {
 }
 
 #[cfg(test)]
-mod session_settings_tests {
-    use super::*;
-    use serial_test::serial;
-
-    fn config(database_url: String, pgbouncer_transaction_mode: bool) -> PostgresConfig {
-        PostgresConfig {
-            database_url,
-            session_database_url: None,
-            pgbouncer_transaction_mode,
-            pool_pre_ping: true,
-            worker_pool_pre_ping: false,
-            pool_size: 2,
-            max_overflow: 0,
-            retain_rerun_input_default: false,
-            pool_timeout: 30,
-            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
-            echo: false,
-            tcp_keepalives: Default::default(),
-            tcp_user_timeout: Default::default(),
-        }
-    }
-
-    async fn jit(pool: &PgPool) -> String {
-        sqlx::query_scalar("SELECT current_setting('jit')")
-            .fetch_one(pool)
-            .await
-            .expect("read jit setting")
-    }
-
-    #[test]
-    fn transaction_mode_pools_do_not_keep_session_settings() {
-        let url = "postgresql://postgres@localhost/horsies".to_owned();
-        assert_eq!(
-            session_settings(&config(url.clone(), false)),
-            SessionSettings::Kept
-        );
-        assert_eq!(
-            session_settings(&config(url, true)),
-            SessionSettings::NotKept
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn broker_pools_that_keep_session_settings_run_without_jit() {
-        let url = crate::test_support::migrated_database_url().await;
-        let separator = if url.contains('?') { '&' } else { '?' };
-        let mut config = config(url.clone(), false);
-        config.session_database_url = Some(format!("{url}{separator}application_name=jit_session"));
-        let broker = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
-            .await
-            .expect("connect broker");
-        assert_eq!(jit(broker.pool()).await, "off");
-        assert_eq!(jit(&broker.session_pool).await, "off");
-        broker.pool().close().await;
-        broker.session_pool.close().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn pools_that_do_not_keep_session_settings_keep_the_server_jit() {
-        let url = crate::test_support::migrated_database_url().await;
-        let options = PgConnectOptions::from_str(&url).expect("parse test URL");
-        let plain = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(options.clone())
-            .await
-            .expect("connect plain pool");
-        let not_kept = with_session_settings(
-            PgPoolOptions::new().max_connections(1),
-            SessionSettings::NotKept,
-        )
-        .connect_with(options)
-        .await
-        .expect("connect not-kept pool");
-        assert_eq!(jit(&not_kept).await, jit(&plain).await);
-        plain.close().await;
-        not_kept.close().await;
-    }
-}
-
-#[cfg(test)]
 mod broker_operation_error_tests {
     //! Python's catalog for broker operations: a refused argument is
     //! `INVALID_INPUT` with no database call, refused connection settings are
@@ -4742,18 +4346,28 @@ mod broker_operation_error_tests {
         assert!(!refused.is_retryable());
     }
 
-    #[test]
-    fn an_unparseable_url_is_refused_as_not_retryable() {
-        let refused = pg_connect_options("postgresql://horsies@127.0.0.1:notaport/horsies", false)
-            .err()
-            .expect("the port does not parse");
+    /// The statement layer parses the URL when the broker is built: a port
+    /// that is not a number is refused before any connection.
+    #[tokio::test]
+    async fn an_unparseable_url_is_refused_as_not_retryable() {
+        let refused = PostgresBroker::connect(
+            "postgresql://horsies@127.0.0.1:notaport/horsies",
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .err()
+        .expect("the port does not parse");
 
-        assert!(matches!(
-            refused,
-            BrokerError::InvalidConnectionSettings(
-                crate::core::config::PostgresConfigError::UnparseableUrl(_)
-            )
-        ));
+        assert!(
+            matches!(
+                &refused,
+                BrokerError::PoolSettings(crate::broker::pools::PoolSettingsError::Url {
+                    cause: crate::db::UrlError::InvalidPort { value },
+                    ..
+                }) if value == "notaport"
+            ),
+            "{refused:?}"
+        );
         assert!(!refused.is_retryable());
     }
 
@@ -4891,8 +4505,11 @@ mod connect_tests {
             .await
             .expect("a connect opens no connection, so it needs no server");
 
-        assert_eq!(broker.pool().size(), 0);
-        assert_eq!(broker.session_pool().size(), 0);
+        let open = broker
+            .core_pools_for_read()
+            .expect("the connect built the pools");
+        assert_eq!(open.main().status().open, 0);
+        assert_eq!(open.pools().session_work().status().open, 0);
     }
 
     #[tokio::test]
@@ -4904,8 +4521,11 @@ mod connect_tests {
             .await
             .expect("a connect opens no connection, so it needs no server");
 
-        assert_eq!(broker.pool().size(), 0);
-        assert_eq!(broker.session_pool().size(), 0);
+        let open = broker
+            .core_pools_for_read()
+            .expect("the connect built the pools");
+        assert_eq!(open.main().status().open, 0);
+        assert_eq!(open.pools().session_work().status().open, 0);
     }
 }
 
@@ -5277,134 +4897,6 @@ mod stale_and_expired_list_tests {
         );
         assert!(ours[0].enqueued_at < ours[0].good_until);
         clean(&pool, &task_name).await;
-    }
-}
-
-#[cfg(test)]
-mod pool_options_tests {
-    //! Python's pool rules (`python/horsies/core/brokers/postgres.py:1343-1404`,
-    //! `python/horsies/core/utils/db.py:165-222`): `pool_recycle` retires a
-    //! connection by age, the session pool is sized as the runtime pool, and
-    //! a connection idle for more than 1 s is pinged at checkout.
-    use super::*;
-    use serial_test::serial;
-
-    fn config(pool_pre_ping: bool) -> PostgresConfig {
-        let mut config = PostgresConfig::from_url("postgresql://horsies@127.0.0.1/horsies");
-        config.pool_size = 3;
-        config.max_overflow = 2;
-        config.pool_timeout = 7;
-        config.pool_recycle = crate::manifest::PoolRecycle::after_seconds(1_800);
-        config.pool_pre_ping = pool_pre_ping;
-        config
-    }
-
-    #[test]
-    fn pool_recycle_is_the_age_at_which_a_connection_retires() {
-        let options = pg_pool_options(&config(true));
-
-        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
-        assert_eq!(options.get_idle_timeout(), None);
-        assert_eq!(options.get_max_connections(), 5);
-        assert_eq!(options.get_acquire_timeout(), Duration::from_secs(7));
-    }
-
-    #[test]
-    fn a_pool_that_never_recycles_keeps_its_connections() {
-        let mut never = config(true);
-        never.pool_recycle = crate::manifest::PoolRecycle::Never;
-
-        assert_eq!(pg_pool_options(&never).get_max_lifetime(), None);
-        assert_eq!(pg_session_pool_options(&never).get_max_lifetime(), None);
-    }
-
-    #[test]
-    fn the_session_pool_is_sized_as_the_runtime_pool() {
-        let options = pg_session_pool_options(&config(true));
-
-        assert_eq!(options.get_max_connections(), 5);
-        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
-    }
-
-    /// The ping at every checkout is gone in both settings; with
-    /// `pool_pre_ping` on, the idle ping replaces it.
-    #[test]
-    fn no_pool_pings_at_every_checkout() {
-        assert!(!pg_pool_options(&config(true)).get_test_before_acquire());
-        assert!(!pg_pool_options(&config(false)).get_test_before_acquire());
-        assert!(!pg_session_pool_options(&config(true)).get_test_before_acquire());
-    }
-
-    async fn pool_on_test_database(pool_pre_ping: bool) -> PgPool {
-        let url = crate::test_support::migrated_database_url().await;
-        let mut config = PostgresConfig::from_url(url.clone());
-        config.pool_size = 1;
-        config.max_overflow = 0;
-        config.pool_pre_ping = pool_pre_ping;
-        pg_pool_options(&config)
-            .connect_with(pg_connect_options(&url, false).expect("parse test URL"))
-            .await
-            .expect("connect test pool")
-    }
-
-    async fn terminate(backend_pid: i32) {
-        let url = crate::test_support::migrated_database_url().await;
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect admin pool");
-        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
-            .bind(backend_pid)
-            .fetch_one(&admin)
-            .await
-            .expect("terminate the pooled backend");
-        assert!(terminated);
-        admin.close().await;
-    }
-
-    /// Python `test_idle_ping.py`: a pooled connection that died while it
-    /// waited more than 1 s is found by the ping and replaced at checkout,
-    /// so the statement runs on a new connection.
-    #[tokio::test]
-    #[serial]
-    async fn a_dead_connection_idle_over_one_second_is_replaced_at_checkout() {
-        let pool = pool_on_test_database(true).await;
-        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&pool)
-            .await
-            .expect("first statement");
-        terminate(first).await;
-        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
-
-        let second: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&pool)
-            .await
-            .expect("the idle ping replaces the dead connection");
-
-        assert_ne!(second, first);
-        pool.close().await;
-    }
-
-    /// With `pool_pre_ping` off, nothing checks the connection at checkout:
-    /// the first statement on the dead connection fails.
-    #[tokio::test]
-    #[serial]
-    async fn without_the_idle_ping_the_first_statement_meets_the_dead_connection() {
-        let pool = pool_on_test_database(false).await;
-        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&pool)
-            .await
-            .expect("first statement");
-        terminate(first).await;
-        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
-
-        let failed = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-            .fetch_one(&pool)
-            .await;
-
-        assert!(failed.is_err(), "the dead connection serves the statement");
-        pool.close().await;
     }
 }
 
@@ -5878,17 +5370,6 @@ mod task_info_code_tests {
             assert_eq!(mapped.code(), BrokerErrorCode::TaskInfoQueryFailed);
             assert!(!mapped.retryable());
         }
-    }
-
-    #[test]
-    fn a_database_failure_is_task_info_query_failed_with_the_driver_flag() {
-        let mapped = task_info_history_error(
-            TASK_INFO_TEST_ID,
-            BrokerError::Database(sqlx::Error::PoolTimedOut),
-        );
-
-        assert_eq!(mapped.code(), BrokerErrorCode::TaskInfoQueryFailed);
-        assert!(mapped.retryable());
     }
 
     #[test]

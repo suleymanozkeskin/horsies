@@ -1,4 +1,4 @@
-use crate::broker::{is_retryable_sqlx_error, BrokerError, ListenError, SessionCheckFailure};
+use crate::broker::{BrokerError, ListenError, SessionCheckFailure};
 use crate::worker::executor::placement::PlacementRefused;
 use crate::worker::executor::slots::{BaselineOverLimit, ChildrenStartFailed, PoolFailure};
 use crate::worker::executor::supervisor::SpawnerStartError;
@@ -10,10 +10,6 @@ pub enum WorkerError {
     /// Broker or database error.
     #[error("broker error: {0}")]
     Broker(#[from] BrokerError),
-
-    /// Direct database error from worker-owned queries.
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
 
     /// Task-history coverage or partition contract error.
     #[error("task-history error: {0}")]
@@ -115,7 +111,6 @@ impl WorkerError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Broker(e) => e.is_retryable(),
-            Self::Database(e) => is_retryable_sqlx_error(e),
             Self::History(error) => error.is_retryable(),
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,

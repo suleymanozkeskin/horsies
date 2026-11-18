@@ -29,6 +29,7 @@ use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{send_error_from_enqueue, TaskSendErrorCode, TaskSendPayload};
+use crate::db::{CheckoutClass, ParameterType, PooledConnection, StatementBound, TypedStatement};
 use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
 
 /// Enqueues of the transaction-pool test: enough statements to meet a
@@ -40,6 +41,36 @@ const SESSION_STATEMENTS: usize = 8;
 
 /// The advisory lock key of the session test (Python's key).
 const SESSION_LOCK_KEY: i64 = 918_273_645;
+
+/// The backend of a core connection.
+static BACKEND_PID: TypedStatement =
+    TypedStatement::new("test_backend_pid", "SELECT pg_backend_pid()", &[]);
+
+/// A session advisory lock on its key.
+static SESSION_LOCK: TypedStatement = TypedStatement::new(
+    "test_session_lock",
+    "SELECT pg_advisory_lock($1)",
+    &[ParameterType::Int8],
+);
+
+/// The release of the session advisory lock on its key.
+static SESSION_UNLOCK: TypedStatement = TypedStatement::new(
+    "test_session_unlock",
+    "SELECT pg_advisory_unlock($1)",
+    &[ParameterType::Int8],
+);
+
+/// The backend pid of the core connection `session`.
+async fn backend_pid(session: &mut PooledConnection) -> i32 {
+    let rows = session
+        .query(
+            &BACKEND_PID.bind().finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .expect("read the backend");
+    rows.first().expect("one row").get(0)
+}
 
 /// The URLs of one test database through each endpoint of the fixture.
 struct PgbouncerUrls {
@@ -221,36 +252,40 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
         .await
         .expect("the session URL delivers a NOTIFY");
 
-    // The session connection of the broker's sqlx session pool: this block
-    // moves to the core session pool with the removal of the sqlx pools.
-    let mut session = broker
-        .session_pool()
-        .acquire()
+    // A connection of the broker's core session pool keeps its server
+    // session: a session lock and the backend hold across its statements.
+    let pools = broker
+        .core_pools_for_read()
+        .expect("the broker's core pools");
+    let mut session = pools
+        .pools()
+        .session_work()
+        .checkout(CheckoutClass::Reserved)
         .await
         .expect("check out a session connection");
-    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *session)
-        .await
-        .expect("read the backend");
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(SESSION_LOCK_KEY)
-        .execute(&mut *session)
+    let backend = backend_pid(&mut session).await;
+    let _locked = session
+        .query(
+            &SESSION_LOCK.bind().value(&SESSION_LOCK_KEY).finish(),
+            StatementBound::ConnectionTimeouts,
+        )
         .await
         .expect("take the session lock");
     for _ in 0..SESSION_STATEMENTS {
-        let current: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *session)
-            .await
-            .expect("read the backend");
+        let current = backend_pid(&mut session).await;
         assert_eq!(current, backend, "the session connection changed backend");
     }
-    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
-        .bind(SESSION_LOCK_KEY)
-        .fetch_one(&mut *session)
+    let unlocked = session
+        .query(
+            &SESSION_UNLOCK.bind().value(&SESSION_LOCK_KEY).finish(),
+            StatementBound::ConnectionTimeouts,
+        )
         .await
         .expect("release the session lock");
+    let released: bool = unlocked.first().expect("the unlock returns one row").get(0);
     assert!(released, "the session lock was not held at the unlock");
     drop(session);
+    drop(pools);
 
     let mut task_ids = Vec::with_capacity(REPEATED_ENQUEUES);
     for index in 0..REPEATED_ENQUEUES {

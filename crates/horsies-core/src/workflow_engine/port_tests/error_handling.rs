@@ -710,8 +710,7 @@ async fn a_failure_in_the_middle_of_a_start_leaves_no_row() {
         matches!(
             &error,
             ClientStartError::Start(
-                WorkflowError::Database(_)
-                    | WorkflowError::Broker(_)
+                WorkflowError::Broker(_)
                     | WorkflowError::StepContract(_)
                     | WorkflowError::ChildSpecSource(_)
             )

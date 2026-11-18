@@ -1908,7 +1908,13 @@ mod orphan_audit_schedule_tests {
 
     #[test]
     fn transient_non_lock_failure_is_an_error_in_the_health_snapshot() {
-        let error = crate::broker::BrokerError::Database(sqlx::Error::PoolTimedOut);
+        let error = crate::broker::BrokerError::Statement(crate::db::StatementFailure::NotSent {
+            statement: "orphan_audit_page",
+            cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                role: crate::db::PoolRole::Main,
+                waited: std::time::Duration::from_secs(30),
+            }),
+        });
         let (kind, snapshot) = orphan_audit_failure_snapshot(&error, std::time::Instant::now());
 
         assert_eq!(kind, OrphanAuditFailureKind::Transient);

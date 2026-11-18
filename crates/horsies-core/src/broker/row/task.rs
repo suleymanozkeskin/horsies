@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
@@ -9,7 +8,7 @@ use crate::broker::error::BrokerError;
 use crate::broker::result_types::StoredEnvelopeText;
 
 /// Columns fetched for task info.
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 pub struct TaskInfoRow {
     pub id: Uuid,
     pub task_name: String,
@@ -93,7 +92,7 @@ pub fn parse_task_status(s: &str) -> Result<TaskStatus, BrokerError> {
 // ---------------------------------------------------------------------------
 
 /// Row returned by SELECT_TASK_ATTEMPTS_SQL.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TaskAttemptRow {
     pub task_id: Uuid,
     pub attempt: i32,
@@ -120,7 +119,7 @@ pub struct TaskAttemptRow {
 /// the configured threshold, indicating the worker may have crashed.
 /// `started_at` is set: the query selects only rows that started before the
 /// threshold. `last_heartbeat` is `None` for a task with no runner beat.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StaleTaskRow {
     pub id: Uuid,
     pub task_name: String,
@@ -135,7 +134,7 @@ pub struct StaleTaskRow {
 ///
 /// Represents a PENDING task whose `good_until` deadline has passed,
 /// meaning it will never be claimed by a worker.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExpiredTaskRow {
     pub id: Uuid,
     pub task_name: String,

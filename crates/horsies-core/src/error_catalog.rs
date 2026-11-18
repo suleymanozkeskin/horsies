@@ -248,8 +248,7 @@ impl ExceptionCause for WorkflowError {
     fn exception_value(&self) -> ExceptionValue {
         match self {
             Self::Broker(error) => error.exception_value(),
-            Self::Database(_)
-            | Self::Serialization(_)
+            Self::Serialization(_)
             | Self::WorkflowNotFound { .. }
             | Self::InvalidStatus(_)
             | Self::Validation(_)
@@ -976,46 +975,19 @@ mod tests {
         );
     }
 
-    /// A server error of the driver that carries a SQLSTATE and a primary
-    /// message, as the server sends it.
-    #[derive(Debug)]
-    struct ServerError {
-        code: &'static str,
-        message: &'static str,
-    }
-
-    impl std::fmt::Display for ServerError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.message)
-        }
-    }
-
-    impl std::error::Error for ServerError {}
-
-    impl sqlx::error::DatabaseError for ServerError {
-        fn message(&self) -> &str {
-            self.message
-        }
-
-        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
-            Some(std::borrow::Cow::Borrowed(self.code))
-        }
-
-        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
-            self
-        }
-
-        fn kind(&self) -> sqlx::error::ErrorKind {
-            sqlx::error::ErrorKind::Other
-        }
+    /// A statement that the server refused with a statement timeout
+    /// (SQLSTATE 57014), with the server's primary message.
+    async fn statement_timeout() -> BrokerError {
+        BrokerError::Statement(crate::db::StatementFailure::StatementRefused {
+            statement: "test_statement",
+            cause: crate::db::RefusalCause::Server(
+                crate::test_support::raised_server_error(
+                    "57014",
+                    "canceling statement due to statement timeout",
+                )
+                .await,
+            ),
+        })
     }
 
     const TASK: Uuid = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
@@ -1128,14 +1100,12 @@ mod tests {
     /// error: the message holds the error's text, and the exception is the
     /// core's class of each cause with the same text and the error's retry
     /// rule.
-    #[test]
-    fn a_database_failure_builds_its_exception_from_its_cause_for_each_cause() {
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_database_failure_builds_its_exception_from_its_cause_for_each_cause() {
         let cases = [
             (
-                BrokerError::Database(sqlx::Error::Database(Box::new(ServerError {
-                    code: "57014",
-                    message: "canceling statement due to statement timeout",
-                }))),
+                statement_timeout().await,
                 FailureCause::Server(crate::ServerErrorFacts::of_code(
                     "57014",
                     "canceling statement due to statement timeout".to_owned(),
@@ -1440,12 +1410,10 @@ mod tests {
     /// error inside it is that broker error with its own text; every other
     /// error is the core's class of its cause with the error's text and its
     /// retry rule.
-    #[test]
-    fn a_workflow_error_builds_the_core_class_of_its_cause() {
-        let statement = BrokerError::Database(sqlx::Error::Database(Box::new(ServerError {
-            code: "57014",
-            message: "canceling statement due to statement timeout",
-        })));
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_workflow_error_builds_the_core_class_of_its_cause() {
+        let statement = statement_timeout().await;
         let statement_text = statement.to_string();
         assert_eq!(
             WorkflowError::Broker(statement).exception_value(),
@@ -1474,13 +1442,18 @@ mod tests {
                 cause: FailureCause::ContractViolation,
             }
         );
-        let pool = WorkflowError::Database(sqlx::Error::PoolTimedOut);
+        let not_run = WorkflowError::ChildSpecSource(
+            crate::workflow_engine::child_spec::ChildSpecUnavailable::NotRun {
+                subject: "child build".to_owned(),
+                cause: "callback queue full".to_owned(),
+            },
+        );
         assert_eq!(
-            pool.exception_value(),
+            not_run.exception_value(),
             ExceptionValue::CoreFailure {
-                text: pool.to_string(),
+                text: not_run.to_string(),
                 retryable: true,
-                cause: pool.failure_cause(),
+                cause: not_run.failure_cause(),
             }
         );
     }

@@ -367,8 +367,7 @@ pub fn send_error_from_enqueue(
             message,
             owner_task_id: *owner_task_id,
         },
-        BrokerError::Database(_)
-        | BrokerError::SchemaRefused(_)
+        BrokerError::SchemaRefused(_)
         | BrokerError::InvalidWorkflowNodeStatus
         | BrokerError::IncompleteTaskHistoryCutover
         | BrokerError::InvalidStatus(_)
@@ -563,6 +562,14 @@ mod tests {
         assert!(error.resend_target().is_none());
     }
 
+    /// A failed enqueue statement that did not reach the server.
+    fn not_sent(cause: crate::db::NotSentCause) -> BrokerError {
+        BrokerError::Statement(crate::db::StatementFailure::NotSent {
+            statement: "enqueue_task",
+            cause,
+        })
+    }
+
     /// Python `test_task_decorator.py::test_retry_send_reuses_task_id_and_payload`:
     /// a resend carries the first send's task id and payload.
     #[test]
@@ -573,7 +580,12 @@ mod tests {
         let error = send_error_from_enqueue(
             task_id,
             payload,
-            &BrokerError::Database(sqlx::Error::PoolTimedOut),
+            &not_sent(crate::db::NotSentCause::Checkout(
+                crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: std::time::Duration::from_secs(30),
+                },
+            )),
         );
 
         assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
@@ -636,14 +648,32 @@ mod tests {
     /// cause, in both directions.
     #[test]
     fn a_failed_write_keeps_the_retry_flag_of_its_cause() {
-        for (cause, retryable) in [
-            (sqlx::Error::PoolTimedOut, true),
-            (sqlx::Error::Protocol("connection reset".to_owned()), true),
-            (sqlx::Error::PoolClosed, false),
-            (sqlx::Error::RowNotFound, false),
+        for (failure, retryable) in [
+            (
+                not_sent(crate::db::NotSentCause::Checkout(
+                    crate::db::CheckoutFailure::TimedOut {
+                        role: crate::db::PoolRole::Main,
+                        waited: std::time::Duration::from_secs(30),
+                    },
+                )),
+                true,
+            ),
+            (not_sent(crate::db::NotSentCause::ConnectionClosed), true),
+            (
+                not_sent(crate::db::NotSentCause::Checkout(
+                    crate::db::CheckoutFailure::PoolClosed {
+                        role: crate::db::PoolRole::Main,
+                    },
+                )),
+                false,
+            ),
+            (
+                BrokerError::RowDecode(crate::broker::RowDecodeError::NoRow {
+                    statement: "enqueue_task",
+                }),
+                false,
+            ),
         ] {
-            let failure = BrokerError::Database(cause);
-
             let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &failure);
 
             assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed, "{failure}");

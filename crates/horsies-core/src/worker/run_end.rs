@@ -165,12 +165,10 @@ fn boot_cause(error: &WorkerError) -> WorkerBootCause {
         WorkerError::Broker(
             BrokerError::ClientFamilyMismatch { .. } | BrokerError::UnknownStoredFamily(_),
         ) => WorkerBootCause::ClientFamilyRefused,
-        WorkerError::Broker(_) | WorkerError::Database(_) | WorkerError::History(_) => {
-            match error.is_retryable() {
-                true => WorkerBootCause::DatabaseUnavailable,
-                false => WorkerBootCause::DatabaseRefused,
-            }
-        }
+        WorkerError::Broker(_) | WorkerError::History(_) => match error.is_retryable() {
+            true => WorkerBootCause::DatabaseUnavailable,
+            false => WorkerBootCause::DatabaseRefused,
+        },
         WorkerError::Config(_) => WorkerBootCause::ConfigRefused,
         WorkerError::StartTimedOut { .. } => WorkerBootCause::StartTimedOut,
         WorkerError::PlacementRefused(_) => WorkerBootCause::PlacementRefused,

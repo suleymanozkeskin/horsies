@@ -1,67 +1,11 @@
 //! `WorkflowError::is_retryable`: one test per variant class.
 
-use std::borrow::Cow;
-
 use uuid::Uuid;
 
 use super::WorkflowError;
 use crate::broker::BrokerError;
 use crate::workflow_engine::child_spec::ChildSpecUnavailable;
 use crate::workflow_engine::steps::StepContractError;
-
-/// A database error that carries only a SQLSTATE, as the server sends it.
-#[derive(Debug)]
-struct ServerError {
-    code: &'static str,
-}
-
-impl std::fmt::Display for ServerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "server error {}", self.code)
-    }
-}
-
-impl std::error::Error for ServerError {}
-
-impl sqlx::error::DatabaseError for ServerError {
-    fn message(&self) -> &str {
-        "server error"
-    }
-
-    fn code(&self) -> Option<Cow<'_, str>> {
-        Some(Cow::Borrowed(self.code))
-    }
-
-    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-        self
-    }
-
-    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
-        self
-    }
-
-    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
-        self
-    }
-
-    fn kind(&self) -> sqlx::error::ErrorKind {
-        sqlx::error::ErrorKind::Other
-    }
-}
-
-fn database_error(code: &'static str) -> WorkflowError {
-    WorkflowError::Database(sqlx::Error::Database(Box::new(ServerError { code })))
-}
-
-#[test]
-fn a_database_error_with_a_serialization_failure_is_retryable() {
-    assert!(database_error("40001").is_retryable());
-}
-
-#[test]
-fn a_database_error_with_an_internal_error_is_not_retryable() {
-    assert!(!database_error("XX000").is_retryable());
-}
 
 #[test]
 fn a_broker_error_follows_the_broker_rule() {

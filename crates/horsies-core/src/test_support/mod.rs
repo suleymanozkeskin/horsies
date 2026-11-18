@@ -9,8 +9,6 @@ mod database;
 pub(crate) mod history;
 mod log_capture;
 pub(crate) mod sql;
-mod sqlx_bridge;
-pub(crate) mod sqlx_terminal_writes;
 pub(crate) mod terminal_writes;
 
 pub(crate) use database::{
@@ -142,27 +140,30 @@ pub(crate) async fn connect_collecting_notices(
     (client, notices)
 }
 
-/// A broker on the database of `pool` whose sqlx adapter pools are closed:
-/// every call that borrows them fails. A path that runs to its end on this
-/// broker runs on the core pools alone. The core pools connect at their first
-/// checkout.
-pub(crate) async fn broker_with_closed_sqlx_pools(
-    pool: &sqlx::PgPool,
-) -> crate::broker::PostgresBroker {
-    let adapter =
-        sqlx::postgres::PgPoolOptions::new().connect_lazy_with((*pool.connect_options()).clone());
-    adapter.close().await;
-    crate::broker::PostgresBroker::from_pool(adapter, ClientFamily::Rust)
-}
-
-/// A broker on the test database of `url` whose sqlx adapter pools are
-/// closed: every call that borrows them fails. A path that runs to its end on
-/// this broker runs on the core pools alone. The core pools connect at their
-/// first checkout.
-pub(crate) async fn broker_with_closed_sqlx_pools_on(url: &str) -> crate::broker::PostgresBroker {
-    let broker = crate::broker::PostgresBroker::from_test_url(url, ClientFamily::Rust);
-    broker.pool().close().await;
-    broker
+/// The server error of a statement that raises SQLSTATE `code` with the
+/// primary message `message`, on the test database of this test. `code` is
+/// five characters of `[0-9A-Z]` and `message` holds no quote.
+///
+/// # Panics
+///
+/// When the server does not raise: the test cannot run.
+pub(crate) async fn raised_server_error(
+    code: &str,
+    message: &str,
+) -> tokio_postgres::error::DbError {
+    let pool = migrated_pool().await;
+    let refused = sql::raw_sql(&format!(
+        "DO $$ BEGIN RAISE EXCEPTION '{message}' USING ERRCODE = '{code}'; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .expect_err("the server raises the SQLSTATE");
+    let error = refused
+        .as_database_error()
+        .expect("the refusal is a server error")
+        .clone();
+    pool.close().await;
+    error
 }
 
 /// Installs the schema into the template of this process: the
