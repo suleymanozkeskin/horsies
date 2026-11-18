@@ -1009,11 +1009,11 @@ class TestRunTaskEntryErrorPaths:
         err = parsed.get('err') or parsed.get('error')
         assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_RESOLUTION_ERROR.value}
 
-    def test_kwargs_json_invalid(
+    def test_input_json_invalid(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """Malformed kwargs_json → WORKER_SERIALIZATION_ERROR."""
+        """Malformed input_json → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
         _run_entry_defaults['input_json'] = '{{{bad'
 
@@ -1022,7 +1022,7 @@ class TestRunTaskEntryErrorPaths:
 
         assert _error_code(payload) == _SERIALIZATION_ERROR
 
-    def test_kwargs_json_lone_surrogate(
+    def test_input_json_lone_surrogate(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
@@ -1036,7 +1036,7 @@ class TestRunTaskEntryErrorPaths:
         assert 'lone surrogate' in _error_message(payload)
         assert 'WORKER_SERIALIZATION_ERROR' in payload
 
-    def test_kwargs_json_past_the_depth_bound(
+    def test_input_json_past_the_depth_bound(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
@@ -1052,7 +1052,7 @@ class TestRunTaskEntryErrorPaths:
         assert 'nested deeper than' in _error_message(payload)
         assert 'WORKER_SERIALIZATION_ERROR' in payload
 
-    def test_kwargs_json_number_outside_finite_binary64(
+    def test_input_json_number_outside_finite_binary64(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
@@ -1066,11 +1066,11 @@ class TestRunTaskEntryErrorPaths:
         assert 'finite binary64' in _error_message(payload)
         assert 'WORKER_SERIALIZATION_ERROR' in payload
 
-    def test_kwargs_json_not_a_dict(
+    def test_input_json_not_a_dict(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """kwargs_json is valid JSON but not a dict → WORKER_SERIALIZATION_ERROR."""
+        """input_json is valid JSON but not a dict → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
         _run_entry_defaults['input_json'] = '[1, 2]'
 
