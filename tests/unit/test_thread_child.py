@@ -25,6 +25,7 @@ from horsies.core.worker.child_frames import (
     DeadlineFiredFrame,
     RssMb,
     RssReading,
+    SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
     ThreadSeatWork,
@@ -354,21 +355,15 @@ class TestRunTable:
     @pytest.mark.parametrize(
         ('returned', 'end'),
         [
-            (
-                SetRunning(OK_WIRE),
-                SeatFinished(ok=True, result_json='"value"', failed_reason=None),
-            ),
-            (
-                StoppedBeforeRunning((False, '', 'CLAIM_LOST')),
-                SeatFinished(ok=False, result_json='', failed_reason='CLAIM_LOST'),
-            ),
+            (SetRunning(OK_END), OK_END),
+            (StoppedBeforeRunning('CLAIM_LOST'), StoppedBeforeRunning('CLAIM_LOST')),
         ],
     )
     def test_a_return_at_or_past_its_deadline_not_yet_fired_keeps_its_end(
         self,
         past_deadline_s: float,
         returned: ThreadSeatReturn,
-        end: SeatFinished,
+        end: SeatEnd,
     ) -> None:
         """Only a deadline that fired before the return makes the run a
         timeout. A return at or past a deadline that the deadline thread has
@@ -385,7 +380,7 @@ class TestRunTable:
         table.finish(1, RssMb(5.0))
 
         assert writer.frames == [
-            SharedResultFrame(dispatch=1, task_id='task-1', end=end, rss=RssMb(5.0)),
+            SharedResultFrame(dispatch=1, task_id=_task_id(1), end=end, rss=RssMb(5.0)),
         ]
 
     def test_a_run_that_stopped_before_running_writes_no_marker(self) -> None:
