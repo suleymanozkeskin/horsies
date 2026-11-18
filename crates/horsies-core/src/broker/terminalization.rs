@@ -1083,10 +1083,14 @@ mod catalog_tests {
     #[serial]
     async fn decoder_rejects_wrong_row_shape() {
         let pool = migrated_pool().await;
-        let row = sql::query(WRONG_ROW_SHAPE.sql())
-            .fetch_one(&pool)
+        // The sqlx decoder reads a sqlx row: this half stays on sqlx until
+        // the sqlx terminalization path goes.
+        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let row = sqlx::query(WRONG_ROW_SHAPE.sql())
+            .fetch_one(&sqlx_pool)
             .await
             .expect("query");
+        sqlx_pool.close().await;
         let err = decode_outcome_pg_row(&row).expect_err("a sqlx row of the wrong shape");
         assert!(err.to_string().contains("row shape"), "{err}");
 
