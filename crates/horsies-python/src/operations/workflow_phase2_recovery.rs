@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
 use crate::child_spec::PythonChildSpecSource;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// What one pass did. `pending_absent` counts the records that were gone
@@ -60,7 +61,12 @@ pub struct Phase2RecoveryFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `recover_workflow_phase2`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed pass.
+const SUBJECT: &str = "recover_workflow_phase2";
 
 /// The outcome of one pass.
 pub enum Phase2RecoveryOutcome {
@@ -95,6 +101,7 @@ fn recovery_outcome(
         (None, Err(error)) => Phase2RecoveryOutcome::Failed(Phase2RecoveryFailed {
             message: format!("phase-2 recovery pass failed: {error}"),
             retryable: error.is_retryable(),
+            exception: FailureException::of(SUBJECT, &error),
         }),
     }
 }
@@ -114,6 +121,7 @@ pub async fn recover_workflow_phase2_operation(
             return Phase2RecoveryOutcome::Failed(Phase2RecoveryFailed {
                 message: format!("phase-2 recovery pass failed: {error}"),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(SUBJECT, &error),
             })
         }
     };

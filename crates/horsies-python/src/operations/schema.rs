@@ -15,6 +15,9 @@ use pyo3::IntoPyObjectExt;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
+/// The subject of the exception of a failed install.
+const INSTALL_SUBJECT: &str = "install_schema";
+
 /// The migrations ran, and the database is at `version`.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
@@ -91,6 +94,7 @@ pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
         Ok(broker) => broker,
         Err(error) => {
             return InstallOutcome::Failed(BrokerFailure::from_broker_error(
+                INSTALL_SUBJECT,
                 BrokerErrorCode::SchemaInitFailed,
                 &error,
             ))
@@ -101,6 +105,7 @@ pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
             version: expected_schema_version(),
         }),
         Err(error) => InstallOutcome::Failed(BrokerFailure::from_broker_error(
+            INSTALL_SUBJECT,
             BrokerErrorCode::SchemaInitFailed,
             &error,
         )),

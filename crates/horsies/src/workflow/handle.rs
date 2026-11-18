@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::codec::from_json_str;
+use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
     process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperationError,
@@ -638,25 +639,25 @@ fn object_or_empty(value: Option<serde_json::Value>) -> serde_json::Map<String, 
 }
 
 /// The stored error of a workflow, read with user codes as text (Python
-/// `_decode_stored_workflow_error`). Pure.
+/// `_decode_stored_workflow_error`). Its `data` keeps the stored text. Pure.
 fn stored_error(workflow_id: Uuid, text: &str) -> Result<TaskError<UserCode>, WorkflowReadError> {
     let unreadable =
         |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
-    let value: serde_json::Value = from_json_str(text)
-        .map_err(|error| unreadable(format!("Workflow error payload corrupt: {error}")))?;
-    let stored = match value {
-        value @ serde_json::Value::Object(_) => horsies_core::TaskError::from_stored_value(value)
-            .map_err(|refused| {
-            unreadable(format!(
+    let stored =
+        horsies_core::TaskError::from_stored_text(text).map_err(|refused| match refused {
+            StoredErrorRefused::NotJson(error) => {
+                unreadable(format!("Workflow error payload corrupt: {error}"))
+            }
+            StoredErrorRefused::NotAnObject => {
+                unreadable("Workflow error payload is not a JSON object".to_owned())
+            }
+            refused @ (StoredErrorRefused::UnknownKey(_)
+            | StoredErrorRefused::MissingField(_)
+            | StoredErrorRefused::FieldInvalid { .. }
+            | StoredErrorRefused::UserValue { .. }) => unreadable(format!(
                 "Workflow error payload validation failed: {refused}"
-            ))
-        })?,
-        _ => {
-            return Err(unreadable(
-                "Workflow error payload is not a JSON object".to_owned(),
-            ))
-        }
-    };
+            )),
+        })?;
     TaskError::<UserCode>::from_stored(stored)
         .map_err(|cause| WorkflowReadError::UnknownUserCode { workflow_id, cause })
 }

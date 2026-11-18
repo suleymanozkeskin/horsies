@@ -117,9 +117,10 @@ impl fmt::Display for BootFailureCause {
                 f.write_str("the child could not create the event loop for async tasks")
             }
             Self::SpawnFailed => f.write_str("the OS refused to start the child process"),
-            Self::LostBeforeReady { loss, exit } => {
-                write!(f, "the child ended before it was ready ({loss}: {exit})")
-            }
+            // Python `describe_failure_cause`
+            // (`python/horsies/core/worker/slots.py:781`) names no loss: the
+            // detail of the boot failure carries the loss and the exit.
+            Self::LostBeforeReady { .. } => f.write_str("the child ended before it was ready"),
             Self::NotReadyInTime => f.write_str("the child was not ready in time"),
             Self::ProtocolMismatch(MismatchSeen::ReadyNamed(received)) => write!(
                 f,
@@ -202,6 +203,10 @@ pub fn boot_end_of(reply: BootReply) -> BootEnd {
     }
 }
 
+/// The detail of the failure is the text of `lost`. A forked child that did
+/// not reach the worker puts `the forked child did not reach the worker: `
+/// before that text (Python `boot_failure_of`,
+/// `python/horsies/core/worker/slots.py:2356-2362`).
 fn boot_end_of_loss(lost: &ChildLost) -> BootEnd {
     let exit_code = match lost.exit {
         ChildExit::Reaped(ReapedExit::ExitedWith(code)) => ChildExitCode::from_code(code),
@@ -209,15 +214,21 @@ fn boot_end_of_loss(lost: &ChildLost) -> BootEnd {
         | ChildExit::ReapedElsewhere
         | ChildExit::ExitUnknown => None,
     };
-    let cause = match (lost.cause, exit_code) {
-        (LossCause::ProtocolMismatch(received), _) => {
-            BootFailureCause::ProtocolMismatch(MismatchSeen::ReadyNamed(received))
-        }
+    let loss = lost.to_string();
+    let failure = match (lost.cause, exit_code) {
+        (LossCause::ProtocolMismatch(received), _) => BootFailure::new(
+            BootFailureCause::ProtocolMismatch(MismatchSeen::ReadyNamed(received)),
+            &loss,
+        ),
         (_, Some(ChildExitCode::ChildHookFailed)) => return BootEnd::ChildHookFailed,
-        (_, Some(ChildExitCode::ReparentFailed)) => BootFailureCause::SpawnFailed,
-        (_, Some(ChildExitCode::ProtocolMismatch)) => {
-            BootFailureCause::ProtocolMismatch(MismatchSeen::ChildRefusedInit)
-        }
+        (_, Some(ChildExitCode::ReparentFailed)) => BootFailure::new(
+            BootFailureCause::SpawnFailed,
+            &format!("the forked child did not reach the worker: {loss}"),
+        ),
+        (_, Some(ChildExitCode::ProtocolMismatch)) => BootFailure::new(
+            BootFailureCause::ProtocolMismatch(MismatchSeen::ChildRefusedInit),
+            &loss,
+        ),
         (
             _,
             Some(
@@ -228,12 +239,15 @@ fn boot_end_of_loss(lost: &ChildLost) -> BootEnd {
                 | ChildExitCode::BootFailed,
             )
             | None,
-        ) => BootFailureCause::LostBeforeReady {
-            loss: lost.cause,
-            exit: lost.exit,
-        },
+        ) => BootFailure::new(
+            BootFailureCause::LostBeforeReady {
+                loss: lost.cause,
+                exit: lost.exit,
+            },
+            &loss,
+        ),
     };
-    BootEnd::Failed(BootFailure::new(cause, &lost.to_string()))
+    BootEnd::Failed(failure)
 }
 
 /// The wait before the next boot after `kills_in_a_row` outside kills.

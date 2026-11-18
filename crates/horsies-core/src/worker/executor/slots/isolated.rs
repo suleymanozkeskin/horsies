@@ -42,8 +42,8 @@ use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
 use crate::worker::executor::protocol::{
-    BodyEnd, ChildFrame, FailureDetail, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
-    TaskTimeoutMs, ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
+    BodyEnd, ChildFrame, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame, TaskTimeoutMs,
+    ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{
     ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
@@ -501,12 +501,13 @@ async fn run_one(
             AfterRun::ChildGone(TasksFinished::NoTask)
         }
         FirstAnswer::DrainDeadline => {
+            // Python `_kill_at_deadline` kills with `kill_for_caller`, so the
+            // loss reads as a kill by the worker (`KILLED_BY_PARENT`), and
+            // `_finalize_child_loss` writes its crash reason.
             drop(held);
             shared.drain_kills.note([task_id]);
-            let crashed = AttemptEnd::Crashed {
-                reason: FailureDetail::cut("the worker killed the child at the drain deadline"),
-            };
-            answer.send(end_after_kill(shared, channel, crashed).await);
+            let lost = lost_after_kill(channel).await;
+            answer.send(end_of_loss(shared, channel, lost).await);
             AfterRun::ChildGone(TasksFinished::NoTask)
         }
     }

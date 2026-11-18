@@ -8,8 +8,8 @@ use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
 use super::outcome::{
-    killed_child_write, retry_request, task_error_write, timeout_recovery_write, timeout_write,
-    worker_failure_write, WriteStage,
+    crash_recovery_writes, killed_child_write, retry_request, task_error_write,
+    timeout_recovery_writes, timeout_write, worker_failure_write, WriteStage,
 };
 use super::pool::Answer;
 use super::scripted::{drop_bytes, exit_at_stop, take_init, ScriptCount};
@@ -511,12 +511,13 @@ fn a_killed_child_write_stores_the_task_and_the_worker() {
             "{code_text}"
         );
     }
-    let recovery = timeout_recovery_write(
+    let recovery = timeout_recovery_writes(
         &claimed,
         "worker-1",
         TaskTimeoutMs::new(1000).unwrap(),
         RetryPlacement::Isolated,
-    );
+    )
+    .first;
     assert_eq!(recovery.error_code.as_deref(), Some("TASK_TIMEOUT"));
     assert_eq!(stored_error_data(&recovery.result_json), expected);
 }
@@ -599,7 +600,8 @@ fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
         RetryPlacement::Isolated,
         TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal),
     );
-    let recovery = timeout_recovery_write(&claimed, "worker-1", timeout, RetryPlacement::Isolated);
+    let recovery =
+        timeout_recovery_writes(&claimed, "worker-1", timeout, RetryPlacement::Isolated).first;
     for write in [&first, &recovery] {
         assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
         assert_eq!(write.fence.claimed_at, claimed.claimed_at);
@@ -626,9 +628,88 @@ fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
         ..claimed
     };
     assert_eq!(
-        timeout_recovery_write(&spent, "worker-1", timeout, RetryPlacement::Isolated).retry,
+        timeout_recovery_writes(&spent, "worker-1", timeout, RetryPlacement::Isolated)
+            .first
+            .retry,
         RetryRequest::NoRetry
     );
+}
+
+/// The `err.message` of the error envelope that a failed-attempt write
+/// stores.
+fn stored_error_message(result_json: &str) -> serde_json::Value {
+    let stored: serde_json::Value =
+        serde_json::from_str(result_json).expect("a failed-attempt write stores a JSON envelope");
+    stored["err"]["message"].clone()
+}
+
+/// Python `_retry_finalize_future` (`python/horsies/core/worker/finalize.py:1957`):
+/// a crash-recovery write sent again after a database error stores
+/// `Retry after future-stage finalize error: ` and the message of the first
+/// send, as the error message and as the attempt's message and failed
+/// reason. The code, the retry, the fence and the error `data` are those of
+/// the first send. Each crash-recovery write has this form: a lost child, a
+/// loop kill, and crash recovery after the failed `TASK_TIMEOUT` writes.
+#[test]
+fn a_crash_recovery_write_sent_again_names_the_retry() {
+    let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
+    let lost = "Worker child lost: child died: exit code 9";
+    let crash = crash_recovery_writes(
+        &claimed,
+        "worker-1",
+        OperationalErrorCode::WorkerCrashed.into(),
+        lost.to_owned(),
+        RetryPlacement::SameClass,
+    );
+    let loop_kill = crash_recovery_writes(
+        &claimed,
+        "worker-1",
+        LoopKillCode::TaskBlockedLoop.code().into(),
+        "blocked".to_owned(),
+        RetryPlacement::Isolated,
+    );
+    let timeout = timeout_recovery_writes(
+        &claimed,
+        "worker-1",
+        TaskTimeoutMs::new(1000).unwrap(),
+        RetryPlacement::Isolated,
+    );
+    let expected = [
+        (
+            &crash,
+            lost,
+            "Retry after future-stage finalize error: Worker child lost: child died: exit code 9",
+        ),
+        (
+            &loop_kill,
+            "blocked",
+            "Retry after future-stage finalize error: blocked",
+        ),
+        (
+            &timeout,
+            "Task reached timeout_ms=1000, and the TASK_TIMEOUT write failed 4 times",
+            "Retry after future-stage finalize error: Task reached timeout_ms=1000, and the \
+             TASK_TIMEOUT write failed 4 times",
+        ),
+    ];
+
+    for (writes, first_text, retry_text) in expected {
+        let (first, retry) = (&writes.first, &writes.retry);
+        assert_eq!(first.attempt.error_message.as_deref(), Some(first_text));
+        assert_eq!(stored_error_message(&first.result_json), first_text);
+        assert_eq!(retry.attempt.error_message.as_deref(), Some(retry_text));
+        assert_eq!(retry.attempt.failed_reason.as_deref(), Some(retry_text));
+        assert_eq!(stored_error_message(&retry.result_json), retry_text);
+        assert_eq!(retry.error_code, first.error_code, "{retry_text}");
+        assert_eq!(retry.retry, first.retry, "{retry_text}");
+        assert_eq!(retry.fence, first.fence, "{retry_text}");
+        assert_eq!(retry.failed_reason, None, "{retry_text}");
+        assert_eq!(
+            stored_error_data(&retry.result_json),
+            stored_error_data(&first.result_json),
+            "{retry_text}"
+        );
+    }
 }
 
 #[test]

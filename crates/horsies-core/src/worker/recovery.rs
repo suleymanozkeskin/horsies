@@ -1593,15 +1593,17 @@ fn stale_attempt_command(
         error_code: OperationalErrorCode::WorkerCrashed.into(),
         message: Some(failed_reason.clone()),
         kind: TaskErrorKind::Plain,
-        data: Some(serde_json::json!({
-            "stale_threshold_ms": threshold_ms,
-            "stale_threshold_seconds": threshold_seconds,
-            "worker_pid": candidate.worker_pid,
-            "worker_hostname": candidate.worker_hostname,
-            "worker_id": candidate.claimed_by_worker_id,
-            "started_at": python_isoformat_utc(candidate.started_at),
-            "detected_at": python_isoformat_utc(candidate.db_now),
-        })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({
+                "stale_threshold_ms": threshold_ms,
+                "stale_threshold_seconds": threshold_seconds,
+                "worker_pid": candidate.worker_pid,
+                "worker_hostname": candidate.worker_hostname,
+                "worker_id": candidate.claimed_by_worker_id,
+                "started_at": python_isoformat_utc(candidate.started_at),
+                "detected_at": python_isoformat_utc(candidate.db_now),
+            }),
+        )),
     };
     let result_json = task_result_to_json_string(&TaskResult::<()>::Err(task_error))?;
     Ok(FinishStaleAttempt {

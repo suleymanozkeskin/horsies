@@ -6,6 +6,7 @@
 //! same rules, in the same order, and gives the first refusal that Python
 //! raises:
 //!
+//! - an empty text, before the scan (`EmptyJsonTextError`);
 //! - a `JSONDecodeError` of the scanner: its message, then the line, the
 //!   column and the index of the character (code points, not bytes);
 //! - the `ValueError` of an int literal with more than [`MAX_INT_DIGITS`]
@@ -62,6 +63,9 @@ impl PythonType {
 /// `JSON parse failed: `.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LoadsRefusal {
+    /// The text is empty (`EmptyJsonTextError`). An empty text is not JSON.
+    #[error("the text is empty")]
+    EmptyText,
     /// A `JSONDecodeError` of the scanner.
     #[error("{message}: {position}")]
     Decode {
@@ -152,11 +156,13 @@ impl std::fmt::Display for TextPosition {
 
 /// Scan `text` by the rules of Python's `loads_json`. `Ok` holds the type of
 /// the value that Python reads; `Err` the first refusal that Python raises.
-/// An empty text is a refusal here, with the text of the scanner;
-/// `loads_json` refuses it before the scan with its own text (`the text is
-/// empty`), so a caller decides what an empty text means before the scan.
-/// Pure.
+/// An empty text is [`LoadsRefusal::EmptyText`]: `loads_json` refuses it
+/// before the scan, with that text. A caller with a nullable column checks
+/// NULL before the call. Pure.
 pub fn check_python_loads(text: &str) -> Result<PythonType, LoadsRefusal> {
+    if text.is_empty() {
+        return Err(LoadsRefusal::EmptyText);
+    }
     let chars: Vec<char> = text.chars().collect();
     Scanner {
         chars: &chars,

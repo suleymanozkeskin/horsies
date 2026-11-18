@@ -10,11 +10,12 @@
 //! (`CLEANUP_FAILED` for a failure). A candidate whose statement fails is
 //! logged by the core and skipped, as Python does.
 
-use horsies_core::{BrokerError, StaleRunningPass, StaleRunningThresholds};
+use horsies_core::{BrokerError, FailureCause, StaleRunningPass, StaleRunningThresholds};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
 use super::arguments::threshold_ms;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The pass ended: the scan read fewer candidates than its batch.
@@ -45,13 +46,19 @@ pub struct StaleRunningScanFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `mark_stale_running`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed pass.
+const SUBJECT: &str = "mark_stale_running";
 
 impl StaleRunningScanFailed {
     fn from_broker_error(error: &BrokerError) -> Self {
         Self {
             message: error.to_string(),
             retryable: error.is_retryable(),
+            exception: FailureException::of(SUBJECT, error),
         }
     }
 }
@@ -122,6 +129,12 @@ pub async fn mark_stale_running_operation(
         Ok(thresholds) => thresholds,
         Err(message) => {
             return StaleRunningOutcome::Failed(StaleRunningScanFailed {
+                exception: FailureException::new(
+                    SUBJECT,
+                    message.clone(),
+                    false,
+                    FailureCause::PreconditionFailed,
+                ),
                 message,
                 retryable: false,
             })

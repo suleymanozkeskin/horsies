@@ -13,6 +13,9 @@ use uuid::Uuid;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
+/// The subject of the exception of a failed read.
+const SUBJECT: &str = "task_info";
+
 /// The optional parts of a task info read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskInfoParts {
@@ -185,6 +188,7 @@ pub async fn task_info_operation(
         Ok(broker) => broker,
         Err(error) => {
             return TaskInfoOutcome::Failed(BrokerFailure::from_broker_error(
+                SUBJECT,
                 BrokerErrorCode::TaskInfoQueryFailed,
                 &error,
             ))
@@ -200,7 +204,7 @@ pub async fn task_info_operation(
         Ok(TaskInfoRead::Absent { reason: _ }) => {
             TaskInfoOutcome::NotFound(TaskInfoNotFound { task_id })
         }
-        Err(error) => TaskInfoOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => TaskInfoOutcome::Failed(BrokerFailure::of_operation_error(SUBJECT, error)),
     }
 }
 

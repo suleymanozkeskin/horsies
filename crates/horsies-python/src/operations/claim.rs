@@ -23,6 +23,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The execution class of a class name: `ISOLATED`, `SHARED_ASYNC` or
@@ -199,7 +200,12 @@ pub struct ClaimPassFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `claim_pass`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed claim_pass.
+const SUBJECT: &str = "claim_pass";
 
 /// The outcome of one claim pass.
 pub enum ClaimPassOutcome {
@@ -224,6 +230,7 @@ fn failed(error: &BrokerError) -> ClaimPassOutcome {
     ClaimPassOutcome::Failed(ClaimPassFailed {
         message: error.to_string(),
         retryable: error.is_retryable(),
+        exception: FailureException::of(SUBJECT, error),
     })
 }
 

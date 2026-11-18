@@ -1383,7 +1383,12 @@ impl CoreHandle {
     ) -> PyResult<Bound<'py, PyAny>> {
         let threshold = match stale_threshold(threshold_minutes)? {
             Ok(threshold) => threshold,
-            Err(refused) => return done_future(py, BrokerFailure::from(refused.error())),
+            Err(refused) => {
+                return done_future(
+                    py,
+                    BrokerFailure::of_operation_error("get_stale_tasks", refused.error()),
+                )
+            }
         };
         let core = checked_core(py)?;
         call_async(
@@ -1563,6 +1568,7 @@ fn ping_database_operation(
             Ok(broker) => broker,
             Err(error) => {
                 return Outcome::Failed(BrokerFailure::from_broker_error(
+                    "ping_database",
                     BrokerErrorCode::DbPingFailed,
                     &error,
                 ))
@@ -1572,7 +1578,9 @@ fn ping_database_operation(
             Ok(ping) => Outcome::Done(DatabasePingRecord {
                 latency_ms: ping.latency_ms,
             }),
-            Err(error) => Outcome::Failed(BrokerFailure::from(error)),
+            Err(error) => {
+                Outcome::Failed(BrokerFailure::of_operation_error("ping_database", error))
+            }
         }
     }
 }

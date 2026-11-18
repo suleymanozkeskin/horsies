@@ -299,10 +299,12 @@ impl ArgsFromConflict {
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };
         TaskError {
-            data: Some(serde_json::json!({
-                "workflow_id": workflow_id.to_string(),
-                "task_index": task_index,
-            })),
+            data: Some(crate::core::codec::JsonText::of_engine_value(
+                &serde_json::json!({
+                    "workflow_id": workflow_id.to_string(),
+                    "task_index": task_index,
+                }),
+            )),
             ..TaskError::builtin(
                 OperationalErrorCode::WorkflowEnqueueFailed,
                 format!(
@@ -559,7 +561,9 @@ pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
     TaskError {
         exception: None,
         error_code: OutcomeCode::UpstreamSkipped.into(),
-        data: Some(serde_json::json!({ "dependency_index": dep_idx })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({ "dependency_index": dep_idx }),
+        )),
         message: Some("Upstream dependency was SKIPPED".to_owned()),
         kind: TaskErrorKind::Plain,
     }
@@ -580,7 +584,7 @@ pub(crate) fn missing_result_error(
     TaskError {
         exception: None,
         error_code: OperationalErrorCode::ResultDeserializationError.into(),
-        data: Some(serde_json::json!({ "dependency_index": dep_idx })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(&serde_json::json!({ "dependency_index": dep_idx }))),
         message: Some(format!(
             "Dependency node {node} (index {dep_idx}, task {task_name}) is {status} with no stored result"
         )),
@@ -850,7 +854,7 @@ mod tests {
             Some("args_from key 'x' conflicts with static kwarg (task 3)")
         );
         assert_eq!(
-            task.data,
+            task.data_value(),
             Some(json!({"workflow_id": workflow_id.to_string(), "task_index": 3}))
         );
         let child = conflict.node_error(workflow_id, 4, MergedNodeKind::SubWorkflow);
@@ -990,7 +994,7 @@ mod tests {
             error.message.as_deref(),
             Some("Upstream dependency was SKIPPED")
         );
-        assert_eq!(error.data, Some(json!({"dependency_index": 3})));
+        assert_eq!(error.data_value(), Some(json!({"dependency_index": 3})));
     }
 
     /// The entry of `horsies_workflow_source_value` (0005) and Python `_missing_result_entry`, for a NULL and an
@@ -1010,7 +1014,7 @@ mod tests {
                 );
                 assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
                 assert_eq!(error.message.as_deref(), Some(expected.as_str()));
-                assert_eq!(error.data, Some(json!({"dependency_index": 2})));
+                assert_eq!(error.data_value(), Some(json!({"dependency_index": 2})));
             }
         }
     }
@@ -1023,7 +1027,7 @@ mod tests {
             error.message.as_deref(),
             Some("Dependency node - (index 4, task produce) is COMPLETED with no stored result")
         );
-        assert_eq!(error.data, Some(json!({"dependency_index": 4})));
+        assert_eq!(error.data_value(), Some(json!({"dependency_index": 4})));
     }
 
     /// A child workflow's builder gets the result envelope, not the wrap (Python

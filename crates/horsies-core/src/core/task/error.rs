@@ -1,10 +1,12 @@
 use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 
 use crate::core::codec::user_value::{
-    check_user_value, check_user_value_text, UserValueRefused, MAX_VALUE_JSON_DEPTH,
+    check_user_value_text, UserValueRefused, MAX_VALUE_JSON_DEPTH,
 };
+use crate::core::codec::{check_json_text, object_members, JsonText, StrictJsonError};
 use crate::core::workflow::summary::SubWorkflowSummary;
 
 // =============================================================================
@@ -571,8 +573,9 @@ pub struct TaskError {
     /// Error code identifying the failure category. Required: the retry rule and outcome routing read it.
     pub error_code: TaskErrorCode,
 
-    /// Error data.
-    pub data: Option<serde_json::Value>,
+    /// Error data, as the text it was written or stored with: an integer outside the `i64` and `u64` range
+    /// keeps every digit.
+    pub data: Option<JsonText>,
 
     /// Human-readable error message.
     pub message: Option<String>,
@@ -584,6 +587,9 @@ pub struct TaskError {
 /// Why a stored error object does not read as a [`TaskError`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoredErrorRefused {
+    /// The stored text breaks the strict read rule.
+    #[error("a stored task error is not strict JSON: {0}")]
+    NotJson(StrictJsonError),
     /// The stored error is not a JSON object.
     #[error("a stored task error must be a JSON object")]
     NotAnObject,
@@ -651,7 +657,7 @@ impl TaskError {
     fn data_refusal(&self) -> Option<UserValueRefused> {
         self.data
             .as_ref()
-            .and_then(|data| check_user_value(data, ERROR_DATA_DEPTH_LIMIT).err())
+            .and_then(|data| check_user_value_text(data, ERROR_DATA_DEPTH_LIMIT).err())
     }
 
     fn summary_output_refusal(&self) -> Option<UserValueRefused> {
@@ -665,36 +671,33 @@ impl TaskError {
         }
     }
 
-    /// Read a stored error object (Python `decode_task_error`, `core/codec/typed.py:1078-1130`).
+    /// Read a stored error object from its text (Python `loads_json`, then `decode_task_error`,
+    /// `core/codec/typed.py:1078-1130`). The `data` and the output of a sub-workflow summary keep their stored
+    /// text: no user value is read into a `serde_json::Value`.
     ///
     /// The object is a sub-workflow error when it has `sub_workflow_id`; then both sub-workflow fields are
-    /// required. `exception`, `data` and `message` may be missing or `null`.
-    pub fn from_stored_value(value: serde_json::Value) -> Result<Self, StoredErrorRefused> {
-        let serde_json::Value::Object(mut fields) = value else {
-            return Err(StoredErrorRefused::NotAnObject);
-        };
-        let is_sub_workflow = fields.contains_key(SUB_WORKFLOW_ID_KEY);
-        if let Some(key) = fields
-            .keys()
-            .find(|key| !is_stored_error_key(key, is_sub_workflow))
+    /// required. `exception`, `data` and `message` may be missing or `null`. Pure.
+    pub fn from_stored_text(text: &str) -> Result<Self, StoredErrorRefused> {
+        check_json_text(text).map_err(StoredErrorRefused::NotJson)?;
+        // The text is strict JSON, so it does not read as members only when it is not an object.
+        let members =
+            object_members(text).map_err(|_not_an_object| StoredErrorRefused::NotAnObject)?;
+        let is_sub_workflow = members
+            .iter()
+            .any(|(key, _value)| key.as_str() == SUB_WORKFLOW_ID_KEY);
+        if let Some((key, _value)) = members
+            .iter()
+            .find(|(key, _value)| !is_stored_error_key(key, is_sub_workflow))
         {
             return Err(StoredErrorRefused::UnknownKey(key.clone()));
         }
-        let error_code: TaskErrorCode = required_field(&mut fields, ERROR_CODE_KEY)?;
-        let exception: Option<ExceptionRecord> = optional_field(&mut fields, EXCEPTION_KEY)?;
-        let message: Option<String> = optional_field(&mut fields, MESSAGE_KEY)?;
-        let data: Option<serde_json::Value> = optional_field(&mut fields, DATA_KEY)?;
-        if let Some(data) = &data {
-            check_user_value(data, ERROR_DATA_DEPTH_LIMIT).map_err(|refusal| {
-                StoredErrorRefused::UserValue {
-                    field: DATA_KEY,
-                    refusal,
-                }
-            })?;
-        }
+        let error_code: TaskErrorCode = required_field(&members, ERROR_CODE_KEY)?;
+        let exception: Option<ExceptionRecord> = optional_field(&members, EXCEPTION_KEY)?;
+        let message: Option<String> = optional_field(&members, MESSAGE_KEY)?;
+        let data = stored_data(&members)?;
         let kind = match is_sub_workflow {
             false => TaskErrorKind::Plain,
-            true => TaskErrorKind::SubWorkflow(read_sub_workflow_failure(&mut fields)?),
+            true => TaskErrorKind::SubWorkflow(read_sub_workflow_failure(&members)?),
         };
         Ok(Self {
             exception,
@@ -702,6 +705,17 @@ impl TaskError {
             data,
             message,
             kind,
+        })
+    }
+}
+
+#[cfg(test)]
+impl TaskError {
+    /// The `data` decoded as a JSON value, for a test that compares it with `serde_json::json!`.
+    pub(crate) fn data_value(&self) -> Option<serde_json::Value> {
+        self.data.as_ref().map(|data| {
+            data.decode()
+                .expect("the data of a task error decodes as a JSON value")
         })
     }
 }
@@ -714,40 +728,68 @@ fn is_stored_error_key(key: &str, is_sub_workflow: bool) -> bool {
     }
 }
 
+/// The text of the member `key` of a stored error, or `None` when it has no such member. Pure.
+fn member<'a>(members: &[(String, &'a RawValue)], key: &str) -> Option<&'a RawValue> {
+    members
+        .iter()
+        .find(|(name, _value)| name.as_str() == key)
+        .map(|(_name, value)| *value)
+}
+
+/// A field that a stored error must have, decoded from its text. Pure.
 fn required_field<T: DeserializeOwned>(
-    fields: &mut serde_json::Map<String, serde_json::Value>,
+    members: &[(String, &RawValue)],
     field: &'static str,
 ) -> Result<T, StoredErrorRefused> {
-    let value = fields
-        .remove(field)
-        .ok_or(StoredErrorRefused::MissingField(field))?;
-    serde_json::from_value(value).map_err(|error| StoredErrorRefused::FieldInvalid {
+    let text = member(members, field).ok_or(StoredErrorRefused::MissingField(field))?;
+    decode_field(text, field)
+}
+
+/// A field that a stored error may leave out or set to `null`, decoded from its text. Pure.
+fn optional_field<T: DeserializeOwned>(
+    members: &[(String, &RawValue)],
+    field: &'static str,
+) -> Result<Option<T>, StoredErrorRefused> {
+    match member(members, field) {
+        None => Ok(None),
+        Some(text) => decode_field::<Option<T>>(text, field),
+    }
+}
+
+/// The value of one field from its text. Pure.
+fn decode_field<T: DeserializeOwned>(
+    text: &RawValue,
+    field: &'static str,
+) -> Result<T, StoredErrorRefused> {
+    serde_json::from_str(text.get()).map_err(|error| StoredErrorRefused::FieldInvalid {
         field,
         cause: error.to_string(),
     })
 }
 
-fn optional_field<T: DeserializeOwned>(
-    fields: &mut serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-) -> Result<Option<T>, StoredErrorRefused> {
-    match fields.remove(field) {
-        None => Ok(None),
-        Some(value) => serde_json::from_value::<Option<T>>(value).map_err(|error| {
-            StoredErrorRefused::FieldInvalid {
-                field,
-                cause: error.to_string(),
-            }
-        }),
-    }
+/// The `data` of a stored error as its stored text, `None` when it is missing or `null`. It follows the rules of
+/// a user value with [`ERROR_DATA_DEPTH_LIMIT`] levels. Pure.
+fn stored_data(members: &[(String, &RawValue)]) -> Result<Option<JsonText>, StoredErrorRefused> {
+    let data = match member(members, DATA_KEY) {
+        None => return Ok(None),
+        Some(text) if text.get() == "null" => return Ok(None),
+        Some(text) => JsonText::of_checked_part(text),
+    };
+    check_user_value_text(&data, ERROR_DATA_DEPTH_LIMIT).map_err(|refusal| {
+        StoredErrorRefused::UserValue {
+            field: DATA_KEY,
+            refusal,
+        }
+    })?;
+    Ok(Some(data))
 }
 
 fn read_sub_workflow_failure(
-    fields: &mut serde_json::Map<String, serde_json::Value>,
+    members: &[(String, &RawValue)],
 ) -> Result<SubWorkflowFailure, StoredErrorRefused> {
-    let sub_workflow_id: uuid::Uuid = required_field(fields, SUB_WORKFLOW_ID_KEY)?;
+    let sub_workflow_id: uuid::Uuid = required_field(members, SUB_WORKFLOW_ID_KEY)?;
     let sub_workflow_summary: SubWorkflowSummary =
-        required_field(fields, SUB_WORKFLOW_SUMMARY_KEY)?;
+        required_field(members, SUB_WORKFLOW_SUMMARY_KEY)?;
     if let Some(output) = &sub_workflow_summary.output {
         check_user_value_text(output, SUMMARY_OUTPUT_DEPTH_LIMIT).map_err(|refusal| {
             StoredErrorRefused::UserValue {
@@ -765,7 +807,7 @@ fn read_sub_workflow_failure(
 /// The `data` slot of a stored error.
 enum StoredData<'a> {
     /// The error's own `data`, or `null`.
-    Kept(Option<&'a serde_json::Value>),
+    Kept(Option<&'a JsonText>),
     /// `{"data_refused": <cause>}`.
     Refused(&'static str),
 }
@@ -814,14 +856,13 @@ impl Serialize for TaskError {
     }
 }
 
-/// Reads the stored form through [`TaskError::from_stored_value`]. The object is taken as raw text and read by
-/// the core's strict reader, so its depth bound is the core's, not the caller's deserializer's.
+/// Reads the stored form through [`TaskError::from_stored_text`]. The object is taken as raw text and read by
+/// the core's strict reader, so its depth bound is the core's, not the caller's deserializer's, and the `data`
+/// keeps its text.
 impl<'de> Deserialize<'de> for TaskError {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
-        let value: serde_json::Value =
-            crate::core::codec::from_json_str(raw.get()).map_err(D::Error::custom)?;
-        Self::from_stored_value(value).map_err(D::Error::custom)
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        Self::from_stored_text(raw.get()).map_err(D::Error::custom)
     }
 }
 
@@ -846,6 +887,11 @@ mod tests {
 
     fn user_code(text: &str) -> TaskErrorCode {
         TaskErrorCode::User(UserCode::parse(text).unwrap())
+    }
+
+    /// The text of a JSON value, as the `data` of an error.
+    fn text(value: serde_json::Value) -> JsonText {
+        JsonText::of(&value).unwrap()
     }
 
     fn failed_summary() -> SubWorkflowSummary {
@@ -1002,7 +1048,7 @@ mod tests {
             r#"{"exception":null,"error_code":"RATE_LIMITED","data":null,"message":"slow down"}"#
         );
         let builtin = TaskError {
-            data: Some(json!({"elapsed_ms": 5000})),
+            data: Some(text(json!({"elapsed_ms": 5000}))),
             message: None,
             ..TaskError::builtin(RetrievalCode::WaitTimeout, "")
         };
@@ -1023,7 +1069,7 @@ mod tests {
                 traceback: "Traceback (most recent call last):\n".to_owned(),
             }),
             error_code: RetrievalCode::WaitTimeout.into(),
-            data: Some(json!({"elapsed_ms": 5000})),
+            data: Some(text(json!({"elapsed_ms": 5000}))),
             message: Some("timeout".to_owned()),
             kind: TaskErrorKind::Plain,
         };
@@ -1068,8 +1114,7 @@ mod tests {
                 StoredErrorRefused::MissingField(SUB_WORKFLOW_SUMMARY_KEY),
             ),
         ] {
-            let value: serde_json::Value = serde_json::from_str(text).unwrap();
-            assert_eq!(TaskError::from_stored_value(value), Err(refusal), "{text}");
+            assert_eq!(TaskError::from_stored_text(text), Err(refusal), "{text}");
         }
         for text in [
             r#"{"error_code":null}"#,
@@ -1098,7 +1143,7 @@ mod tests {
             (nested_list(250), "ValueValidationError"),
         ] {
             let err = TaskError {
-                data: Some(data),
+                data: Some(text(data)),
                 ..TaskError::new("RATE_LIMITED", "m").unwrap()
             };
             let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
@@ -1117,12 +1162,12 @@ mod tests {
     fn data_of_199_levels_is_kept() {
         let data = nested_list(ERROR_DATA_DEPTH_LIMIT);
         let err = TaskError {
-            data: Some(data.clone()),
+            data: Some(text(data.clone())),
             ..TaskError::builtin(OperationalErrorCode::BrokerError, "m")
         };
         assert_eq!(err.storage_refusal(), None);
         let back: TaskError = serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
-        assert_eq!(back.data, Some(data));
+        assert_eq!(back.data, Some(text(data)));
     }
 
     #[test]
@@ -1134,13 +1179,48 @@ mod tests {
             json!(5),
         ] {
             let err = TaskError {
-                data: Some(data.clone()),
+                data: Some(text(data.clone())),
                 ..TaskError::new("RATE_LIMITED", "m").unwrap()
             };
             let back: TaskError =
                 serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
-            assert_eq!(back.data, Some(data));
+            assert_eq!(back.data, Some(text(data)));
         }
+    }
+
+    /// A stored `data` outside the `i64` and `u64` range keeps its stored text through the read and the write,
+    /// and decodes as `u128` or `i128`.
+    #[test]
+    fn data_outside_i64_and_u64_keeps_its_stored_text() {
+        for data in [
+            "340282366920938463463374607431768211455",
+            r#"{"below": -9223372036854775809}"#,
+        ] {
+            let stored = format!(
+                r#"{{"exception":null,"error_code":"RATE_LIMITED","data":{data},"message":"m"}}"#
+            );
+            let read = TaskError::from_stored_text(&stored).unwrap();
+            assert_eq!(read.data.as_ref().map(JsonText::get), Some(data));
+            assert_eq!(serde_json::to_string(&read).unwrap(), stored);
+            let via_serde: TaskError = serde_json::from_str(&stored).unwrap();
+            assert_eq!(via_serde, read);
+        }
+        let wide = TaskError::from_stored_text(
+            r#"{"error_code":"X","data":340282366920938463463374607431768211455}"#,
+        )
+        .unwrap();
+        assert_eq!(wide.data.unwrap().decode::<u128>().unwrap(), u128::MAX);
+        let written = TaskError {
+            data: Some(JsonText::of(&(i128::from(i64::MIN) - 1)).unwrap()),
+            ..TaskError::new("RATE_LIMITED", "m").unwrap()
+        };
+        let envelope =
+            crate::core::codec::task_result_to_json_string(&TaskResult::<()>::Err(written))
+                .unwrap();
+        assert!(
+            envelope.contains(r#""data":-9223372036854775809,"#),
+            "{envelope}"
+        );
     }
 
     /// Python decodes `data` with the reserved-key scan: a stored error with an engine key in `data` does not
@@ -1227,7 +1307,7 @@ mod tests {
             stored["data"],
             json!({ DATA_REFUSED_KEY: "StrictJsonError" })
         );
-        let back = TaskError::from_stored_value(stored).unwrap();
+        let back = TaskError::from_stored_text(&stored.to_string()).unwrap();
         assert_eq!(
             back.error_code,
             TaskErrorCode::from(OutcomeCode::SubworkflowFailed)

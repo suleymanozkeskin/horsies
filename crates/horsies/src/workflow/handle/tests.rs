@@ -332,7 +332,13 @@ fn an_outputless_entry_without_a_payload_a_task_name_or_an_envelope_names_its_no
             "RESULT_DESERIALIZATION_ERROR",
             "{node}"
         );
-        assert_eq!(error.data(), Some(&json!({ "node_id": node })), "{node}");
+        assert_eq!(
+            error
+                .data()
+                .map(|data| data.decode::<serde_json::Value>().unwrap()),
+            Some(json!({ "node_id": node })),
+            "{node}"
+        );
     }
 }
 

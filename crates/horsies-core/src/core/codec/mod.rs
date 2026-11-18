@@ -8,7 +8,7 @@ pub(crate) mod python_loads;
 mod strict;
 mod strict_read;
 pub mod user_value;
-pub use json_text::JsonText;
+pub use json_text::{JsonText, JsonTextRefused};
 pub(crate) use object_members::object_members;
 pub use strict::{to_json_bytes_strict, to_json_value_strict};
 pub use strict_read::{

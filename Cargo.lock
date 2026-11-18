@@ -1049,6 +1049,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsies-docs-check"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "horsies",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-postgres",
+ "uuid",
+]
+
+[[package]]
 name = "horsies-examples"
 version = "0.1.0-alpha.1"
 dependencies = [

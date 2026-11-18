@@ -16,6 +16,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and
@@ -69,6 +70,42 @@ pub struct HandleFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the handle operation as its subject (for example
+    /// `pause_workflow`).
+    pub exception: FailureException,
+}
+
+impl HandleFailed {
+    /// The record of a handle error of the operation `subject`. Pure.
+    pub fn of_handle_error(
+        subject: &'static str,
+        workflow_id: Uuid,
+        error: &HandleOperationError,
+    ) -> Self {
+        Self {
+            workflow_id,
+            code: error.code.wire_value().to_owned(),
+            message: error.message.clone(),
+            retryable: error.retryable,
+            exception: FailureException::of_handle_error(subject, error),
+        }
+    }
+
+    /// The record of a failed connect of the operation `subject`: no
+    /// statement ran. Pure.
+    pub fn of_connect_error(
+        subject: &'static str,
+        workflow_id: Uuid,
+        error: &horsies_core::BrokerError,
+    ) -> Self {
+        Self {
+            workflow_id,
+            code: HandleErrorCode::DbOperationFailed.wire_value().to_owned(),
+            message: error.to_string(),
+            retryable: error.is_retryable(),
+            exception: FailureException::of(subject, error),
+        }
+    }
 }
 
 /// The operation whose answer a record reads.
@@ -76,6 +113,16 @@ pub struct HandleFailed {
 enum Transition {
     Pause,
     Cancel,
+}
+
+impl Transition {
+    /// The subject of the exception of a failed transition.
+    const fn subject(self) -> &'static str {
+        match self {
+            Self::Pause => "pause_workflow",
+            Self::Cancel => "cancel_workflow",
+        }
+    }
 }
 
 /// The outcome of one pause or cancel.
@@ -110,18 +157,21 @@ impl<'py> IntoPyObject<'py> for WorkflowTransitionOutcome {
 /// Panics: a code that the core gives only for another operation
 /// (`RESUME_RECOVERY_FAILED`) or only in Python (`LOOP_RUNNER_FAILED`,
 /// `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`): a defect of the core.
-fn failed_record(workflow_id: Uuid, error: &HandleOperationError) -> WorkflowTransitionOutcome {
+fn failed_record(
+    transition: Transition,
+    workflow_id: Uuid,
+    error: &HandleOperationError,
+) -> WorkflowTransitionOutcome {
     match error.code {
         HandleErrorCode::WorkflowNotFound => {
             WorkflowTransitionOutcome::Absent(WorkflowAbsent { workflow_id })
         }
         HandleErrorCode::DbOperationFailed | HandleErrorCode::StoredDataInvalid => {
-            WorkflowTransitionOutcome::Failed(HandleFailed {
+            WorkflowTransitionOutcome::Failed(HandleFailed::of_handle_error(
+                transition.subject(),
                 workflow_id,
-                code: error.code.wire_value().to_owned(),
-                message: error.message.clone(),
-                retryable: error.retryable,
-            })
+                error,
+            ))
         }
         HandleErrorCode::ResumeRecoveryFailed
         | HandleErrorCode::LoopRunnerFailed
@@ -152,21 +202,21 @@ fn transition_outcome(
         (Transition::Cancel, Ok(false)) => {
             WorkflowTransitionOutcome::NotCancellable(WorkflowNotCancellable { workflow_id })
         }
-        (_, Err(error)) => failed_record(workflow_id, &error),
+        (_, Err(error)) => failed_record(transition, workflow_id, &error),
     }
 }
 
 /// The record of a failed connect. Pure.
 fn connect_failed(
+    transition: Transition,
     workflow_id: Uuid,
     error: &horsies_core::BrokerError,
 ) -> WorkflowTransitionOutcome {
-    WorkflowTransitionOutcome::Failed(HandleFailed {
+    WorkflowTransitionOutcome::Failed(HandleFailed::of_connect_error(
+        transition.subject(),
         workflow_id,
-        code: HandleErrorCode::DbOperationFailed.wire_value().to_owned(),
-        message: error.to_string(),
-        retryable: error.is_retryable(),
-    })
+        error,
+    ))
 }
 
 /// Pause one workflow tree. Writes, in one statement; a caller that leaves
@@ -177,7 +227,7 @@ pub async fn pause_workflow_operation(
 ) -> WorkflowTransitionOutcome {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return connect_failed(workflow_id, &error),
+        Err(error) => return connect_failed(Transition::Pause, workflow_id, &error),
     };
     transition_outcome(
         Transition::Pause,
@@ -194,7 +244,7 @@ pub async fn cancel_workflow_operation(
 ) -> WorkflowTransitionOutcome {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return connect_failed(workflow_id, &error),
+        Err(error) => return connect_failed(Transition::Cancel, workflow_id, &error),
     };
     transition_outcome(
         Transition::Cancel,
