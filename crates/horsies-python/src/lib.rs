@@ -207,6 +207,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::claim::ClaimPassRecord>()?;
     module.add_class::<operations::claim::ClaimPassFailed>()?;
     module.add_class::<operations::coverage::CoverageRequestArgument>()?;
+    module.add_class::<operations::coverage::InstallCoverageArgument>()?;
     module.add_class::<operations::coverage::CoveredForeverRecord>()?;
     module.add_class::<operations::coverage::CoveredUntilRecord>()?;
     module.add_class::<operations::coverage::CoverageEnsuredRecord>()?;

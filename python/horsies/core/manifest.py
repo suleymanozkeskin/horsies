@@ -9,6 +9,8 @@ worker manifest builder shares. The two inputs that `PostgresConfig` does
 not hold, the schema mode and the idempotency reservation window, are
 parameters: the caller decides them. `schema_mode_of` gives the schema mode
 of the broker flags `run_schema_migrations` and `assume_initialized`.
+`install_coverage_of` gives the core the coverage request of the handle's
+schema install from the app's `RetentionConfig`.
 
 Pydantic refuses every user error first, so a manifest built here is one
 that the core accepts. A refusal by the core is a defect of this function.
@@ -47,7 +49,9 @@ from horsies.core.manifest_database import (
     tcp_keepalives_with,
     tcp_user_timeout_with,
 )
+from horsies._core import InstallCoverage
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.retention import RetentionConfig
 
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
@@ -95,6 +99,24 @@ def schema_mode_of(
             return 'MIGRATE_AND_VALIDATE'
         case (False, False):
             return 'OBSERVE_ONLY'
+
+
+def install_coverage_of(retention: RetentionConfig) -> InstallCoverage:
+    """The coverage request of the schema install of a broker whose app has
+    `retention`: its two horizons and every period that a send can stamp,
+    the request of the worker start's pass. The core install runs it gated,
+    after the migrations, so the history leaves of the current UTC day and of
+    the lookahead exist for each class with or without a worker.
+
+    Pure: no I/O. `retention` passed its Pydantic validation, so the core
+    accepts every value; a refusal (`ValueError`) is a defect of this
+    function.
+    """
+    return InstallCoverage(
+        history_horizon_days=retention.history_leaf_horizon_days,
+        heartbeat_horizon_hours=retention.heartbeat_leaf_horizon_hours,
+        declared_period_days=[int(days) for days in sorted(retention.sendable_periods())],
+    )
 
 
 def reservation_window_micros(window: timedelta) -> int:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Final, LiteralString
 
 import psycopg
@@ -21,12 +21,14 @@ from horsies.core.baseline.migration import BaselineMigration, load_baseline_mig
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.identity.uuid7 import mint_task_id
+from horsies.core.history.periods import RetentionDays, period_class_key
 from horsies.core.history.reads.publisher import (
     PUBLISHED_READER_SIGNATURES,
     StagedLoaderPublisher,
 )
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring import cancel_task
@@ -264,6 +266,43 @@ async def test_a_fresh_install_covers_a_cancel_and_an_expiry_with_no_worker(
                 (cancelled, 'CANCELLED', 'standard_30d'),
                 (expired, 'EXPIRED', 'standard_30d'),
             ]
+        finally:
+            await connection.close()
+    finally:
+        _ = await broker.close_async()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_install_covers_the_declared_periods_of_the_retention_config(
+    database_url: str,
+) -> None:
+    """A broker built with its app's retention covers each declared period
+    at the install: with no worker ever started, the cancel of a task of the
+    class of that period finds its leaf."""
+    broker = PostgresBroker(
+        PostgresConfig(database_url=SecretStr(database_url)),
+        retention=RetentionConfig(retention_periods=(timedelta(days=7),)),
+    )
+    try:
+        assert await broker.ensure_schema_initialized() == Ok(None)
+        task_id = mint_task_id()
+        sent = await broker.enqueue_async(
+            'install.coverage',
+            task_id=task_id,
+            send_kind=SendKind.FIRST,
+            input_json='{}',
+            sent_at=datetime.now(timezone.utc),
+            retention_class_key=period_class_key(RetentionDays(7)),
+        )
+        assert is_ok(sent), sent
+
+        cancel = await cancel_task(broker, task_id)
+        assert is_ok(cancel), cancel
+
+        connection = await _connect(database_url)
+        try:
+            history = await connection.execute(_HISTORY_ROWS_SQL, {'task_ids': [task_id]})
+            assert await history.fetchall() == [(task_id, 'CANCELLED', 'standard_7d')]
         finally:
             await connection.close()
     finally:

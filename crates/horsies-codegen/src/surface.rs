@@ -244,6 +244,13 @@ const COVERAGE_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("declared_period_days", "list[int]"),
     keyword("serialization", "Literal['GATED', 'PER_LEAF_LOCKS']"),
 ];
+const INSTALL_COVERAGE_PARAMETERS: &[StubParameter] = &[
+    keyword("history_horizon_days", "int"),
+    keyword("heartbeat_horizon_hours", "int"),
+    keyword("declared_period_days", "list[int]"),
+];
+const WITH_INSTALL_COVERAGE_PARAMETERS: &[StubParameter] =
+    &[positional("install_coverage", "InstallCoverage")];
 const ENSURE_PARTITION_COVERAGE_PARAMETERS: &[StubParameter] =
     &[positional("request", "CoverageRequest")];
 const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
@@ -626,6 +633,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::FutureOf(INSTALL_OUTCOME),
         doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "with_install_coverage",
+        parameters: WITH_INSTALL_COVERAGE_PARAMETERS,
+        returns: TypeText::Plain("CoreHandle"),
+        doc: "A new handle of the same manifest and pool profile whose schema install ends with the\ncoverage pass of install_coverage. It shares no pool and no child spec source with this\none. Starts nothing.",
     },
     StubFunction {
         name: "schema_status",
@@ -3060,6 +3073,13 @@ const HISTORY_CLASSES: &[StubClass] = &[
         name: "CoverageRequest",
         doc: "One frozen coverage pass: the two horizons, the declared retention periods in whole days,\nand how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two\nleaves, or another serialization raises ValueError.",
         constructor: Constructor::Parameters(COVERAGE_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "InstallCoverage",
+        doc: "The coverage request of a handle's schema install: the two horizons and the declared\nretention periods in whole days. The install runs it gated, as the worker start. A period\noutside 1 to 1825 days or a horizon below two leaves raises ValueError.",
+        constructor: Constructor::Parameters(INSTALL_COVERAGE_PARAMETERS),
         properties: &[],
         methods: &[],
     },

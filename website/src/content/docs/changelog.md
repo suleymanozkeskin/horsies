@@ -350,8 +350,10 @@ written in Rust, on a new baseline schema.
   a client) ends with the startup coverage pass that the worker start runs:
   the leaves of the current UTC day and of the lookahead
   (`history_leaf_horizon_days`) for the forever class, the 30-day default
-  class and, in the Rust client, every period of `AppConfig.retention`, and
-  the heartbeat leaves. A cancel, a pending expiry or a workflow cancel of a
+  class and every period of the app's `AppConfig.retention`, and the
+  heartbeat leaves. `Horsies.get_broker()` passes the app's retention; a
+  `PostgresBroker` built directly takes it as `retention=` (none covers the
+  default classes). A cancel, a pending expiry or a workflow cancel of a
   producer with no worker then moves its tasks to history. 0.7 had the same
   gap: its install created no leaf; only the worker start and the reaper
   did.
