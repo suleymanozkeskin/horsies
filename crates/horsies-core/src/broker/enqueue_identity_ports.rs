@@ -218,7 +218,10 @@ async fn concurrent_sends(
         .connect_with((*pool.connect_options()).clone())
         .await
         .expect("connect the concurrent pool");
-    let broker = Arc::new(PostgresBroker::from_pool(wide.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        wide.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let sent_at = Utc::now();
     let mut sends = tokio::task::JoinSet::new();
     for index in 0..CONCURRENT_SENDS {
@@ -321,7 +324,7 @@ async fn a_key_replays_its_task_after_the_history_row_is_gone() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let first = Send::new(Some("history-removed"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("first send"),
@@ -350,7 +353,7 @@ async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let first = Send::new(Some("reusable-order"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("first send"),
@@ -391,7 +394,7 @@ async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
 async fn an_unkeyed_resend_of_a_keyed_task_returns_it_and_keeps_its_key() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let keyed = Send::new(Some("order-1"), Utc::now());
     assert_eq!(
         send(&broker, keyed).await.expect("keyed send"),
@@ -423,7 +426,7 @@ async fn a_replay_after_the_move_returns_the_moved_task() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let first = Send::new(Some("order-1"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("first send"),
@@ -451,7 +454,7 @@ async fn a_repeat_send_of_a_finished_task_answers_from_history() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
     ensure_history_coverage(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let repeated = Send::new(None, Utc::now());
     let other = Send::new(None, Utc::now());
     let first = Send::new(None, Utc::now());
@@ -492,7 +495,7 @@ async fn a_repeat_send_of_a_finished_task_answers_from_history() {
 async fn unkeyed_sends_write_no_reservation() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let sent_at = Utc::now();
     for one in [Send::new(None, sent_at), Send::new(None, sent_at)] {
         assert_eq!(send(&broker, one).await.expect("unkeyed send"), one.task_id);
@@ -510,7 +513,7 @@ async fn unkeyed_sends_write_no_reservation() {
 async fn a_new_row_stores_the_exact_version_one_fingerprint() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_id = mint_task_id().expect("mint a task id");
     let applied = broker
         .enqueue(
@@ -567,7 +570,7 @@ async fn a_new_row_stores_the_exact_version_one_fingerprint() {
 async fn after_the_bind_a_send_with_a_new_id_replays_the_bound_task() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let existing = Send::new(None, Utc::now());
     assert_eq!(
         send(&broker, existing).await.expect("unkeyed send"),
@@ -608,7 +611,7 @@ async fn after_the_bind_a_send_with_a_new_id_replays_the_bound_task() {
 async fn a_keyed_task_resent_under_a_second_key_is_a_payload_mismatch() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let first = Send::new(Some("first-key"), Utc::now());
     assert_eq!(
         send(&broker, first).await.expect("keyed send"),

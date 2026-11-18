@@ -43,6 +43,7 @@ pub(crate) async fn run_isolated_in_process(
             start_hook: ChildStartHook::NoHook,
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
+            family: crate::ClientFamily::Rust,
         }),
         pid: IN_PROCESS_PID,
         writer,

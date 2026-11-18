@@ -257,7 +257,7 @@ async fn finalize_with(
     result: TaskResult<Vec<u8>>,
     claimed: &ClaimedTask,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     persist_terminal_state(&broker, claimed, result, WORKER, &PayloadPolicy::default()).await
 }
 
@@ -796,7 +796,7 @@ async fn phase_two(
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
     phase_two_on(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         queue,
         is_workflow_task,
@@ -1081,9 +1081,13 @@ async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
         describe(&phase_one)
     );
     let database_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-    let timeout_broker = PostgresBroker::connect_with(&PostgresConfig::from_url(
-        with_query_parameter(&database_url, CONSUME_LOCK_TIMEOUT_PARAMETER),
-    ))
+    let timeout_broker = PostgresBroker::connect_with(
+        &PostgresConfig::from_url(with_query_parameter(
+            &database_url,
+            CONSUME_LOCK_TIMEOUT_PARAMETER,
+        )),
+        crate::ClientFamily::Rust,
+    )
     .await
     .expect("connect a broker with a lock timeout");
     let mut holder = pool.begin().await.expect("begin the lock holder");

@@ -63,15 +63,11 @@ pub(super) fn task_send_manifest(
 }
 
 /// Publish the producer handle of this child: `manifest` with the producer
-/// pools, writing as the Rust client. Starts nothing. The child host
-/// publishes once per process; a second publish is a defect of the host and
-/// crashes loud.
-pub(super) fn publish_child_producer(manifest: ProducerManifest) {
-    let handle = Arc::new(CoreHandle::new(
-        manifest,
-        PoolProfile::Producer,
-        ClientFamily::Rust,
-    ));
+/// pools, writing as `family`, the client family of the binary. Starts
+/// nothing. The child host publishes once per process; a second publish is a
+/// defect of the host and crashes loud.
+pub(super) fn publish_child_producer(manifest: ProducerManifest, family: ClientFamily) {
+    let handle = Arc::new(CoreHandle::new(manifest, PoolProfile::Producer, family));
     if CHILD_PRODUCER.set(handle).is_err() {
         panic!("the producer handle of this child was published twice");
     }

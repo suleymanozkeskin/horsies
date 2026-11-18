@@ -625,7 +625,7 @@ mod tests {
 
     /// A broker on the database of `pool`: the failure writes run on its core pools.
     fn broker_of(pool: &PgPool) -> PostgresBroker {
-        PostgresBroker::from_pool(pool.clone())
+        PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
     }
 
     fn lazy_pool() -> PgPool {

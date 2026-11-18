@@ -1055,6 +1055,7 @@ mod tests {
     async fn a_non_integer_ordinality_is_refused() {
         let broker = crate::broker::PostgresBroker::from_pool(
             crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
         );
         let rows = broker
             .query_main(&TEXT_ORDINALITY_ROW.bind().finish())

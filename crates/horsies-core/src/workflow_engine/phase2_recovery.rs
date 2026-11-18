@@ -576,7 +576,7 @@ mod tests {
         attempt_bound: u32,
     ) -> Result<Phase2RecoverySummary, WorkflowError> {
         drive_phase2_recovery_with(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             &TestChildSpecs::empty(),
             grace_ms,
             max_rows,
@@ -1179,7 +1179,7 @@ mod tests {
         assert_eq!(kind, "FAIL_RUNNING");
 
         let summary = drive_phase2_recovery_with(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             &TestChildSpecs::empty(),
             0,
             1,
@@ -1298,7 +1298,7 @@ mod tests {
         store_prior_attempts(&pool, task_id, 2, "SOURCE_VERSION_CONFLICT").await;
 
         let summary = drive_phase2_recovery_with(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             &TestChildSpecs::empty(),
             0,
             1,
@@ -1524,7 +1524,7 @@ mod tests {
     #[serial]
     async fn a_raise_at_the_bound_of_a_paused_workflow_is_not_recorded() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 2).await;
@@ -1562,7 +1562,7 @@ mod tests {
     #[serial]
     async fn a_raise_under_the_bound_is_counted_and_a_gone_record_is_absent() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 0).await;
@@ -1776,8 +1776,10 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn each_raise_record_outcome_reads_into_its_variant() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
 
         let cases = [
             (
@@ -1913,7 +1915,7 @@ mod tests {
             .expect("age the phase-2 record");
 
             let summary = drive_phase2_recovery_with(
-                &PostgresBroker::from_pool(pool.clone()),
+                &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
                 &TestChildSpecs::empty(),
                 0,
                 1,

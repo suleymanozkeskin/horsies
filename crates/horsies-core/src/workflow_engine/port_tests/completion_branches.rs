@@ -68,7 +68,7 @@ async fn phase_two_under_a_paused_workflow_writes_the_node_and_promotes_nothing(
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "PAUSED", true).await;
 
     let completion = on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         &TestChildSpecs::empty(),
     )
@@ -101,7 +101,7 @@ async fn a_node_finish_that_reads_no_dependents_still_completes_its_workflow() {
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "RUNNING", false).await;
 
     let finished = node_finish_alone(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         false,
         Dependents::NoneToRead,
@@ -131,7 +131,7 @@ async fn the_phase_two_of_on_workflow_task_complete_sends_no_capacity_wake() {
     let mut listener = Notifications::listen(&pool, &[COMPLETION_CHANNEL]).await;
 
     let completion = on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         &TestChildSpecs::empty(),
     )
