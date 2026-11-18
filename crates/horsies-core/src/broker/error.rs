@@ -426,6 +426,20 @@ mod tests {
         sqlx::Error::Database(Box::new(ServerError { code }))
     }
 
+    /// Python `test_broker_error_variants.py::TestProcessBoundaries::test_reaper_sqlstate_reads_the_driver_cause`
+    /// and `::test_reaper_sqlstate_of_an_error_without_a_cause_is_none`: the
+    /// reaper reads the SQLSTATE that the server error of the driver
+    /// carries; 55P03 is the lock refusal (the orphan audit reports it as
+    /// `refused`, `worker::recovery`). Another SQLSTATE, and an error with no
+    /// server cause, are not.
+    #[test]
+    fn the_lock_refusal_is_read_from_the_server_cause() {
+        assert!(BrokerError::Database(server_error("55P03")).is_lock_not_available());
+        assert!(!BrokerError::Database(server_error("40001")).is_lock_not_available());
+        assert!(!BrokerError::Database(sqlx::Error::PoolClosed).is_lock_not_available());
+        assert!(!BrokerError::ListenerClosed.is_lock_not_available());
+    }
+
     /// Python's rule: the `OperationalError` family of psycopg is retryable.
     /// It holds serialization failure, too many connections and a statement
     /// timeout, which the earlier Rust list left out.
