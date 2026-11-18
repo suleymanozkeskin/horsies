@@ -158,7 +158,7 @@ _CORE_STOP_STATEMENT: Final = (
 )
 _CORE_RESUME_FAILURE: Final = (
     'asserts the failure class that the core resume gives a database error '
-    '(CoreOperationFailed); the reference resume gives the psycopg error'
+    '(CoreServerError); the reference resume gives the psycopg error'
 )
 
 WORKFLOW_ENGINE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (

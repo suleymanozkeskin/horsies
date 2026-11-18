@@ -45,6 +45,22 @@ written in Rust, on a new baseline schema.
   a workflow start and a workflow resume keep a resource set per event loop.
   The sync send pool is gone.
 
+- **The `exception` of a database failure is the core's class of the
+  cause.** Where a call ran on the core and failed, the `exception` field of
+  its error (for example `BrokerOperationFailed.exception`,
+  `TaskActionDbOperationFailed.exception`,
+  `HandleDbOperationFailed.exception`) holds one class of `horsies._core`:
+  `CoreServerError` (the server answered with an error: `sqlstate` and the
+  server's primary `message`), `CoreConnectionError` (no answer from the
+  server), `CoreContractViolation` (a row or a stored value broke the
+  core's read contract) or `CorePreconditionFailed` (a precondition of the
+  call does not hold, for example a database of the other client family).
+  Each has `subject`, the core operation, and `message`; all but
+  `CoreContractViolation` have `retryable`. The declared types do not
+  change. `rerun_task` raises `CorePreconditionFailed` for a database of the
+  other client family. A refused orphan cursor is `CoreServerError` with
+  `sqlstate` `'55P03'`.
+
 - **A process forked without exec after the core started cannot call
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
