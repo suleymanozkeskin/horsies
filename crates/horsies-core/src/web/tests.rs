@@ -171,7 +171,7 @@ fn test_state(
     actions_enabled: bool,
     assets: Arc<dyn super::spa::AssetStore>,
 ) -> WebState {
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
+    let broker = Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust));
     WebState {
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
@@ -1292,6 +1292,7 @@ async fn migrated_state() -> WebState {
     let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
         pool,
         &database_url,
+        crate::ClientFamily::Rust,
     ));
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
@@ -1465,6 +1466,7 @@ async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_b
     let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
         pool.clone(),
         &migrated_database_url().await,
+        crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
     let mut subscription = broadcaster.subscribe().await;
@@ -1516,6 +1518,7 @@ async fn a_listener_gap_sends_one_refresh_per_topic() {
     let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
         pool.clone(),
         &format!("{url}{separator}application_name={application_name}"),
+        crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
     let mut subscription = broadcaster.subscribe().await;
@@ -1557,6 +1560,7 @@ async fn a_listener_that_cannot_start_degrades_the_stream() {
     let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
         lazy_pool(),
         "postgresql://postgres:pw@127.0.0.1:1/none",
+        crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(25));
     let mut subscription = broadcaster.subscribe().await;
@@ -1596,9 +1600,12 @@ async fn sse_route_emits_idle_heartbeat_comments() {
 async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
-        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(database.url()).broker)
-            .await
-            .unwrap(),
+        PostgresBroker::connect_observe_only(
+            &AppConfig::for_database_url(database.url()).broker,
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .unwrap(),
     );
     assert_eq!(
         broker.schema_initialization_mode(),
@@ -1625,7 +1632,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
 
 #[tokio::test]
 async fn default_broker_mode_still_migrates_and_validates() {
-    let broker = PostgresBroker::from_pool(lazy_pool());
+    let broker = PostgresBroker::from_pool(lazy_pool(), crate::ClientFamily::Rust);
     assert_eq!(
         broker.schema_initialization_mode(),
         SchemaInitializationMode::MigrateAndValidate
@@ -1841,8 +1848,10 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
         "Task detail",
         crate::monitoring::MonitoringQueryError::HistoryContractViolation {
             message: "task detail history read failed: bad row".to_owned(),
-            source: crate::monitoring::MonitoringQueryErrorSource::History(
-                crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
+            source: crate::monitoring::HistoryContractSource(
+                crate::monitoring::MonitoringQueryErrorSource::History(
+                    crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
+                ),
             ),
         },
     );
@@ -2302,9 +2311,12 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     let database = crate::test_support::TestDatabase::create_empty().await;
     let url = database.url().to_owned();
     let broker = Arc::new(
-        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
-            .await
-            .expect("connect the observe-only broker"),
+        PostgresBroker::connect_observe_only(
+            &AppConfig::for_database_url(&url).broker,
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .expect("connect the observe-only broker"),
     );
     let handler = MonitoringHandler::new(
         Arc::clone(&broker),

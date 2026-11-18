@@ -208,7 +208,7 @@ async fn a_facets_poll_is_one_round_trip_for_both_sides() {
     let upstream = database_options(&database.pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let broker = PostgresBroker::from_pool(proxied.clone());
+    let broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
     let query = TaskFacetsQuery::new(window());
     let _warm_up = facets_of(&broker, &query).await;
 

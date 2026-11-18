@@ -6,25 +6,18 @@ one of its claim budgets serves the class (``ClassBudget.serves``). A worker
 is live while its latest state snapshot is at most
 ``WORKER_STATE_LIVE_WINDOW_S`` old.
 
-The types are frozen reports. The functions are pure. The class reads of
+The types are frozen reports. The class reads of
 ``PostgresBroker`` run in the core and give these types
 (``horsies.core.brokers.worker_state_records``).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TypeAlias, assert_never
+from typing import TypeAlias
 
-from horsies.core.models.health import (
-    ClassBudget,
-    ClassBudgets,
-    parse_class_capacity,
-)
 from horsies.core.models.tasks import Execution
-from horsies.core.types.result import Err, Ok, Result
 
 
 @dataclass(slots=True, frozen=True)
@@ -166,197 +159,3 @@ class ClassReport:
     workers: tuple[WorkerClassLoad, ...]
 
 
-@dataclass(slots=True, frozen=True)
-class ClassReadRefused:
-    """Stored data that the class reads cannot decide on, or a read bound that was hit.
-
-    ``reason`` names the subject (a worker, a class, a bound) and the cause.
-    Nothing changed.
-    """
-
-    reason: str
-
-
-@dataclass(slots=True, frozen=True)
-class LiveWorker:
-    """A worker whose latest snapshot is live, with the budgets it recorded."""
-
-    worker_id: str
-    snapshot_at: datetime
-    queues: frozenset[str]
-    budgets: tuple[ClassBudget, ...]
-
-
-@dataclass(slots=True, frozen=True)
-class StreamHead:
-    """The earliest ``enqueued_at`` of the pending rows of one (queue, class, priority)."""
-
-    queue_name: str
-    execution: Execution
-    enqueued_at: datetime
-
-
-def live_worker(
-    worker_id: str,
-    snapshot_at: datetime,
-    queues: Sequence[str],
-    class_capacity: object,
-) -> Result[LiveWorker, ClassReadRefused]:
-    """Build a live worker from its latest snapshot row.
-
-    ``Err``: the stored ``class_capacity`` is unreadable. Reads only.
-    """
-    match parse_class_capacity(class_capacity):
-        case Ok(capacity):
-            pass
-        case Err(unreadable):
-            return Err(
-                ClassReadRefused(
-                    f'worker {worker_id} snapshot at {snapshot_at}: '
-                    f'class_capacity is unreadable: {unreadable.reason}',
-                ),
-            )
-    match capacity:
-        case ClassBudgets(budgets=budgets):
-            return Ok(LiveWorker(worker_id, snapshot_at, frozenset(queues), budgets))
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def stream_coverage(
-    queue_name: str,
-    execution: Execution,
-    workers: Sequence[LiveWorker],
-) -> StreamCoverageState:
-    """Whether the live ``workers`` serve the stream, and with what capacity."""
-    budgets = [
-        budget
-        for worker in workers
-        if queue_name in worker.queues
-        for budget in worker.budgets
-        if execution in budget.serves
-    ]
-    if not budgets:
-        return StreamUnserved()
-    capacity = sum(budget.capacity for budget in budgets)
-    if capacity == 0:
-        return StreamWithoutCapacity(workers=len(budgets))
-    return StreamServed(workers=len(budgets), capacity=capacity)
-
-
-def stream_wait(heads: Sequence[datetime], checked_at: datetime) -> StreamWait:
-    """The wait of a stream from the head of each of its priorities.
-
-    A row is due when its ``enqueued_at`` is at or before ``checked_at``.
-    ``heads`` holds at least one instant; an empty one is a defect of the
-    caller (``AssertionError``).
-    """
-    assert heads, 'a pending stream has at least one head'
-    due = [head for head in heads if head <= checked_at]
-    if due:
-        oldest = min(due)
-        return OldestWaiting(enqueued_at=oldest, wait=checked_at - oldest)
-    return NoneDue(next_due_at=min(heads))
-
-
-def class_coverage(
-    checked_at: datetime,
-    workers: Sequence[LiveWorker],
-    streams: Sequence[tuple[str, Execution]],
-) -> ClassCoverage:
-    """The coverage of each pending (queue, class) in ``streams`` by ``workers``."""
-    return ClassCoverage(
-        checked_at=checked_at,
-        live_workers=len(workers),
-        streams=tuple(
-            StreamCoverage(
-                queue_name, execution, stream_coverage(queue_name, execution, workers)
-            )
-            for queue_name, execution in sorted(streams, key=_stream_order)
-        ),
-    )
-
-
-def class_report(
-    checked_at: datetime,
-    workers: Sequence[LiveWorker],
-    heads: Sequence[StreamHead],
-    in_flight: Mapping[tuple[str, Execution], int],
-) -> Result[ClassReport, ClassReadRefused]:
-    """Pending streams from their heads, and the budget load of each live worker.
-
-    ``in_flight`` maps (worker id, class) to the rows that the worker holds.
-    ``Err``: a worker holds rows of a class that none of its budgets serves.
-    """
-    grouped: dict[tuple[str, Execution], list[datetime]] = {}
-    for head in heads:
-        grouped.setdefault((head.queue_name, head.execution), []).append(
-            head.enqueued_at
-        )
-    streams = tuple(
-        PendingStream(
-            queue_name=queue_name,
-            execution=execution,
-            wait=stream_wait(grouped[(queue_name, execution)], checked_at),
-            state=stream_coverage(queue_name, execution, workers),
-        )
-        for queue_name, execution in sorted(grouped, key=_stream_order)
-    )
-    loads: list[WorkerClassLoad] = []
-    for worker in sorted(workers, key=lambda entry: entry.worker_id):
-        held = {
-            execution: count
-            for (worker_id, execution), count in in_flight.items()
-            if worker_id == worker.worker_id
-        }
-        match budget_loads(worker, held):
-            case Ok(budgets):
-                loads.append(
-                    WorkerClassLoad(worker.worker_id, worker.snapshot_at, budgets)
-                )
-            case Err(refused):
-                return Err(refused)
-    return Ok(
-        ClassReport(
-            checked_at=checked_at,
-            streams=streams,
-            workers=tuple(loads),
-        ),
-    )
-
-
-def budget_loads(
-    worker: LiveWorker,
-    in_flight: Mapping[Execution, int],
-) -> Result[tuple[BudgetLoad, ...], ClassReadRefused]:
-    """The load of each budget of ``worker`` from the rows it holds per class.
-
-    ``Err``: the worker holds rows of a class that none of its budgets
-    serves. The claim takes only rows of a served class, so such a row
-    means that the stored data and the recorded budgets disagree.
-    """
-    served = {member for budget in worker.budgets for member in budget.serves}
-    for execution, count in in_flight.items():
-        if count > 0 and execution not in served:
-            return Err(
-                ClassReadRefused(
-                    f'worker {worker.worker_id} holds {count} {execution.value} '
-                    'row(s), and no budget of its snapshot serves that class',
-                ),
-            )
-    return Ok(
-        tuple(
-            BudgetLoad(
-                budget=budget.budget,
-                capacity=budget.capacity,
-                serves=budget.serves,
-                in_flight=sum(in_flight.get(member, 0) for member in budget.serves),
-            )
-            for budget in worker.budgets
-        ),
-    )
-
-
-def _stream_order(stream: tuple[str, Execution]) -> tuple[str, int]:
-    queue_name, execution = stream
-    return queue_name, list(Execution).index(execution)

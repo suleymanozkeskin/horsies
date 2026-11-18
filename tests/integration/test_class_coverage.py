@@ -25,12 +25,9 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 
 import json
-import logging
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import timedelta
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -39,7 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode
-from horsies.core.cli import execution_settings
 from horsies.core.models.class_coverage import (
     BudgetLoad,
     NoneDue,
@@ -51,23 +47,8 @@ from horsies.core.models.class_coverage import (
     WorkerClassLoad,
 )
 from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
-from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.worker_profile import (
-    IsolatedChildren,
-    SharedAsyncChildren,
-    WorkerProfile,
-)
-from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker.runtime import _ReaperPassState
-from horsies.core.worker.slots import SlotPool
-from horsies.core.worker.worker import Worker, WorkerConfig
-from tests.dualrun.reference.class_coverage_reads import (
-    _PENDING_HEADS_SQL,
-    _PENDING_STREAMS_SQL,
-)
-from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -453,192 +434,3 @@ class TestClassReport:
                 assert 'ISOLATED' in error.message
             case Ok(report):
                 raise AssertionError(report)
-
-
-async def _snapshot_of_profile(broker: PostgresBroker, profile: WorkerProfile) -> str:
-    """Write the snapshot of a worker of ``profile`` on queue ``a``, through
-    ``_update_worker_state``, before its children start. Returns its id."""
-    settings = execution_settings(profile)
-    worker = Worker(
-        session_factory=current_resources(broker).session_factory,
-        listener=MagicMock(),
-        cfg=WorkerConfig(
-            dsn='unused',
-            psycopg_dsn='unused',
-            queues=['a'],
-            processes=settings.processes,
-            shared_async=settings.shared_async,
-        ),
-    )
-    worker._slots = SlotPool(worker._slot_pool_config(), pending_limit=1)
-    await worker._update_worker_state()
-    return worker.worker_instance_id
-
-
-@pytest.mark.usefixtures('empty_fleet')
-class TestRealSharedProfile:
-    async def test_the_report_gives_the_seats_of_the_shared_budget(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-    ) -> None:
-        worker_id = await _snapshot_of_profile(
-            broker,
-            WorkerProfile(
-                isolated=IsolatedChildren(count=1),
-                shared_async=SharedAsyncChildren(count=2, seats=4),
-            ),
-        )
-        await _task(
-            session, queue='a', execution=ASYNC, status='RUNNING', owner=worker_id
-        )
-        await _task(session, queue='a', execution=ASYNC)
-
-        match await broker.get_class_report_async():
-            case Ok(report):
-                pass
-            case Err(error):
-                raise AssertionError(error.message)
-
-        (worker,) = report.workers
-        assert worker == WorkerClassLoad(
-            worker_id=worker_id,
-            snapshot_at=worker.snapshot_at,
-            budgets=(
-                BudgetLoad(ISOLATED, 1, (ISOLATED, THREAD), in_flight=0),
-                BudgetLoad(ASYNC, 8, (ASYNC,), in_flight=1),
-            ),
-        )
-        (stream,) = report.streams
-        assert stream.state == StreamServed(workers=1, capacity=8)
-
-    async def test_a_worker_with_only_shared_children_serves_only_shared_rows(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-    ) -> None:
-        await _snapshot_of_profile(
-            broker,
-            WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=4)),
-        )
-        await _task(session, queue='a', execution=ISOLATED)
-        await _task(session, queue='a', execution=ASYNC)
-
-        match await broker.get_class_coverage_async():
-            case Ok(coverage):
-                pass
-            case Err(error):
-                raise AssertionError(error.message)
-
-        assert coverage.streams == (
-            StreamCoverage('a', ISOLATED, StreamUnserved()),
-            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=4)),
-        )
-
-
-def _reaper_worker(broker: PostgresBroker) -> Worker:
-    """A Worker constructed only as far as ``_run_reaper_pass`` requires."""
-    config = WorkerConfig(
-        dsn='postgresql://unused:unused@localhost/unused',
-        psycopg_dsn='postgresql://unused:unused@localhost/unused',
-        queues=['a'],
-    )
-    return Worker(
-        session_factory=MagicMock(),
-        listener=MagicMock(),
-        cfg=config,
-        broker=broker,
-    )
-
-
-@pytest.mark.usefixtures('empty_fleet')
-class TestReaperPassLogsUnservedStreams:
-    """Enter at the pass, assert the log line: the wiring, not the mechanism."""
-
-    async def test_the_pass_logs_an_unserved_isolated_retry(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        await _snapshot(session, 'w-async', ASYNC_CHILDREN_ONLY, queues=['a'])
-        await _task(session, queue='a', execution=ISOLATED)
-        state = _ReaperPassState(
-            next_retention_cleanup_at=float('inf'),
-            next_partition_maintenance_at=float('inf'),
-            next_orphan_task_audit_at=float('inf'),
-        )
-
-        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
-            await _reaper_worker(broker)._run_reaper_pass(
-                broker,
-                current_resources(broker),
-                RecoveryConfig(),
-                RetentionConfig(),
-                state,
-            )
-
-        lines = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-        assert any(
-            "PENDING ISOLATED tasks on queue 'a' wait: no live worker serves this class"
-            in line
-            for line in lines
-        ), lines
-
-
-async def _plan(session: AsyncSession, statement: Any, params: dict[str, Any]) -> str:
-    rows = (
-        await session.execute(
-            text(f'EXPLAIN (FORMAT JSON) {statement.text}'),
-            params,
-        )
-    ).scalar_one()
-    return json.dumps(rows)
-
-
-@pytest.mark.usefixtures('empty_fleet')
-class TestClassReadsUseTheClaimIndex:
-    """Both skip scans probe horsies_tasks_claim_pending.
-
-    The statements are Python's reads before the monitoring switch, the
-    dual-run reference (``tests/dualrun/reference/class_coverage_reads.py``).
-    The core's statements have their own plan test
-    (``crates/horsies-core/src/broker/class_coverage_read_tests.rs``).
-
-    20,000 PENDING rows over 4 queues, 3 classes and 100 priorities, so the
-    planner picks on its own, without ``enable_seqscan = off``.
-    """
-
-    async def test_the_stream_and_head_scans_probe_the_pending_class_index(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        await _task(session, queue='a', execution=ISOLATED)
-        await session.execute(
-            text("""
-                INSERT INTO horsies_tasks
-                  (
-                      id, task_name, queue_name, priority, input, status, enqueued_at,
-                      is_workflow_task, created_at, updated_at, retry_count,
-                      max_retries, retention_class_key, command_fingerprint_version,
-                      command_fingerprint, retain_rerun_input, execution, sent_at
-                  )
-                  SELECT gen_random_uuid(), 'class_task', 'q' || (g % 4), 1 + (g % 100),
-                      '{}', 'PENDING', now() - g * interval '1 ms', false, now(),
-                      now(), 0, 0, 'standard_30d', 1,
-                      sha256(convert_to(CAST(g AS text), 'UTF8')), false,
-                      (ARRAY['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'])[1 + g % 3],
-                      NOW()
-                  FROM generate_series(1, 20000) AS g
-            """),
-        )
-        await session.commit()
-        await session.execute(text('ANALYZE horsies_tasks'))
-        await session.commit()
-
-        streams = await _plan(session, _PENDING_STREAMS_SQL, {'stream_limit': 10})
-        heads = await _plan(session, _PENDING_HEADS_SQL, {'head_limit': 10})
-
-        for plan in (streams, heads):
-            assert 'horsies_tasks_claim_pending' in plan
-            assert '"Seq Scan"' not in plan

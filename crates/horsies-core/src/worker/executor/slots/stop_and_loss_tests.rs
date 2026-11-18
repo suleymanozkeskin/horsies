@@ -26,8 +26,8 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
-    CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ProcessId, RssReading, RunRef,
-    SeatEnd, SharedResultFrame, TaskTimeoutMs,
+    CancelGraceMs, ChildAfterFrame, DispatchNumber, FailureDetail, IsolatedWork, ProcessId,
+    RssReading, RunRef, SeatEnd, SharedResultFrame, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause, PartialFrame, Spawner};
 
@@ -74,6 +74,7 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
                 run,
                 end: SeatEnd::TimedOut,
                 rss: RssReading::Unreadable,
+                child: ChildAfterFrame::ServesOn,
             })
             .unwrap();
         assert_eq!(
@@ -125,7 +126,7 @@ fn unreachable_writer() -> OutcomeWriter {
         .acquire_timeout(Duration::from_secs(1))
         .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
         .expect("a lazy pool opens no connection");
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
+    let broker = Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
@@ -244,7 +245,10 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = format!("slots_{}", &Uuid::new_v4().simple().to_string()[..8]);
     let (task_id, generation) = seed_running(&pool, &queue).await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     let writer = OutcomeWriter::new(
         broker,

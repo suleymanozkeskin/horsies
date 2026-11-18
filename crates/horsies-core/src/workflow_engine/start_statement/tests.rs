@@ -478,7 +478,10 @@ fn a_build_that_the_client_did_not_run_refuses_the_start() {
 #[serial]
 async fn the_start_writes_the_tree_in_one_statement() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let workflow_id = Uuid::new_v4();
     let spec = spec_of("one_statement_parent", vec![subworkflow_root(0)]);
 

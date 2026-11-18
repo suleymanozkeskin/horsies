@@ -1,8 +1,7 @@
-"""Task ids are ``uuid.UUID`` on the send path and in the scheduler."""
+"""Task ids are ``uuid.UUID`` on the send path."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -16,7 +15,6 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.core.utils.fingerprint import schedule_slot_task_id
 
 pytestmark = [pytest.mark.unit]
 
@@ -75,12 +73,3 @@ def test_a_failed_send_carries_the_minted_uuid() -> None:
     assert isinstance(error, TaskSendEnqueueFailed)
     assert error.task_id == _sent_task_id(broker)
     assert isinstance(error.task_id, UUID)
-
-
-def test_a_schedule_slot_task_id_is_a_version_7_uuid() -> None:
-    slot = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
-
-    slot_task_id = schedule_slot_task_id('daily_report', slot)
-
-    assert isinstance(slot_task_id, UUID)
-    assert slot_task_id.version == 7

@@ -22,10 +22,11 @@ use crate::core::config::recovery::RecoveryConfigError;
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, ChildConnection, ChildFrame, ChildKind, ChildLogLevel,
-    ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
-    ParentFrame, PoolMaxSize, PoolMinSize, ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading,
-    RunEnd, RunFrame, TaskInputText, TaskSendPool, TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, ChildAfterFrame, ChildConnection, ChildFrame,
+    ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild,
+    IsolatedWork, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ReadyFrame,
+    ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, TaskInputText, TaskSendPool,
+    TaskTimeoutMs,
 };
 use crate::worker::executor::slots::{
     AttemptEnd, ChildLayout, ClaimedTask, ExecutionClass, ExitNotSeen, IsolatedDeadline,
@@ -1096,6 +1097,7 @@ fn answer_after_a_second(claimed: &ClaimedTask) -> String {
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     }))
     .expect("the result frame encodes")
     .to_bytes();

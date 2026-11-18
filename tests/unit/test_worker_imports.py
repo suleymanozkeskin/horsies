@@ -16,7 +16,7 @@ from horsies.core.utils.imports import (
     find_project_root,
     unload_file_path,
 )
-from horsies.core.worker.worker import _locate_app
+from horsies.core.worker.child_runner import _locate_app
 
 
 @pytest.mark.unit

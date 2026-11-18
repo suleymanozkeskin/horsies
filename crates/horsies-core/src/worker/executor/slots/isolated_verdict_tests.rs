@@ -22,7 +22,8 @@ use super::scripted::{
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    encode_child_frame, ChildFrame, NoLeftWork, ResultFrame, RssMb, RssReading, RunEnd,
+    encode_child_frame, ChildAfterFrame, ChildFrame, NoLeftWork, ResultFrame, RssMb, RssReading,
+    RunEnd,
 };
 use crate::worker::executor::supervisor::Spawner;
 
@@ -496,6 +497,7 @@ fn logging_children(dir: &TestDir, tasks: &[ClaimedTask], runs: usize, rss: RssR
                 end: RunEnd::Result(super::scripted::ok_envelope(value)),
                 rss,
                 task_loop: NoLeftWork::NoTaskLoop,
+                child: ChildAfterFrame::ServesOn,
             });
             (
                 task,

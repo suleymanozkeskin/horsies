@@ -141,6 +141,16 @@ before you upgrade a 0.7 deployment.
   failure. A failed `result_for` read keeps the `BROKER_ERROR` message of
   0.7, which names the node: `DB query failed for result_for node
   <node_id> in workflow <id>: <cause>`.
+- **`HistoryContractError` is generated from the core, and the core builds
+  the error classes of the monitoring reads.** `HistoryContractError` is
+  rendered into `horsies._catalog.history_errors`, and
+  `horsies.core.history.errors` re-exports it; its name, base, doc and its
+  subclasses do not change. A failed monitoring read returns the
+  `MonitoringQueryError` class that the core builds, with the same
+  messages. The `exception` of `MonitoringQueryDbOperationFailed` is the
+  core's class of the cause with the cause's own text (the read is its
+  subject); the `exception` of `MonitoringQueryHistoryContractViolation` is
+  a `HistoryContractError` with the cause's own text, as in 0.7.
 
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
@@ -157,6 +167,23 @@ before you upgrade a 0.7 deployment.
   `forkserver` start method, or fork before the parent's first call that
   runs on the core. `CoreStopped` means that a background task of the core
   panicked, a defect in horsies: restart the process.
+
+- **A worker child whose core stopped ends itself.** It never serves on
+  with a stopped core (`CoreStopped`) or as a fork of a child
+  (`ForkedAfterCoreStart`). The child exits with code 80, and the worker
+  starts a new child; the frame that the child sends last says that it
+  ends itself, so the worker sends it no other task. At the start of a
+  task, before task code ran, the
+  worker releases the claim with no attempt charged, and the new child runs
+  the task. After a body that finished, the child reports the result and
+  the worker writes it as for any task: the task keeps its result, with no
+  second run. A body that the refusal ended (a core call of the body raised
+  it) has no result: the child reports nothing, and the task takes the
+  crashed-child path (`WORKER_CRASHED`) and its retry policy, as does every
+  other run of a shared child whose body still runs at the exit. A fork
+  exits at once and writes nothing to the worker. The last log line of the
+  child names the cause; the worker logs the replacement of a child that
+  held no task at error level.
 
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of

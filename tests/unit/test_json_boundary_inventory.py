@@ -61,7 +61,6 @@ _FROZEN_DUMPS: Final = Counter(
         ('python/horsies/core/worker_manifest.py', 'dump_worker_profiles'): 1,
         ('python/horsies/_catalog/scheduler_manifest.py', 'dump_scheduler_manifest'): 1,
         ('python/horsies/core/lifecycle/persistence.py', '_fused_batch_parameters'): 1,
-        ('python/horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,
     }
 )
 

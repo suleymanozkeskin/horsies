@@ -1,91 +1,21 @@
-"""The class of a claimed row against the task that this worker registered.
+"""The ``Execution`` of each task that the app registered, from its stored
+task options.
 
 A row stores the ``Execution`` of its task at send. A deploy can change the
 class of the function after that, for example from ``async def`` with
-``SHARED_ASYNC`` to ``def``. The parent checks each claimed row before it
-picks a child for it: a shared child runs only functions of its class, and
-cannot hand a row back.
+``SHARED_ASYNC`` to ``def``. The worker manifest carries the registered
+classes to the core, which checks each claimed row against them before it
+picks a child: a shared child runs only functions of its class.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from typing import TypeAlias, assert_never
+from collections.abc import Iterable
 
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.task_options import stored_execution
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok
-
-
-@dataclass(frozen=True, slots=True)
-class RowClassFits:
-    """A child of the row's route can run the registered function."""
-
-
-@dataclass(frozen=True, slots=True)
-class RowClassMismatch:
-    """The row asks for a shared class that the registered function does not
-    have, for example ``SHARED_ASYNC`` on the row after a deploy changed the
-    function to ``def``."""
-
-    row_class: Execution
-    registered_class: Execution
-
-
-@dataclass(frozen=True, slots=True)
-class TaskNotRegistered:
-    """This worker registered no task of the row's name. The child fails the
-    row with its usual error, as it does without a class."""
-
-
-RowClassCheck: TypeAlias = RowClassFits | RowClassMismatch | TaskNotRegistered
-
-
-def check_row_class(
-    row_class: Execution,
-    task_name: str,
-    registered: Mapping[str, Execution],
-) -> RowClassCheck:
-    """Compare the class stored on a claimed row with the registered task.
-
-    An ``ISOLATED`` row fits any function: an isolated child runs both kinds.
-    A row of a shared class fits only a function of that class. Does no I/O.
-    """
-    match registered.get(task_name):
-        case None:
-            return TaskNotRegistered()
-        case registered_class:
-            pass
-    match row_class:
-        case Execution.ISOLATED:
-            return RowClassFits()
-        case Execution.SHARED_ASYNC | Execution.SHARED_THREAD:
-            if registered_class == row_class:
-                return RowClassFits()
-            return RowClassMismatch(
-                row_class=row_class,
-                registered_class=registered_class,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def parse_row_class(task_id: str, stored: object) -> Execution:
-    """The ``Execution`` of the ``execution`` column of a claimed row.
-
-    The column has a CHECK on the ``Execution`` values, and the claim reads
-    only classes of the plan, so another value is a defect:
-    ``AssertionError`` with the task id and the value.
-    """
-    for member in Execution:
-        if stored == member.value:
-            return member
-    raise AssertionError(
-        f'claimed task {task_id} has execution {stored!r}, '
-        'which is not an Execution value',
-    )
 
 
 def registered_task_classes(

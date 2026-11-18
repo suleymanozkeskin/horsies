@@ -87,6 +87,7 @@ from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
     bounded_end,
     bounded_envelope,
+    end_child_after_frame,
     _read_rss,
     _send_child_frame,
     exit_after_stop,
@@ -102,7 +103,6 @@ from horsies.core.worker.child_frames import (
     LeftoverStuckFrame,
     ReadyFrame,
     RssReading,
-    RunEnd,
     RunStuckFrame,
     SecondCancelFrame,
     SeatEnd,
@@ -112,9 +112,13 @@ from horsies.core.worker.child_frames import (
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_return import (
+    CoreStoppedAfterBody,
+    CoreStoppedBeforeStart,
+    MarkerEnd,
     ResultEnvelope,
     SetRunning as SetRunning,
     StoppedBeforeRunning as StoppedBeforeRunning,
+    end_after_marker,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.run_mark import (
@@ -155,8 +159,11 @@ CHILD_DEFECT_EXIT_CODE: Final = 1
 """A defect inside the child, as when a task escapes the task runner."""
 
 
-type SeatReturn = SetRunning | StoppedBeforeRunning
-"""What the coroutine of one run returns."""
+type SeatReturn = SetRunning | StoppedBeforeRunning | CoreStoppedBeforeStart
+"""What the coroutine of one run returns. ``CoreStoppedBeforeStart``: the
+core of the child stopped before the start; the run reports
+``OWNERSHIP_UNCONFIRMED``, and the child ends itself once that frame is
+written (``FrameWriter``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,10 +190,12 @@ class StartedSeats(Protocol):
         """
         ...
 
-    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``, which ended.
         A failed, skipped or late write is logged only: nothing escapes.
-        Runs as a task with no run mark."""
+        ``MarkerMetStoppedCore``: the core of the child stopped; the run
+        reports its result, and the child then ends itself. Runs as a task
+        with no run mark."""
         ...
 
 
@@ -257,7 +266,12 @@ def _bounded_shared_result(
     task_name: str, frame: SharedResultFrame
 ) -> SharedResultFrame:
     match frame.end:
-        case ResultEnvelope() | StoppedBeforeRunning() as finished:
+        case (
+            ResultEnvelope()
+            | StoppedBeforeRunning()
+            | CoreStoppedBeforeStart()
+            | CoreStoppedAfterBody()
+        ) as finished:
             return SharedResultFrame(
                 dispatch=frame.dispatch,
                 task_id=frame.task_id,
@@ -278,6 +292,10 @@ class FrameWriter:
     and writes each frame with ``write``, so no encode of a large result runs
     on the loop. A full queue is a defect of the caller: the process ends at
     once. A failed write ends the process in ``write`` (the parent is gone).
+    Once a result frame of a run that met the stopped core of the child is
+    written, the thread ends the process (``end_child_after_frame``): the
+    worker has the release of a refused start, or the result of a body that
+    finished, first.
     """
 
     def __init__(self, write: Callable[[ChildFrame], None], capacity: int) -> None:
@@ -333,8 +351,22 @@ class FrameWriter:
                     return
                 case _ResultToWrite(task_name=task_name, frame=frame):
                     self._write(bounded_result_frame(task_name, frame))
+                    _end_after_written(frame)
                 case _:
                     self._write(item)
+
+
+def _end_after_written(frame: FrameWithResult) -> None:
+    """After the write of ``frame``: end the child when the run that it
+    reports met the stopped core of the child (``end_child_after_frame``).
+    Every other frame returns."""
+    match frame:
+        case SharedResultFrame(task_id=task_id, end=end):
+            end_child_after_frame(end, task_id)
+        case LeftoverCancelFrame() | LeftoverStuckFrame():
+            return
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 class _Stop(Enum):
@@ -397,10 +429,10 @@ class _LeftoverStuck:
 
 @dataclass(frozen=True, slots=True)
 class _Finalizing:
-    """The run ended with ``end``. Its finalizing marker is in flight, and
-    the end report follows it."""
+    """The body of the run finished with ``end``. Its finalizing marker is
+    in flight, and the end report follows it."""
 
-    end: RunEnd
+    end: ResultEnvelope
 
 
 type _RunStop = _Stop | _LeftoverGrace | _LeftoverCancel | _LeftoverStuck | _Finalizing
@@ -882,9 +914,16 @@ class SeatLoop:
         match end, _marker_at_end(seat, self._loop.time()):
             case _, NoMarker():
                 self._send_end(dispatch, seat, end)
-            case ResultEnvelope() | StoppedBeforeRunning() as finished, MarkerDue():
+            case ResultEnvelope() as finished, MarkerDue():
                 seat.stop = _Finalizing(finished)
                 self._start_marker(dispatch, seat)
+            case (
+                StoppedBeforeRunning() | CoreStoppedBeforeStart() | CoreStoppedAfterBody(),
+                MarkerDue(),
+            ):
+                raise AssertionError(
+                    f'run {dispatch} did not finish a body and has a marker due',
+                )
             case SeatTimedOut(), MarkerDue():
                 raise AssertionError(
                     f'run {dispatch} timed out and has a marker due',
@@ -905,10 +944,13 @@ class SeatLoop:
         )
         marker.add_done_callback(functools.partial(self._marker_done, dispatch))
 
-    def _marker_done(self, dispatch: int, marker: asyncio.Task[None]) -> None:
-        """The marker of run ``dispatch`` ended: report the end of the run.
-        A marker that raised or was cancelled is a defect of the seat
-        program, whose marker logs every failure."""
+    def _marker_done(self, dispatch: int, marker: asyncio.Task[MarkerEnd]) -> None:
+        """The marker of run ``dispatch`` ended: report the end of the run,
+        with the result of its body (``end_after_marker``). A marker that
+        met the stopped core of the child gives ``CoreStoppedAfterBody``:
+        the writer ends the child once that frame is written. A marker that
+        raised or was cancelled is a defect of the seat program, whose
+        marker logs every failure."""
         seat = self._seats[dispatch]
         match seat.stop:
             case _Finalizing(end=end):
@@ -925,7 +967,7 @@ class SeatLoop:
                 'end on its own',
                 CHILD_DEFECT_EXIT_CODE,
             )
-        self._send_end(dispatch, seat, end)
+        self._send_end(dispatch, seat, end_after_marker(end, marker.result()))
 
     def _send_end(self, dispatch: int, seat: _Seat, end: SeatEnd) -> None:
         """Free the seat of run ``dispatch`` and report its end."""
@@ -1025,13 +1067,15 @@ def _seat_return(seat: _Seat) -> SeatReturn:
     return seat.task.result()
 
 
-def _returned_end(seat: _Seat) -> RunEnd:
+def _returned_end(
+    seat: _Seat,
+) -> ResultEnvelope | StoppedBeforeRunning | CoreStoppedBeforeStart:
     """The end of a run with what its coroutine returned (``_seat_return``):
     its result envelope, or its stop before its start."""
     match _seat_return(seat):
         case SetRunning(result=result):
             return result
-        case StoppedBeforeRunning() as stopped:
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart() as stopped:
             return stopped
         case _ as unreachable:
             assert_never(unreachable)
@@ -1048,6 +1092,11 @@ def _returned_result(seat: _Seat) -> ResultEnvelope:
             raise AssertionError(
                 f'run {seat.frame.dispatch} stopped before running ({stopped.reason}) '
                 'and left work',
+            )
+        case CoreStoppedBeforeStart():
+            raise AssertionError(
+                f'run {seat.frame.dispatch} stopped before running (its core '
+                'stopped) and left work',
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -1088,7 +1137,7 @@ def _marker_at_end(seat: _Seat, now: float) -> MarkerDue | NoMarker:
         case _ as unreachable:
             assert_never(unreachable)
     match _seat_return(seat), seat.deadline:
-        case StoppedBeforeRunning(), _:
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart(), _:
             return NoMarker()
         case SetRunning(), _NoDeadline():
             return MarkerDue()

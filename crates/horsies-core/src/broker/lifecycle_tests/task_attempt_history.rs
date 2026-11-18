@@ -137,7 +137,7 @@ async fn stale_cleanup_writes_failed_attempt_worker_crashed() {
 async fn replay_does_not_create_duplicate_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task = ClaimedTask {
         task_id,
         task_name: "lifecycle.test".to_owned(),

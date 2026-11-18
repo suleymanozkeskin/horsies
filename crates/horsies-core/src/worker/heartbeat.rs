@@ -259,7 +259,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("clock");
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         send_claimer_heartbeat(&broker, BEAT_WORKER, "h", 1, 60_000, 180_000)
             .await
             .expect("beat and renew");
@@ -358,7 +358,10 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let beats = spawn_claimer_heartbeat(
-            Arc::new(PostgresBroker::from_pool(pool.clone())),
+            Arc::new(PostgresBroker::from_pool(
+                pool.clone(),
+                crate::ClientFamily::Rust,
+            )),
             BEAT_WORKER.to_owned(),
             "h".to_owned(),
             1,

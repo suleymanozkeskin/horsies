@@ -15,30 +15,30 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator
 
+import psycopg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
-    WORKER_PING_CHANNEL,
     AllSlotsServing,
     ClassBudget,
     ClassBudgets,
     DownSlot,
     SlotsDown,
-    WorkerPingRequest,
-    WorkerPongPayload,
-    slots_down_json,
 )
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
-from tests.broker_resources_support import current_resources
+
+
+_WORKER_PING_CHANNEL = 'horsies_worker_ping'
+"""The channel of the worker ping: a request carries ``correlation_id`` and
+``reply_channel``; a pong carries ``correlation_id``, ``worker_id``,
+``hostname`` and ``pid``."""
 
 
 _INSERT_WORKER_STATE = text("""
@@ -228,12 +228,22 @@ async def test_worker_state_reads_the_slot_health(
         down_since=datetime(2026, 1, 1, tzinfo=timezone.utc),
         failed_boots=2,
     )
-    for suffix, slots_down in (('degraded', [down]), ('serving', [])):
+    # The stored form of ``down`` that the worker writes in ``slots_down``.
+    down_json = [
+        {
+            'slot': 1,
+            'cause': {'kind': 'resource_shortage', 'errno': 'EMFILE'},
+            'detail': 'OSError: [Errno 24] Too many open files',
+            'down_since': '2026-01-01T00:00:00+00:00',
+            'failed_boots': 2,
+        },
+    ]
+    for suffix, slots_down in (('degraded', down_json), ('serving', [])):
         await session.execute(
             _INSERT_WORKER_STATE_WITH_SLOTS,
             {
                 'worker_id': f'{prefix}-{suffix}',
-                'slots_down': json.dumps(slots_down_json(slots_down)),
+                'slots_down': json.dumps(slots_down),
             },
         )
     await session.commit()
@@ -422,32 +432,31 @@ async def test_get_worker_state_history_newest_first(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_ping_workers_roundtrip(broker: PostgresBroker) -> None:
-    """A live responder on the real NOTIFY path is collected as a pong."""
-    psycopg_url = to_psycopg_url(broker.config.effective_session_database_url)
-    responder = PostgresListener(psycopg_url)
-    fake_worker_id = f'itest-{uuid.uuid4().hex}'
+    """A live responder on the real NOTIFY path is collected as a pong.
 
-    start_r = await responder.start()
-    assert is_ok(start_r)
-    listen_r = await responder.listen(WORKER_PING_CHANNEL)
-    assert is_ok(listen_r)
-    ping_queue = listen_r.ok_value
+    The responder is a raw psycopg connection on the session URL of the
+    config: it listens on the ping channel and answers the request on its
+    reply channel with the pong that a worker sends."""
+    responder = await psycopg.AsyncConnection.connect(
+        to_psycopg_url(broker.config.effective_session_database_url),
+        autocommit=True,
+    )
+    fake_worker_id = f'itest-{uuid.uuid4().hex}'
+    _ = await responder.execute(f'LISTEN {_WORKER_PING_CHANNEL}')
 
     async def respond_once() -> None:
-        notify = await ping_queue.get()
-        req = WorkerPingRequest.model_validate(loads_json(notify.payload).ok_value)
-        pong = WorkerPongPayload(
-            correlation_id=req.correlation_id,
-            worker_id=fake_worker_id,
-            hostname='itest-host',
-            pid=4242,
+        notify = await anext(responder.notifies(timeout=5.0))
+        request = json.loads(notify.payload)
+        pong = {
+            'correlation_id': request['correlation_id'],
+            'worker_id': fake_worker_id,
+            'hostname': 'itest-host',
+            'pid': 4242,
+        }
+        _ = await responder.execute(
+            'SELECT pg_notify(%s, %s)',
+            (request['reply_channel'], json.dumps(pong)),
         )
-        async with current_resources(broker).session_factory() as s:
-            await s.execute(
-                text('SELECT pg_notify(:ch, :p)'),
-                {'ch': req.reply_channel, 'p': dumps_json(pong.model_dump()).ok_value},
-            )
-            await s.commit()
 
     responder_task = asyncio.create_task(respond_once())
     try:

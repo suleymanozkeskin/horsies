@@ -245,7 +245,7 @@ fn test_queue() -> String {
 }
 
 fn writer(pool: PgPool) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
+    let broker = Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
@@ -581,7 +581,7 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
         kind: TaskKind::WorkflowTask,
         ..claimed(task_id, &queue, generation)
     };
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let command = timeout_write(
         &task,
         WORKER_ID,

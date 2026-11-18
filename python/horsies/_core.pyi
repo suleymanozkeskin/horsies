@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable
 from typing import Literal, final
 
-from horsies._catalog.monitoring_errors import TaskActionCoreError
+from horsies._catalog.monitoring_errors import MonitoringQueryCoreError, TaskActionCoreError
 from horsies._catalog.workflow_handle_errors import HandleDbOperationFailed, HandleResumeRecoveryFailed, HandleStoredDataInvalid
 
 
@@ -327,42 +327,42 @@ class CoreHandle:
         """
     def raw_result_record_async(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[RawResultRecordRecord | RawResultAbsent | BrokerFailure]:
         """The awaitable form of the method above. A cancelled await drops the wait."""
-    def monitoring_list_tasks_async(self, query: TaskListQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_list_tasks_async(self, query: TaskListQuery) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """One page of the task list: the JSON text of the core's TaskListPage. Reads only, in one
         statement. A cancelled await drops the read.
         """
-    def monitoring_task_detail_async(self, task_id: uuid.UUID) -> asyncio.Future[MonitoringJson | TaskDetailAbsent | MonitoringFailed]:
+    def monitoring_task_detail_async(self, task_id: uuid.UUID) -> asyncio.Future[MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError]:
         """One task with its attempts: the JSON text of the core's TaskDetail, or the reason it is
         absent. Reads only, in one statement. A cancelled await drops the read.
         """
-    def monitoring_task_facets_async(self, query: TaskFacetsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_task_facets_async(self, query: TaskFacetsQuery) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """The facets of one scope: the JSON text of the core's Facets. Reads only, in one
         statement. A cancelled await drops the read.
         """
-    def monitoring_task_stats_async(self, query: TaskStatsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_task_stats_async(self, query: TaskStatsQuery) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """The count of each task status: the JSON text of the core's list of StatusCount. Reads
         only, in one statement.
         """
-    def monitoring_task_breakdown_async(self, query: TaskBreakdownQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_task_breakdown_async(self, query: TaskBreakdownQuery) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """The task counts per group: the JSON text of the core's Breakdown. Reads only, in one
         statement.
         """
-    def monitoring_workflow_names_async(self) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_workflow_names_async(self) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """The names of the root runs: the JSON text of a list of str. Reads only, in one statement."""
-    def monitoring_workflow_runs_async(self, query: WorkflowRunsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_workflow_runs_async(self, query: WorkflowRunsQuery) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """The newest root runs: the JSON text of the core's list of WorkflowRunSummary. Reads only,
         in one statement.
         """
-    def monitoring_workflow_run_async(self, workflow_id: uuid.UUID) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_workflow_run_async(self, workflow_id: uuid.UUID) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """One run with its nodes and edges: the JSON text of the core's WorkflowRunDetail, or null
         when no run has the id. Reads only, in one statement.
         """
-    def monitoring_workflow_node_async(self, workflow_id: uuid.UUID, *, task_index: int) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_workflow_node_async(self, workflow_id: uuid.UUID, *, task_index: int) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """One node with its task: the JSON text of the core's WorkflowTaskDetail, or null when the
         run has no node at the index. Reads only, in one statement. An index outside 32 bits
         raises OverflowError.
         """
-    def monitoring_schedules_async(self) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+    def monitoring_schedules_async(self) -> asyncio.Future[MonitoringJson | MonitoringQueryCoreError]:
         """Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,
         in one statement.
         """
@@ -695,15 +695,34 @@ class SendAsyncContext:
 
 @final
 class SendValidationFailed:
-    """The core refused the send before any statement. Nothing was written. cause_text is the
-    JSON reader's error when the refused text does not read.
-    """
+    """The core refused the send before any statement. Nothing was written."""
     @property
     def code(self) -> Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']: ...
     @property
     def message(self) -> str: ...
     @property
-    def cause_text(self) -> str | None: ...
+    def cause(self) -> SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule: ...
+
+
+@final
+class SendRefusalUnreadableJson:
+    """The refused text does not read as JSON. reader_error is the JSON reader's error."""
+    @property
+    def reader_error(self) -> str: ...
+
+
+@final
+class SendRefusalByRule:
+    """A rule refused a value that reads. The message is the only fact."""
+
+
+@final
+class SendRefusalByValueRule:
+    """A rule of the version-1 command or of the scoped idempotency key refused a value. rule is
+    the rule's text.
+    """
+    @property
+    def rule(self) -> str: ...
 
 
 @final
@@ -1574,19 +1593,6 @@ class MonitoringJson:
     """The JSON text of the core model of one monitoring read."""
     @property
     def json(self) -> str: ...
-
-
-@final
-class MonitoringFailed:
-    """An expected failure of a monitoring read. Nothing changed: a read writes nothing."""
-    @property
-    def code(self) -> Literal['DB_OPERATION_FAILED', 'EVENT_LOOP_LIMIT', 'HISTORY_CONTRACT_VIOLATION']: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def retryable(self) -> bool: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2957,6 +2963,8 @@ class ProtocolNumbers:
     @property
     def protocol_mismatch_exit_code(self) -> int: ...
     @property
+    def core_stopped_exit_code(self) -> int: ...
+    @property
     def child_hook_failed_exit_code(self) -> int: ...
     @property
     def spawn_request_byte(self) -> int: ...
@@ -3041,7 +3049,7 @@ class BootFailedFrame:
 @final
 class ResultFrame:
     """An isolated task ended and left no work on a task loop."""
-    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final
@@ -3067,7 +3075,7 @@ class LeftWorkStuckFrame:
 @final
 class SharedResultFrame:
     """A run of a shared child ended; its seat is free."""
-    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE']) -> None: ...
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final

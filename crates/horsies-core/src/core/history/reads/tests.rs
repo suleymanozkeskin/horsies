@@ -1121,7 +1121,7 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
             .expect("stale result read"),
         TaskResultRead::Absent
     );
-    let broker = PostgresBroker::from_pool(database.pool.clone());
+    let broker = PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust);
     let confirmed = broker
         .get_raw_result_record(completed_id, None)
         .await
@@ -1217,7 +1217,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         );
     }
 
-    let broker = PostgresBroker::from_pool(database.pool.clone());
+    let broker = PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust);
     let staged = broker
         .get_raw_result_record(completed_id, None)
         .await

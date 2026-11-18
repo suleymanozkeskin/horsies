@@ -37,7 +37,7 @@ fn unreachable_broker() -> PostgresBroker {
         .acquire_timeout(std::time::Duration::from_millis(250))
         .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
         .expect("a lazy pool on an unreachable server");
-    PostgresBroker::from_pool(pool)
+    PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)
 }
 
 async fn page(broker: &PostgresBroker, query: TaskListQuery) -> TaskListPage {

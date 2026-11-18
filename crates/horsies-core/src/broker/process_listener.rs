@@ -660,9 +660,10 @@ mod tests {
                 .expect("12345 ms is in bounds"),
         };
 
-        let broker = crate::broker::PostgresBroker::connect_with(&config)
-            .await
-            .expect("a connect opens no connection, so it needs no server");
+        let broker =
+            crate::broker::PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
+                .await
+                .expect("a connect opens no connection, so it needs no server");
 
         let ListenerSource::SessionUrl {
             session_url: listened,
@@ -895,7 +896,7 @@ mod tests {
     #[serial_test::serial]
     async fn the_schema_install_does_not_start_the_listener() {
         let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        let broker = crate::broker::PostgresBroker::connect(&url)
+        let broker = crate::broker::PostgresBroker::connect(&url, crate::ClientFamily::Rust)
             .await
             .expect("connect a broker");
 
