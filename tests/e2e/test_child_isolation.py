@@ -488,6 +488,31 @@ async def test_multiprocessing_works_inside_a_task(
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
+async def test_a_send_from_a_fork_pool_in_a_task_raises_forked_after_core_start() -> None:
+    """#1785: a worker of a fork-start ``multiprocessing.Pool`` that a task
+    body opens is a fork after the child's core started. Its send raises
+    ``ForkedAfterCoreStart`` with the child's pid, its own pid and the advice;
+    the task completes with that report."""
+    with _worker(
+        INSTANCE,
+        children=1,
+        ready_check=_ready_check(isolation.healthcheck),
+        timeout=SLOW_START_S,
+    ):
+        handle = unwrap_send(await isolation.send_from_fork_pool.send_async())
+        result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
+
+    report = result.unwrap()
+    assert report['ended'] == 'raised', report
+    assert report['class'] == 'ForkedAfterCoreStart', report
+    assert report['core_pid'] == report['child_pid'], report
+    assert report['this_pid'] == report['pool_worker_pid'], report
+    assert report['this_pid'] != report['child_pid'], report
+    assert 'spawn' in report['advice'] and 'forkserver' in report['advice'], report
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
 async def test_drain_deadline_records_the_crash_at_once(
     isolation_broker: PostgresBroker,
 ) -> None:
