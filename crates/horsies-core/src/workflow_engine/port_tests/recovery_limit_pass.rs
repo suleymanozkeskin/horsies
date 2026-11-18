@@ -523,6 +523,7 @@ async fn the_resume_pass_logs_and_does_not_count() {
     .expect("the tree pass returns its report");
 
     assert_eq!(report.metrics.case1.errors, 1, "{report:?}");
+    assert_eq!(report.metrics.case1.failures_counted, 0, "{report:?}");
     assert_eq!(failed_passes(&db.pool, workflow_id).await, None);
     assert_eq!(node_status(&db.pool, workflow_id, 0).await, "READY");
     db.drop().await;
