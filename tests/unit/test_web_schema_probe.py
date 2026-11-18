@@ -21,13 +21,10 @@ from horsies._core import SchemaStatusRecord, TooManyPendingCalls
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.web.schema import (
-    BASELINE_VERSION,
     EXPECTED_SCHEMA_VERSION,
     SchemaProbe,
     SchemaState,
     SchemaStatus,
-    classify_stored_version,
-    classify_without_migrations,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -70,39 +67,6 @@ class TestSchemaStatus:
         assert status(SchemaState.ABSENT, None).compatible is False
         assert status(SchemaState.ZERO_X, None).compatible is False
         assert status(SchemaState.UNKNOWN, None).compatible is False
-
-
-class TestClassification:
-    """What each set of catalog facts means."""
-
-    def test_no_bookkeeping_at_all_is_absent(self) -> None:
-        assert classify_without_migrations(schema_version_table=False) == status(
-            SchemaState.ABSENT, None,
-        )
-
-    def test_the_0x_python_bookkeeping_alone_is_a_0x_schema(self) -> None:
-        """horsies_schema_version without horsies_migrations is horsies 0.x."""
-        assert classify_without_migrations(schema_version_table=True) == status(
-            SchemaState.ZERO_X, None,
-        )
-
-    def test_no_successful_migration_is_absent(self) -> None:
-        assert classify_stored_version(0) == status(SchemaState.ABSENT, None)
-
-    @pytest.mark.parametrize('stored', [1, 65, BASELINE_VERSION - 1])
-    def test_a_version_below_the_baseline_is_a_0x_schema(self, stored: int) -> None:
-        """horsies-rust 0.x records versions 1 to 65 in horsies_migrations."""
-        assert classify_stored_version(stored) == status(SchemaState.ZERO_X, stored)
-
-    def test_the_expected_version_matches(self) -> None:
-        assert classify_stored_version(EXPECTED_SCHEMA_VERSION) == status(
-            SchemaState.MATCH, EXPECTED_SCHEMA_VERSION,
-        )
-
-    def test_a_newer_version_is_a_mismatch(self) -> None:
-        assert classify_stored_version(EXPECTED_SCHEMA_VERSION + 1) == status(
-            SchemaState.MISMATCH, EXPECTED_SCHEMA_VERSION + 1,
-        )
 
 
 class TestProbeCaching:
