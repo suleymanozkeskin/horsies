@@ -455,12 +455,13 @@ def _parse_enqueue_task_options(
 
     ``serialize_task_options()`` always produces this text, so malformed JSON
     is a bug, not a runtime condition, and it must not be silently swallowed.
-    No options store no retries and ``ISOLATED``. Options that hold an int
+    No options (None) store no retries and ``ISOLATED``. An empty text is
+    not JSON and is refused, as the core refuses it. Options that hold an int
     outside ``MIN_OPTIONS_INTEGER`` to ``MAX_OPTIONS_INTEGER`` (for example a
     ``max_delay_seconds`` of ``2**64``) are refused before the retry limit is
     read, as the core refuses them.
     """
-    if not task_options:
+    if task_options is None:
         return Ok(_EnqueueOptions(max_retries=0, execution=Execution.ISOLATED))
     opts_r = loads_json(task_options)
     if is_err(opts_r):
@@ -498,13 +499,9 @@ def _parse_enqueue_json(
 ) -> Result[Json, BrokerInvalidInput]:
     """Parse one JSON input text.
 
-    Empty text is refused: it is not JSON, and ``loads_json`` reads it as null.
+    A text that does not read is refused, an empty text included
+    (``EmptyJsonTextError``).
     """
-    if not text:
-        return Err(BrokerInvalidInput(
-            message=f'{label} JSON corrupt for {task_name}: empty text',
-            exception=NoCause(),
-        ))
     loaded = loads_json(text)
     if is_err(loaded):
         return Err(BrokerInvalidInput(
@@ -875,19 +872,10 @@ def _strict_result_envelope(
 
     A text that does not read (malformed, a non-finite number) or a value
     that is neither an object nor null is ``INVALID_JSON_PAYLOAD``, as the
-    Python read of a stored result before the switch. An empty text is
-    ``INVALID_JSON_PAYLOAD`` too: a task with no result stores NULL, which
-    the caller reads before this call.
+    Python read of a stored result before the switch. An empty text does not
+    read either (``EmptyJsonTextError``): a task with no result stores NULL,
+    which the caller reads before this call.
     """
-    match result_json:
-        case '':
-            # loads_json reads an empty text as None, so it is refused here.
-            return Err(BrokerInvalidJsonPayload(
-                message=f'Result JSON parse failed for task {task_id}: the stored text is empty',
-                exception=SerializationError('JSON parse failed: the stored text is empty'),
-            ))
-        case _:
-            pass
     loaded = loads_json(result_json)
     if is_err(loaded):
         return Err(BrokerInvalidJsonPayload(
@@ -2222,12 +2210,20 @@ class PostgresBroker:
     ) -> BrokerResult[RawResultRecord | None]:
         """Decode the result column into a ``RawResultRecord``.
 
-        Returns ``Err(INVALID_JSON_PAYLOAD)`` when the stored JSON is
-        malformed (parser failure, NaN / Infinity rejected by the
-        parse-constant guard) or when the top-level payload is neither
+        ``result_json`` None (no stored result) gives a record without a
+        result. Returns ``Err(INVALID_JSON_PAYLOAD)`` when the stored JSON is
+        malformed (parser failure, an empty text, NaN / Infinity rejected by
+        the parse-constant guard) or when the top-level payload is neither
         ``None`` nor a JSON object (the envelope grammar requires a
         ``dict``). Otherwise wraps the loaded value into the record.
         """
+        if result_json is None:
+            return Ok(RawResultRecord(
+                task_id=task_id,
+                task_name=task_name,
+                status=status,
+                raw_result=None,
+            ))
         _lr = loads_json(result_json)
         if is_err(_lr):
             return Err(BrokerInvalidJsonPayload(

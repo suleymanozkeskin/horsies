@@ -252,11 +252,6 @@ def _args_from_map(
     match node.args_from:
         case None:
             return {}
-        case '':
-            # loads_json reads an empty text as None; raw stays None.
-            logger.warning(
-                'JSON parse failed (subworkflow args_from): the stored text is empty',
-            )
         case str() as text_value:
             match loads_json(text_value):
                 case Ok(parsed):
@@ -308,18 +303,13 @@ def _input_kwargs(
     no writer stores an empty text.
     """
     raw_kwargs: object = None
-    match node.node_input:
-        case '':
-            # loads_json reads an empty text as None; raw_kwargs stays None.
-            logger.warning('JSON parse failed (subworkflow kwargs): the stored text is empty')
-        case text_value:
-            match loads_json(text_value):
-                case Ok(parsed):
-                    raw_kwargs = parsed
-                case Err(parse_error):
-                    logger.warning(f'JSON parse failed (subworkflow kwargs): {parse_error}')
-                case _ as unreachable:
-                    assert_never(unreachable)
+    match loads_json(node.node_input):
+        case Ok(parsed):
+            raw_kwargs = parsed
+        case Err(parse_error):
+            logger.warning(f'JSON parse failed (subworkflow kwargs): {parse_error}')
+        case _ as unreachable:
+            assert_never(unreachable)
     if raw_kwargs is None:
         return _failed(
             node,
@@ -583,7 +573,7 @@ def task_options_with_good_until(node: TaskNode[Any], owner: NodeOwner) -> str |
     if node.good_until is None:
         return options_json
     base_options: dict[str, Any] = {}
-    if options_json:
+    if options_json is not None:
         match loads_json(options_json):
             case Ok(dict() as parsed_options):
                 base_options = cast(dict[str, Any], parsed_options)

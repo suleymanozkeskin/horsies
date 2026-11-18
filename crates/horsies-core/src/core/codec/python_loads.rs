@@ -152,8 +152,10 @@ impl std::fmt::Display for TextPosition {
 
 /// Scan `text` by the rules of Python's `loads_json`. `Ok` holds the type of
 /// the value that Python reads; `Err` the first refusal that Python raises.
-/// An empty text is a refusal here; `loads_json` reads it as `None`, so a
-/// caller decides what an empty text means before the scan. Pure.
+/// An empty text is a refusal here, with the text of the scanner;
+/// `loads_json` refuses it before the scan with its own text (`the text is
+/// empty`), so a caller decides what an empty text means before the scan.
+/// Pure.
 pub fn check_python_loads(text: &str) -> Result<PythonType, LoadsRefusal> {
     let chars: Vec<char> = text.chars().collect();
     Scanner {

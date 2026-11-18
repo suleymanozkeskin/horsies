@@ -22,7 +22,7 @@ from sqlalchemy.exc import OperationalError
 
 import horsies._core as core
 from horsies.core.brokers.resources import EventLoopLimit
-from horsies.core.codec.json_io import SerializationError
+from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.tasks import OperationalErrorCode, RetrievalCode
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
@@ -401,9 +401,10 @@ class TestStoredSubworkflowSummary:
         assert isinstance(err, HandleStoredDataInvalid)
         assert err.code is HandleErrorCode.STORED_DATA_INVALID
         assert not err.retryable
-        assert isinstance(err.exception, SerializationError)
+        assert isinstance(err.exception, EmptyJsonTextError)
         assert err.message == (
-            'sub_workflow_summary JSON corrupt for node parent:0: the stored text is empty'
+            'sub_workflow_summary JSON corrupt for node parent:0: '
+            'JSON parse failed: the text is empty'
         )
 
     @pytest.mark.asyncio
@@ -470,7 +471,24 @@ class TestStoredNodeResult:
         error = node_result.unwrap_err()
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert error.message == (
-            'Result JSON corrupt for node parent:0: the stored text is empty'
+            'Result JSON corrupt for node parent:0: '
+            'JSON parse failed: the text is empty'
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_result_that_is_not_json_names_the_node(self) -> None:
+        handle = _tasks_handle(None, result_json='{not valid json')
+
+        result = await handle.tasks_async()
+
+        assert is_ok(result)
+        node_result = result.ok_value[0].result
+        assert node_result is not None
+        error = node_result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message is not None
+        assert error.message.startswith(
+            'Result JSON corrupt for node parent:0: JSON parse failed: ',
         )
 
 

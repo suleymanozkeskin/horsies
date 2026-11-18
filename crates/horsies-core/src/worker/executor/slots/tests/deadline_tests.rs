@@ -14,9 +14,6 @@ use crate::worker::executor::slots::scripted::read_bytes;
 /// The child script: wait `before_boot`, take the init frame, send ready,
 /// then do `after_ready` (which reads the run frame itself).
 fn child_script(before_boot: &str, after_ready: &str) -> ChildCommand {
-    let init = encode_parent_frame(&ParentFrame::Init(init_frame()))
-        .unwrap()
-        .to_bytes();
     let ready = encode_child_frame(&ChildFrame::Ready(ReadyFrame {
         pid: ProcessId::new(1).unwrap(),
         rss: RssReading::Unreadable,
@@ -25,7 +22,7 @@ fn child_script(before_boot: &str, after_ready: &str) -> ChildCommand {
     .to_bytes();
     let script = format!(
         r#"{before_boot} {init}printf '{ready}' >&"$0"; {after_ready}"#,
-        init = drop_bytes(ScriptCount::Known(init.len())),
+        init = take_init(),
         ready = printf_bytes(&ready),
     );
     ChildCommand {

@@ -12,7 +12,7 @@ use super::outcome::{
     worker_failure_write, WriteStage,
 };
 use super::pool::Answer;
-use super::scripted::{drop_bytes, exit_at_stop, ScriptCount};
+use super::scripted::{drop_bytes, exit_at_stop, take_init, ScriptCount};
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -727,9 +727,6 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
 /// A child script: take the init frame, send ready, take the run frame,
 /// then do `after_run`.
 fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
-    let init = encode_parent_frame(&ParentFrame::Init(init_frame()))
-        .unwrap()
-        .to_bytes();
     let ready = encode_child_frame(&ChildFrame::Ready(ReadyFrame {
         pid: ProcessId::new(1).unwrap(),
         rss: RssReading::Unreadable,
@@ -738,7 +735,7 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
     .to_bytes();
     let script = format!(
         r#"{init}printf '{ready}' >&"$0"; {run}{after_run}"#,
-        init = drop_bytes(ScriptCount::Known(init.len())),
+        init = take_init(),
         ready = printf_bytes(&ready),
         run = drop_bytes(ScriptCount::Known(run_frame_bytes(claimed).len())),
     );
