@@ -2,8 +2,8 @@
 
 The restructure puts the core crate and each client in its own folder:
 
-    core/             the core crate (was crates/horsies-core), with baseline/
-                      and webui-dist/
+    core/             the core crate (was crates/horsies-core), with baseline/,
+                      webui-dist/ and derive/ (was crates/horsies-core-derive)
     clients/python/   horsies/ (was python/horsies), bridge/ (was
                       crates/horsies-python), codegen/ (was
                       crates/horsies-codegen), tests/ (was tests/ without the
@@ -13,8 +13,9 @@ The restructure puts the core crate and each client in its own folder:
                       crates/horsies-macros), tests/ (was rust/tests),
                       examples/ (was rust/examples, with rust/showcase at
                       examples/showcase/), scripts/ (was rust/scripts)
-    tests/            cross-client only: parity/, perf/ with its compose file,
-                      stored_form_vectors.py
+    tests/            cross-client only: parity/, perf/ with its compose file
+                      and its unit tests, stored_form_vectors.py with its unit
+                      tests
     webui/ website/ scripts/   unchanged
 
 This module holds the data of the move and the pure text rules. It does no
@@ -59,8 +60,29 @@ class Stay:
     reason: str
 
 
+PERF_UNIT_TESTS: Final = (
+    'test_perf_release_patches.py',
+    'test_perf_result_artifacts.py',
+    'test_perf_run_exit.py',
+    'test_perf_seed_ids.py',
+    'test_perf_statistics.py',
+)
+"""The unit tests of the perf harness, in tests/unit/ before the move and next
+to the harness, in tests/perf/, after it."""
+
+STORED_FORM_UNIT_TESTS: Final = (
+    'test_stored_form_error_data.py',
+    'test_stored_form_result_envelope.py',
+    'test_stored_form_task_input.py',
+    'test_stored_form_task_options.py',
+    'test_stored_form_workflow_spec_data.py',
+)
+"""The unit tests of the stored-form vectors, in tests/unit/ before the move
+and next to tests/stored_form_vectors.py, in tests/, after it."""
+
 MOVES: Final = (
     Move('crates/horsies-core', 'core'),
+    Move('crates/horsies-core-derive', 'core/derive'),
     Move('crates/horsies-python', 'clients/python/bridge'),
     Move('crates/horsies-codegen', 'clients/python/codegen'),
     Move('python/horsies', 'clients/python/horsies'),
@@ -69,6 +91,8 @@ MOVES: Final = (
     Move('pyrightconfig.clean.json', 'clients/python/pyrightconfig.clean.json'),
     Move('pyrightconfig.docs.json', 'clients/python/pyrightconfig.docs.json'),
     Move('showcase', 'clients/python/examples'),
+    *(Move(f'tests/unit/{name}', f'tests/perf/{name}') for name in PERF_UNIT_TESTS),
+    *(Move(f'tests/unit/{name}', f'tests/{name}') for name in STORED_FORM_UNIT_TESTS),
     Move('tests', 'clients/python/tests'),
     Move('crates/horsies', 'clients/rust/horsies'),
     Move('crates/horsies-macros', 'clients/rust/macros'),
@@ -78,11 +102,14 @@ MOVES: Final = (
     Move('rust/scripts', 'clients/rust/scripts'),
     Move('rust/imported-commit-map.txt', 'clients/rust/imported-commit-map.txt'),
 )
-"""Every move, in the order of the ``git mv`` steps. ``rust/examples`` moves
-before ``rust/showcase``, whose new folder is inside it."""
+"""Every move, in the order of the ``git mv`` steps. A move whose new folder
+is inside the new folder of another move comes after it:
+``crates/horsies-core`` before ``crates/horsies-core-derive``,
+``rust/examples`` before ``rust/showcase``. The unit tests of the cross-client
+harnesses leave ``tests/unit/`` before ``tests`` moves."""
 
 STAYS: Final = (
-    Stay('tests/__init__.py', 'the root portion of the split package `tests`'),
+    Stay('tests/__init__.py', 'the package `tests` of the cross-client harnesses'),
     Stay('tests/parity', 'cross-client: drives the Python and the Rust client'),
     Stay('tests/perf', 'cross-client: the measurement harness'),
     Stay('tests/fixtures/perf', 'cross-client: the servers of the measurement harness'),
@@ -99,6 +126,34 @@ package is ``clients/python/``."""
 
 PYTHON_PROJECT: Final = 'clients/python'
 PYTHON_TESTS: Final = 'clients/python/tests'
+"""The package ``tests`` of the Python client. The top-level ``tests/`` is the
+package ``tests`` of the cross-client harnesses. They are two packages with
+one name: no process imports both, and neither extends its package path."""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenImport:
+    """A ``tests.`` import under ``folder`` that names a module of the other
+    package ``tests``, and the decision that it waits for. The checks report
+    it as open, not as a failure; each entry must match an import."""
+
+    folder: str
+    module: str
+    decision: str
+
+
+PARITY_IMPORTS: Final = (
+    'The Python side of the parity harness (tests/parity/) imports tests.dualrun '
+    'and tests.session_database, modules of the package `tests` of the Python '
+    'client. With no package split, the top-level package `tests` does not hold '
+    'them. Open: tests/parity/ moves to clients/python/tests/parity/, or these '
+    'imports change.'
+)
+
+OPEN_IMPORTS: Final = (
+    OpenImport('tests/parity', 'tests.dualrun', PARITY_IMPORTS),
+    OpenImport('tests/parity', 'tests.session_database', PARITY_IMPORTS),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +178,7 @@ NEW_FILES: Final = (
     NewFile(
         'clients/python/tests/__init__.py',
         'tests/__init__.py',
-        'the Python client portion of the split package `tests`',
+        'the package `tests` of the Python client',
     ),
 )
 
@@ -702,7 +757,7 @@ def render_file_base(
 ) -> str:
     """``Path(__file__)`` with ``levels`` folders up and ``literals`` joined, in the form of ``match``."""
     resolve = match.group('resolve') or ''
-    if match.group('parents') is not None and levels <= 3:
+    if (match.group('parents') is not None and levels <= 3) or levels == 1:
         base = f'Path(__file__){resolve}' + '.parent' * levels
     else:
         base = f'Path(__file__){resolve}.parents[{levels - 1}]'
@@ -1140,24 +1195,20 @@ class Edit:
 
 
 TESTS_PACKAGE_DOC_OLD: Final = '"""Tests package for horsies."""\n'
-
-
-def tests_package_text(portion: str) -> str:
-    """The ``__init__.py`` of one folder of the split package ``tests``."""
-    return (
-        f'"""Tests package for horsies: {portion}.\n'
-        '\n'
-        'The package is split across two folders: tests/ at the repository root\n'
-        'holds the cross-client harnesses (parity, perf, the stored-form vectors),\n'
-        'and clients/python/tests/ holds the tests of the Python client. Each\n'
-        'portion adds the other one to the package path when the folder that holds\n'
-        'it is on sys.path (pytest: `pythonpath` in clients/python/pyproject.toml).\n'
-        '"""\n'
-        '\n'
-        'from pkgutil import extend_path\n'
-        '\n'
-        '__path__ = extend_path(__path__, __name__)\n'
-    )
+CROSS_CLIENT_TESTS_DOC: Final = (
+    '"""The cross-client test harnesses of horsies: parity, perf and the\n'
+    'stored-form vectors, each with its own tests.\n'
+    '\n'
+    'The tests of the Python client are the package `tests` of clients/python/.\n'
+    '"""\n'
+)
+PYTHON_CLIENT_TESTS_DOC: Final = (
+    '"""The tests of the Python client of horsies.\n'
+    '\n'
+    'The cross-client harnesses (parity, perf, the stored-form vectors) are the\n'
+    'package `tests` at the repository root.\n'
+    '"""\n'
+)
 
 
 UV_PROJECT_OLD: Final = 'permissions: {}\n\njobs:\n'
@@ -1180,18 +1231,36 @@ WORKFLOWS_WITH_UV: Final = (
 )
 
 _PYTHON_SCOPE_OLD: Final = """\
-          # Rust client, the generator, rust/, or the format and lint settings
-          # cannot: the Python jobs are skipped for it.
-          if git diff --quiet "$base" HEAD -- . ':(exclude)clients/rust/horsies/' ':(exclude)clients/python/codegen/' ':(exclude)rust/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
+          # horsies._core is built from clients/python/bridge, core
+          # and core/derive with the root Cargo and toolchain
+          # files, so a change there can change a Python result. A PR that
+          # changes only the Rust client, its macros, the generator, rust/, or
+          # the format and lint settings cannot: the Python jobs are skipped for
+          # it.
+          if git diff --quiet "$base" HEAD -- . ':(exclude)clients/rust/horsies/' ':(exclude)clients/rust/macros/' ':(exclude)clients/python/codegen/' ':(exclude)rust/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
 """
 _PYTHON_SCOPE_NEW: Final = """\
-          # Rust client, its tests and examples, the generator, or the format and
-          # lint settings cannot: the Python jobs are skipped for it.
-          if git diff --quiet "$base" HEAD -- . ':(exclude)clients/rust/horsies/' ':(exclude)clients/rust/tests/' ':(exclude)clients/rust/examples/' ':(exclude)clients/rust/scripts/' ':(exclude)clients/rust/imported-commit-map.txt' ':(exclude)clients/python/codegen/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
+          # horsies._core is built from clients/python/bridge, core and
+          # core/derive with the root Cargo and toolchain files, so a change
+          # there can change a Python result. A PR that changes only the Rust
+          # client (clients/rust/), the generator, or the format and lint
+          # settings cannot: the Python jobs are skipped for it.
+          if git diff --quiet "$base" HEAD -- . ':(exclude)clients/rust/' ':(exclude)clients/python/codegen/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
 """
 
 OLD_CRATES_FOLDERS: Final = 'core/ clients/python/bridge/ clients/python/codegen/ clients/rust/horsies/ clients/rust/macros/'
-"""The five crates that were under crates/, for a pathspec that named crates/."""
+"""The crates that were under crates/, for a pathspec that named crates/.
+``core/`` holds ``core/derive/``."""
+
+HARNESS_UNIT_TESTS_STEP: Final = (
+    '      # The unit tests of the cross-client harnesses in the top-level tests/:\n'
+    '      # the perf harness and the stored-form vectors. They run from the\n'
+    '      # repository root with the pytest settings of the Python project.\n'
+    '      - name: Run the unit tests of the cross-client harnesses\n'
+    '        run: {uv_run} pytest -c clients/python/pyproject.toml --rootdir . tests/perf/ tests/test_stored_form_*.py -v --tb=short\n'
+)
+"""A CI step after the unit tests of the Python client; ``{uv_run}`` is the
+``uv run`` form of the workflow."""
 
 EDITS: Final[tuple[Edit, ...]] = (
     *(
@@ -1262,15 +1331,39 @@ EDITS: Final[tuple[Edit, ...]] = (
     Edit(
         '.gitignore', '\ntests/test_results\n', '\nclients/python/tests/test_results\n'
     ),
-    Edit(
-        'tests/__init__.py',
-        TESTS_PACKAGE_DOC_OLD,
-        tests_package_text('the cross-client portion'),
-    ),
+    Edit('tests/__init__.py', TESTS_PACKAGE_DOC_OLD, CROSS_CLIENT_TESTS_DOC),
     Edit(
         'clients/python/tests/__init__.py',
         TESTS_PACKAGE_DOC_OLD,
-        tests_package_text('the Python client portion'),
+        PYTHON_CLIENT_TESTS_DOC,
+    ),
+    Edit(
+        '.github/workflows/tests.yml',
+        '      - name: Run unit tests\n'
+        '        run: uv run --no-sync pytest clients/python/tests/unit/ -v --tb=short\n',
+        '      - name: Run unit tests\n'
+        '        run: uv run --no-sync pytest clients/python/tests/unit/ -v --tb=short\n'
+        '\n' + HARNESS_UNIT_TESTS_STEP.format(uv_run='uv run --no-sync'),
+    ),
+    Edit(
+        '.github/workflows/tests-full.yml',
+        '      - name: Run unit tests\n'
+        '        run: uv run pytest clients/python/tests/unit/ -v --tb=short\n',
+        '      - name: Run unit tests\n'
+        '        run: uv run pytest clients/python/tests/unit/ -v --tb=short\n'
+        '\n' + HARNESS_UNIT_TESTS_STEP.format(uv_run='uv run'),
+    ),
+    Edit(
+        # A glob over files that moved next to their harness: the citation
+        # rule moves it with tests/unit/.
+        'tests/stored_form_vectors.py',
+        'Python tests (``clients/python/tests/unit/test_stored_form_*.py``)',
+        'Python tests (``tests/test_stored_form_*.py``)',
+    ),
+    Edit(
+        'core/tests/fixtures/stored_forms/README.md',
+        '`clients/python/tests/unit/test_stored_form_*.py`, helpers in `tests/stored_form_vectors.py`',
+        '`tests/test_stored_form_*.py`, helpers in `tests/stored_form_vectors.py`',
     ),
     Edit(
         'clients/python/pyproject.toml',
@@ -1284,18 +1377,8 @@ EDITS: Final[tuple[Edit, ...]] = (
         '    { file = "bridge/Cargo.toml" },\n'
         '    { file = "bridge/**/*.rs" },\n'
         '    { file = "../../core/Cargo.toml" },\n'
-        '    { file = "../../core/**/*.rs" },\n'
-        '    { file = "../rust/macros/Cargo.toml" },\n'
-        '    { file = "../rust/macros/**/*.rs" },\n',
-    ),
-    Edit(
-        'clients/python/pyproject.toml',
-        'testpaths = ["tests"]\n',
-        'testpaths = ["tests"]\n'
-        '# The package `tests` is split between tests/ here and the cross-client\n'
-        '# tests/ at the repository root; with the root on sys.path each portion adds\n'
-        '# the other to the package path (tests/__init__.py).\n'
-        'pythonpath = ["../.."]\n',
+        '    { file = "../../core/derive/Cargo.toml" },\n'
+        '    { file = "../../core/**/*.rs" },\n',
     ),
     Edit(
         'core/tests/user_value_text.rs',

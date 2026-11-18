@@ -57,10 +57,13 @@ GONE_FOLDER_CHAIN: Final = re.compile(
         )
         for move in rules.MOVES
         if len(rules.parts_of(move.old)) > 1
+        and rules.parts_of(move.old)[0] in rules.OLD_FOLDERS_GONE
     )
     + r'|[\'"]showcase[\'"]\s*\)?\s*/',
 )
-"""Literals joined with ``/`` that name an old path: ``'crates' / 'horsies-core'``."""
+"""Literals joined with ``/`` that name an old path under an emptied folder:
+``'crates' / 'horsies-core'``. A chain that starts at ``'tests'`` is relative
+to a base that the text does not show (the pytest root, the cwd)."""
 
 NEW_CHAIN_HEAD: Final = re.compile(r'[\'"]clients[\'"]\s*\)?\s*/\s*$')
 """The new form ``'clients' / 'python' / 'horsies'`` holds the old pair; this is its head."""
@@ -208,6 +211,9 @@ PLANTED_TREE: Final = rules.Tree.of(
         'Cargo.toml',
         'core/Cargo.toml',
         'core/src/lib.rs',
+        'core/derive/Cargo.toml',
+        'core/derive/src/lib.rs',
+        'tests/perf/test_perf_statistics.py',
         'core/tests/fixtures/stored_forms/README.md',
         'clients/python/pyproject.toml',
         'clients/python/tests/unit/test_a.py',
@@ -221,6 +227,13 @@ PLANTED_TREE: Final = rules.Tree.of(
 PLANTED: Final = (
     # (citing file, line, whether the line cites an old path)
     ('README.md', 'see crates/horsies-core/src/lib.rs:12', True),
+    ('README.md', 'crates/horsies-core-derive/src/lib.rs', True),
+    ('README.md', 'core/derive/src/lib.rs', False),
+    ('README.md', "ROOT / 'crates' / 'horsies-core-derive'", True),
+    ('README.md', 'horsies-core-derive = { path = "../horsies-core-derive" }', True),
+    ('README.md', 'horsies-core-derive = { path = "derive" }', False),
+    ('README.md', 'tests/unit/test_perf_statistics.py', True),
+    ('README.md', 'tests/perf/test_perf_statistics.py', False),
     ('README.md', '`python/horsies/core/cli.py`', True),
     ('README.md', 'rust/tests/worker/src/main.rs', True),
     ('README.md', 'uv run horsies check showcase/acme/app.py', True),

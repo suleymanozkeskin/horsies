@@ -24,8 +24,10 @@ only in <checkout>:
      a crate and every ``path =`` of a Cargo manifest names a tracked path;
    - the workspace members are exactly the crates of the tree;
    - every tracked TOML and YAML file and both pyright configs parse;
-   - every ``tests.`` import names a module of the split package ``tests``,
-     and both ``__init__.py`` files extend the package path;
+   - every ``tests.`` import names a module of the package ``tests`` that
+     holds the importing file (``tests/`` or ``clients/python/tests/``),
+     apart from the imports of ``move_rules.OPEN_IMPORTS``, and neither
+     ``__init__.py`` extends the package path;
    - ``clients/python/pyproject.toml`` names files that exist;
    - nothing is left unstaged or untracked.
 
@@ -34,8 +36,9 @@ script writes two commits on the current branch: the renames with unchanged
 bytes (so that ``git log --follow`` follows each file), then the edits. It
 never pushes and never builds.
 
-The script prints the sites that a rule left for a person ("review"); they
-are not failures. Exit codes: 0 done, 1 a step or a check failed, 2 usage.
+The script prints the sites that a rule left for a person ("review") and
+the imports that wait for a decision ("open"); they are not failures. Exit
+codes: 0 done, 1 a step or a check failed, 2 usage.
 """
 
 from __future__ import annotations
@@ -283,8 +286,10 @@ def apply_edits(repo: Path) -> tuple[set[str], list[Failure]]:
 
 
 def check_index(old_files: Iterable[str], new_files: Iterable[str]) -> list[Failure]:
-    """The index holds exactly the moved old files and the added ones."""
-    expected = {rules.new_path_of(path) for path in old_files}
+    """The index holds exactly the moved old files and the added ones, and no
+    file that moves is still at its old path."""
+    old = set(old_files)
+    expected = {rules.new_path_of(path) for path in old}
     expected |= {new_file.path for new_file in rules.NEW_FILES} | {
         link.path for link in rules.NEW_LINKS
     }
@@ -297,14 +302,11 @@ def check_index(old_files: Iterable[str], new_files: Iterable[str]) -> list[Fail
         Failure(path, 'in the index after the move, not expected')
         for path in sorted(actual - expected)
     ]
-    for move in rules.MOVES:
-        if any(
-            rules.is_under(path, move.old) and rules.stay_of(path) is None
-            for path in actual
-        ):
-            failures.append(
-                Failure(move.old, 'a tracked file is still under an old path')
-            )
+    failures += [
+        Failure(path, 'a tracked file that moves is still at its old path')
+        for path in sorted(actual & old)
+        if rules.new_path_of(path) != path
+    ]
     return failures
 
 
@@ -451,49 +453,96 @@ TESTS_IMPORT: Final = re.compile(
     r'^\s*(?:from\s+(?P<from>tests(?:\.\w+)*)\s+import|import\s+(?P<import>tests(?:\.\w+)*))',
     re.MULTILINE,
 )
-TEST_PACKAGE_ROOTS: Final = ('tests', rules.PYTHON_TESTS)
-"""The two folders of the split package ``tests``: cross-client, and the Python client."""
+CROSS_CLIENT_TESTS: Final = 'tests'
+TEST_PACKAGE_ROOTS: Final = (CROSS_CLIENT_TESTS, rules.PYTHON_TESTS)
+"""The folders of the two packages ``tests``: the cross-client harnesses, and
+the Python client."""
 
 
-def module_exists(module: str, tree: rules.Tree) -> bool:
-    """Whether ``tests.a.b`` is a module or a package (regular or namespace) in
-    either folder of the split package."""
-    rest = module.split('.')[1:]
-    for root in TEST_PACKAGE_ROOTS:
-        base = '/'.join((root, *rest))
-        if f'{base}.py' in tree.files or base in tree.folders:
-            return True
-    return False
+@dataclass(frozen=True, slots=True)
+class OpenSite:
+    """An import of ``move_rules.OPEN_IMPORTS``: where, and its decision."""
+
+    site: str
+    module: str
+    decision: str
 
 
-def check_test_imports(repo: Path, tree: rules.Tree) -> tuple[int, list[Failure]]:
-    """Every ``tests.`` import of a tracked Python file names a module of the split package."""
+def package_of(path: str) -> str:
+    """The folder of the package ``tests`` that a ``tests.`` import of ``path`` names."""
+    if rules.is_under(path, rules.PYTHON_PROJECT):
+        return rules.PYTHON_TESTS
+    return CROSS_CLIENT_TESTS
+
+
+def module_exists(module: str, package: str, tree: rules.Tree) -> bool:
+    """Whether ``tests.a.b`` is a module or a package in the folder ``package``."""
+    base = '/'.join((package, *module.split('.')[1:]))
+    return f'{base}.py' in tree.files or base in tree.folders
+
+
+def open_import_of(path: str, module: str) -> rules.OpenImport | None:
+    """The entry of ``move_rules.OPEN_IMPORTS`` that covers an import of ``path``."""
+    for entry in rules.OPEN_IMPORTS:
+        if rules.is_under(path, entry.folder) and (
+            module == entry.module or module.startswith(f'{entry.module}.')
+        ):
+            return entry
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class ImportCheck:
+    """The ``tests.`` imports checked, the failures, and the open imports."""
+
+    count: int
+    failures: list[Failure]
+    open_sites: list[OpenSite]
+
+
+def check_test_imports(repo: Path, tree: rules.Tree) -> ImportCheck:
+    """Every ``tests.`` import of a tracked Python file names a module of its own
+    package ``tests``, or is an open import; neither package extends its path."""
     count = 0
     failures: list[Failure] = []
+    open_sites: list[OpenSite] = []
+    matched: set[rules.OpenImport] = set()
     for path in sorted(tree.files):
         if not path.endswith('.py') or rules.kept_file_rule(path) is not None:
             continue
         text = read_text(repo / path) or ''
+        package = package_of(path)
         for match in TESTS_IMPORT.finditer(text):
             module = match.group('from') or match.group('import')
             count += 1
-            if not module_exists(module, tree):
-                failures.append(
-                    Failure(
-                        f'{path}:{rules.line_of(text, match.start())}',
-                        f'imports {module}, which is in neither tests/ nor {rules.PYTHON_TESTS}/',
+            site = f'{path}:{rules.line_of(text, match.start())}'
+            if module_exists(module, package, tree):
+                continue
+            match open_import_of(path, module):
+                case None:
+                    failures.append(
+                        Failure(site, f'imports {module}, which is not in {package}/')
                     )
-                )
+                case entry:
+                    matched.add(entry)
+                    open_sites.append(OpenSite(site, module, entry.decision))
+    failures += [
+        Failure(entry.folder, f'open import {entry.module} matches no import')
+        for entry in rules.OPEN_IMPORTS
+        if entry not in matched
+    ]
     for root in TEST_PACKAGE_ROOTS:
-        text = read_text(repo / root / '__init__.py') or ''
-        if 'extend_path(__path__, __name__)' not in text:
+        text = read_text(repo / root / '__init__.py')
+        if text is None:
+            failures.append(Failure(f'{root}/__init__.py', 'missing'))
+        elif 'extend_path' in text:
             failures.append(
                 Failure(
                     f'{root}/__init__.py',
-                    'does not extend the package path; `tests` is split across two folders',
+                    'extends the package path; the two packages `tests` stay apart',
                 )
             )
-    return count, failures
+    return ImportCheck(count=count, failures=failures, open_sites=open_sites)
 
 
 def check_pyproject(repo: Path, tree: rules.Tree) -> list[Failure]:
@@ -577,12 +626,12 @@ def run_checks(repo: Path, old_files: tuple[str, ...]) -> list[Failure]:
     rust_count, rust_failures = check_rust_paths(repo, tree)
     member_count, member_failures = check_workspace(repo, tree)
     parse_count, parse_failures = check_parse(repo, tree)
-    import_count, import_failures = check_test_imports(repo, tree)
+    imports = check_test_imports(repo, tree)
     failures += (
         rust_failures
         + member_failures
         + parse_failures
-        + import_failures
+        + imports.failures
         + check_pyproject(repo, tree)
     )
     failures += check_clean_stage(repo)
@@ -590,8 +639,14 @@ def run_checks(repo: Path, old_files: tuple[str, ...]) -> list[Failure]:
         f'Rust and Cargo paths checked: {rust_count}; workspace members: {member_count}'
     )
     print(
-        f'TOML, YAML and pyright files parsed: {parse_count}; tests. imports resolved: {import_count}'
+        f'TOML, YAML and pyright files parsed: {parse_count}; tests. imports checked: {imports.count}'
     )
+    for site in imports.open_sites:
+        print(f'open {site.site}: imports {site.module}')
+    decisions = sorted({site.decision for site in imports.open_sites})
+    for decision in decisions:
+        print(f'open decision: {decision}')
+    print(f'open imports: {len(imports.open_sites)}')
     return failures
 
 
@@ -602,10 +657,11 @@ def run_checks(repo: Path, old_files: tuple[str, ...]) -> list[Failure]:
 RENAME_MESSAGE: Final = """\
 Move the crates and the clients into the 0.8.0 layout
 
-core/ holds the core crate; clients/python/ the package, the extension
-module crate, the generator, the Python tests and examples; clients/rust/
-the Rust client, its macros, tests and examples. tests/ keeps the
-cross-client parity and perf harnesses and the stored-form vectors. Every
+core/ holds the core crate and its derives (core/derive/); clients/python/
+the package, the extension module crate, the generator, the Python tests
+and examples; clients/rust/ the Rust client, its macros, tests and
+examples. tests/ keeps the cross-client parity and perf harnesses and the
+stored-form vectors, with the unit tests of perf and of the vectors. Every
 file keeps its bytes; the next commit changes the paths. This commit alone
 does not build.
 """
@@ -614,9 +670,9 @@ EDIT_MESSAGE: Final = """\
 Point every path at the 0.8.0 layout
 
 The Cargo workspace, the crate manifests, pyproject.toml, the pyright
-configs, the CI workflows, the docs and the tests follow the move. The
-package `tests` is split between tests/ (cross-client) and
-clients/python/tests/ (the Python client).
+configs, the CI workflows, the docs and the tests follow the move. tests/
+and clients/python/tests/ are two packages named `tests`: the cross-client
+harnesses, and the tests of the Python client.
 """
 
 
