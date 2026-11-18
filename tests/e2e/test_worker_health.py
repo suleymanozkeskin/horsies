@@ -197,7 +197,7 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
     and its shared budget of every seat, with the row it runs; the pending
     SHARED_ASYNC stream is served with the seats of the shared budget."""
     await _forget_other_workers(session)
-    pending = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
+    pending = unwrap_send(await shared_async_tasks.shared_sleep.send_async(seconds=0))
     await _pending_later(session, pending.task_id)
 
     with run_worker(
@@ -250,8 +250,8 @@ async def test_a_worker_with_only_shared_children_serves_only_shared_rows(
     """A worker of 1 shared async child of 4 seats serves the SHARED_ASYNC
     stream of its queue, and no ISOLATED row: that stream is unserved."""
     await _forget_other_workers(session)
-    unserved = unwrap_send(basic_tasks.healthcheck.send())
-    pending = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
+    unserved = unwrap_send(await basic_tasks.healthcheck.send_async())
+    pending = unwrap_send(await shared_async_tasks.shared_sleep.send_async(seconds=0))
     await _pending_later(session, pending.task_id)
 
     with run_worker(
