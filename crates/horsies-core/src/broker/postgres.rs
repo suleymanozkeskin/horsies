@@ -786,6 +786,11 @@ impl SendCommand {
         retain_rerun_input: bool,
     ) -> Result<Self, BrokerError> {
         check_sent_input(input)?;
+        // The options are read with the strict rule before the retry limit,
+        // as `CheckedSend::check` reads them, so a text that does not read
+        // names its reader's error (Python `_parse_enqueue_task_options`).
+        let _options = parse_optional_object(task_options)
+            .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
         let retention_class_key = retention.class_key();
         let facts = prepare_enqueue_facts(
@@ -3083,14 +3088,15 @@ fn decode_pong(
 use crate::worker::retry::stored_max_retries;
 
 /// The `max_retries` that enqueue stores, by Python's rule
-/// (`python/horsies/core/codec/task_options.py:80-103`, `stored_max_retries`): no
-/// options and no `retry_policy` store 0; a policy stores its `max_retries`.
-/// The options are read with the reader of the dispatch
+/// (`python/horsies/core/codec/task_options.py`, `stored_max_retries`): no
+/// options (`None`) and no `retry_policy` store 0; a policy stores its
+/// `max_retries`. The options are read with the reader of the dispatch
 /// ([`stored_max_retries`]), so a text that the worker would refuse is refused
-/// here, before any statement: text that does not parse, that is not a JSON
-/// object, or whose `retry_policy` does not fit Python's `RetryPolicy` (a
-/// limit outside 1 to 20, a wrong field, no code) is `EnqueueContract`, which
-/// a send reports as `VALIDATION_FAILED`. Other keys are not judged here.
+/// here, before any statement: text that does not parse (an empty text
+/// included), that is not a JSON object, or whose `retry_policy` does not fit
+/// Python's `RetryPolicy` (a limit outside 1 to 20, a wrong field, no code) is
+/// `EnqueueContract`, which a send reports as `VALIDATION_FAILED`. Other keys
+/// are not judged here.
 fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
     stored_max_retries(task_options).map_err(|refusal| {
         BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
@@ -5121,7 +5127,6 @@ mod enqueue_task_options_tests {
     fn no_options_and_no_policy_store_zero_retries() {
         for options in [
             None,
-            Some(""),
             Some(r#"{"retry_policy": null, "execution": "ISOLATED"}"#),
             Some("{}"),
         ] {
@@ -5130,6 +5135,79 @@ mod enqueue_task_options_tests {
                 0,
                 "{options:?}"
             );
+        }
+    }
+
+    /// An empty text is not "no options": the retry limit refuses it with
+    /// the reason of the dispatch reader (`read_stored_options`).
+    #[test]
+    fn an_empty_text_is_refused_with_the_dispatch_reason() {
+        let reason = match crate::worker::retry::read_stored_options(Some("")) {
+            crate::worker::retry::StoredOptions::Unreadable { reason } => reason,
+            readable => panic!("the dispatch reads an empty text as {readable:?}"),
+        };
+
+        match enqueue_max_retries("t", Some("")) {
+            Err(BrokerError::EnqueueContract(refusal)) => assert_eq!(
+                refusal,
+                EnqueueRefusal::by_rule(
+                    SendPart::TaskOptions,
+                    format!("task_options refused for t: {reason}"),
+                )
+            ),
+            other => panic!("an empty text gave {other:?}"),
+        }
+    }
+
+    /// A send command and a send read the options with the strict rule
+    /// before the retry limit, so both refuse an empty text with the strict
+    /// read's error, not with the retry limit's.
+    #[test]
+    fn both_send_paths_refuse_an_empty_text_with_the_strict_read_error() {
+        let expected = EnqueueRefusal {
+            part: SendPart::TaskOptions,
+            message: "task_options JSON is refused: JSON text is empty".to_owned(),
+            cause: crate::broker::error::EnqueueRefusalCause::JsonUnreadable(
+                "JSON text is empty".to_owned(),
+            ),
+        };
+        let command = SendCommand::prepare(
+            "t",
+            "default",
+            100,
+            "{}",
+            Some(""),
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_command| ());
+        let send = CheckedSend::check(
+            "t",
+            "{}",
+            "default",
+            100,
+            None,
+            None,
+            None,
+            Some(""),
+            Some(Uuid::from_u128(7)),
+            None,
+            None,
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_send| ());
+
+        for (path, outcome) in [
+            ("SendCommand::prepare", command),
+            ("CheckedSend::check", send),
+        ] {
+            match outcome {
+                Err(BrokerError::EnqueueContract(refusal)) => {
+                    assert_eq!(refusal, expected, "{path}");
+                }
+                other => panic!("{path}: an empty text gave {other:?}"),
+            }
         }
     }
 

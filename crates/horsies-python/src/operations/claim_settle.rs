@@ -16,6 +16,7 @@ use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use super::arguments::utc_instant;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The claims of one settle: the worker and each claimed workflow task with
@@ -70,7 +71,12 @@ pub struct SettleFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `settle_claimed_workflow_tasks`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed settle_claimed_workflow_tasks.
+const SUBJECT: &str = "settle_claimed_workflow_tasks";
 
 /// The outcome of one settle.
 pub enum SettleOutcome {
@@ -96,6 +102,7 @@ fn settle_failed(error: &horsies_core::BrokerError) -> SettleOutcome {
     SettleOutcome::Failed(SettleFailed {
         message: format!("claim-time settle of workflow tasks failed: {error}"),
         retryable: error.is_retryable(),
+        exception: FailureException::of(SUBJECT, error),
     })
 }
 

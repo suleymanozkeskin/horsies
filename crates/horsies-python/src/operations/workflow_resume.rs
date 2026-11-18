@@ -16,13 +16,13 @@
 //! function's contract raises `PanicException`, as Python raises
 //! `OutcomeDecodeError`.
 
-use horsies_core::catalog::CodeEnum;
 use horsies_core::{HandleErrorCode, HandleOperationError, HandleResult};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use crate::child_spec::PythonChildSpecSource;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::operations::workflow_lifecycle::{HandleFailed, WorkflowAbsent};
 
@@ -49,7 +49,13 @@ pub struct WorkflowResumeRecoveryFailed {
     pub workflow_id: Uuid,
     /// The cause, with its subject.
     pub message: String,
+    /// The cause of the failed work after the commit, with the subject
+    /// `resume_workflow`, not retryable.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed resume.
+const SUBJECT: &str = "resume_workflow";
 
 /// The outcome of one resume.
 pub enum WorkflowResumeOutcome {
@@ -90,17 +96,17 @@ fn failed_record(workflow_id: Uuid, error: &HandleOperationError) -> WorkflowRes
             WorkflowResumeOutcome::Absent(WorkflowAbsent { workflow_id })
         }
         HandleErrorCode::DbOperationFailed | HandleErrorCode::StoredDataInvalid => {
-            WorkflowResumeOutcome::Failed(HandleFailed {
+            WorkflowResumeOutcome::Failed(HandleFailed::of_handle_error(
+                SUBJECT,
                 workflow_id,
-                code: error.code.wire_value().to_owned(),
-                message: error.message.clone(),
-                retryable: error.retryable,
-            })
+                error,
+            ))
         }
         HandleErrorCode::ResumeRecoveryFailed => {
             WorkflowResumeOutcome::RecoveryFailed(WorkflowResumeRecoveryFailed {
                 workflow_id,
                 message: error.message.clone(),
+                exception: FailureException::of_handle_error(SUBJECT, error),
             })
         }
         HandleErrorCode::LoopRunnerFailed
@@ -144,12 +150,11 @@ pub async fn resume_workflow_operation(
     let broker = match connection.broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return WorkflowResumeOutcome::Failed(HandleFailed {
+            return WorkflowResumeOutcome::Failed(HandleFailed::of_connect_error(
+                SUBJECT,
                 workflow_id,
-                code: HandleErrorCode::DbOperationFailed.wire_value().to_owned(),
-                message: error.to_string(),
-                retryable: error.is_retryable(),
-            })
+                &error,
+            ))
         }
     };
     let answer = broker.resume_client_workflow(workflow_id, &source).await;

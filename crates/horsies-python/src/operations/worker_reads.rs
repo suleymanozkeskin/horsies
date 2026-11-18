@@ -16,17 +16,22 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, TimeDelta, Utc};
 use horsies_core::{
     checked_history_limit, worker_history_limit_refused, BrokerErrorCode, BudgetLoad, ClassBudget,
-    ClassCoverage, ClassReport, ClearableBootCause, DownSlot, Execution, PendingStream, SlotHealth,
-    StreamCoverage, StreamCoverageState, StreamWait, WorkerClassLoad, WorkerStateSnapshot,
+    ClassCoverage, ClassReport, ClearableBootCause, DownSlot, Execution, FailureCause,
+    PendingStream, SlotHealth, StreamCoverage, StreamCoverageState, StreamWait, WorkerClassLoad,
+    WorkerStateSnapshot,
 };
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyInt, PyList};
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::operations::task_lists::connect_failed;
 use crate::records::BrokerFailure;
+
+/// The subject of the exception of a refused or failed history read.
+const HISTORY_SUBJECT: &str = "get_worker_state_history";
 
 /// The cause of a down slot that ran short of an OS resource.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -467,9 +472,10 @@ pub fn history_limit(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<i64>, B
     if value.is_instance_of::<PyBool>() {
         return match value.is_truthy()? {
             true => Ok(Err(limit_statement_refused("True"))),
-            false => Ok(Err(BrokerFailure::from(worker_history_limit_refused(
-                &"False",
-            )))),
+            false => Ok(Err(BrokerFailure::of_operation_error(
+                HISTORY_SUBJECT,
+                worker_history_limit_refused(&"False"),
+            ))),
         };
     }
     if !value.is_instance_of::<PyInt>() {
@@ -479,13 +485,15 @@ pub fn history_limit(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<i64>, B
         )));
     }
     match value.extract::<i64>() {
-        Ok(limit) => Ok(checked_history_limit(Some(limit)).map_err(BrokerFailure::from)),
+        Ok(limit) => Ok(checked_history_limit(Some(limit))
+            .map_err(|refused| BrokerFailure::of_operation_error(HISTORY_SUBJECT, refused))),
         Err(_) => {
             let text = value.str()?.to_string();
             match value.lt(0)? {
-                true => Ok(Err(BrokerFailure::from(worker_history_limit_refused(
-                    &text,
-                )))),
+                true => Ok(Err(BrokerFailure::of_operation_error(
+                    HISTORY_SUBJECT,
+                    worker_history_limit_refused(&text),
+                ))),
                 false => Ok(Err(limit_statement_refused(&text))),
             }
         }
@@ -494,9 +502,16 @@ pub fn history_limit(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<i64>, B
 
 /// A history limit that PostgreSQL refuses as a `bigint` `LIMIT` value.
 fn limit_statement_refused(limit: &str) -> BrokerFailure {
+    let message = format!("get_worker_state_history failed: limit {limit} is not a bigint value");
     BrokerFailure {
         code: BrokerErrorCode::MonitoringQueryFailed.to_string(),
-        message: format!("get_worker_state_history failed: limit {limit} is not a bigint value"),
+        exception: FailureException::new(
+            HISTORY_SUBJECT,
+            message.clone(),
+            false,
+            FailureCause::PreconditionFailed,
+        ),
+        message,
         retryable: false,
     }
 }
@@ -513,7 +528,10 @@ pub async fn worker_states_operation(
     };
     match broker.list_worker_states().await {
         Ok(states) => WorkerReadOutcome::Read(states),
-        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::of_operation_error(
+            "list_worker_states",
+            error,
+        )),
     }
 }
 
@@ -529,7 +547,9 @@ pub async fn worker_state_operation(
     match broker.get_worker_state(&worker_id).await {
         Ok(Some(snapshot)) => WorkerReadOutcome::Read(WorkerStateLookup::Found(snapshot)),
         Ok(None) => WorkerReadOutcome::Read(WorkerStateLookup::Absent { worker_id }),
-        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => {
+            WorkerReadOutcome::Failed(BrokerFailure::of_operation_error("get_worker_state", error))
+        }
     }
 }
 
@@ -542,13 +562,13 @@ pub async fn worker_state_history_operation(
 ) -> WorkerReadOutcome<Vec<WorkerStateSnapshot>> {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => {
-            return WorkerReadOutcome::Failed(connect_failed("get_worker_state_history", &error))
-        }
+        Err(error) => return WorkerReadOutcome::Failed(connect_failed(HISTORY_SUBJECT, &error)),
     };
     match broker.get_worker_state_history(&worker_id, limit).await {
         Ok(states) => WorkerReadOutcome::Read(states),
-        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => {
+            WorkerReadOutcome::Failed(BrokerFailure::of_operation_error(HISTORY_SUBJECT, error))
+        }
     }
 }
 
@@ -564,7 +584,10 @@ pub async fn class_coverage_operation(
     };
     match broker.get_class_coverage().await {
         Ok(coverage) => WorkerReadOutcome::Read(coverage),
-        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::of_operation_error(
+            "get_class_coverage",
+            error,
+        )),
     }
 }
 
@@ -578,7 +601,9 @@ pub async fn class_report_operation(
     };
     match broker.get_class_report().await {
         Ok(report) => WorkerReadOutcome::Read(report),
-        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => {
+            WorkerReadOutcome::Failed(BrokerFailure::of_operation_error("get_class_report", error))
+        }
     }
 }
 

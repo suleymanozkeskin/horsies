@@ -369,23 +369,24 @@ pub enum RetryLimitRefused {
 }
 
 /// The `max_retries` column of a row whose `task_options` are this text
-/// (Python `stored_max_retries`, `python/horsies/core/codec/task_options.py:80-103`).
+/// (Python `stored_max_retries`, `python/horsies/core/codec/task_options.py`).
 ///
-/// - No options, an empty text, no `retry_policy` key or a `null` policy: 0.
+/// - No options (`None`), no `retry_policy` key or a `null` policy: 0.
 /// - A policy that fits the rule of [`read_stored_options`]: its
 ///   `max_retries`, 1 to [`MAX_RETRY_ATTEMPTS`].
-/// - Otherwise [`RetryLimitRefused`]: the text does not parse, is not an
-///   object, or holds a policy that does not fit the rule (a null,
-///   non-integer or out-of-range `max_retries` included). A key that the
-///   policy leaves out takes its `RetryPolicy` field default.
+/// - Otherwise [`RetryLimitRefused`]: the text does not parse (an empty
+///   text included), is not an object, or holds a policy that does not fit
+///   the rule (a null, non-integer or out-of-range `max_retries` included).
+///   A key that the policy leaves out takes its `RetryPolicy` field default.
 ///
-/// One reader serves the task row of a send and the node and task rows of a
-/// workflow, so the worker never meets a stored policy that its dispatch
-/// refuses. Other keys of the options are not judged here. Pure.
+/// A text that [`read_stored_options`] reads as
+/// [`StoredOptions::Unreadable`] is `UnreadableOptions` here, with the same
+/// reason. One reader serves the task row of a send and the node and task
+/// rows of a workflow, so the worker never meets a stored policy that its
+/// dispatch refuses. Other keys of the options are not judged here. Pure.
 pub fn stored_max_retries(task_options: Option<&str>) -> Result<i32, RetryLimitRefused> {
-    let text = match task_options {
-        None | Some("") => return Ok(0),
-        Some(text) => text,
+    let Some(text) = task_options else {
+        return Ok(0);
     };
     let _members =
         options_members(text).map_err(|reason| RetryLimitRefused::UnreadableOptions { reason })?;

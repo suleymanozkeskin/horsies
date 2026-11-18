@@ -20,6 +20,9 @@ use crate::bridge::blocking::{BlockingBound, BLOCKING_CALL_BOUND};
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
+/// The subject of the exception of a failed read.
+const SUBJECT: &str = "raw_result_record";
+
 /// The status of one task and its stored result envelope. `result_json` is
 /// the outer envelope as JSON text for a terminal task, and `None` for a
 /// task that had not finished when the limit passed.
@@ -103,7 +106,7 @@ fn read_outcome(
         Ok(RawResultRead::Absent { reason: _ }) => {
             RawResultOutcome::Absent(RawResultAbsent { task_id })
         }
-        Err(error) => RawResultOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => RawResultOutcome::Failed(BrokerFailure::of_operation_error(SUBJECT, error)),
     }
 }
 
@@ -122,6 +125,7 @@ pub async fn raw_result_record_operation(
         Ok(broker) => broker,
         Err(error) => {
             return RawResultOutcome::Failed(BrokerFailure::from_broker_error(
+                SUBJECT,
                 BrokerErrorCode::TaskInfoQueryFailed,
                 &error,
             ))

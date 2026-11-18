@@ -201,12 +201,13 @@ async fn test_subworkflow_success_full_surface_matrix() {
         .as_ref()
         .expect("the summary of the ended child");
     assert_eq!(summary.status, WorkflowStatus::Completed);
+    let output = summary
+        .output
+        .as_ref()
+        .expect("the output of the ended child");
     assert_eq!(
-        summary
-            .output
-            .as_ref()
-            .map(|output| output.decode::<i64>().expect("the output reads as i64")),
-        Some(SUB_OK_VALUE)
+        output.decode::<i64>().expect("the output decodes as i64"),
+        SUB_OK_VALUE
     );
     assert_eq!((summary.total_tasks, summary.completed_tasks), (1, 1));
 

@@ -36,6 +36,7 @@ from tests.dualrun.rules import (
     ColumnSpec,
     DigestOf,
     EachItem,
+    EachMember,
     Exact,
     FormatVersion,
     GeneratedName,
@@ -48,6 +49,7 @@ from tests.dualrun.rules import (
     JsonTime,
     Key,
     NormalisedId,
+    PathStep,
     RunMeasure,
     RunMeasuresInText,
     RunWindowReference,
@@ -94,6 +96,54 @@ _PROCESS_SAMPLE: Final = Ignored(
 JSON: Final = StoredJson(storage=JsonStorage.TEXT, format=Unversioned(), paths=())
 """A JSON text with no ids or clock values inside."""
 
+WORKFLOW_IDS_IN_TEXT: Final = IdsInText(family=IdFamily.WORKFLOW)
+"""A message that can name a workflow by its id."""
+
+_RUN_CLOCK_TEXT: Final = JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK)
+
+
+def stored_error_paths(error: tuple[PathStep, ...]) -> tuple[JsonPath, ...]:
+    """The rules of a stored error (a ``TaskError`` as JSON) at the path ``error``.
+
+    The library writes these ids, clock values and texts into an error:
+
+    - ``data.task_id`` and ``data.worker_id``: the task and the worker of a
+      worker failure (``{"task_id": ..., "worker_id": ...}``); the stale
+      recovery's crash data names the worker and holds ``data.started_at``
+      and ``data.detected_at``, as in the result envelope;
+    - ``data.workflow_id``: the workflow of the recovery limit error and of
+      the output-skipped error (``WORKFLOW_OUTPUT_SKIPPED``);
+    - ``sub_workflow_id``: the child of a ``SUBWORKFLOW_FAILED`` error;
+    - ``message`` and ``sub_workflow_summary.error_summary``: texts that name
+      a workflow by its id (``Subworkflow <id> failed``, ``Workflow <id> is
+      COMPLETED and has no output: ...``).
+    """
+    data = (*error, Key(name='data'))
+    return (
+        JsonPath(steps=(*data, Key(name='task_id')), rule=TASK_ID),
+        JsonPath(steps=(*data, Key(name='worker_id')), rule=WORKER_ID),
+        JsonPath(steps=(*data, Key(name='workflow_id')), rule=WORKFLOW_ID),
+        JsonPath(steps=(*data, Key(name='started_at')), rule=_RUN_CLOCK_TEXT),
+        JsonPath(steps=(*data, Key(name='detected_at')), rule=_RUN_CLOCK_TEXT),
+        JsonPath(steps=(*error, Key(name='sub_workflow_id')), rule=WORKFLOW_ID),
+        JsonPath(steps=(*error, Key(name='message')), rule=WORKFLOW_IDS_IN_TEXT),
+        JsonPath(
+            steps=(*error, Key(name='sub_workflow_summary'), Key(name='error_summary')),
+            rule=WORKFLOW_IDS_IN_TEXT,
+        ),
+    )
+
+
+_RESULTS_BY_ID_ERROR: Final = (
+    Key(name='results_by_id'),
+    EachMember(),
+    Key(name='err'),
+)
+"""The error of each stored task result of a ``results_by_id`` map (node id to
+result envelope)."""
+
+_CONTEXT: Final = Key(name='__h_workflow_ctx__')
+
 TASK_INPUT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
@@ -102,48 +152,72 @@ TASK_INPUT: Final = StoredJson(
             steps=(Key(name='__h_workflow_meta__'), Key(name='workflow_id')),
             rule=WORKFLOW_ID,
         ),
+        JsonPath(steps=(_CONTEXT, Key(name='workflow_id')), rule=WORKFLOW_ID),
+        *stored_error_paths((_CONTEXT, *_RESULTS_BY_ID_ERROR)),
+        JsonPath(
+            steps=(
+                _CONTEXT,
+                Key(name='summaries_by_id'),
+                EachMember(),
+                Key(name='error_summary'),
+            ),
+            rule=WORKFLOW_IDS_IN_TEXT,
+        ),
     ),
 )
 """A task's input. The input of an engine-minted workflow task names its
-workflow in ``__h_workflow_meta__``."""
-
-WORKFLOW_IDS_IN_TEXT: Final = IdsInText(family=IdFamily.WORKFLOW)
-"""A message that can name a workflow by its id."""
+workflow in ``__h_workflow_meta__``. The input of a task that receives the
+workflow context names its workflow in ``__h_workflow_ctx__.workflow_id``,
+holds the result of each dependency in ``__h_workflow_ctx__.results_by_id``
+(each error by ``stored_error_paths``) and the summary of each sub-workflow
+dependency in ``__h_workflow_ctx__.summaries_by_id`` (``error_summary`` can
+name a workflow)."""
 
 WORKFLOW_ERROR: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
-    paths=(
-        JsonPath(steps=(Key(name='data'), Key(name='workflow_id')), rule=WORKFLOW_ID),
-        JsonPath(steps=(Key(name='sub_workflow_id'),), rule=WORKFLOW_ID),
-        JsonPath(steps=(Key(name='message'),), rule=WORKFLOW_IDS_IN_TEXT),
-    ),
+    paths=stored_error_paths(()),
 )
-"""A stored workflow error. The recovery limit error names its workflow in
-``data.workflow_id``. The error of a workflow that a failed child paused
-names the child in ``sub_workflow_id`` and in ``message`` (``Subworkflow
-<id> failed``)."""
+"""A stored workflow error, by ``stored_error_paths``: the recovery limit
+error names its workflow in ``data.workflow_id``; the error of a workflow
+that a failed child paused names the child in ``sub_workflow_id`` and in
+``message`` (``Subworkflow <id> failed``); the error that a failed task left
+holds the data of that task's error."""
 
 NODE_RESULT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
+    paths=stored_error_paths((Key(name='err'),)),
+)
+"""A stored node result, its error by ``stored_error_paths``: the recovery
+limit result names its workflow in ``err.data.workflow_id``; the result of a
+sub-workflow node whose child failed names the child in
+``err.sub_workflow_id``, in ``err.message`` (``Subworkflow <id> failed with
+status <status>``) and in ``err.sub_workflow_summary.error_summary``; the
+result of a task node holds its task's error data."""
+
+WORKFLOW_RESULT: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
     paths=(
-        JsonPath(
-            steps=(Key(name='err'), Key(name='data'), Key(name='workflow_id')),
-            rule=WORKFLOW_ID,
-        ),
-        JsonPath(
-            steps=(Key(name='err'), Key(name='sub_workflow_id')), rule=WORKFLOW_ID
-        ),
-        JsonPath(
-            steps=(Key(name='err'), Key(name='message')), rule=WORKFLOW_IDS_IN_TEXT
-        ),
+        *stored_error_paths((Key(name='err'),)),
+        *stored_error_paths((Key(name='ok'), *_RESULTS_BY_ID_ERROR)),
     ),
 )
-"""A stored node result. The recovery limit result names its workflow in
-``err.data.workflow_id``. The result of a sub-workflow node whose child
-failed names the child in ``err.sub_workflow_id`` and in ``err.message``
-(``Subworkflow <id> failed with status <status>``)."""
+"""A stored workflow result, its error by ``stored_error_paths`` (the
+output-skipped error names the workflow in ``err.data.workflow_id`` and in
+``err.message``). The result of a workflow without an output node holds the
+result of each terminal node in ``ok.results_by_id``
+(``{"__h_outputless_terminals__": true, "ok": {"results_by_id": ...}}``),
+each error by ``stored_error_paths``."""
+
+SUB_WORKFLOW_SUMMARY: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(JsonPath(steps=(Key(name='error_summary'),), rule=WORKFLOW_IDS_IN_TEXT),),
+)
+"""The stored summary of a sub-workflow node's child; ``error_summary`` can
+name a workflow (``Workflow <id> is COMPLETED and has no output: ...``)."""
 
 TASK_OPTIONS: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -350,7 +424,7 @@ _WORKFLOWS: Final = TableRules(
         ('on_error', EXACT),
         ('output_task_index', EXACT),
         ('success_policy', JSON),
-        ('result', JSON),
+        ('result', WORKFLOW_RESULT),
         ('error', WORKFLOW_ERROR),
         ('parent_workflow_id', WORKFLOW_ID),
         ('parent_task_index', EXACT),
@@ -404,7 +478,7 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('sub_workflow_name', EXACT),
         ('sub_definition_key', EXACT),
         ('sub_workflow_params', EXACT),
-        ('sub_workflow_summary', JSON),
+        ('sub_workflow_summary', SUB_WORKFLOW_SUMMARY),
         ('result', NODE_RESULT),
         ('error', JSON),
         ('created_at', RUN_CLOCK),

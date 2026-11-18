@@ -32,6 +32,7 @@ use super::arguments::utc_instant;
 use super::attempt_records::{
     observed_fields, AttemptWriteFailed, PhaseTwoOwedRecord, RefusalRecord,
 };
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The plain successes of one worker for one statement: 1 to 64 rows of
@@ -136,6 +137,8 @@ pub struct BatchNotSent {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `complete_successes`.
+    pub exception: FailureException,
 }
 
 /// No row of the batch changed: the server refused the statement (Python
@@ -148,6 +151,8 @@ pub struct BatchRefused {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The server's error, with the subject `complete_successes`.
+    pub exception: FailureException,
 }
 
 /// The statement was sent and its reply was lost: each row may have
@@ -158,7 +163,16 @@ pub struct BatchRefused {
 pub struct BatchCommitUnknown {
     /// The cause, with its subject.
     pub message: String,
+    /// The cause, with the subject `complete_successes`: no answer from
+    /// the server, or the server's error that ended the session.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed success batch.
+const COMPLETE_SUCCESSES_SUBJECT: &str = "complete_successes";
+
+/// The subject of the exception of a failed workflow success write.
+const WORKFLOW_SUCCESS_SUBJECT: &str = "finish_workflow_success";
 
 /// The outcome of one batch.
 pub enum BatchRecord {
@@ -254,14 +268,17 @@ fn batch_record(written: Result<BatchOutcomes, BatchWriteError>) -> BatchRecord 
         Err(error @ BatchWriteError::NotSent { .. }) => BatchRecord::NotSent(BatchNotSent {
             message: error.to_string(),
             retryable: matches!(error.transience(), Transience::Transient),
+            exception: FailureException::of(COMPLETE_SUCCESSES_SUBJECT, &error),
         }),
         Err(error @ BatchWriteError::Refused { .. }) => BatchRecord::Refused(BatchRefused {
             message: error.to_string(),
             retryable: matches!(error.transience(), Transience::Transient),
+            exception: FailureException::of(COMPLETE_SUCCESSES_SUBJECT, &error),
         }),
         Err(error @ BatchWriteError::CommitUnknown { .. }) => {
             BatchRecord::CommitUnknown(BatchCommitUnknown {
                 message: error.to_string(),
+                exception: FailureException::of(COMPLETE_SUCCESSES_SUBJECT, &error),
             })
         }
         Err(error @ BatchWriteError::ContractBroken { .. }) => panic!("{error}"),
@@ -282,6 +299,7 @@ pub async fn complete_successes_operation(
             return BatchRecord::NotSent(BatchNotSent {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(COMPLETE_SUCCESSES_SUBJECT, &error),
             })
         }
     };
@@ -363,7 +381,11 @@ fn workflow_success_record(
         Ok(WorkflowSuccessOutcome::Refused(refusal)) => {
             WorkflowSuccessRecord::Refused(RefusalRecord::from(&refusal))
         }
-        Err(error) => WorkflowSuccessRecord::Failed(AttemptWriteFailed::new(task_id, &error)),
+        Err(error) => WorkflowSuccessRecord::Failed(AttemptWriteFailed::new(
+            WORKFLOW_SUCCESS_SUBJECT,
+            task_id,
+            &error,
+        )),
     }
 }
 
@@ -377,7 +399,11 @@ pub async fn finish_workflow_success_operation(
     let broker = match connection.broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return WorkflowSuccessRecord::Failed(AttemptWriteFailed::new(command.task_id, &error))
+            return WorkflowSuccessRecord::Failed(AttemptWriteFailed::new(
+                WORKFLOW_SUCCESS_SUBJECT,
+                command.task_id,
+                &error,
+            ))
         }
     };
     workflow_success_record(

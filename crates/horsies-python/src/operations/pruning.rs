@@ -13,6 +13,7 @@ use horsies_core::{PrunePass, PrunePassError, PruneReach};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// One pruning pass: the finalized leaves, the counts of the swept leaves
@@ -64,7 +65,12 @@ pub struct PruneFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `prune_expired_partitions`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a pass with no report.
+const SUBJECT: &str = "prune_expired_partitions";
 
 /// The outcome of one pruning pass.
 pub enum PruneOutcomeRecord {
@@ -92,6 +98,7 @@ fn outcome_record(outcome: Result<PrunePass, PrunePassError>) -> PruneOutcomeRec
         Err(error) => PruneOutcomeRecord::Failed(PruneFailed {
             message: error.to_string(),
             retryable: error.is_retryable(),
+            exception: FailureException::of(SUBJECT, &error),
         }),
     }
 }
@@ -107,6 +114,7 @@ pub async fn prune_expired_partitions_operation(
             return PruneOutcomeRecord::Failed(PruneFailed {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(SUBJECT, &error),
             })
         }
     };

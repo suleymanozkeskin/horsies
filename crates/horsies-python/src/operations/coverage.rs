@@ -23,6 +23,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// One frozen coverage pass: its request and its serialization.
@@ -240,7 +241,12 @@ pub struct CoverageFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `ensure_partition_coverage`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a pass with no outcome.
+const SUBJECT: &str = "ensure_partition_coverage";
 
 /// The outcome of one coverage pass.
 pub enum CoverageOutcomeRecord {
@@ -271,6 +277,7 @@ fn outcome_record(outcome: Result<CoverageOutcome, CoveragePassError>) -> Covera
         Err(error) => CoverageOutcomeRecord::Failed(CoverageFailed {
             message: error.to_string(),
             retryable: error.is_retryable(),
+            exception: FailureException::of(SUBJECT, &error),
         }),
     }
 }
@@ -287,6 +294,7 @@ pub async fn ensure_partition_coverage_operation(
             return CoverageOutcomeRecord::Failed(CoverageFailed {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(SUBJECT, &error),
             })
         }
     };

@@ -8,10 +8,11 @@
 
 use std::num::NonZeroU32;
 
-use horsies_core::{PausedWorkflowAge, WorkflowError};
+use horsies_core::{FailureCause, PausedWorkflowAge, WorkflowError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The call ended. `expired` counts the workflows that it expired.
@@ -32,7 +33,12 @@ pub struct PausedExpiryFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `expire_paused_workflows`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed call.
+const SUBJECT: &str = "expire_paused_workflows";
 
 /// The outcome of one paused expiry call.
 pub enum PausedExpiryOutcome {
@@ -72,6 +78,7 @@ fn expiry_outcome(answer: Result<u64, WorkflowError>) -> PausedExpiryOutcome {
         Err(error) => PausedExpiryOutcome::Failed(PausedExpiryFailed {
             message: format!("paused workflow expiry failed: {error}"),
             retryable: error.is_retryable(),
+            exception: FailureException::of(SUBJECT, &error),
         }),
     }
 }
@@ -88,6 +95,12 @@ pub async fn expire_paused_workflows_operation(
         Ok(arguments) => arguments,
         Err(message) => {
             return PausedExpiryOutcome::Failed(PausedExpiryFailed {
+                exception: FailureException::new(
+                    SUBJECT,
+                    message.clone(),
+                    false,
+                    FailureCause::PreconditionFailed,
+                ),
                 message,
                 retryable: false,
             })
@@ -99,6 +112,7 @@ pub async fn expire_paused_workflows_operation(
             return PausedExpiryOutcome::Failed(PausedExpiryFailed {
                 message: format!("paused workflow expiry failed: {error}"),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(SUBJECT, &error),
             })
         }
     };

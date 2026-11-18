@@ -49,7 +49,6 @@
     "tests/unit/test_shared_slot_pool.py",
     "tests/unit/test_shared_dispatch.py",
     "python/horsies/core/models/class_coverage.py",
-    "python/horsies/core/brokers/class_coverage_reads.py",
     "python/horsies/core/worker/class_coverage_log.py",
     "python/horsies/monitoring/execution_classes.py",
     "tests/unit/test_class_coverage.py",

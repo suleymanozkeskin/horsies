@@ -18,8 +18,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyList, PyString};
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
+
+/// The subject of the exception of a refused or failed ping.
+const SUBJECT: &str = "ping_workers";
 
 /// One worker's reply to a ping, with the measured round trip.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -102,24 +106,33 @@ fn shown(value: &Bound<'_, PyAny>) -> PyResult<String> {
 /// the value only.
 fn ping_window(value: &Bound<'_, PyAny>) -> PyResult<Result<Duration, BrokerFailure>> {
     if value.le(0)? {
-        return Ok(Err(BrokerFailure::from(ping_timeout_refused(&shown(
-            value,
-        )?))));
+        return Ok(Err(BrokerFailure::of_operation_error(
+            SUBJECT,
+            ping_timeout_refused(&shown(value)?),
+        )));
     }
     let seconds = match value.extract::<f64>() {
         Ok(seconds) => seconds,
         Err(error) => {
+            let message = format!("ping_workers failed: {error}");
             return Ok(Err(BrokerFailure {
                 code: BrokerErrorCode::WorkerPingFailed.to_string(),
-                message: format!("ping_workers failed: {error}"),
+                exception: FailureException::new(
+                    SUBJECT,
+                    message.clone(),
+                    false,
+                    FailureCause::PreconditionFailed,
+                ),
+                message,
                 retryable: false,
-            }))
+            }));
         }
     };
     if seconds.is_nan() {
-        return Ok(Err(BrokerFailure::from(ping_timeout_refused(&shown(
-            value,
-        )?))));
+        return Ok(Err(BrokerFailure::of_operation_error(
+            SUBJECT,
+            ping_timeout_refused(&shown(value)?),
+        )));
     }
     Ok(Ok(
         Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
@@ -138,9 +151,10 @@ fn min_responses(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<usize>, Bro
         return Ok(Ok(None));
     }
     if value.lt(1)? {
-        return Ok(Err(BrokerFailure::from(ping_min_responses_refused(
-            &shown(value)?,
-        ))));
+        return Ok(Err(BrokerFailure::of_operation_error(
+            SUBJECT,
+            ping_min_responses_refused(&shown(value)?),
+        )));
     }
     match value.extract::<usize>() {
         Ok(count) => Ok(Ok(Some(count))),
@@ -162,15 +176,18 @@ fn ping_target(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<String>, Brok
         true => Ok(Ok(Some(value.extract::<String>()?))),
         false => {
             let type_name = value.get_type().name()?.to_string();
-            Ok(Err(BrokerFailure::from(BrokerOperationError {
-                code: BrokerErrorCode::InvalidInput,
-                message: format!(
-                    "ping_workers request refused: target_worker_id must be a str or None, \
+            Ok(Err(BrokerFailure::of_operation_error(
+                SUBJECT,
+                BrokerOperationError {
+                    code: BrokerErrorCode::InvalidInput,
+                    message: format!(
+                        "ping_workers request refused: target_worker_id must be a str or None, \
                      not {type_name}"
-                ),
-                retryable: false,
-                cause: FailureCause::PreconditionFailed,
-            })))
+                    ),
+                    retryable: false,
+                    cause: FailureCause::PreconditionFailed,
+                },
+            )))
         }
     }
 }
@@ -196,7 +213,10 @@ pub fn ping_request(
     };
     match listener {
         HandleListener::Disabled => {
-            return Ok(Err(BrokerFailure::from(ping_listener_disabled())));
+            return Ok(Err(BrokerFailure::of_operation_error(
+                SUBJECT,
+                ping_listener_disabled(),
+            )));
         }
         HandleListener::Process => {}
     }
@@ -225,6 +245,7 @@ pub async fn ping_workers_operation(
                 code: BrokerErrorCode::WorkerPingFailed.to_string(),
                 message: format!("ping_workers failed: {error}"),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(SUBJECT, &error),
             })
         }
     };
@@ -237,7 +258,7 @@ pub async fn ping_workers_operation(
         .await
     {
         Ok(pongs) => PingOutcome::Replied(pongs),
-        Err(error) => PingOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => PingOutcome::Failed(BrokerFailure::of_operation_error(SUBJECT, error)),
     }
 }
 
