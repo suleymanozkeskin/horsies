@@ -4405,7 +4405,7 @@ mod tests {
             "{message}"
         );
         assert_eq!(
-            persisted_error.data,
+            persisted_error.data_value(),
             Some(serde_json::json!({ "exception_type": "panic" }))
         );
         let record = persisted_error

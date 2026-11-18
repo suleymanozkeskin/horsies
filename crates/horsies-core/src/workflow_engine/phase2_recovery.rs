@@ -1411,6 +1411,17 @@ mod tests {
         .unwrap();
     }
 
+    /// The recovery source of a record.
+    async fn recovery_source(pool: &PgPool, task_id: Uuid) -> String {
+        sqlx::query_scalar(
+            "SELECT recovery_source FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the recovery source")
+    }
+
     /// The attempt count and failure class of a record.
     async fn record_attempts(pool: &PgPool, task_id: Uuid) -> (i32, Option<String>) {
         sqlx::query_as(
@@ -1465,8 +1476,10 @@ mod tests {
             "WORKFLOW_RECOVERY_LIMIT_REACHED"
         );
         assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("case")),
-            Some(&serde_json::json!("phase2_progression"))
+            error
+                .data_value()
+                .and_then(|data| data.get("case").cloned()),
+            Some(serde_json::json!("phase2_progression"))
         );
         let (source, attempts): (String, i32) = sqlx::query_as(
             "SELECT recovery_source, attempt_count
@@ -1519,6 +1532,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        let source_before = recovery_source(&pool, task_id).await;
         let failure = CandidateFailure::Error(WorkflowError::Validation("raised".to_owned()));
 
         let record = record_raise(&broker, task_id, 3, &failure)
@@ -1530,6 +1544,14 @@ mod tests {
             record_attempts(&pool, task_id).await,
             (2, Some("RAISED".to_owned()))
         );
+        assert_eq!(recovery_source(&pool, task_id).await, source_before);
+        let workflow_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the workflow");
+        assert_eq!(workflow_status, "PAUSED");
         cleanup_case(&pool, workflow_id, task_id).await;
     }
 

@@ -31,7 +31,10 @@ use crate::broker::core_rows::{column, one_row, scalar, StatementLog};
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
 use crate::broker::PostgresBroker;
-use crate::core::codec::user_value::{check_task_input, InputRefused};
+use crate::core::codec::check_json_text;
+use crate::core::codec::user_value::{
+    check_input_members, check_input_text, input_text_kind, InputRefused, InputText,
+};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoStep,
@@ -193,24 +196,20 @@ pub(crate) fn build_task_input(
     input: &str,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
-    let value: serde_json::Value = crate::core::codec::from_json_str(input)
+    check_json_text(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
     let no_engine_members: HashSet<String> = HashSet::new();
-    let mut object = match value {
-        serde_json::Value::Object(object) => object,
-        serde_json::Value::Null => return Ok(input.as_bytes().to_vec()),
-        other => {
-            check_task_input(
-                std::slice::from_ref(&other),
-                &serde_json::Map::new(),
-                &no_engine_members,
-            )
-            .map_err(|refusal| input_refused(&refusal))?;
+    let object = match input_text_kind(input) {
+        InputText::Object(members) => members,
+        InputText::Null => return Ok(input.as_bytes().to_vec()),
+        InputText::OneValue => {
+            check_input_text(input, &no_engine_members)
+                .map_err(|refusal| input_refused(&refusal))?;
             return Ok(input.as_bytes().to_vec());
         }
     };
     if !holds_engine_members(&object) {
-        check_task_input(&[], &object, &no_engine_members)
+        check_input_members(&object, &no_engine_members)
             .map_err(|refusal| input_refused(&refusal))?;
         return Ok(input.as_bytes().to_vec());
     }
@@ -224,8 +223,12 @@ pub(crate) fn build_task_input(
             TaskMember::Stored(_) => None,
         })
         .collect();
-    object.retain(|name, _| name != WORKFLOW_CTX_KWARG && name != WORKFLOW_META_KWARG);
-    check_task_input(&[], &object, &args_from_names).map_err(|refusal| input_refused(&refusal))?;
+    let user_members: Vec<(String, &RawValue)> = object
+        .into_iter()
+        .filter(|(name, _value)| name != WORKFLOW_CTX_KWARG && name != WORKFLOW_META_KWARG)
+        .collect();
+    check_input_members(&user_members, &args_from_names)
+        .map_err(|refusal| input_refused(&refusal))?;
     let workflow_ctx = match (members.workflow_ctx, accepts_workflow_ctx) {
         (Some(payload), true) => Some(workflow_ctx_text(payload.get())?),
         (Some(_), false) | (None, _) => None,
@@ -239,13 +242,25 @@ const WORKFLOW_CTX_FIELD: &str = "workflow_ctx";
 
 /// Whether an object input holds a member that the engine writes: the
 /// workflow context, the workflow meta, or an `args_from` entry (an object
-/// whose `ARGS_FROM_ENVELOPE_KEY` member is `true`). Pure.
-fn holds_engine_members(object: &serde_json::Map<String, serde_json::Value>) -> bool {
-    object.contains_key(WORKFLOW_CTX_KWARG)
-        || object.contains_key(WORKFLOW_META_KWARG)
-        || object
-            .values()
-            .any(|value| value.get(ARGS_FROM_ENVELOPE_KEY) == Some(&serde_json::Value::Bool(true)))
+/// whose `ARGS_FROM_ENVELOPE_KEY` member is `true`). The members are parts of
+/// a text that passed the strict read rule; each is read as its text. Pure.
+fn holds_engine_members(members: &[(String, &RawValue)]) -> bool {
+    members.iter().any(|(name, value)| {
+        name == WORKFLOW_CTX_KWARG || name == WORKFLOW_META_KWARG || is_args_from_entry(value)
+    })
+}
+
+/// Whether a member text is an object whose `ARGS_FROM_ENVELOPE_KEY` member is
+/// `true`. Pure.
+fn is_args_from_entry(value: &RawValue) -> bool {
+    match value.get().starts_with('{') {
+        false => false,
+        true => object_members(value.get()).is_ok_and(|entry| {
+            entry
+                .iter()
+                .any(|(key, flag)| key == ARGS_FROM_ENVELOPE_KEY && flag.get() == "true")
+        }),
+    }
 }
 
 /// One member of the task input, as its text.
@@ -1457,7 +1472,7 @@ mod parse {
             ContextEntry::Unreadable(TaskResult::Err(TaskError {
                 exception: None,
                 error_code: OperationalErrorCode::ResultDeserializationError.into(),
-                data: Some(data),
+                data: Some(crate::core::codec::JsonText::of_engine_value(&data)),
                 message: Some(message),
                 kind: TaskErrorKind::Plain,
             }))
@@ -1717,6 +1732,30 @@ mod task_input_tests {
         );
     }
 
+    /// The checks of the input read each member from its text: an integer past the `f64` range, which a
+    /// `serde_json::Value` refuses, passes with and without an engine member, and an engine key is still refused.
+    #[test]
+    fn an_integer_of_any_width_passes_the_input_checks() {
+        let long = "9".repeat(400);
+        let plain = format!(r#"{{"long":{long},"max":340282366920938463463374607431768211455}}"#);
+        assert_eq!(task_input(&plain), plain);
+        assert_eq!(task_input(&format!("[{long}]")), format!("[{long}]"));
+        let with_meta = format!(r#"{{"long":{long},"__h_workflow_meta__":{{"workflow_id":"w"}}}}"#);
+        assert_eq!(task_input(&with_meta), format!(r#"{{"long":{long}}}"#));
+        for refused in [
+            format!(r#"{{"long":{long},"x":{{"__h_x":1}}}}"#),
+            format!(r#"{{"long":{long},"x":{{"__h_x":1}},"__h_workflow_meta__":{{}}}}"#),
+            r#"{"__h_other__":1}"#.to_owned(),
+        ] {
+            let error = build_task_input(&refused, false).unwrap_err();
+            assert_eq!(
+                error.error_code.to_string(),
+                "WORKER_SERIALIZATION_ERROR",
+                "{refused}"
+            );
+        }
+    }
+
     /// The context takes the place of a member named `workflow_ctx`, as Python's
     /// `kwargs['workflow_ctx'] = ...`; without one, it comes last.
     #[test]
@@ -1741,6 +1780,7 @@ mod task_input_tests {
 #[cfg(test)]
 mod workflow_ctx_tests {
     use super::workflow_ctx_text;
+    use crate::core::codec::JsonText;
     use crate::core::task::error::TaskError;
     use crate::core::task::result::TaskResult;
     use crate::core::workflow::context::WorkflowContext;
@@ -1792,7 +1832,41 @@ mod workflow_ctx_tests {
         let summary = ctx
             .summary_for(&NodeKey::<i32>::new("sub".to_owned()))
             .unwrap();
-        assert_eq!(summary.output, Some(serde_json::json!(5)));
+        assert_eq!(summary.output.as_ref().map(JsonText::get), Some("5"));
+    }
+
+    /// A summary output outside the `i64` and `u64` range keeps its stored text in the `workflow_ctx` field,
+    /// and the task's context reads it as `u128` or `i128`.
+    #[test]
+    fn a_summary_output_keeps_its_stored_text() {
+        let summary = |output: &str| {
+            format!(
+                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+            )
+        };
+        let wide = "340282366920938463463374607431768211455";
+        let below = "-9223372036854775809";
+        let payload = serde_json::json!({
+            "workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 2,
+            "task_name": "consume",
+            "summaries_by_id": {"wide": summary(wide), "below": summary(below)},
+        });
+        let text = workflow_ctx_text(&payload.to_string()).unwrap();
+        for output in [wide, below] {
+            assert!(text.contains(&summary(output)), "{text}");
+        }
+        let ctx: WorkflowContext = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            ctx.output_for(&NodeKey::<u128>::new("wide".to_owned()))
+                .unwrap(),
+            Some(u128::MAX)
+        );
+        assert_eq!(
+            ctx.output_for(&NodeKey::<i128>::new("below".to_owned()))
+                .unwrap(),
+            Some(i128::from(i64::MIN) - 1)
+        );
     }
 
     #[test]

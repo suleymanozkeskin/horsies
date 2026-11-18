@@ -116,6 +116,26 @@ written in Rust, on a new baseline schema.
   `loads_json_bytes` refuse it at any depth; at enqueue it is
   `INVALID_INPUT` and nothing is written. 0.7 kept the last value.
 
+- **Breaking: `loads_json` refuses an empty text and takes no `None`.** An
+  empty text is not JSON: `loads_json('')` and `loads_json_bytes(b'')` are
+  `Err(EmptyJsonTextError)`, a `SerializationError` with the text
+  `JSON parse failed: the text is empty`. 0.7 read `''` and `None` as the
+  JSON value `null`. A caller with a nullable value checks `None` before the
+  call. A send whose kwargs text or task options text is empty gets
+  `VALIDATION_FAILED` (`INVALID_INPUT` and `INVALID_TASK_OPTIONS` from
+  `PostgresBroker.enqueue`). The handle reads of an empty stored result,
+  error or summary keep their outcome, and the message now holds the text
+  of `EmptyJsonTextError`.
+
+- **A send refuses task options that hold an integer outside
+  -9223372036854775808 to 18446744073709551615.** The send returns
+  `VALIDATION_FAILED` (`PostgresBroker.enqueue` returns
+  `INVALID_TASK_OPTIONS`) with the text `task_options JSON holds an integer
+  outside -9223372036854775808 to 18446744073709551615`, and nothing is
+  written. `RetryPolicy` still takes a `max_delay_seconds` of any size, so a
+  task whose policy has `max_delay_seconds` of `2**64` or more is refused at
+  each send; 0.7 sent it. A stored policy with such a cap still reads.
+
 - **The web task routes answer a task id that is not a UUID with 400
   `INVALID_INPUT`.** `GET /api/tasks/{task_id}` and `POST
   /api/tasks/{task_id}/cancel` answer `{"code": "INVALID_INPUT", "detail":
@@ -434,7 +454,10 @@ unless it starts with "Added".
   only the engine writes, data deeper than the error bound) is replaced with
   `{"data_refused": "<cause>"}`, the cause that Python stores, and the code
   and the message are kept. The replacement is logged at ERROR with the
-  code. Before, a non-finite float became `null` with no notice.
+  code. Before, a non-finite float became `null` with no notice. `data()`
+  returns `Option<&JsonText>`, the data as its stored text (`get`,
+  `decode::<T>`): an integer outside the `i64` and `u64` range is stored
+  with every digit and reads as `u128` or `i128`, as in Python.
 - **Added: `#[derive(horsies::UserErrorCode)]`.** On an enum of unit
   variants, each variant's code is its name in UPPER_SNAKE_CASE
   (`RateLimited` is `RATE_LIMITED`). A code with the name of a built-in code
@@ -558,6 +581,10 @@ unless it starts with "Added".
   the `i64` and `u64` range reads as `u128` or `i128`, as in Python. A
   dependency result (a `TaskOutcome<S, E>` input field) and
   `WorkflowContext::result_for` decode the value from its stored text too.
+  The reads with no type keep the value as its stored text, `JsonText`: the
+  `result` of `TaskInfo` is `TaskResult<JsonText>`, `NodeResult::Outcome`
+  and each entry of `OutputlessResults` are `TaskOutcome<JsonText,
+  UserCode>`.
   The worker's child and the sub-workflow child build pass each input member
   and each dependency result to the task or the builder as stored.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
@@ -735,7 +762,11 @@ unless it starts with "Added".
 - **`WorkflowContext::result_for::<T, E>` returns `Result<TaskOutcome<T,
   E>, WorkflowContextError>`** (`NotInContext`, `Unreadable`,
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
-  `output_for` the child's output read as `T`.
+  `output_for` the child's output read as `T`. `SubWorkflowSummary.output`
+  is `Option<JsonText>`, the child's output as its stored text (`get`,
+  `decode::<T>`); `output_for` and the summary of `WorkflowHandle::tasks`
+  read it from that text, so an integer outside the `i64` and `u64` range
+  reads as `u128` or `i128`, as in Python.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
   `UserErrorCode`, with every user code as checked text. `UserCode` and
   `UserCodeRefused` are exported at the crate root, so the outcome type of

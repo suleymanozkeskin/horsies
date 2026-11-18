@@ -74,10 +74,10 @@ pub(crate) fn child_workflow_depth(
     match child_depth > MAX_SUBWORKFLOW_DEPTH {
         false => Ok(child_depth),
         true => Err(TaskError {
-            data: Some(serde_json::json!({
+            data: Some(crate::core::codec::JsonText::of_engine_value(&serde_json::json!({
                 "workflow_id": parent_workflow_id.to_string(),
                 "task_index": task_index,
-            })),
+            }))),
             ..TaskError::builtin(
                 OperationalErrorCode::SubworkflowDepthLimitReached,
                 format!(
@@ -474,7 +474,7 @@ mod tests {
             "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
         );
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({"workflow_id": parent.to_string(), "task_index": 4}))
         );
         assert_eq!(
@@ -552,7 +552,7 @@ mod tests {
             )
         );
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 3}))
         );
     }

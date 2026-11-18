@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
@@ -16,10 +17,14 @@ from tests.dualrun.catalog import (
     LEAF_NAME,
     NODE_RESULT,
     RUN_CLOCK,
+    SUB_WORKFLOW_SUMMARY,
+    TASK_ID,
+    TASK_INPUT,
     TASK_OPTIONS,
     WORKER_ID,
     WORKFLOW_ERROR,
     WORKFLOW_ID,
+    WORKFLOW_RESULT,
 )
 from tests.dualrun.cells import (
     NormalizeError,
@@ -39,6 +44,7 @@ from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
 from tests.dualrun.rules import (
     ColumnSpec,
     DigestOf,
+    EachMember,
     Exact,
     IdFamily,
     JsonPath,
@@ -68,7 +74,9 @@ from tests.dualrun.values import (
     NullValue,
     RunWindow,
     TimeRank,
+    UnparsedDocument,
     json_leaves,
+    render_value,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -320,10 +328,45 @@ def test_task_options_rank_their_good_until() -> None:
 
 
 @pytest.mark.parametrize(
+    'doc',
+    [
+        pytest.param('{"owner": ', id='truncated'),
+        pytest.param('{"n": NaN}', id='nan'),
+        pytest.param('', id='empty'),
+        pytest.param('not json', id='a-word'),
+    ],
+)
+def test_a_stored_text_that_is_not_json_compares_as_that_text(doc: str) -> None:
+    reference = _snapshot([_row('a1', RUN_A, doc=doc)], RUN_A)
+    candidate = _snapshot([_row('b1', RUN_B, doc=doc)], RUN_B)
+    other = _snapshot([_row('b1', RUN_B, doc=f'{doc}x')], RUN_B)
+    parsed = _snapshot([_row('b1', RUN_B, doc='{"owner": "b1"}')], RUN_B)
+
+    assert _cell(reference, 'doc') == UnparsedDocument(text=doc)
+    assert compare_snapshots(reference, candidate).entries == ()
+    for differing in (other, parsed):
+        assert [
+            entry.column
+            for entry in compare_snapshots(reference, differing).entries
+            if isinstance(entry, ColumnDifference)
+        ] == ['doc']
+
+
+def test_stored_bytes_that_are_utf8_text_but_not_json_compare_as_that_text() -> None:
+    text = b'{"attempt": '
+    row = _row('a1', RUN_A)
+
+    snapshot = _snapshot(
+        [(*row[:5], _hex(text), _hex(hashlib.sha256(text).digest()), row[7])], RUN_A
+    )
+
+    assert _cell(snapshot, 'archive') == UnparsedDocument(text=text.decode('utf-8'))
+    assert _cell(snapshot, 'archive_digest') == DigestMatches()
+
+
+@pytest.mark.parametrize(
     ('doc', 'cause_part'),
     [
-        pytest.param('{"owner": ', 'JSONDecodeError', id='truncated'),
-        pytest.param('{"n": NaN}', 'NaN is not valid JSON', id='nan'),
         pytest.param('{"owner": 12}', 'not text', id='id-path-holds-a-number'),
         pytest.param(
             '{"due": "tomorrow"}', 'clock path', id='clock-path-holds-other-text'
@@ -478,6 +521,243 @@ def test_text_with_ids_takes_only_canonical_lower_case_uuids(
     text: str, parts: tuple[str | PendingId, ...]
 ) -> None:
     assert text_with_ids(text, IdFamily.WORKFLOW) == PendingText(parts=parts)
+
+
+# ---- Ids inside stored errors, results, summaries and the workflow context ----
+
+TASK_A: Final = '0190b2c4-1a2b-7c3d-8e4f-5a6b7c8d9e03'
+TASK_B: Final = '0191aaaa-bbbb-7ccc-8ddd-eeeeffff0003'
+
+
+@dataclass(frozen=True, slots=True)
+class Run:
+    """The library-made ids and the start of one run."""
+
+    workflow: str
+    task: str
+    worker: str
+    start: datetime
+
+
+RUN_IDS_A: Final = Run(
+    workflow=CHILD_A, task=TASK_A, worker='worker-a', start=RUN_A
+)
+RUN_IDS_B: Final = Run(
+    workflow=CHILD_B, task=TASK_B, worker='worker-b', start=RUN_B
+)
+
+
+def _envelope(error: dict[str, object] | None) -> dict[str, object]:
+    return {'__h_task_result__': True, 'ok': None, 'err': error}
+
+
+def _crash_error(run: Run) -> dict[str, object]:
+    """The error that the stale recovery writes, with the task of a worker failure."""
+    return {
+        'error_code': 'WORKER_CRASHED',
+        'message': 'the worker stopped',
+        'data': {
+            'task_id': run.task,
+            'worker_id': run.worker,
+            'started_at': (run.start + timedelta(seconds=1)).isoformat(),
+            'detected_at': (run.start + timedelta(seconds=30)).isoformat(),
+        },
+    }
+
+
+def _skipped_error(named: str) -> dict[str, object]:
+    return {
+        'error_code': 'WORKFLOW_OUTPUT_SKIPPED',
+        'message': f'Workflow {named} is COMPLETED and has no output',
+        'data': {'workflow_id': named, 'output_task_index': 1},
+    }
+
+
+def _child_failed_error(named: str) -> dict[str, object]:
+    return {
+        'error_code': 'SUBWORKFLOW_FAILED',
+        'message': f'Subworkflow {named} failed with status FAILED',
+        'sub_workflow_id': named,
+        'sub_workflow_summary': {
+            'status': 'FAILED',
+            'error_summary': f'Subworkflow {named} failed with status FAILED',
+        },
+    }
+
+
+def _task_input(run: Run, named: str) -> dict[str, object]:
+    return {
+        'value': 1,
+        '__h_workflow_meta__': {'workflow_id': run.workflow, 'task_index': 2},
+        '__h_workflow_ctx__': {
+            'workflow_id': named,
+            'task_index': 2,
+            'task_name': 'consume',
+            'results_by_id': {
+                'source:0': _envelope(_skipped_error(named)),
+                'child:1': _envelope(_child_failed_error(named)),
+                'other:3': None,
+            },
+            'summaries_by_id': {
+                'child:1': {'status': 'COMPLETED', 'error_summary': f'Workflow {named} ended'},
+            },
+            'task_name_by_id': {'source:0': 'produce'},
+        },
+    }
+
+
+def _outputless_result(named: str) -> dict[str, object]:
+    return {
+        '__h_task_result__': True,
+        '__h_outputless_terminals__': True,
+        'ok': {'results_by_id': {'source:0': _envelope(_skipped_error(named))}},
+        'err': None,
+    }
+
+
+def _documents(run: Run, named: str) -> dict[str, object]:
+    """One stored document of each column rule, naming the workflow ``named``."""
+    return {
+        'input': _task_input(run, named),
+        'workflow_error': _crash_error(run),
+        'node_result': _envelope(_crash_error(run)),
+        'child_node_result': _envelope(_child_failed_error(named)),
+        'workflow_result': _envelope(_skipped_error(named)),
+        'outputless_result': _outputless_result(named),
+        'summary': {'status': 'COMPLETED', 'error_summary': f'Workflow {named} ended'},
+    }
+
+
+DOCUMENTS: Final = SnapshotCatalog(
+    tables=(
+        TableRules(
+            name='documents',
+            columns=(
+                ColumnSpec(name='workflow', rule=WORKFLOW_ID),
+                ColumnSpec(name='task', rule=TASK_ID),
+                ColumnSpec(name='worker', rule=WORKER_ID),
+                ColumnSpec(name='input', rule=TASK_INPUT),
+                ColumnSpec(name='workflow_error', rule=WORKFLOW_ERROR),
+                ColumnSpec(name='node_result', rule=NODE_RESULT),
+                ColumnSpec(name='child_node_result', rule=NODE_RESULT),
+                ColumnSpec(name='workflow_result', rule=WORKFLOW_RESULT),
+                ColumnSpec(name='outputless_result', rule=WORKFLOW_RESULT),
+                ColumnSpec(name='summary', rule=SUB_WORKFLOW_SUMMARY),
+            ),
+            order_by=('workflow',),
+            identity=('workflow',),
+        ),
+    ),
+)
+"""A workflow, a task and a worker, then one document of each rule that holds them."""
+
+DOCUMENT_COLUMNS: Final = tuple(spec.name for spec in DOCUMENTS.tables[0].columns[3:])
+
+
+def _documents_snapshot(run: Run, named: str) -> NormalizedSnapshot:
+    documents = _documents(run, named)
+    row = (
+        run.workflow,
+        run.task,
+        run.worker,
+        *(json.dumps(documents[column]) for column in DOCUMENT_COLUMNS),
+    )
+    raw = RawSnapshot(tables=(RawTable(name='documents', rows=(row,)),))
+    match normalize_snapshot(raw, DOCUMENTS, _window(run.start)):
+        case Ok(snapshot):
+            return snapshot
+        case Err(error):
+            raise AssertionError(f'normalize failed: {error}')
+
+
+def test_library_ids_in_stored_documents_compare_by_their_labels() -> None:
+    reference = _documents_snapshot(RUN_IDS_A, RUN_IDS_A.workflow)
+    candidate = _documents_snapshot(RUN_IDS_B, RUN_IDS_B.workflow)
+
+    assert compare_snapshots(reference, candidate).entries == ()
+
+
+@pytest.mark.parametrize('column', DOCUMENT_COLUMNS)
+def test_no_raw_library_id_is_left_in_a_stored_document(column: str) -> None:
+    snapshot = _documents_snapshot(RUN_IDS_A, RUN_IDS_A.workflow)
+    table = snapshot.table('documents')
+    (row,) = table.rows
+
+    rendered = render_value(row[table.rules.position(column)])
+
+    for raw in (RUN_IDS_A.workflow, RUN_IDS_A.task, RUN_IDS_A.worker):
+        assert raw not in rendered, f'{column}: {rendered}'
+
+
+def test_a_document_that_names_another_workflow_is_a_difference() -> None:
+    reference = _documents_snapshot(RUN_IDS_A, RUN_IDS_A.workflow)
+    candidate = _documents_snapshot(RUN_IDS_B, PARENT_B)
+
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, candidate).entries
+        if isinstance(entry, ColumnDifference)
+    ] == [
+        'input',
+        'child_node_result',
+        'workflow_result',
+        'outputless_result',
+        'summary',
+    ]
+
+
+def test_crash_data_times_in_a_stored_error_are_run_clock_values() -> None:
+    snapshot = _documents_snapshot(RUN_IDS_A, RUN_IDS_A.workflow)
+    table = snapshot.table('documents')
+    (row,) = table.rows
+
+    # data keys sorted: detected_at, started_at, task_id, worker_id
+    assert _leaves(row[table.rules.position('workflow_error')])[:4] == [
+        DuringRun(),
+        DuringRun(),
+        IdLabel(family=IdFamily.TASK, ordinal=1),
+        IdLabel(family=IdFamily.WORKER, ordinal=1),
+    ]
+
+
+def test_each_member_steps_into_every_member_of_an_object_and_no_array_item() -> None:
+    rule = StoredJson(
+        storage=JsonStorage.TEXT,
+        format=Unversioned(),
+        paths=(JsonPath(steps=(EachMember(), Key(name='id')), rule=WORKFLOW_ID),),
+    )
+    catalog = SnapshotCatalog(
+        tables=(
+            TableRules(
+                name='maps',
+                columns=(
+                    ColumnSpec(name='name', rule=Exact()),
+                    ColumnSpec(name='doc', rule=rule),
+                ),
+                order_by=('name',),
+                identity=('name',),
+            ),
+        ),
+    )
+    rows = (
+        ('object', json.dumps({'x': {'id': CHILD_A}, 'y': {'id': PARENT_A}})),
+        ('array', json.dumps([{'id': CHILD_A}])),
+    )
+
+    match normalize_snapshot(
+        RawSnapshot(tables=(RawTable(name='maps', rows=rows),)), catalog, _window(RUN_A)
+    ):
+        case Ok(snapshot):
+            pass
+        case Err(error):
+            raise AssertionError(f'normalize failed: {error}')
+    array_row, object_row = snapshot.table('maps').rows  # ordered by name
+
+    assert _leaves(object_row[1]) == [
+        IdLabel(family=IdFamily.WORKFLOW, ordinal=1),
+        IdLabel(family=IdFamily.WORKFLOW, ordinal=2),
+    ]
+    assert _leaves(array_row[1]) == []
 
 
 # ---- Attempt archive ----

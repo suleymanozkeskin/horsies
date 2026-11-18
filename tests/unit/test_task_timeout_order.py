@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from psycopg import OperationalError
 
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies._core import CoreConnectionError
 
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
@@ -162,8 +162,8 @@ class _RecordingConnection:
         return MagicMock()
 
 
-_DATABASE_DOWN = CoreOperationFailed('finish_failed_attempt', 'connection refused', True)
-"""The record of a failed-attempt write whose database is down, as the
+_DATABASE_DOWN = CoreConnectionError('finish_failed_attempt', 'connection refused', True)
+"""The exception of a failed-attempt write whose database is down, as the
 facade raises it: retryable."""
 
 

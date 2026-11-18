@@ -14,14 +14,17 @@
 //! `validation_error`, the same text.
 
 use std::any::TypeId;
+use std::collections::BTreeMap;
 
 use horsies_core::core::codec::{
-    check_json_bytes, check_json_bytes_with, to_json_bytes_strict, TextRule, MAX_JSON_DEPTH,
+    check_json_bytes, check_json_bytes_with, object_members, to_json_bytes_strict, TextRule,
+    MAX_JSON_DEPTH,
 };
 use horsies_core::core::task::RawTaskResult;
 use horsies_core::{OperationalErrorCode, TaskErrorKind, TaskResult};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use super::error::TaskError;
 use super::user_code::UserErrorCode;
@@ -69,7 +72,9 @@ pub fn decode_input<A: DeserializeOwned>(input: &[u8]) -> Result<A, StoredTaskEr
 /// ([`decode_input`]), the decoded value reads back to itself
 /// ([`encode_read_back`]), and each member of `input` that is not `null`,
 /// at any depth, is a member that the read-back holds (`unread_member`).
-/// The client's task bodies give it as `validate_input`. Pure.
+/// The compare reads members as texts and parses no number, so an integer
+/// of any width that the strict read rule takes passes it. The client's
+/// task bodies give it as `validate_input`. Pure.
 ///
 /// Fails with `WORKER_SERIALIZATION_ERROR`; the text names `A`, the field
 /// path or the key path of the member, never a value.
@@ -85,11 +90,9 @@ where
         ))
     };
     let encoded = encode_read_back(&decoded).map_err(read_back_failure)?;
-    let given = decode_checked::<serde_json::Value>(input)
-        .map_err(|failure| read_back_failure(failure.to_string()))?;
-    let read = decode_checked::<serde_json::Value>(&encoded)
-        .map_err(|failure| read_back_failure(failure.to_string()))?;
-    match unread_member(&given, &read) {
+    let given = raw_value_of(input).map_err(|failure| read_back_failure(failure.to_string()))?;
+    let read = raw_value_of(&encoded).map_err(|failure| read_back_failure(failure.to_string()))?;
+    match unread_member(value_parts(given), read) {
         None => Ok(()),
         Some(member) => Err(serialization_error::<A>(format!(
             "task input names the member '{}', which {} does not read",
@@ -113,11 +116,69 @@ pub(crate) struct UnreadMember {
     pub(crate) depth: usize,
 }
 
+/// A JSON value one level down: each member of an object and each element
+/// of a list as its text. No number is parsed, so an integer of any width
+/// keeps its digits.
+pub(crate) enum ValueParts<'a> {
+    /// An object: its members in text order.
+    Object(Vec<(String, &'a RawValue)>),
+    /// A list: its elements in order.
+    List(Vec<&'a RawValue>),
+    /// `null`.
+    Null,
+    /// A boolean, a number or a string.
+    Scalar,
+}
+
+/// The parts of `value`; the first byte of its text names the kind. Pure.
+///
+/// Panics: for an object or a list that does not read as its members or
+/// its elements. A part of a text that passed the strict read rule, or that
+/// the strict writer wrote, reads as them; the callers pass only such
+/// texts.
+pub(crate) fn value_parts(value: &RawValue) -> ValueParts<'_> {
+    let text = value.get();
+    match text.as_bytes().first() {
+        Some(b'{') => ValueParts::Object(
+            object_members(text).expect("an object of a strict JSON text reads as its members"),
+        ),
+        Some(b'[') => ValueParts::List(
+            serde_json::from_str(text).expect("a list of a strict JSON text reads as its elements"),
+        ),
+        Some(b'n') => ValueParts::Null,
+        Some(b't' | b'f' | b'"' | b'-' | b'0'..=b'9') => ValueParts::Scalar,
+        Some(_) | None => unreachable!("a raw JSON value starts with the first byte of a value"),
+    }
+}
+
+/// The JSON value of `bytes` as its text, without the whitespace around
+/// it. No member is parsed. Pure.
+///
+/// Errors: the [`DecodeFailure`] at the value itself (`.`, depth 0) of
+/// bytes that are not one JSON value.
+pub(crate) fn raw_value_of(bytes: &[u8]) -> Result<&RawValue, DecodeFailure> {
+    let failure = |error: serde_json::Error| DecodeFailure {
+        path: ".".to_owned(),
+        depth: 0,
+        text: value_free_decode_text(&error),
+    };
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value: &RawValue = Deserialize::deserialize(&mut deserializer).map_err(failure)?;
+    deserializer.end().map_err(failure)?;
+    Ok(value)
+}
+
+/// Whether the text of `value` is `null`. A raw value holds no whitespace
+/// around its text.
+fn is_null(value: &RawValue) -> bool {
+    value.get() == "null"
+}
+
 /// The first member of `given` with a value that is not `null` and that
-/// `read` does not hold at the same place, at any depth. `given` is an
-/// input, and `read` is the encoding of the value that it decoded to.
-/// Python refuses such a key at any depth (`extra='forbid'` at an input).
-/// Pure.
+/// `read` does not hold at the same place, at any depth. `given` is the
+/// parts of an input, and `read` is the encoding of the value that it
+/// decoded to. Python refuses such a key at any depth (`extra='forbid'` at
+/// an input). Members are compared by key, and no number is parsed. Pure.
 ///
 /// - An object member must be a member of the object at the same place in
 ///   `read`; its value is then compared with the value there.
@@ -135,34 +196,45 @@ pub(crate) struct UnreadMember {
 /// field with `#[serde(skip_serializing)]`, or a value that
 /// `skip_serializing_if` leaves out. Each is named as unread.
 ///
-/// Panics: for a value nested deeper than [`MAX_JSON_DEPTH`]. The callers
-/// pass text that passed the strict read rule, which bounds the depth.
-pub(crate) fn unread_member(
-    given: &serde_json::Value,
-    read: &serde_json::Value,
-) -> Option<UnreadMember> {
-    unread_below(given, Some(read), "", MAX_JSON_DEPTH)
+/// Panics: for a value nested deeper than [`MAX_JSON_DEPTH`], and as
+/// [`value_parts`]. The callers pass a text that passed the strict read
+/// rule, which bounds the depth, and its encoding by the strict writer.
+pub(crate) fn unread_member(given: ValueParts<'_>, read: &RawValue) -> Option<UnreadMember> {
+    unread_in(given, Some(read), "", MAX_JSON_DEPTH)
 }
 
 /// [`unread_member`] of `given` at `path`, against `read` at the same place
 /// (`None`: `read` has no value there), with `levels_left` levels of
 /// nesting allowed for `given` and below.
 fn unread_below(
-    given: &serde_json::Value,
-    read: Option<&serde_json::Value>,
+    given: &RawValue,
+    read: Option<&RawValue>,
     path: &str,
     levels_left: usize,
 ) -> Option<UnreadMember> {
-    use serde_json::Value;
-    match (given, read) {
-        (Value::Object(members), Some(Value::Object(read_members))) => {
+    unread_in(value_parts(given), read, path, levels_left)
+}
+
+/// [`unread_below`] of the parts of a value.
+fn unread_in(
+    given: ValueParts<'_>,
+    read: Option<&RawValue>,
+    path: &str,
+    levels_left: usize,
+) -> Option<UnreadMember> {
+    match (given, read.map(value_parts)) {
+        (ValueParts::Object(members), Some(ValueParts::Object(read_members))) => {
             let below = level_below(levels_left, path);
+            let read_by_key: BTreeMap<&str, &RawValue> = read_members
+                .iter()
+                .map(|(key, value)| (key.as_str(), *value))
+                .collect();
             members
                 .iter()
-                .filter(|(_key, value)| !value.is_null())
+                .filter(|(_key, value)| !is_null(value))
                 .find_map(|(key, value)| {
                     let member = member_path(path, key);
-                    match read_members.get(key) {
+                    match read_by_key.get(key.as_str()).copied() {
                         None => Some(UnreadMember {
                             path: member,
                             key: key.clone(),
@@ -172,29 +244,29 @@ fn unread_below(
                     }
                 })
         }
-        (Value::Object(members), None) => members
+        (ValueParts::Object(members), None) => members
             .iter()
-            .find(|(_key, value)| !value.is_null())
+            .find(|(_key, value)| !is_null(value))
             .map(|(key, _value)| UnreadMember {
                 path: member_path(path, key),
                 key: key.clone(),
                 depth: member_depth(levels_left),
             }),
-        (Value::Array(elements), Some(Value::Array(read_elements))) => {
+        (ValueParts::List(elements), Some(ValueParts::List(read_elements))) => {
             let below = level_below(levels_left, path);
             elements.iter().enumerate().find_map(|(position, element)| {
                 let element_path = format!("{path}[{position}]");
-                unread_element(element, position, read_elements, &element_path, below)
+                unread_element(element, position, &read_elements, &element_path, below)
             })
         }
-        (Value::Array(elements), None) => {
+        (ValueParts::List(elements), None) => {
             let below = level_below(levels_left, path);
             elements.iter().enumerate().find_map(|(position, element)| {
                 unread_below(element, None, &format!("{path}[{position}]"), below)
             })
         }
-        (Value::Object(_) | Value::Array(_), Some(_))
-        | (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_), _) => None,
+        (ValueParts::Object(_) | ValueParts::List(_), Some(_))
+        | (ValueParts::Null | ValueParts::Scalar, _) => None,
     }
 }
 
@@ -203,15 +275,16 @@ fn unread_below(
 /// holds each of its members; else the member that the element at
 /// `position` leaves unread.
 fn unread_element(
-    element: &serde_json::Value,
+    element: &RawValue,
     position: usize,
-    read: &[serde_json::Value],
+    read: &[&RawValue],
     path: &str,
     levels_left: usize,
 ) -> Option<UnreadMember> {
-    let unread = unread_below(element, read.get(position), path, levels_left)?;
+    let unread = unread_below(element, read.get(position).copied(), path, levels_left)?;
     let held_elsewhere = read
         .iter()
+        .copied()
         .any(|read_element| unread_below(element, Some(read_element), path, levels_left).is_none());
     match held_elsewhere {
         true => None,
@@ -269,19 +342,17 @@ pub fn decode_unit_input(input: &[u8]) -> Result<(), StoredTaskError> {
 /// `()` from the text `null` or `{}`. A non-empty object names its first
 /// key in serde's words for a type with no fields; any other value names
 /// only its kind. The failure is at the value itself (`.`, depth 0), also
-/// for a key. Pure.
+/// for a key. The members are read as texts, with no number parse
+/// ([`value_parts`]). The callers pass a text that passed the strict read
+/// rule. Pure.
 pub(crate) fn decode_unit(input: &[u8]) -> Result<(), DecodeFailure> {
-    let value = decode_checked::<serde_json::Value>(input)?;
-    let text = match &value {
-        serde_json::Value::Null => return Ok(()),
-        serde_json::Value::Object(members) => match members.keys().next() {
+    let text = match value_parts(raw_value_of(input)?) {
+        ValueParts::Null => return Ok(()),
+        ValueParts::Object(members) => match members.first() {
             None => return Ok(()),
-            Some(key) => format!("unknown field `{key}`, there are no fields"),
+            Some((key, _value)) => format!("unknown field `{key}`, there are no fields"),
         },
-        serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_)
-        | serde_json::Value::Array(_) => {
+        ValueParts::List(_) | ValueParts::Scalar => {
             format!("invalid type: {INPUT_PLACEHOLDER}, expected null or an empty object")
         }
     };
@@ -511,7 +582,10 @@ fn serialization_error<V>(message: String) -> StoredTaskError {
         error_code: horsies_core::TaskErrorCode::from(
             OperationalErrorCode::WorkerSerializationError,
         ),
-        data: Some(serde_json::Value::Object(data)),
+        data: Some(
+            horsies_core::JsonText::of(&serde_json::Value::Object(data))
+                .expect("an object of two text members writes as strict JSON"),
+        ),
         message: Some(message),
         kind: TaskErrorKind::Plain,
     }
@@ -678,16 +752,21 @@ mod tests {
         assert_eq!(shipment.parcels[0].weight, 1);
     }
 
+    /// The raw value of the JSON text `text`.
+    fn raw(text: &str) -> &RawValue {
+        serde_json::from_str(text).unwrap()
+    }
+
     /// [`unread_member`]: a member that `read` does not hold is named by its
     /// key path and its depth at each depth: in the object, in a nested
     /// object, and in an element of a list.
     #[test]
     fn an_unread_member_is_named_by_its_key_path_at_each_depth() {
-        let read = json!({"a": {"b": 1}, "list": [{"c": 1}, {"c": 2}]});
-        let unread = |given: serde_json::Value| unread_member(&given, &read);
-        assert_eq!(unread(json!({"a": {"b": 1}, "list": []})), None);
+        let read = raw(r#"{"a": {"b": 1}, "list": [{"c": 1}, {"c": 2}]}"#);
+        let unread = |given: &str| unread_member(value_parts(raw(given)), read);
+        assert_eq!(unread(r#"{"a": {"b": 1}, "list": []}"#), None);
         assert_eq!(
-            unread(json!({"x": 1})),
+            unread(r#"{"x": 1}"#),
             Some(UnreadMember {
                 path: "x".to_owned(),
                 key: "x".to_owned(),
@@ -695,7 +774,7 @@ mod tests {
             })
         );
         assert_eq!(
-            unread(json!({"a": {"b": 1, "y": 2}})),
+            unread(r#"{"a": {"b": 1, "y": 2}}"#),
             Some(UnreadMember {
                 path: "a.y".to_owned(),
                 key: "y".to_owned(),
@@ -703,7 +782,7 @@ mod tests {
             })
         );
         assert_eq!(
-            unread(json!({"list": [{"c": 1}, {"c": 2, "z": 3}]})),
+            unread(r#"{"list": [{"c": 1}, {"c": 2, "z": 3}]}"#),
             Some(UnreadMember {
                 path: "list[1].z".to_owned(),
                 key: "z".to_owned(),
@@ -716,9 +795,9 @@ mod tests {
     /// element held by another element of `read` is not named.
     #[test]
     fn a_list_element_held_by_another_element_of_the_read_back_is_not_named() {
-        let read = json!([{"name": "a"}, {"name": "b", "colour": "red"}]);
-        let given = json!([{"name": "b", "colour": "red"}, {"name": "a"}, {"name": "a"}]);
-        assert_eq!(unread_member(&given, &read), None);
+        let read = raw(r#"[{"name": "a"}, {"name": "b", "colour": "red"}]"#);
+        let given = raw(r#"[{"name": "b", "colour": "red"}, {"name": "a"}, {"name": "a"}]"#);
+        assert_eq!(unread_member(value_parts(given), read), None);
     }
 
     /// [`unread_member`]: an object at a place where `read` holds another
@@ -726,9 +805,48 @@ mod tests {
     /// another).
     #[test]
     fn a_value_that_reads_back_in_another_form_is_not_compared() {
-        let read = json!({"when": "2026-01-01"});
-        let given = json!({"when": {"year": 2026, "month": 1, "day": 1}});
-        assert_eq!(unread_member(&given, &read), None);
+        let read = raw(r#"{"when": "2026-01-01"}"#);
+        let given = raw(r#"{"when": {"year": 2026, "month": 1, "day": 1}}"#);
+        assert_eq!(unread_member(value_parts(given), read), None);
+    }
+
+    /// An integer of 400 digits: past the `f64` range, within the digit
+    /// bound of the strict read rule.
+    fn digits_400() -> String {
+        "9".repeat(400)
+    }
+
+    /// The input of [`check_input_takes_an_integer_of_400_digits`]: a field
+    /// that keeps the text of its value.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct WideAmount {
+        amount: horsies_core::JsonText,
+    }
+
+    /// #1893: the key compare reads members as texts and parses no number,
+    /// so an integer of 400 digits in a `JsonText` field passes, as the
+    /// typed decode takes it. A member that the type does not read is still
+    /// named.
+    #[test]
+    fn check_input_takes_an_integer_of_400_digits() {
+        let wide = digits_400();
+        let input = format!(r#"{{"amount": {wide}}}"#);
+        assert!(check_input::<WideAmount>(input.as_bytes()).is_ok());
+        let unread = format!(r#"{{"amount": {wide}, "note": {wide}}}"#);
+        let refused = check_input::<WideAmount>(unread.as_bytes()).unwrap_err();
+        let message = refused.message.unwrap_or_default();
+        assert!(message.contains("'note'"), "{message}");
+        assert!(!message.contains(&wide), "{message}");
+    }
+
+    /// #1893: a task with no parameters names the first key of an input
+    /// whose value is an integer of 400 digits, as for any other value.
+    #[test]
+    fn the_unit_check_names_the_key_of_an_integer_of_400_digits() {
+        let input = format!(r#"{{"wide": {}, "next": 1}}"#, digits_400());
+        let failure = decode_unit(input.as_bytes()).unwrap_err();
+        assert_eq!(failure.text, "unknown field `wide`, there are no fields");
+        assert_eq!((failure.path.as_str(), failure.depth), (".", 0));
     }
 
     /// The input of [`a_decode_failure_has_the_depth_of_its_path`]: a key
@@ -845,7 +963,7 @@ mod tests {
         );
         assert!(message.contains("Order"), "{message}");
         assert!(!text_of(&error).contains(MARKER));
-        let data = error.data.unwrap();
+        let data: serde_json::Value = error.data.unwrap().decode().unwrap();
         assert!(data["expected_type"].as_str().unwrap().contains("Order"));
         assert_eq!(data["validation_error"].as_str(), Some(message.as_str()));
     }
@@ -1012,10 +1130,8 @@ mod tests {
                     .clone()
                     .unwrap()
                     .contains("does not read back"));
-                assert_eq!(
-                    error.data.as_ref().unwrap()["expected_type"],
-                    std::any::type_name::<TextNumber>()
-                );
+                let data: serde_json::Value = error.data.as_ref().unwrap().decode().unwrap();
+                assert_eq!(data["expected_type"], std::any::type_name::<TextNumber>());
                 assert!(!text_of(&error).contains(MARKER));
             }
         }

@@ -2,8 +2,8 @@
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 use crate::surface::{
-    Constructor, ModuleSurface, ParameterKind, StubClass, StubFunction, StubParameter,
-    StubStaticMethod, TypeText,
+    Constructor, ExceptionBody, ModuleSurface, ParameterKind, StubClass, StubException,
+    StubFunction, StubParameter, StubProperty, StubStaticMethod, TypeText,
 };
 
 /// The file name of the stubs, inside the package folder.
@@ -18,11 +18,7 @@ pub fn render_core_stub(surface: &ModuleSurface) -> String {
     );
     for exception in surface.exceptions {
         text.push_str("\n\n");
-        text.push_str(&format!("class {}({}):\n", exception.name, exception.base));
-        match docstring(exception.doc, "    ") {
-            Some(doc) => text.push_str(&doc),
-            None => text.push_str("    ...\n"),
-        }
+        text.push_str(&render_exception(exception));
     }
     for class in surface.classes {
         text.push_str("\n\n");
@@ -35,24 +31,61 @@ pub fn render_core_stub(surface: &ModuleSurface) -> String {
     text
 }
 
-fn render_class(class: &StubClass, static_methods: &[StubStaticMethod]) -> String {
-    let mut text = format!("@final\nclass {}:\n", class.name);
-    if let Some(doc) = docstring(class.doc, "    ") {
-        text.push_str(&doc);
+/// An exception class: its doc, then, for a class with attributes, its
+/// constructor and its read-only attributes.
+fn render_exception(exception: &StubException) -> String {
+    let mut text = format!("class {}({}):\n", exception.name, exception.base);
+    let doc = docstring(exception.doc, "    ");
+    match exception.body {
+        ExceptionBody::ArgsOnly => match doc {
+            Some(doc) => text.push_str(&doc),
+            None => text.push_str("    ...\n"),
+        },
+        ExceptionBody::Attributes {
+            constructor,
+            properties,
+        } => {
+            let empty_body = doc.is_none()
+                && matches!(constructor, Constructor::NoConstructor)
+                && properties.is_empty();
+            if let Some(doc) = doc {
+                text.push_str(&doc);
+            }
+            text.push_str(&render_members(constructor, properties));
+            if empty_body {
+                text.push_str("    ...\n");
+            }
+        }
     }
-    if let Constructor::Parameters(parameters) = class.constructor {
+    text
+}
+
+/// The `__init__` of `constructor` and one read-only property per entry of
+/// `properties`, indented as members of a class.
+fn render_members(constructor: Constructor, properties: &[StubProperty]) -> String {
+    let mut text = String::new();
+    if let Constructor::Parameters(parameters) = constructor {
         text.push_str(&format!(
             "    def __init__(self{}) -> None: ...\n",
             parameter_list(parameters)
         ));
     }
-    for property in class.properties {
+    for property in properties {
         text.push_str(&format!(
             "    @property\n    def {}(self) -> {}: ...\n",
             property.name,
             type_text(&property.annotation)
         ));
     }
+    text
+}
+
+fn render_class(class: &StubClass, static_methods: &[StubStaticMethod]) -> String {
+    let mut text = format!("@final\nclass {}:\n", class.name);
+    if let Some(doc) = docstring(class.doc, "    ") {
+        text.push_str(&doc);
+    }
+    text.push_str(&render_members(class.constructor, class.properties));
     for method in class.methods {
         text.push_str(&render_function(method, "    "));
     }
@@ -164,6 +197,46 @@ mod tests {
         for function in CORE_MODULE.functions {
             assert!(stub.contains(&format!("\ndef {}(", function.name)));
         }
+    }
+
+    #[test]
+    fn an_exception_with_attributes_has_its_constructor_and_its_properties() {
+        let exception = StubException {
+            name: "ProbeError",
+            base: "Exception",
+            doc: "A probe failed.",
+            body: ExceptionBody::Attributes {
+                constructor: Constructor::Parameters(&[StubParameter {
+                    name: "subject",
+                    annotation: TypeText::Plain("str"),
+                    kind: ParameterKind::Positional,
+                }]),
+                properties: &[StubProperty {
+                    name: "subject",
+                    annotation: TypeText::Plain("str"),
+                }],
+            },
+        };
+        assert_eq!(
+            render_exception(&exception),
+            "class ProbeError(Exception):\n    \"\"\"A probe failed.\"\"\"\n    \
+             def __init__(self, subject: str) -> None: ...\n    @property\n    \
+             def subject(self) -> str: ...\n"
+        );
+    }
+
+    #[test]
+    fn an_exception_of_args_only_has_its_doc_only() {
+        let exception = StubException {
+            name: "ProbeError",
+            base: "Exception",
+            doc: "",
+            body: ExceptionBody::ArgsOnly,
+        };
+        assert_eq!(
+            render_exception(&exception),
+            "class ProbeError(Exception):\n    ...\n"
+        );
     }
 
     #[test]

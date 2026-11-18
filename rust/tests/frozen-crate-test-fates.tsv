@@ -753,7 +753,7 @@ src/core/task/result.rs	core::task::result::tests::task_not_found_is_transient	K
 src/core/task/result.rs	core::task::result::tests::user_code_is_terminal	KEPT	horsies-core core::task::result::tests::user_code_is_terminal
 src/core/task/result.rs	core::task::result::tests::broker_error_serde_round_trip	KEPT	horsies-core core::task::result::tests::broker_error_serde_round_trip
 src/core/task/retry_utils.rs	core::task::retry_utils::tests::none_returns_zero	COVERED	crates/horsies-core/src/worker/retry/tests.rs::options_without_a_policy_store_zero_retries
-src/core/task/retry_utils.rs	core::task::retry_utils::tests::empty_string_returns_zero	COVERED	crates/horsies-core/src/worker/retry/tests.rs::options_without_a_policy_store_zero_retries
+src/core/task/retry_utils.rs	core::task::retry_utils::tests::empty_string_returns_zero	DELETED	an empty options text does not mean no options: the retry limit refuses it with the reason of the dispatch reader, as it refuses a text that does not parse (an_unreadable_text_has_python_s_reason) -- code: crates/horsies-core/src/worker/retry.rs::pub fn stored_max_retries
 src/core/task/retry_utils.rs	core::task::retry_utils::tests::no_retry_policy_returns_zero	COVERED	crates/horsies-core/src/worker/retry/tests.rs::options_without_a_policy_store_zero_retries
 src/core/task/retry_utils.rs	core::task::retry_utils::tests::policy_without_max_retries_defaults_to_three	COVERED	crates/horsies-core/src/worker/retry/tests.rs::a_key_the_policy_leaves_out_takes_the_field_default
 src/core/task/retry_utils.rs	core::task::retry_utils::tests::policy_with_explicit_max_retries	COVERED	crates/horsies-core/src/worker/retry/tests.rs::a_policy_that_fits_the_rule_stores_its_limit

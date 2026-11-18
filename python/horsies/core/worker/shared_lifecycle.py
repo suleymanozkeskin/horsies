@@ -31,10 +31,9 @@ from datetime import datetime
 from typing import Final, assert_never
 
 import horsies._core as core
-from horsies._core import CoreChildHandle, CoreError
+from horsies._core import CoreChildHandle, CoreError, CoreFailure
 from horsies.core.lifecycle.core_records import task_row_end_of
 from horsies.core.logging import get_logger
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.child_pool import _get_child_core_handle
 from horsies.core.worker.child_runner import (
     CANCELLED_WRITE_END_S as CANCELLED_WRITE_END_S,
@@ -72,8 +71,6 @@ cancel request, so the start does not commit after the bound. A seat also
 ends its wait for the attempt here; past it the attempt ends with
 ``OWNERSHIP_UNCONFIRMED``."""
 
-_EXPIRE_BEFORE_START_SUBJECT: Final = 'CoreChildHandle.expire_owned_claim_async'
-"""The subject of a failed expiry of the miss path."""
 
 REFUSAL_WRITES_BOUND_S: Final = (
     _PRE_START_CONFIRM_ATTEMPTS * (RUNNING_ATTEMPT_TIMEOUT_S + CANCELLED_WRITE_END_S)
@@ -124,7 +121,6 @@ async def _after_missed_start(
                         worker_id=worker_id,
                         attempt_elapsed_ms=attempt_elapsed_ms(attempt_began),
                     ),
-                    _EXPIRE_BEFORE_START_SUBJECT,
                 ),
             )
         case 'NOT_HELD' | 'LEASE_EXPIRED':
@@ -169,7 +165,7 @@ async def _confirm_ownership_and_set_running(
             RUNNING_ATTEMPT_TIMEOUT_S,
         )
         return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
-    except (CoreError, CoreOperationFailed) as exc:
+    except (CoreError, CoreFailure) as exc:
         return _start_unconfirmed(task_id, exc)
 
 
@@ -190,7 +186,8 @@ async def _set_running(
 
     Raises:
         CoreError: the core of this process cannot run the call.
-        CoreOperationFailed: the expiry of the miss path failed.
+        CoreFailure: the expiry of the miss path failed (the core's class of
+            the cause).
     """
     attempt_began = time.monotonic()
     record = await handle.start_attempt_async(

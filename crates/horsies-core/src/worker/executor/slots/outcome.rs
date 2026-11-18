@@ -17,7 +17,9 @@
 //! is sent again, at most the retries of its [`WriteStage`]. After the last
 //! retry of a `TASK_TIMEOUT` write, crash recovery writes `TASK_TIMEOUT` at
 //! the same placement, with its own retries (Python
-//! `_recover_timed_out_row`). A plain success sent again joins a later
+//! `_recover_timed_out_row`). A crash-recovery write sent again stores
+//! [`CRASH_RECOVERY_RETRY_PREFIX`] and the message of its first send (Python
+//! `_retry_finalize_future`). A plain success sent again joins a later
 //! batch; a row whose batch committed before its reply was lost answers
 //! `AlreadyApplied`.
 
@@ -59,6 +61,10 @@ const WORKER_FAILURE_FALLBACK: &str = "Worker failure";
 pub const TIMEOUT_WRITE_MAX_RETRIES: u32 = 3;
 /// Retries of a crash-recovery write (Python `_FINALIZE_FUTURE_MAX_RETRIES`).
 pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
+/// The start of the message of a crash-recovery write that is sent again
+/// after a database error; the message of the first send follows (Python
+/// `_retry_finalize_future`, `python/horsies/core/worker/finalize.py:1957`).
+pub const CRASH_RECOVERY_RETRY_PREFIX: &str = "Retry after future-stage finalize error: ";
 /// Sends of the release of a claim that no child took, the first included.
 pub const RELEASE_SENDS: u32 = 3;
 
@@ -198,7 +204,9 @@ pub fn worker_failure_write(
         false => detail.to_owned(),
     };
     let mut error = TaskError::builtin(OperationalErrorCode::BrokerError, message.clone());
-    error.data = Some(serde_json::json!({ "task_id": task.task_id.to_string() }));
+    error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &serde_json::json!({ "task_id": task.task_id.to_string() }),
+    ));
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),
@@ -229,10 +237,12 @@ pub fn killed_child_write(
 ) -> FinishFailedAttempt {
     let code_text = code.value();
     let mut error = TaskError::builtin(code, message.clone());
-    error.data = Some(serde_json::json!({
-        "task_id": task.task_id.to_string(),
-        "worker_id": worker_id,
-    }));
+    error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &serde_json::json!({
+            "task_id": task.task_id.to_string(),
+            "worker_id": worker_id,
+        }),
+    ));
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),
@@ -245,6 +255,37 @@ pub fn killed_child_write(
             error_message: Some(message.clone()),
             failed_reason: Some(message),
         },
+    }
+}
+
+/// The two forms of one crash-recovery write (Python stage `FUTURE`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrashRecoveryWrites {
+    /// The first send.
+    pub first: FinishFailedAttempt,
+    /// Each send after a database error that may clear: the same code,
+    /// retry, fence and error `data`, with [`CRASH_RECOVERY_RETRY_PREFIX`]
+    /// before the message of `first`.
+    pub retry: FinishFailedAttempt,
+}
+
+/// The crash-recovery writes of a child the worker killed or lost: two
+/// [`killed_child_write`]s, with `message` on the first send and with
+/// `Retry after future-stage finalize error: <message>` on each send after
+/// a database error (Python `_finalize_child_loss` and
+/// `_retry_finalize_future`, `python/horsies/core/worker/finalize.py:1942-1985`).
+/// Pure.
+pub fn crash_recovery_writes(
+    task: &ClaimedTask,
+    worker_id: &str,
+    code: BuiltInTaskCode,
+    message: String,
+    placement: RetryPlacement,
+) -> CrashRecoveryWrites {
+    let retry_message = format!("{CRASH_RECOVERY_RETRY_PREFIX}{message}");
+    CrashRecoveryWrites {
+        first: killed_child_write(task, worker_id, code.clone(), message, placement),
+        retry: killed_child_write(task, worker_id, code, retry_message, placement),
     }
 }
 
@@ -264,7 +305,9 @@ pub fn timeout_write(
     let code_text = code.value();
     let message = format!("Task exceeded timeout_ms={}", timeout.get());
     let mut error = TaskError::builtin(code, message.clone());
-    error.data = Some(timeout_data(task.task_id, timeout, cancel));
+    error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &timeout_data(task.task_id, timeout, cancel),
+    ));
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),
@@ -296,17 +339,17 @@ fn timeout_data(task_id: Uuid, timeout: TaskTimeoutMs, cancel: TimeoutCancel) ->
     data
 }
 
-/// The crash-recovery write of an attempt that reached `timeout` and whose
+/// The crash-recovery writes of an attempt that reached `timeout` and whose
 /// `TASK_TIMEOUT` write failed on every retry: the same code and placement,
 /// with a message that names the failed writes, and with the `data` of
 /// crash recovery (Python `_recover_timed_out_row`). Pure.
-pub fn timeout_recovery_write(
+pub fn timeout_recovery_writes(
     task: &ClaimedTask,
     worker_id: &str,
     timeout: TaskTimeoutMs,
     placement: RetryPlacement,
-) -> FinishFailedAttempt {
-    killed_child_write(
+) -> CrashRecoveryWrites {
+    crash_recovery_writes(
         task,
         worker_id,
         OutcomeCode::TaskTimeout.into(),
@@ -466,36 +509,24 @@ impl OutcomeWriter {
                 retry,
                 reason,
             } => {
-                let write = killed_child_write(
+                let writes = crash_recovery_writes(
                     task,
                     &self.worker_id,
                     code.code().into(),
                     reason.into_string(),
                     retry,
                 );
-                self.phase_one(
-                    task,
-                    PhaseOneWrite::Failure(write),
-                    ClaimedRowRule::Release,
-                    WriteStage::CrashRecovery,
-                )
-                .await
+                self.crash_recovery(task, writes).await
             }
             AttemptEnd::Crashed { reason } => {
-                let write = killed_child_write(
+                let writes = crash_recovery_writes(
                     task,
                     &self.worker_id,
                     OperationalErrorCode::WorkerCrashed.into(),
                     reason.into_string(),
                     RetryPlacement::SameClass,
                 );
-                self.phase_one(
-                    task,
-                    PhaseOneWrite::Failure(write),
-                    ClaimedRowRule::Release,
-                    WriteStage::CrashRecovery,
-                )
-                .await
+                self.crash_recovery(task, writes).await
             }
         }
     }
@@ -533,14 +564,8 @@ impl OutcomeWriter {
             task_id = %task.task_id,
             "every retry of the TASK_TIMEOUT write failed; crash recovery writes the row",
         );
-        let recovery = timeout_recovery_write(task, &self.worker_id, timeout, placement);
-        self.phase_one(
-            task,
-            PhaseOneWrite::Failure(recovery),
-            ClaimedRowRule::Release,
-            WriteStage::CrashRecovery,
-        )
-        .await
+        let recovery = timeout_recovery_writes(task, &self.worker_id, timeout, placement);
+        self.crash_recovery(task, recovery).await
     }
 
     fn result_write(&self, task: &ClaimedTask, envelope: &ResultEnvelopeText) -> PhaseOneWrite {
@@ -674,12 +699,9 @@ impl OutcomeWriter {
         }
     }
 
-    /// The write and at most the retries of its `stage`; then phase 2 when
-    /// owed.
-    ///
-    /// The write is boxed: its future holds every writer of phase 1, and
-    /// `settle` builds this future at seven call sites. Inline, a debug
-    /// build needs more than a 2 MiB thread stack for one settlement.
+    /// The write and at most the retries of its `stage`, each retry the same
+    /// write (Python `_retry_finalize_phase1`, `_retry_finalize_timeout`);
+    /// then phase 2 when owed.
     async fn phase_one(
         &self,
         task: &ClaimedTask,
@@ -687,10 +709,49 @@ impl OutcomeWriter {
         claimed_row: ClaimedRowRule,
         stage: WriteStage,
     ) -> Settlement {
+        self.send_with_retries(task, &write, &write, claimed_row, stage)
+            .await
+    }
+
+    /// A crash-recovery write under the claimed-row rule `RELEASE`:
+    /// `writes.first`, then `writes.retry` on each retry of
+    /// [`WriteStage::CrashRecovery`] (Python `_retry_finalize_future`); then
+    /// phase 2 when owed.
+    async fn crash_recovery(&self, task: &ClaimedTask, writes: CrashRecoveryWrites) -> Settlement {
+        let first = PhaseOneWrite::Failure(writes.first);
+        let retry = PhaseOneWrite::Failure(writes.retry);
+        self.send_with_retries(
+            task,
+            &first,
+            &retry,
+            ClaimedRowRule::Release,
+            WriteStage::CrashRecovery,
+        )
+        .await
+    }
+
+    /// Send `first`, then `retry` after each database error that may clear,
+    /// at most the retries of `stage`; then phase 2 when owed.
+    ///
+    /// The write is boxed: its future holds every writer of phase 1, and
+    /// `settle` builds this future at seven call sites. Inline, a debug
+    /// build needs more than a 2 MiB thread stack for one settlement.
+    async fn send_with_retries(
+        &self,
+        task: &ClaimedTask,
+        first: &PhaseOneWrite,
+        retry: &PhaseOneWrite,
+        claimed_row: ClaimedRowRule,
+        stage: WriteStage,
+    ) -> Settlement {
         let max_retries = stage.max_retries();
         let mut retries_done: u32 = 0;
         let outcome = loop {
-            let error = match Box::pin(self.write_once(task, &write, claimed_row)).await {
+            let write = match retries_done {
+                0 => first,
+                _ => retry,
+            };
+            let error = match Box::pin(self.write_once(task, write, claimed_row)).await {
                 Ok(outcome) => break outcome,
                 Err(error) => error,
             };

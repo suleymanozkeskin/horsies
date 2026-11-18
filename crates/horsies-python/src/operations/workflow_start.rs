@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use super::arguments::utc_instant;
 use crate::child_spec::PythonChildSpecSource;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// One frozen workflow start. `spec_json` is the workflow spec data of the
@@ -108,7 +109,12 @@ pub struct WorkflowStartFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `start_workflow`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed start.
+const SUBJECT: &str = "start_workflow";
 
 /// The outcome of one start.
 pub enum WorkflowStartOutcome {
@@ -205,6 +211,7 @@ fn failed(workflow_id: Uuid, error: &ClientStartError) -> WorkflowStartOutcome {
         workflow_id,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        exception: FailureException::of(SUBJECT, error),
     })
 }
 
@@ -222,6 +229,7 @@ pub async fn start_workflow_operation(
                 workflow_id: parts.workflow_id,
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(SUBJECT, &error),
             })
         }
     };

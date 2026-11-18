@@ -523,6 +523,7 @@ async fn the_resume_pass_logs_and_does_not_count() {
     .expect("the tree pass returns its report");
 
     assert_eq!(report.metrics.case1.errors, 1, "{report:?}");
+    assert_eq!(report.metrics.case1.failures_counted, 0, "{report:?}");
     assert_eq!(failed_passes(&db.pool, workflow_id).await, None);
     assert_eq!(node_status(&db.pool, workflow_id, 0).await, "READY");
     db.drop().await;
@@ -617,7 +618,9 @@ async fn the_limit_bounds_case_1_5() {
         code(&error).as_deref(),
         Some("WORKFLOW_RECOVERY_LIMIT_REACHED")
     );
-    let data = error.data.expect("the limit error carries its facts");
+    let data = error
+        .data_value()
+        .expect("the limit error carries its facts");
     assert_eq!(data["case"], "ready_subworkflow_not_started");
     assert_eq!(data["task_index"], 0);
     db.drop().await;

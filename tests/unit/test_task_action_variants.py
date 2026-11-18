@@ -18,6 +18,7 @@ import pytest
 
 from horsies._core import (
     CancelFailed,
+    CoreConnectionError,
     CancelRefusedStatus,
     CancelRefusedWorkflowTask,
     CancelStoredDataInvalid,
@@ -28,7 +29,6 @@ from horsies._core import (
 )
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.task_actions import (
@@ -256,8 +256,11 @@ class TestCancelOutcome:
 class TestCancelFailures:
     @pytest.mark.asyncio
     async def test_a_failure_record_keeps_its_message_and_classification(self) -> None:
+        cause = CoreConnectionError('cancel_task', CAUSE_MARKER, True)
         result, _ = await _cancel(
-            _record(CancelFailed, message=f'cancel: {CAUSE_MARKER}', retryable=True),
+            _record(
+                CancelFailed, message=f'cancel: {CAUSE_MARKER}', retryable=True, exception=cause,
+            ),
         )
 
         assert is_err(result)
@@ -266,8 +269,7 @@ class TestCancelFailures:
         assert error.retryable is True
         assert error.task_id == TASK_ID
         assert CAUSE_MARKER in error.message
-        assert isinstance(error.exception, CoreOperationFailed)
-        assert error.exception.message == f'cancel: {CAUSE_MARKER}'
+        assert error.exception is cause
 
     @pytest.mark.parametrize(
         ('error', 'retryable'),

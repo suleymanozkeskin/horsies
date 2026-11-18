@@ -28,6 +28,7 @@ from tests.dualrun.coverage import (
 )
 from tests.dualrun.rules import (
     AnchoredJsonTime,
+    AnchorNull,
     AnchorReference,
     CatalogDefect,
     ColumnRule,
@@ -82,7 +83,8 @@ pytestmark = [pytest.mark.unit]
 
 ONE_SECOND: Final = timedelta(seconds=1)
 ANCHORED: Final = TimeWithin(
-    reference=AnchorReference(column='made_at'), bound=ONE_SECOND
+    reference=AnchorReference(column='made_at', when_anchor_null=AnchorNull.REFUSED),
+    bound=ONE_SECOND,
 )
 RUN_CLOCK: Final = TimeWithin(reference=RunWindowReference(), bound=ONE_SECOND)
 

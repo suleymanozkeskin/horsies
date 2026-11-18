@@ -325,7 +325,10 @@ fn the_child_build_answers_each_definition_from_the_node_input() {
     let absent = node_error(registry.child_spec_answer(&child_request("tests.absent.v1", "{}")));
     assert_eq!(absent.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
     assert_eq!(
-        absent.data,
+        absent
+            .data
+            .as_ref()
+            .map(|data| data.decode::<serde_json::Value>().unwrap()),
         Some(serde_json::json!({"definition_key": "tests.absent.v1"}))
     );
 }
@@ -369,7 +372,13 @@ fn a_member_that_no_params_field_takes_fails_the_node() {
             "Typed decode of subworkflow kwargs failed for task 0: colour: unknown field `colour`"
         )
     );
-    assert_eq!(error.data, Some(request_data()));
+    assert_eq!(
+        error
+            .data
+            .as_ref()
+            .map(|data| data.decode::<serde_json::Value>().unwrap()),
+        Some(request_data())
+    );
 }
 
 /// A definition with params whose params are `()`.
@@ -412,7 +421,13 @@ fn a_member_for_unit_params_fails_the_node() {
              `colour`, there are no fields"
         )
     );
-    assert_eq!(error.data, Some(request_data()));
+    assert_eq!(
+        error
+            .data
+            .as_ref()
+            .map(|data| data.decode::<serde_json::Value>().unwrap()),
+        Some(request_data())
+    );
     match registry.child_spec_answer(&child_request("tests.no_params.v1", "{}")) {
         Ok(ClientChildSpec::Built(client)) => assert_eq!(client.name(), "no_params"),
         other => panic!("expected the no_params child, got {other:?}"),
@@ -465,6 +480,32 @@ fn the_first_refused_member_in_the_text_is_named() {
     }
 }
 
+/// The params of [`a_params_member_of_400_digits_passes_the_key_check`]: a
+/// field that keeps the text of its value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WideParams {
+    amount: horsies_core::JsonText,
+}
+
+/// #1893: the static members and the read-back compare of params read
+/// members as texts and parse no number, so an integer of 400 digits in a
+/// `JsonText` field passes; `()` names the key of such a member.
+#[test]
+fn a_params_member_of_400_digits_passes_the_key_check() {
+    let wide = "9".repeat(400);
+    let text = format!(r#"{{"amount": {wide}}}"#);
+    let params = decode_params::<WideParams>(&text, &[]).unwrap();
+    assert_eq!(params.amount.get(), wide);
+    assert_eq!(
+        static_members(&text, &[]).unwrap(),
+        vec!["amount".to_owned()]
+    );
+    match decode_params::<()>(&text, &[]) {
+        Err(ParamsBuildRefused::Member { key, .. }) => assert_eq!(key, "amount"),
+        other => panic!("expected a member refusal, got {other:?}"),
+    }
+}
+
 #[test]
 fn params_that_fit_decode() {
     assert_eq!(
@@ -495,7 +536,10 @@ fn a_params_field_with_no_member_fails_the_build_with_the_decode_text() {
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
     assert_eq!(error.message.as_deref(), Some(expected.as_str()));
     assert_eq!(
-        error.data,
+        error
+            .data
+            .as_ref()
+            .map(|data| data.decode::<serde_json::Value>().unwrap()),
         Some(serde_json::json!({
             "workflow_id": uuid::Uuid::nil().to_string(),
             "task_index": 0,

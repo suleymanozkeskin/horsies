@@ -416,9 +416,16 @@ fn ended_attempt_record(outcome: &UnreportedAttemptOutcome) -> FailedAttemptReco
     }
 }
 
-fn write_failed(task_id: Uuid, error: &BrokerError) -> FailedAttemptRecord {
-    FailedAttemptRecord::Failed(AttemptWriteFailed::new(task_id, error))
+/// The failure of the write `subject` of `task_id` that met `error`.
+fn write_failed(subject: &'static str, task_id: Uuid, error: &BrokerError) -> FailedAttemptRecord {
+    FailedAttemptRecord::Failed(AttemptWriteFailed::new(subject, task_id, error))
 }
+
+/// The subject of the exception of a failed `finish_failed_attempt`.
+const FAILED_ATTEMPT_SUBJECT: &str = "finish_failed_attempt";
+
+/// The subject of the exception of a failed `finish_ended_attempt`.
+const ENDED_ATTEMPT_SUBJECT: &str = "finish_ended_attempt";
 
 /// Write the failed attempt of a child that reported a result (rule
 /// `REFUSE`). Writes, in one statement; a caller that leaves early does not
@@ -429,11 +436,11 @@ pub async fn finish_failed_attempt_operation(
 ) -> FailedAttemptRecord {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return write_failed(command.task_id, &error),
+        Err(error) => return write_failed(FAILED_ATTEMPT_SUBJECT, command.task_id, &error),
     };
     match broker.finish_failed_attempt(&command).await {
         Ok(outcome) => failed_attempt_record(&outcome),
-        Err(error) => write_failed(command.task_id, &error),
+        Err(error) => write_failed(FAILED_ATTEMPT_SUBJECT, command.task_id, &error),
     }
 }
 
@@ -446,11 +453,11 @@ pub async fn finish_ended_attempt_operation(
 ) -> FailedAttemptRecord {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return write_failed(command.task_id, &error),
+        Err(error) => return write_failed(ENDED_ATTEMPT_SUBJECT, command.task_id, &error),
     };
     match broker.finish_ended_attempt(&command).await {
         Ok(outcome) => ended_attempt_record(&outcome),
-        Err(error) => write_failed(command.task_id, &error),
+        Err(error) => write_failed(ENDED_ATTEMPT_SUBJECT, command.task_id, &error),
     }
 }
 
@@ -570,6 +577,7 @@ mod tests {
     #[test]
     fn a_failed_write_keeps_its_cause_and_retry_rule() {
         let FailedAttemptRecord::Failed(failed) = write_failed(
+            FAILED_ATTEMPT_SUBJECT,
             task(),
             &BrokerError::TerminalizationContract("planned failure".to_owned()),
         ) else {

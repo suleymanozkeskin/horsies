@@ -1771,10 +1771,12 @@ fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serd
              Workflow task insertion did not complete."
         )),
         exception: None,
-        data: Some(serde_json::json!({
-            "workflow_id": workflow_id.to_string(),
-            "recovery": "case_4",
-        })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "recovery": "case_4",
+            }),
+        )),
         kind: crate::core::TaskErrorKind::Plain,
     })
 }
@@ -2039,7 +2041,7 @@ mod cap_tests {
             )
         );
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({
                 "workflow_id": workflow_id.to_string(),
                 "recovery": "case_4",
@@ -3528,7 +3530,7 @@ mod cap_tests {
                 "{task_name}: {error:?}"
             );
             assert_eq!(
-                error.data,
+                error.data_value(),
                 Some(serde_json::json!({
                     "workflow_id": workflow_id.to_string(),
                     "task_index": 0,

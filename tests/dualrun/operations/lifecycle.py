@@ -173,13 +173,22 @@ LIFECYCLE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
         node_id=(
             'tests/integration/test_monitoring_task_actions.py::TestDatabaseFailure::test_cancel_reports_a_retryable_db_failure'
         ),
-        reason='expects the core exception class CoreOperationFailed in the error',
+        reason='expects the core exception class CoreConnectionError in the error',
     ),
     CoreOnlyTest(
         node_id=(
             'tests/integration/test_worker_retry_scheduling.py::test_good_until_is_judged_under_the_lock'
         ),
         reason='patches finish_failed_attempt_in_core, the core path of the failed attempt',
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_statement_echo.py::test_a_broker_with_echo_logs_its_core_statements_at_info_on_horsies_sql'
+        ),
+        reason=(
+            "reads the core's statement records of expire_pending_tasks on horsies.sql; the "
+            'reference expiry runs on the SQLAlchemy engine, which writes no such record'
+        ),
     ),
 )
 """The tests of this module that run once, on the core (``CoreOnlyTest``)."""

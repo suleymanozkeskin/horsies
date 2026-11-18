@@ -33,6 +33,7 @@
 mod bridge;
 mod child_handle;
 mod child_spec;
+mod core_failures;
 mod errors;
 mod frames;
 mod handle;
@@ -391,5 +392,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(set_panic_rule, module)?)?;
     frames::add_frames(module)?;
     errors::add_errors(module)?;
+    core_failures::add_failure_classes(module)?;
     Ok(())
 }

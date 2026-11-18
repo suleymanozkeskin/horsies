@@ -32,7 +32,6 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.run_return import StoppedBeforeRunning
 from horsies.core.worker.child_runner import (
@@ -46,7 +45,6 @@ TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 CLAIMED_AT = datetime(2026, 11, 17, 11, 0, tzinfo=timezone.utc)
 NOW = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 WORKER_ID = 'worker-1'
-SUBJECT = 'CoreChildHandle.expire_owned_claim'
 OBSERVED = ObservedTaskState(status=TaskStatus.CLAIMED, worker_id=WORKER_ID, claimed_at=CLAIMED_AT)
 
 
@@ -67,7 +65,7 @@ def _record(record_class: type, **fields: object) -> MagicMock:
 
 def test_an_ended_row_is_applied_with_its_kind_and_observed_row() -> None:
     outcome = task_row_end_of(
-        _record(core.TaskRowEnded, terminal_at=NOW, kind='CANCEL_ORPHAN'), SUBJECT,
+        _record(core.TaskRowEnded, terminal_at=NOW, kind='CANCEL_ORPHAN'),
     )
 
     assert outcome == Applied(
@@ -83,15 +81,14 @@ def test_each_refusal_keeps_its_outcome() -> None:
     assert isinstance(
         task_row_end_of(
             _record(core.AttemptAlreadyApplied, terminal_at=NOW, kind='CANCEL_ORPHAN_SWEEP'),
-            SUBJECT,
         ),
         AlreadyApplied,
     )
-    assert task_row_end_of(_record(core.AttemptLostClaim), SUBJECT) == LostClaim(
+    assert task_row_end_of(_record(core.AttemptLostClaim)) == LostClaim(
         task_id=TASK_ID, ordinality=None, observed=OBSERVED,
     )
     conflict = task_row_end_of(
-        _record(core.AttemptSourceStateConflict, guard='WORKFLOW_LINK_STATE'), SUBJECT,
+        _record(core.AttemptSourceStateConflict, guard='WORKFLOW_LINK_STATE'),
     )
     assert conflict == SourceStateConflict(
         task_id=TASK_ID,
@@ -99,26 +96,30 @@ def test_each_refusal_keeps_its_outcome() -> None:
         observed=OBSERVED,
         evidence=EvidenceLoggedByCore(guard=GuardKind.WORKFLOW_LINK_STATE),
     )
-    assert task_row_end_of(_record(core.AttemptTaskAbsent), SUBJECT) == TaskAbsent(
+    assert task_row_end_of(_record(core.AttemptTaskAbsent)) == TaskAbsent(
         task_id=TASK_ID, ordinality=None,
     )
 
 
-def test_a_failed_write_raises_with_the_core_s_retry_rule() -> None:
-    with pytest.raises(CoreOperationFailed) as raised:
+def test_a_failed_write_raises_the_record_exception() -> None:
+    cause = core.CoreConnectionError('expire_owned_claim', 'connection lost', True)
+
+    with pytest.raises(core.CoreConnectionError) as raised:
         task_row_end_of(
-            _record(core.AttemptWriteFailed, message='connection lost', retryable=True),
-            SUBJECT,
+            _record(
+                core.AttemptWriteFailed,
+                message='connection lost',
+                retryable=True,
+                exception=cause,
+            ),
         )
 
-    assert raised.value.subject == SUBJECT
-    assert raised.value.message == 'connection lost'
-    assert raised.value.retryable is True
+    assert raised.value is cause
 
 
 def test_a_kind_outside_the_catalog_is_a_decode_error() -> None:
     with pytest.raises(OutcomeDecodeError):
-        task_row_end_of(_record(core.TaskRowEnded, terminal_at=NOW, kind='NOT_A_KIND'), SUBJECT)
+        task_row_end_of(_record(core.TaskRowEnded, terminal_at=NOW, kind='NOT_A_KIND'))
 
 
 @pytest.mark.parametrize(

@@ -54,7 +54,14 @@ from tests.dualrun.reference.worker_parent.worker.claiming import (
 from tests.dualrun.reference import claim_caller
 from horsies.core.utils.db import PooledStatements
 import horsies._core as core
-from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed, TooManyPendingCalls
+from horsies._core import (
+    ClaimsReleased,
+    CoreConnectionError,
+    NotHeldRow,
+    ReleasedRow,
+    ReleaseFailed,
+    TooManyPendingCalls,
+)
 from tests.dualrun.reference.worker_parent.worker.worker import (
     Worker,
     WorkerConfig,
@@ -1253,7 +1260,12 @@ class TestRequeueClaimedTask:
         worker = _make_worker()
         _ = _with_core_release(
             worker,
-            MagicMock(spec=ReleaseFailed, message='connection lost', retryable=True),
+            MagicMock(
+                spec=ReleaseFailed,
+                message='connection lost',
+                retryable=True,
+                exception=CoreConnectionError('release_claims', 'connection lost', True),
+            ),
         )
 
         with patch('tests.dualrun.reference.worker_parent.worker.release.ReleaseClaimsRequest'):
@@ -6002,7 +6014,6 @@ from horsies.core.lifecycle.outcomes import (
     SuccessApplied,
 )
 from horsies.core.lifecycle.persistence import (
-    COMPLETE_SUCCESSES_SUBJECT,
     BatchCommitUnknown,
     BatchRolledBack,
     BatchWriteError,
@@ -6011,7 +6022,6 @@ from horsies.core.lifecycle.persistence import (
     CoreStatementRefused,
     FusedCompletionBatch,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Result
 from tests.dualrun.reference.worker_parent.worker.workflow_success import FinishWorkflowSuccess
 from horsies.core.types.status import TaskStatus
@@ -6089,8 +6099,9 @@ def _with_core_handle() -> Any:
     )
 
 
-def _core_failure(message: str, retryable: bool) -> CoreOperationFailed:
-    return CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable)
+def _core_failure(message: str, retryable: bool) -> CoreConnectionError:
+    """The exception of a core batch record that met ``message``."""
+    return CoreConnectionError('complete_successes', message, retryable)
 
 
 @pytest.mark.unit
@@ -6506,7 +6517,7 @@ async def test_workflow_recovery_failure_publishes_partial_health() -> None:
     report = RecoveryReport(errors=1)
     report.metrics['case_0'].errors = 1
     failure = RecoveryPassFailure(
-        report, CoreOperationFailed('recover_workflows', 'discovery failed', False),
+        report, CoreConnectionError('recover_workflows', 'discovery failed', False),
     )
     config = RecoveryConfig(
         auto_requeue_stale_claimed=False,

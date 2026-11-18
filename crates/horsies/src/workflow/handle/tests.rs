@@ -164,12 +164,42 @@ fn an_outputless_result_reads_each_node() {
     assert_eq!(results.len(), 2);
     assert_eq!(
         results.get("fetch"),
-        Some(&TaskOutcome::Succeeded(json!(3)))
+        Some(&TaskOutcome::Succeeded(JsonText::parse("3").unwrap()))
     );
     assert_eq!(
         library_code(results.get("lost").unwrap()),
         "RESULT_DESERIALIZATION_ERROR"
     );
+}
+
+/// Each value of an outputless result and of an untyped node result keeps
+/// its stored text: an integer outside the `i64` and `u64` range keeps every
+/// digit and decodes as `u128` or `i128`.
+#[test]
+fn an_untyped_value_keeps_its_stored_text() {
+    let wide = "340282366920938463463374607431768211455";
+    let below = "-9223372036854775809";
+    let stored = format!(
+        r#"{{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{{"results_by_id":{{"wide":{{"__h_task_result__":true,"ok":{wide},"err":null}},"below":{{"__h_task_result__":true,"ok":{below},"err":null}}}},"task_name_by_id":{{"wide":"wide","below":"below"}},"definition_key_by_id":{{}}}},"err":null}}"#
+    );
+    let outcome = completed_outcome::<OutputlessResults>(workflow(), &stored).unwrap();
+    let TaskOutcome::Succeeded(results) = outcome else {
+        panic!("an outputless result reads as Succeeded");
+    };
+    let Some(TaskOutcome::Succeeded(value)) = results.get("wide") else {
+        panic!("the wide entry reads");
+    };
+    assert_eq!(value.get(), wide);
+    assert_eq!(value.decode::<u128>().unwrap(), u128::MAX);
+    let Some(TaskOutcome::Succeeded(value)) = results.get("below") else {
+        panic!("the below entry reads");
+    };
+    assert_eq!(value.decode::<i128>().unwrap(), i128::from(i64::MIN) - 1);
+    let node = format!(r#"{{"__h_task_result__":true,"ok":{wide},"err":null}}"#);
+    let NodeResult::Outcome(TaskOutcome::Succeeded(value)) = node_result(&node) else {
+        panic!("the node result reads");
+    };
+    assert_eq!(value.get(), wide);
 }
 
 /// Python fails closed when the stored form and the handle's type disagree.
@@ -217,7 +247,7 @@ fn a_node_result_reads_with_the_node_types() {
 fn an_untyped_node_result_keeps_what_does_not_read() {
     assert_eq!(
         node_result(&json!({"__h_task_result__": true, "ok": [1], "err": null}).to_string()),
-        NodeResult::Outcome(TaskOutcome::Succeeded(json!([1])))
+        NodeResult::Outcome(TaskOutcome::Succeeded(JsonText::parse("[1]").unwrap()))
     );
     assert!(matches!(node_result("{"), NodeResult::Unreadable { .. }));
 }
@@ -332,7 +362,13 @@ fn an_outputless_entry_without_a_payload_a_task_name_or_an_envelope_names_its_no
             "RESULT_DESERIALIZATION_ERROR",
             "{node}"
         );
-        assert_eq!(error.data(), Some(&json!({ "node_id": node })), "{node}");
+        assert_eq!(
+            error
+                .data()
+                .map(|data| data.decode::<serde_json::Value>().unwrap()),
+            Some(json!({ "node_id": node })),
+            "{node}"
+        );
     }
 }
 
@@ -443,7 +479,9 @@ fn a_stored_node_reads_its_status_result_and_summary() {
     assert_eq!(info.status, WorkflowTaskStatus::Completed);
     assert_eq!(
         info.result,
-        Some(NodeResult::Outcome(TaskOutcome::Succeeded(json!(42))))
+        Some(NodeResult::Outcome(TaskOutcome::Succeeded(
+            JsonText::parse("42").unwrap()
+        )))
     );
     let summary = info
         .sub_workflow_summary
@@ -458,6 +496,34 @@ fn a_stored_node_reads_its_status_result_and_summary() {
         ),
         (3, 3, 0, 0)
     );
+}
+
+/// A stored summary output outside the `i64` and `u64` range keeps its
+/// stored text and decodes as `u128` or `i128` (#1862).
+#[test]
+fn a_stored_summary_output_keeps_its_stored_text() {
+    for output in [
+        "340282366920938463463374607431768211455",
+        "-9223372036854775809",
+    ] {
+        let text = format!(
+            r#"{{"status": "COMPLETED", "output": {output}, "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}}"#
+        );
+        let info = node_info(workflow(), stored_node("COMPLETED", Some(&text))).unwrap();
+        let summary_output = info
+            .sub_workflow_summary
+            .expect("the node gives its summary")
+            .output
+            .expect("the summary holds the output");
+        assert_eq!(summary_output.get(), output);
+        match output.starts_with('-') {
+            true => assert_eq!(
+                summary_output.decode::<i128>().unwrap(),
+                i128::from(i64::MIN) - 1
+            ),
+            false => assert_eq!(summary_output.decode::<u128>().unwrap(), u128::MAX),
+        }
+    }
 }
 
 /// Python `stored_node_status`: a stored status outside the node statuses

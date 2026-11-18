@@ -189,18 +189,26 @@ async fn test_subworkflow_success_full_surface_matrix() {
     let info = &infos[0];
     assert_eq!(info.status, WorkflowTaskStatus::Completed);
     assert_eq!(info.sub_workflow_id, Some(child_id));
+    let Some(NodeResult::Outcome(TaskOutcome::Succeeded(value))) = &info.result else {
+        panic!("the node info has no ok result: {:?}", info.result);
+    };
     assert_eq!(
-        info.result,
-        Some(NodeResult::Outcome(TaskOutcome::Succeeded(json!(
-            SUB_OK_VALUE
-        ))))
+        value.decode::<i64>().expect("the node value reads as i64"),
+        SUB_OK_VALUE
     );
     let summary = info
         .sub_workflow_summary
         .as_ref()
         .expect("the summary of the ended child");
     assert_eq!(summary.status, WorkflowStatus::Completed);
-    assert_eq!(summary.output, Some(json!(SUB_OK_VALUE)));
+    let output = summary
+        .output
+        .as_ref()
+        .expect("the output of the ended child");
+    assert_eq!(
+        output.decode::<i64>().expect("the output decodes as i64"),
+        SUB_OK_VALUE
+    );
     assert_eq!((summary.total_tasks, summary.completed_tasks), (1, 1));
 
     let by_node = handle

@@ -421,7 +421,13 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     assert_ok_value(&node_result(sub.result), serde_json::json!(11));
     let summary = summary_of(sub.sub_workflow_summary.as_deref());
     assert_eq!(summary.status, WorkflowStatus::Completed);
-    assert_eq!(summary.output, Some(serde_json::json!(11)));
+    assert_eq!(
+        summary
+            .output
+            .as_ref()
+            .map(crate::core::codec::JsonText::get),
+        Some("11")
+    );
     assert_eq!((summary.total_tasks, summary.completed_tasks), (1, 1));
     let child = tree(&pool, workflow_id)
         .await

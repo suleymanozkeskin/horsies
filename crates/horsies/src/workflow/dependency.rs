@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use horsies_core::{OutcomeCode, TaskResult, UserCode};
+use horsies_core::{JsonText, OutcomeCode, TaskResult, UserCode};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -67,21 +67,22 @@ where
 }
 
 /// The result of a workflow with no output node (Python's outputless
-/// result): the outcome of each node by node id, with the value as JSON and
-/// the user codes as text, because the nodes are of many tasks.
+/// result): the outcome of each node by node id, with the value as its
+/// stored text (`JsonText::decode` reads it with the node's type) and the
+/// user codes as text, because the nodes are of many tasks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputlessResults {
-    by_node_id: BTreeMap<String, TaskOutcome<serde_json::Value, UserCode>>,
+    by_node_id: BTreeMap<String, TaskOutcome<JsonText, UserCode>>,
 }
 
 impl OutputlessResults {
     /// The outcome of the node `node_id`, when the result holds it.
-    pub fn get(&self, node_id: &str) -> Option<&TaskOutcome<serde_json::Value, UserCode>> {
+    pub fn get(&self, node_id: &str) -> Option<&TaskOutcome<JsonText, UserCode>> {
         self.by_node_id.get(node_id)
     }
 
     /// Every node id and its outcome, by node id.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &TaskOutcome<serde_json::Value, UserCode>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &TaskOutcome<JsonText, UserCode>)> {
         self.by_node_id
             .iter()
             .map(|(node_id, outcome)| (node_id.as_str(), outcome))
@@ -97,9 +98,7 @@ impl OutputlessResults {
         self.by_node_id.is_empty()
     }
 
-    pub(crate) fn new(
-        by_node_id: BTreeMap<String, TaskOutcome<serde_json::Value, UserCode>>,
-    ) -> Self {
+    pub(crate) fn new(by_node_id: BTreeMap<String, TaskOutcome<JsonText, UserCode>>) -> Self {
         Self { by_node_id }
     }
 }
@@ -111,7 +110,7 @@ impl<'de> Deserialize<'de> for OutputlessResults {
     /// the workflow handle reads the stored result of an outputless workflow
     /// through its own envelope.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeMap::<String, TaskOutcome<serde_json::Value, UserCode>>::deserialize(deserializer)
+        BTreeMap::<String, TaskOutcome<JsonText, UserCode>>::deserialize(deserializer)
             .map(Self::new)
     }
 }

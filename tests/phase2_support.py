@@ -36,6 +36,7 @@ def failing_phase2(
     record = MagicMock(spec=core.NodeFinishFailed)
     record.message = message
     record.retryable = False
+    record.exception = core.CoreContractViolation('finish_workflow_node', message)
     call = AsyncMock(return_value=record)
     monkeypatch.setattr(
         broker,

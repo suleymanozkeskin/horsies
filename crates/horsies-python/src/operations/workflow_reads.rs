@@ -210,18 +210,17 @@ impl<'py> IntoPyObject<'py> for WorkflowReadOutcome {
 /// Panics: a code that a read never gives (`RESUME_RECOVERY_FAILED`) or that
 /// only Python gives (`LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`,
 /// `ASYNC_CONTEXT`): a defect of the core.
-fn failed_read(workflow_id: Uuid, error: &HandleOperationError) -> WorkflowReadOutcome {
+fn failed_read(
+    subject: &'static str,
+    workflow_id: Uuid,
+    error: &HandleOperationError,
+) -> WorkflowReadOutcome {
     match error.code {
         HandleErrorCode::WorkflowNotFound => {
             WorkflowReadOutcome::Absent(WorkflowAbsent { workflow_id })
         }
         HandleErrorCode::DbOperationFailed | HandleErrorCode::StoredDataInvalid => {
-            WorkflowReadOutcome::Failed(HandleFailed {
-                workflow_id,
-                code: error.code.wire_value().to_owned(),
-                message: error.message.clone(),
-                retryable: error.retryable,
-            })
+            WorkflowReadOutcome::Failed(HandleFailed::of_handle_error(subject, workflow_id, error))
         }
         HandleErrorCode::ResumeRecoveryFailed
         | HandleErrorCode::LoopRunnerFailed
@@ -233,15 +232,21 @@ fn failed_read(workflow_id: Uuid, error: &HandleOperationError) -> WorkflowReadO
     }
 }
 
-/// The record of a failed connect. Pure.
-fn connect_failed(workflow_id: Uuid, error: &BrokerError) -> WorkflowReadOutcome {
-    WorkflowReadOutcome::Failed(HandleFailed {
-        workflow_id,
-        code: HandleErrorCode::DbOperationFailed.wire_value().to_owned(),
-        message: error.to_string(),
-        retryable: error.is_retryable(),
-    })
+/// The record of a failed connect of the read `subject`. Pure.
+fn connect_failed(
+    subject: &'static str,
+    workflow_id: Uuid,
+    error: &BrokerError,
+) -> WorkflowReadOutcome {
+    WorkflowReadOutcome::Failed(HandleFailed::of_connect_error(subject, workflow_id, error))
 }
+
+/// The subjects of the exceptions of the reads.
+const STATUS_SUBJECT: &str = "workflow_status";
+const WAIT_SUBJECT: &str = "wait_workflow_result";
+const NODE_RESULTS_SUBJECT: &str = "workflow_node_results";
+const NODE_RESULT_SUBJECT: &str = "workflow_node_result";
+const NODES_SUBJECT: &str = "workflow_nodes";
 
 /// The record of a status read. Pure.
 fn status_outcome(workflow_id: Uuid, answer: HandleResult<WorkflowStatus>) -> WorkflowReadOutcome {
@@ -250,7 +255,7 @@ fn status_outcome(workflow_id: Uuid, answer: HandleResult<WorkflowStatus>) -> Wo
             workflow_id,
             status: status.wire_value().to_owned(),
         }),
-        Err(error) => failed_read(workflow_id, &error),
+        Err(error) => failed_read(STATUS_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -275,7 +280,7 @@ fn wait_outcome(workflow_id: Uuid, answer: HandleResult<WorkflowWait>) -> Workfl
         }
         Ok(WorkflowWait::NotFound) => WorkflowReadOutcome::Absent(WorkflowAbsent { workflow_id }),
         Ok(WorkflowWait::TimedOut) => WorkflowReadOutcome::TimedOut(WaitTimedOut { workflow_id }),
-        Err(error) => failed_read(workflow_id, &error),
+        Err(error) => failed_read(WAIT_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -297,7 +302,7 @@ fn node_results_outcome(
                     .collect(),
             })
         }
-        Err(error) => failed_read(workflow_id, &error),
+        Err(error) => failed_read(NODE_RESULTS_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -313,7 +318,7 @@ fn node_result_outcome(
             workflow_id,
             node_id,
         }),
-        Err(error) => failed_read(workflow_id, &error),
+        Err(error) => failed_read(NODE_RESULT_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -327,7 +332,7 @@ fn nodes_outcome(workflow_id: Uuid, answer: HandleResult<NodesRead>) -> Workflow
             workflow_id,
             nodes: nodes.into_iter().map(StoredNodeRecord::from).collect(),
         }),
-        Err(error) => failed_read(workflow_id, &error),
+        Err(error) => failed_read(NODES_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -338,7 +343,7 @@ pub async fn workflow_status_operation(
 ) -> WorkflowReadOutcome {
     match connection.broker().await {
         Ok(broker) => status_outcome(workflow_id, broker.workflow_status(workflow_id).await),
-        Err(error) => connect_failed(workflow_id, &error),
+        Err(error) => connect_failed(STATUS_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -355,7 +360,7 @@ pub async fn wait_workflow_result_operation(
             workflow_id,
             broker.wait_workflow_end(workflow_id, timeout).await,
         ),
-        Err(error) => connect_failed(workflow_id, &error),
+        Err(error) => connect_failed(WAIT_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -368,7 +373,7 @@ pub async fn workflow_node_results_operation(
         Ok(broker) => {
             node_results_outcome(workflow_id, broker.workflow_node_results(workflow_id).await)
         }
-        Err(error) => connect_failed(workflow_id, &error),
+        Err(error) => connect_failed(NODE_RESULTS_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -383,7 +388,7 @@ pub async fn workflow_node_result_operation(
             let answer = broker.workflow_node_result(workflow_id, &node_id).await;
             node_result_outcome(workflow_id, node_id, answer)
         }
-        Err(error) => connect_failed(workflow_id, &error),
+        Err(error) => connect_failed(NODE_RESULT_SUBJECT, workflow_id, &error),
     }
 }
 
@@ -394,7 +399,7 @@ pub async fn workflow_nodes_operation(
 ) -> WorkflowReadOutcome {
     match connection.broker().await {
         Ok(broker) => nodes_outcome(workflow_id, broker.workflow_nodes(workflow_id).await),
-        Err(error) => connect_failed(workflow_id, &error),
+        Err(error) => connect_failed(NODES_SUBJECT, workflow_id, &error),
     }
 }
 

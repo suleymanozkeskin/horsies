@@ -58,7 +58,7 @@ async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>>
 | `.with_data(value)` | This error with `data`. Never fails; see [Data](#data) |
 | `.code()` | `&TaskErrorCode<E>`: `Library(BuiltInTaskCode)` or `User(E)` |
 | `.message()` | `Option<&str>` |
-| `.data()` | `Option<&serde_json::Value>`, as stored |
+| `.data()` | `Option<&JsonText>`: the stored text; `decode::<T>()` reads it, an integer of any width with all its digits |
 | `.exception()` | `Option<&ExceptionRecord>`: set by the library for a panic of the task body |
 | `.sub_workflow()` | `Option<&SubWorkflowFailure>`: the failed child workflow, when the error is a sub-workflow failure |
 

@@ -449,7 +449,10 @@ unless it starts with "Added".
   only the engine writes, data deeper than the error bound) is replaced with
   `{"data_refused": "<cause>"}`, the cause that Python stores, and the code
   and the message are kept. The replacement is logged at ERROR with the
-  code. Before, a non-finite float became `null` with no notice.
+  code. Before, a non-finite float became `null` with no notice. `data()`
+  returns `Option<&JsonText>`, the data as its stored text (`get`,
+  `decode::<T>`): an integer outside the `i64` and `u64` range is stored
+  with every digit and reads as `u128` or `i128`, as in Python.
 - **Added: `#[derive(horsies::UserErrorCode)]`.** On an enum of unit
   variants, each variant's code is its name in UPPER_SNAKE_CASE
   (`RateLimited` is `RATE_LIMITED`). A code with the name of a built-in code
@@ -573,6 +576,10 @@ unless it starts with "Added".
   the `i64` and `u64` range reads as `u128` or `i128`, as in Python. A
   dependency result (a `TaskOutcome<S, E>` input field) and
   `WorkflowContext::result_for` decode the value from its stored text too.
+  The reads with no type keep the value as its stored text, `JsonText`: the
+  `result` of `TaskInfo` is `TaskResult<JsonText>`, `NodeResult::Outcome`
+  and each entry of `OutputlessResults` are `TaskOutcome<JsonText,
+  UserCode>`.
   The worker's child and the sub-workflow child build pass each input member
   and each dependency result to the task or the builder as stored.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
@@ -750,7 +757,11 @@ unless it starts with "Added".
 - **`WorkflowContext::result_for::<T, E>` returns `Result<TaskOutcome<T,
   E>, WorkflowContextError>`** (`NotInContext`, `Unreadable`,
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
-  `output_for` the child's output read as `T`.
+  `output_for` the child's output read as `T`. `SubWorkflowSummary.output`
+  is `Option<JsonText>`, the child's output as its stored text (`get`,
+  `decode::<T>`); `output_for` and the summary of `WorkflowHandle::tasks`
+  read it from that text, so an integer outside the `i64` and `u64` range
+  reads as `u128` or `i128`, as in Python.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
   `UserErrorCode`, with every user code as checked text. `UserCode` and
   `UserCodeRefused` are exported at the crate root, so the outcome type of

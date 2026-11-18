@@ -38,7 +38,6 @@ from horsies._core import (
     ReleaseFailed,
 )
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
-from horsies.core.types.core_failure import CoreOperationFailed
 
 RELEASE_CLAIMS_SQL = text("""
     SELECT ordinality, task_id, outcome
@@ -180,10 +179,6 @@ async def release_claims(
     return tuple(released)
 
 
-RELEASE_SUBJECT: Final = 'release_claims'
-"""The subject of a ``CoreOperationFailed`` of the release."""
-
-
 def _core_placement(placement: ReleasePlacement) -> Literal['SAME_CLASS', 'ISOLATED']:
     match placement:
         case ReleasePlacement.SAME_CLASS:
@@ -247,9 +242,10 @@ async def release_claims_in_core(
     id with ``ValueError``).
 
     Raises:
-        CoreOperationFailed: a ``ReleaseFailed`` record, with its message and
-            retryable flag. The calls sent before it committed; the failed
-            call wrote nothing, or committed and its reply was lost.
+        CoreFailure: a ``ReleaseFailed`` record raises its ``exception``
+            (the core's class of the cause, with its retry rule). The calls
+            sent before it committed; the failed call wrote nothing, or
+            committed and its reply was lost.
         CoreError: the core of this process stopped or did not start.
         OutcomeDecodeError: a record count or task id outside the
             operation's contract.
@@ -269,8 +265,8 @@ async def release_claims_in_core(
                     _released_row_outcome(claim, row)
                     for claim, row in zip(chunk, rows, strict=True)
                 )
-            case ReleaseFailed(message=message, retryable=retryable):
-                raise CoreOperationFailed(RELEASE_SUBJECT, message, retryable)
+            case ReleaseFailed(exception=exception):
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
     return tuple(released)

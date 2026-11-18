@@ -60,6 +60,8 @@ pub use crate::core::{
     WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
+// A user value kept as its stored text: a sub-workflow summary output, the `data` of a task error.
+pub use crate::core::codec::{JsonText, JsonTextRefused};
 
 // broker re-exports
 pub use crate::broker::{

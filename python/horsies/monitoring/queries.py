@@ -63,7 +63,7 @@ from horsies.core.models.tasks import (
     OutcomeCode,
     RetrievalCode,
 )
-from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+from horsies.core.types.core_failure import core_error_retryable
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.history_window import MonitoringWindow
@@ -210,7 +210,9 @@ def _core_read_failed(
     """The error of a read failure that the core reports. Pure.
 
     The core's message names the read and the cause, as Python's did
-    (``'<read> failed: <cause>'``). ``EVENT_LOOP_LIMIT`` is a code of the
+    (``'<read> failed: <cause>'``). A database failure keeps the record's
+    exception: the core's class of the cause, with the read as its
+    subject. ``subject`` names the read in the error of a defect. ``EVENT_LOOP_LIMIT`` is a code of the
     Python client only: a core answer with it is a defect.
     """
     match failed.code:
@@ -219,7 +221,7 @@ def _core_read_failed(
                 MonitoringQueryDbOperationFailed(
                     message=failed.message,
                     retryable=failed.retryable,
-                    exception=CoreOperationFailed(subject, failed.message, failed.retryable),
+                    exception=failed.exception,
                 )
             )
         case 'HISTORY_CONTRACT_VIOLATION':

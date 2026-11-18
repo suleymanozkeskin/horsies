@@ -205,19 +205,19 @@ pub enum RunPermit {
 
 /// Read the stored `task_options` of a claimed row.
 ///
-/// `None` and an empty text mean the row has no options, as the Python
-/// worker read (`read_stored_timeout`, `read_stored_retry_policy`) treats
-/// them.
+/// `None` (NULL) means the row has no options. An empty text is
+/// [`StoredOptions::Unreadable`]: no writer stores it (the send and the
+/// workflow node promotion refuse it), so it is corrupt data, and its
+/// reason is Python's (`stored task_options do not parse: JSON parse
+/// failed: the text is empty`). The Python worker read
+/// (`read_stored_timeout`, `read_stored_retry_policy`) reads both the same.
 pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
-    let text = match task_options {
-        None | Some("") => {
-            return StoredOptions::Readable {
-                timeout: StoredTimeout::NoTimeout,
-                cancel_grace: StoredCancelGrace::NotStored,
-                retry: StoredRetry::NoPolicy,
-            }
-        }
-        Some(text) => text,
+    let Some(text) = task_options else {
+        return StoredOptions::Readable {
+            timeout: StoredTimeout::NoTimeout,
+            cancel_grace: StoredCancelGrace::NotStored,
+            retry: StoredRetry::NoPolicy,
+        };
     };
     match options_members(text) {
         Err(reason) => StoredOptions::Unreadable { reason },
@@ -230,10 +230,10 @@ pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
     }
 }
 
-/// The members of a non-empty stored options text, each value kept raw, or
-/// the reason that the text is unreadable, with Python's text
-/// (`read_stored_timeout`): the text does not read by Python's `loads_json`
-/// rule, or it holds another JSON value than an object.
+/// The members of a stored options text, each value kept raw, or the reason
+/// that the text is unreadable, with Python's text (`read_stored_timeout`):
+/// the text does not read by Python's `loads_json` rule (an empty text
+/// included), or it holds another JSON value than an object.
 fn options_members(text: &str) -> Result<RawMembers<'_>, String> {
     match check_python_loads(text) {
         Err(refusal) => Err(format!(
@@ -369,23 +369,24 @@ pub enum RetryLimitRefused {
 }
 
 /// The `max_retries` column of a row whose `task_options` are this text
-/// (Python `stored_max_retries`, `python/horsies/core/codec/task_options.py:80-103`).
+/// (Python `stored_max_retries`, `python/horsies/core/codec/task_options.py`).
 ///
-/// - No options, an empty text, no `retry_policy` key or a `null` policy: 0.
+/// - No options (`None`), no `retry_policy` key or a `null` policy: 0.
 /// - A policy that fits the rule of [`read_stored_options`]: its
 ///   `max_retries`, 1 to [`MAX_RETRY_ATTEMPTS`].
-/// - Otherwise [`RetryLimitRefused`]: the text does not parse, is not an
-///   object, or holds a policy that does not fit the rule (a null,
-///   non-integer or out-of-range `max_retries` included). A key that the
-///   policy leaves out takes its `RetryPolicy` field default.
+/// - Otherwise [`RetryLimitRefused`]: the text does not parse (an empty
+///   text included), is not an object, or holds a policy that does not fit
+///   the rule (a null, non-integer or out-of-range `max_retries` included).
+///   A key that the policy leaves out takes its `RetryPolicy` field default.
 ///
-/// One reader serves the task row of a send and the node and task rows of a
-/// workflow, so the worker never meets a stored policy that its dispatch
-/// refuses. Other keys of the options are not judged here. Pure.
+/// A text that [`read_stored_options`] reads as
+/// [`StoredOptions::Unreadable`] is `UnreadableOptions` here, with the same
+/// reason. One reader serves the task row of a send and the node and task
+/// rows of a workflow, so the worker never meets a stored policy that its
+/// dispatch refuses. Other keys of the options are not judged here. Pure.
 pub fn stored_max_retries(task_options: Option<&str>) -> Result<i32, RetryLimitRefused> {
-    let text = match task_options {
-        None | Some("") => return Ok(0),
-        Some(text) => text,
+    let Some(text) = task_options else {
+        return Ok(0);
     };
     let _members =
         options_members(text).map_err(|reason| RetryLimitRefused::UnreadableOptions { reason })?;

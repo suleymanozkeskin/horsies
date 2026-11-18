@@ -113,7 +113,6 @@ _POLICY: Final = '"auto_retry_for": ["X"]'
 _READ_OR_REFUSED_CASES: Final = (
     # No options, and options that Python reads.
     pytest.param(None, id='no options'),
-    pytest.param('', id='empty options'),
     pytest.param('{}', id='empty object'),
     pytest.param('{"retry_policy": null, "x": [1, {"y": "z"}]}', id='other members are not read'),
     pytest.param(_library_options(TaskOptions(task_name='t')), id='library options, defaults'),
@@ -181,7 +180,9 @@ _READ_OR_REFUSED_CASES: Final = (
     pytest.param('{"a": "\\ud83d\\ude00"}', id='surrogate pair'),
     pytest.param('{"a": "\\\\ud800"}', id='escaped backslash before u'),
     pytest.param('{"a": "x", "b": {"a": 1}}', id='same key in two objects'),
-    # Text that does not parse.
+    # Text that does not parse. An empty text is not JSON; a node without
+    # options stores NULL.
+    pytest.param('', id='empty options'),
     pytest.param('not json', id='not json'),
     pytest.param('   ', id='whitespace'),
     pytest.param('{"a": 1,}', id='trailing comma'),

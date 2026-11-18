@@ -63,7 +63,6 @@ from horsies._core import (
     prepare_rerun_write,
 )
 from horsies._core import rerun_read as core_rerun_read
-from horsies.core.types.core_failure import CoreOperationFailed
 
 from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryContractError
@@ -353,11 +352,6 @@ type RerunOutcome = (
 )
 
 
-RERUN_SUBJECT: Final = 'rerun_task'
-"""The subject of a ``CoreOperationFailed`` of a rerun: a database of the
-other client family (the interim class of #1363)."""
-
-
 async def _run_prepared(
     connection: AsyncConnection, statement: PreparedStatement
 ) -> tuple[object, ...]:
@@ -432,8 +426,9 @@ async def rerun_task(
         ValueError: the new request's retention class is not registered, the
             caller key is not a valid idempotency key, or the task id source
             refused to mint. Nothing is written.
-        CoreOperationFailed: the database was installed by the other client
-            family, or records none. Nothing is written.
+        CorePreconditionFailed: the database was installed by the other
+            client family, or records none (subject ``rerun_task``, not
+            retryable). Nothing is written.
         CoreError: the core of this process cannot run (forked after the
             core started, or stopped).
         A database error of a statement raises from the caller's driver.
@@ -475,8 +470,8 @@ async def rerun_task(
             return RerunInputCorrupt(task_id=task_id, detail=detail)
         case RerunClassNotRegistered(class_key=class_key):
             raise _class_not_registered(class_key)
-        case RerunClientFamilyMismatch(message=message):
-            raise CoreOperationFailed(RERUN_SUBJECT, message, False)
+        case RerunClientFamilyMismatch(exception=exception):
+            raise exception
         case RerunCallerKeyRefused(cause=cause):
             raise ValueError(cause)
         case IdMintRefused(cause=cause):

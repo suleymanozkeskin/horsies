@@ -213,7 +213,7 @@ fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
         Some("Failed to load subworkflow definition for orphan_parent:0")
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"definition_key": CHILD_KEY}))
     );
 }
@@ -252,7 +252,7 @@ fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
         )
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 0}))
     );
 }
@@ -272,7 +272,7 @@ fn a_params_decode_failure_keeps_the_decode_text_without_a_class() {
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
     assert_eq!(error.message.as_deref(), Some(expected.as_str()));
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 2}))
     );
 }

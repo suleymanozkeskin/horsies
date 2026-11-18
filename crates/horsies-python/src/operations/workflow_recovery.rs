@@ -13,6 +13,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
 use crate::child_spec::PythonChildSpecSource;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// Bounded work and outcome counts of one recovery case.
@@ -87,7 +88,12 @@ pub struct RecoveryPassFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `recover_workflows`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed pass.
+const SUBJECT: &str = "recover_workflows";
 
 /// The outcome of one pass.
 pub enum RecoveryPassOutcome {
@@ -123,6 +129,7 @@ fn pass_outcome(
             report: RecoveryPassRecord::of(&failure.report),
             message: format!("workflow recovery pass failed: {}", failure.error),
             retryable: failure.error.is_retryable(),
+            exception: FailureException::of(SUBJECT, &failure.error),
         }),
     }
 }
@@ -145,6 +152,7 @@ pub async fn recover_workflows_operation(
                 }),
                 message: format!("workflow recovery pass failed: {error}"),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(SUBJECT, &error),
             })
         }
     };
