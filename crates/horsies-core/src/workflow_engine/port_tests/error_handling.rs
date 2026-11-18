@@ -1122,3 +1122,36 @@ async fn one_met_case_of_several_completes_the_workflow() {
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
+
+/// `test_stored_max_retries.py::TestWorkflowPaths::test_node_promotion_refuses_a_negative_limit`:
+/// the promotion refuses the stored options of a task node whose retry limit
+/// is negative, with Python's text: the node index, then pydantic's detail
+/// (`horsies_workflow_task_options_refusal`, Python
+/// `_build_enqueued_task_params`). The promotion fails the node with this
+/// message (`a_task_node_that_cannot_be_prepared_at_promotion_fails_alone`).
+#[tokio::test]
+#[serial]
+async fn the_promotion_refuses_a_negative_retry_limit_with_python_s_text() {
+    let pool = shared_pool().await;
+    let options = r#"{"retry_policy": {"max_retries": -1, "intervals": [5],
+        "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["TRANSIENT"]}}"#;
+
+    let refusal: Option<String> =
+        sqlx::query_scalar("SELECT horsies_workflow_task_options_refusal($1, 3)")
+            .bind(options)
+            .fetch_one(&pool)
+            .await
+            .expect("the options refusal");
+
+    let refusal = refusal.expect("a negative limit is refused");
+    assert!(
+        refusal.starts_with("Invalid retry_policy for task 3: "),
+        "{refusal}"
+    );
+    assert!(
+        refusal.contains(
+            "max_retries: Input should be greater than or equal to 1 [greater_than_equal]"
+        ),
+        "{refusal}"
+    );
+}
