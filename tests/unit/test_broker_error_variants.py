@@ -63,6 +63,7 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, is_err
 from horsies.core.utils.loop_runner import LoopRunnerError
 from horsies.core.worker.reaper import _operation_sqlstate  # pyright: ignore[reportPrivateUsage]
+from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
 
@@ -107,8 +108,8 @@ def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
 
 
 ENQUEUE_VARIANTS: frozenset[type[Any]] = frozenset(
-    get_args(BrokerEnqueueError.__value__)
-    + get_args(BrokerSyncCallError.__value__)
+    union_members(BrokerEnqueueError)
+    + union_members(BrokerSyncCallError)
 )
 
 
@@ -145,7 +146,7 @@ def _variant_id(error: BrokerOperationError) -> str:
 class TestVariantCatalog:
     def test_each_code_names_exactly_one_state(self) -> None:
         codes: list[BrokerErrorCode] = []
-        for variant in get_args(BrokerOperationError.__value__):
+        for variant in union_members(BrokerOperationError):
             if variant is BrokerOperationFailed:
                 codes.extend(get_args(BrokerOperationFailedCode.__value__))
             else:
@@ -157,14 +158,14 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
-        assert built == set(get_args(BrokerOperationError.__value__))
+        assert built == set(union_members(BrokerOperationError))
 
     def test_the_enqueue_errors_are_disjoint_broker_errors(self) -> None:
-        enqueue = set(get_args(BrokerEnqueueError.__value__))
-        sync_call = set(get_args(BrokerSyncCallError.__value__))
+        enqueue = set(union_members(BrokerEnqueueError))
+        sync_call = set(union_members(BrokerSyncCallError))
 
         assert enqueue.isdisjoint(sync_call)
-        assert enqueue | sync_call <= set(get_args(BrokerOperationError.__value__))
+        assert enqueue | sync_call <= set(union_members(BrokerOperationError))
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError(CAUSE_MARKER)), ids=_variant_id
