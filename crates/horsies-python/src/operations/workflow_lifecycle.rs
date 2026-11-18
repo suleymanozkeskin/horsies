@@ -3,20 +3,23 @@
 //! `horsies_workflow_cancel` (`PostgresBroker::cancel_workflow`).
 //!
 //! The outcome is one class per answer. Pause: `WorkflowPaused`,
-//! `WorkflowNotRunning`, `WorkflowAbsent`, or `HandleFailed`. Cancel:
-//! `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or
-//! `HandleFailed`. The Python client maps them to the `HandleResult` of
-//! `pause_workflow` and `WorkflowHandle.cancel_async`. A row outside a
-//! function's contract panics in the core and raises `PanicException`, as
-//! Python raises `OutcomeDecodeError`.
+//! `WorkflowNotRunning`, `WorkflowAbsent`, or a failure. Cancel:
+//! `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or a
+//! failure. A failure is the generated class of the core's
+//! `HandleOperationError` (`horsies._catalog.workflow_handle_errors`:
+//! `HandleDbOperationFailed` or `HandleStoredDataInvalid`), built in Rust
+//! (`catalog_errors`) with the core's message. The Python client maps the
+//! records to the `HandleResult` of `pause_workflow` and
+//! `WorkflowHandle.cancel_async`, and returns a failure as it is. A row
+//! outside a function's contract panics in the core and raises
+//! `PanicException`, as Python raises `OutcomeDecodeError`.
 
-use horsies_core::catalog::CodeEnum;
-use horsies_core::{HandleErrorCode, HandleOperationError, HandleResult};
+use horsies_core::{HandleOperation, HandleOperationError, HandleResult};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
-use crate::core_failures::FailureException;
+use crate::catalog_errors::catalog_error;
 use crate::handle::BrokerConnection;
 
 /// The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and
@@ -56,55 +59,39 @@ pub struct WorkflowAbsent {
     pub workflow_id: Uuid,
 }
 
-/// The connect, the client family check or the statement failed
-/// (`DB_OPERATION_FAILED`), or a stored value of the workflow does not parse
-/// (`STORED_DATA_INVALID`, not retryable). After `DB_OPERATION_FAILED` the
-/// statement wrote nothing, or it committed and its reply was lost.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct HandleFailed {
-    pub workflow_id: Uuid,
-    /// `DB_OPERATION_FAILED` or `STORED_DATA_INVALID`, a wire value of
-    /// `HandleErrorCode`.
-    pub code: String,
-    /// The cause, with its subject.
-    pub message: String,
-    pub retryable: bool,
-    /// The cause, with the handle operation as its subject (for example
-    /// `pause_workflow`).
-    pub exception: FailureException,
+/// A failed handle operation: `DB_OPERATION_FAILED` (the connect, the
+/// client family check or the statement failed; the statement wrote
+/// nothing, or it committed and its reply was lost) or
+/// `STORED_DATA_INVALID` (a stored value of the workflow does not parse,
+/// not retryable). Python reads it as the generated class of `error`, with
+/// the subject of `operation` as the subject of its exception.
+#[derive(Debug)]
+pub struct HandleFailure {
+    pub operation: HandleOperation,
+    pub error: HandleOperationError,
 }
 
-impl HandleFailed {
-    /// The record of a handle error of the operation `subject`. Pure.
-    pub fn of_handle_error(
-        subject: &'static str,
+impl HandleFailure {
+    /// A failed connect of `operation`: no statement ran. Pure.
+    pub fn connect_failed(
+        operation: HandleOperation,
         workflow_id: Uuid,
-        error: &HandleOperationError,
+        error: horsies_core::BrokerError,
     ) -> Self {
         Self {
-            workflow_id,
-            code: error.code().wire_value().to_owned(),
-            message: error.message().to_owned(),
-            retryable: error.retryable(),
-            exception: FailureException::of_handle_error(subject, error),
+            error: HandleOperationError::connect_failed(operation.clone(), workflow_id, error),
+            operation,
         }
     }
+}
 
-    /// The record of a failed connect of the operation `subject`: no
-    /// statement ran. Pure.
-    pub fn of_connect_error(
-        subject: &'static str,
-        workflow_id: Uuid,
-        error: &horsies_core::BrokerError,
-    ) -> Self {
-        Self {
-            workflow_id,
-            code: HandleErrorCode::DbOperationFailed.wire_value().to_owned(),
-            message: error.to_string(),
-            retryable: error.is_retryable(),
-            exception: FailureException::of(subject, error),
-        }
+impl<'py> IntoPyObject<'py> for HandleFailure {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        catalog_error(py, self.operation.subject(), &self.error)
     }
 }
 
@@ -116,11 +103,12 @@ enum Transition {
 }
 
 impl Transition {
-    /// The subject of the exception of a failed transition.
-    const fn subject(self) -> &'static str {
+    /// The handle operation of the transition: its label and the subject
+    /// of the exception of a failure.
+    fn operation(self) -> HandleOperation {
         match self {
-            Self::Pause => "pause_workflow",
-            Self::Cancel => "cancel_workflow",
+            Self::Pause => HandleOperation::Pause,
+            Self::Cancel => HandleOperation::Cancel,
         }
     }
 }
@@ -132,7 +120,7 @@ pub enum WorkflowTransitionOutcome {
     Cancelled(WorkflowCancelled),
     NotCancellable(WorkflowNotCancellable),
     Absent(WorkflowAbsent),
-    Failed(HandleFailed),
+    Failed(HandleFailure),
 }
 
 impl<'py> IntoPyObject<'py> for WorkflowTransitionOutcome {
@@ -147,7 +135,7 @@ impl<'py> IntoPyObject<'py> for WorkflowTransitionOutcome {
             Self::Cancelled(cancelled) => cancelled.into_bound_py_any(py),
             Self::NotCancellable(not_cancellable) => not_cancellable.into_bound_py_any(py),
             Self::Absent(absent) => absent.into_bound_py_any(py),
-            Self::Failed(failed) => failed.into_bound_py_any(py),
+            Self::Failed(failed) => failed.into_pyobject(py),
         }
     }
 }
@@ -160,16 +148,19 @@ impl<'py> IntoPyObject<'py> for WorkflowTransitionOutcome {
 fn failed_record(
     transition: Transition,
     workflow_id: Uuid,
-    error: &HandleOperationError,
+    error: HandleOperationError,
 ) -> WorkflowTransitionOutcome {
     match error {
         HandleOperationError::WorkflowNotFound { .. } => {
             WorkflowTransitionOutcome::Absent(WorkflowAbsent { workflow_id })
         }
         HandleOperationError::DbOperationFailed { .. }
-        | HandleOperationError::StoredDataInvalid { .. } => WorkflowTransitionOutcome::Failed(
-            HandleFailed::of_handle_error(transition.subject(), workflow_id, error),
-        ),
+        | HandleOperationError::StoredDataInvalid { .. } => {
+            WorkflowTransitionOutcome::Failed(HandleFailure {
+                operation: transition.operation(),
+                error,
+            })
+        }
         HandleOperationError::ResumeRecoveryFailed { .. }
         | HandleOperationError::AsyncContext { .. } => panic!(
             "a pause or cancel of workflow {workflow_id} answered {} (a defect): {}",
@@ -198,7 +189,7 @@ fn transition_outcome(
         (Transition::Cancel, Ok(false)) => {
             WorkflowTransitionOutcome::NotCancellable(WorkflowNotCancellable { workflow_id })
         }
-        (_, Err(error)) => failed_record(transition, workflow_id, &error),
+        (_, Err(error)) => failed_record(transition, workflow_id, error),
     }
 }
 
@@ -206,10 +197,10 @@ fn transition_outcome(
 fn connect_failed(
     transition: Transition,
     workflow_id: Uuid,
-    error: &horsies_core::BrokerError,
+    error: horsies_core::BrokerError,
 ) -> WorkflowTransitionOutcome {
-    WorkflowTransitionOutcome::Failed(HandleFailed::of_connect_error(
-        transition.subject(),
+    WorkflowTransitionOutcome::Failed(HandleFailure::connect_failed(
+        transition.operation(),
         workflow_id,
         error,
     ))
@@ -223,7 +214,7 @@ pub async fn pause_workflow_operation(
 ) -> WorkflowTransitionOutcome {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return connect_failed(Transition::Pause, workflow_id, &error),
+        Err(error) => return connect_failed(Transition::Pause, workflow_id, error),
     };
     transition_outcome(
         Transition::Pause,
@@ -240,7 +231,7 @@ pub async fn cancel_workflow_operation(
 ) -> WorkflowTransitionOutcome {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return connect_failed(Transition::Cancel, workflow_id, &error),
+        Err(error) => return connect_failed(Transition::Cancel, workflow_id, error),
     };
     transition_outcome(
         Transition::Cancel,
@@ -251,6 +242,8 @@ pub async fn cancel_workflow_operation(
 
 #[cfg(test)]
 mod tests {
+    use horsies_core::{BrokerError, HandleErrorCode, WorkflowError};
+
     use super::*;
 
     fn workflow() -> Uuid {
@@ -260,7 +253,7 @@ mod tests {
     fn handle_error(code: HandleErrorCode, retryable: bool) -> HandleOperationError {
         let message = format!("planned {code}");
         let workflow_id = workflow();
-        let cause = horsies_core::FailureCause::Connection;
+        let cause = || WorkflowError::Broker(BrokerError::ConnectionFailed("refused".to_owned()));
         match code {
             HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
                 message,
@@ -270,17 +263,17 @@ mod tests {
                 message,
                 retryable,
                 workflow_id,
-                cause,
+                cause: cause(),
             },
             HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
                 message,
                 workflow_id,
-                cause,
+                cause: WorkflowError::InvalidStatus("BOGUS".to_owned()),
             },
             HandleErrorCode::ResumeRecoveryFailed => HandleOperationError::ResumeRecoveryFailed {
                 message,
                 workflow_id,
-                cause,
+                cause: cause(),
             },
             HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
                 message,
@@ -330,28 +323,61 @@ mod tests {
         }
     }
 
+    /// A failure stays the core's value, with the transition's operation:
+    /// Python reads its generated class with the operation's subject.
     #[test]
-    fn a_failure_keeps_its_code_cause_and_retry_rule() {
+    fn a_failure_keeps_the_core_s_value_and_its_operation() {
         let WorkflowTransitionOutcome::Failed(failed) = transition_outcome(
             Transition::Pause,
             workflow(),
             Err(handle_error(HandleErrorCode::DbOperationFailed, true)),
         ) else {
-            panic!("a database failure gives HandleFailed");
+            panic!("a database failure gives a failure");
         };
-        assert_eq!(failed.code, "DB_OPERATION_FAILED");
-        assert!(failed.message.contains("planned"), "{}", failed.message);
-        assert!(failed.retryable);
+        assert_eq!(failed.operation, HandleOperation::Pause);
+        assert_eq!(failed.error.code(), HandleErrorCode::DbOperationFailed);
+        assert_eq!(failed.error.message(), "planned DB_OPERATION_FAILED");
+        assert!(failed.error.retryable());
 
         let WorkflowTransitionOutcome::Failed(invalid) = transition_outcome(
             Transition::Cancel,
             workflow(),
             Err(handle_error(HandleErrorCode::StoredDataInvalid, false)),
         ) else {
-            panic!("stored data that does not parse gives HandleFailed");
+            panic!("stored data that does not parse gives a failure");
         };
-        assert_eq!(invalid.code, "STORED_DATA_INVALID");
-        assert!(!invalid.retryable);
+        assert_eq!(invalid.operation, HandleOperation::Cancel);
+        assert_eq!(invalid.error.code(), HandleErrorCode::StoredDataInvalid);
+        assert!(!invalid.error.retryable());
+    }
+
+    /// A failed connect names the transition's operation and keeps the
+    /// broker error as its cause.
+    #[test]
+    fn a_failed_connect_names_the_operation_and_keeps_the_broker_error() {
+        let WorkflowTransitionOutcome::Failed(failed) = connect_failed(
+            Transition::Cancel,
+            workflow(),
+            BrokerError::ConnectionFailed("refused".to_owned()),
+        ) else {
+            panic!("a failed connect gives a failure");
+        };
+        assert_eq!(failed.operation, HandleOperation::Cancel);
+        assert_eq!(
+            failed.error.message(),
+            format!(
+                "Cancel failed for workflow {}: connection failed: refused",
+                workflow()
+            )
+        );
+        assert!(failed.error.retryable());
+        assert!(matches!(
+            failed.error,
+            HandleOperationError::DbOperationFailed {
+                cause: WorkflowError::Broker(BrokerError::ConnectionFailed(_)),
+                ..
+            }
+        ));
     }
 
     #[test]

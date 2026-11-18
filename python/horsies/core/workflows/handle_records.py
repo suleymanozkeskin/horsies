@@ -1,11 +1,13 @@
-"""The handle errors of the workflow operations that run in the core.
+"""The handle errors of the workflow operations that the client builds.
 
-A workflow operation of the handle (pause, cancel, and the reads) runs one
-statement through ``horsies._core``. The core answers with one record per outcome; these
-functions build the public ``HandleOperationError`` of a failure record, of a
-core boundary error, and of a workflow id text that is not a UUID. The calls
-raise ``ForkedAfterCoreStart`` and ``CoreStopped`` (``call_refusal_or_raise``):
-no handle error names them.
+A workflow operation of the handle (pause, cancel, resume, and the reads)
+runs through ``horsies._core``. The core answers with one record per
+outcome; a failure is the generated ``HandleOperationError`` class, which
+the core builds with its message, and the client returns it as it is. These
+functions build the handle errors that never reach the core: a core
+boundary error raised by the call, and a workflow id text that is not a
+UUID. The calls raise ``ForkedAfterCoreStart`` and ``CoreStopped``
+(``call_refusal_or_raise``): no handle error names them.
 """
 
 from __future__ import annotations
@@ -14,17 +16,15 @@ import uuid
 from enum import Enum
 from typing import assert_never
 
-import horsies._core as core
-from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleStoredDataInvalid,
-)
+from horsies.core.models.workflow.handle_types import HandleDbOperationFailed
 from horsies.core.types.core_failure import CoreCallRefusal, core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 
 
 class WorkflowOperation(Enum):
-    """A workflow operation of the handle that runs in the core."""
+    """A workflow operation of the handle that runs in the core. The value
+    is the core's name of the operation (``horsies_core::HandleOperation``),
+    the subject of the core's exception of a failure."""
 
     PAUSE = 'pause_workflow'
     CANCEL = 'cancel_workflow'
@@ -37,7 +37,11 @@ class WorkflowOperation(Enum):
 
 
 def _label(operation: WorkflowOperation) -> str:
-    """The word that starts the message of a failure. Pure."""
+    """The word that starts the message of a failure, as the core's
+    ``HandleOperation::failure_message`` starts the failures that it builds.
+    The core's message of a failed ``result_for`` read names the node
+    instead: ``DB query failed for result_for node {node_id} in workflow
+    {id}: {cause}``. Pure."""
     match operation:
         case WorkflowOperation.PAUSE:
             return 'Pause'
@@ -81,37 +85,6 @@ def workflow_uuid(
             workflow_id=workflow_id,
             exception=exc,
         ))
-
-
-def handle_failed_error(
-    record: core.HandleFailed,
-    workflow_id: str,
-    operation: WorkflowOperation,
-) -> HandleDbOperationFailed | HandleStoredDataInvalid:
-    """The handle error of a ``HandleFailed`` record. Pure.
-
-    ``exception`` holds the record's exception: the core's class of the
-    cause, with the core operation as its subject (for example
-    ``workflow_status``).
-    """
-    message = f'{_label(operation)} failed for workflow {workflow_id}: {record.message}'
-    cause = record.exception
-    match record.code:
-        case 'DB_OPERATION_FAILED':
-            return HandleDbOperationFailed(
-                message=message,
-                retryable=record.retryable,
-                workflow_id=workflow_id,
-                exception=cause,
-            )
-        case 'STORED_DATA_INVALID':
-            return HandleStoredDataInvalid(
-                message=message,
-                workflow_id=workflow_id,
-                exception=cause,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 def core_call_error(

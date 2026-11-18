@@ -27,7 +27,7 @@
 use horsies_core::monitoring::MonitoringQueryError;
 use horsies_core::{
     BatchWriteError, BrokerError, BrokerOperationError, ClientStartError, CoveragePassError,
-    FailureCause, HandleOperationError, PrunePassError, WorkflowError,
+    FailureCause, PrunePassError, WorkflowError,
 };
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
@@ -264,16 +264,6 @@ impl FailureException {
     /// The exception of a broker operation error of `subject`: its message,
     /// its retry rule and its cause. Pure.
     pub fn of_operation_error(subject: &'static str, error: &BrokerOperationError) -> Self {
-        Self::new(
-            subject,
-            error.message().to_owned(),
-            error.retryable(),
-            error.failure_cause(),
-        )
-    }
-
-    /// The exception of a workflow handle error of `subject`. Pure.
-    pub fn of_handle_error(subject: &'static str, error: &HandleOperationError) -> Self {
         Self::new(
             subject,
             error.message().to_owned(),

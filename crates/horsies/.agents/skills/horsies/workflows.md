@@ -416,11 +416,14 @@ with the error's id.
 | `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed |
+| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
 `HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
 `pause`, `resume`) is an enum with one variant per state; every variant
 has `message` and `workflow_id`, and `DbOperationFailed` has `retryable`.
+`DbOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
+their `cause`, the `WorkflowError`. A failure's message starts with the
+operation's label: `Status failed for workflow <id>: <cause>`.
 The methods `code()`, `message()`, `retryable()`, `workflow_id()` and
 `failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
 `StoredDataInvalid` (`status`, `tasks`, `resume`), and

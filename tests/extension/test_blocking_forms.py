@@ -120,7 +120,9 @@ def test_each_blocking_form_on_an_unreachable_database_gives_the_awaitable_failu
     outcomes = dict(_pairs(blocking))
     assert _class_of(outcomes['start']) == 'WorkflowStartFailed'
     for read in ('status', 'wait', 'node_result', 'node_results', 'nodes', 'pause', 'resume', 'cancel'):
-        assert _class_and_code(outcomes[read]) == ('HandleFailed', 'DB_OPERATION_FAILED'), read
+        assert _class_and_code(outcomes[read]) == (
+            'HandleDbOperationFailed', 'DB_OPERATION_FAILED',
+        ), read
     for read in ('worker_states', 'worker_state', 'worker_state_history', 'class_coverage', 'class_report'):
         assert _class_and_code(outcomes[read]) == ('BrokerFailure', 'MONITORING_QUERY_FAILED'), read
     # Refused before any core call: the same answer as on a real database.

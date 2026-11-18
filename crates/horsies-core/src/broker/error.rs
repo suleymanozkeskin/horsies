@@ -264,6 +264,14 @@ pub enum BrokerError {
     /// requires. Not retryable.
     #[error("{0}")]
     RowDecode(#[from] RowDecodeError),
+
+    /// The client did not run the operation: the core's process runtime
+    /// refused it. Nothing ran. Retryable when the OS refused the runtime's
+    /// threads (a later use starts the runtime again); a fork of the
+    /// process that started the runtime is not. A client's blocking form
+    /// produces it before it calls the core.
+    #[error("{0}")]
+    ProcessRuntime(crate::process_runtime::ProcessRuntimeRefusal),
 }
 
 impl BrokerError {
@@ -285,14 +293,18 @@ impl BrokerError {
     /// Retryable: `Database` when the driver error is retryable (see
     /// [`is_retryable_sqlx_error`]), `Statement` when its cause is transient
     /// (see [`is_retryable_statement_failure`]), `ConnectionFailed`,
-    /// `ListenerClosed`, `InstallLock` and `InstallCoverage` by their own
-    /// rules. Every other variant is a refusal or a broken contract, which
+    /// `ListenerClosed`, and `ProcessRuntime`, `InstallLock` and
+    /// `InstallCoverage` by their own rules. Every other variant is a refusal or a broken contract, which
     /// the same call meets again.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Database(e) => is_retryable_sqlx_error(e),
             Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
+            Self::ProcessRuntime(refusal) => match refusal {
+                crate::process_runtime::ProcessRuntimeRefusal::StartFailed { .. } => true,
+                crate::process_runtime::ProcessRuntimeRefusal::ForkedAfterStart { .. } => false,
+            },
             Self::InstallLock(failure) => failure.is_retryable(),
             Self::InstallCoverage(error) => error.is_retryable(),
             Self::SchemaRefused(_)

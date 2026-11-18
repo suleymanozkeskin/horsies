@@ -28,11 +28,13 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     WorkflowTaskStatus,
     OnError,
+    HandleDbOperationFailed,
     HandleErrorCode,
     HandleStoredDataInvalid,
 )
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.typed import encode_task_error
+from horsies._core import CoreConnectionError
 from horsies.core.types.result import Err, Ok, is_ok, is_err
 
 from .conftest import DB_URL, make_simple_task, make_failing_task, make_workflow_spec, start_ok
@@ -1400,6 +1402,30 @@ class TestUnknownStoredWorkflowStatus:
         assert status_r.ok_value == WorkflowStatus.RUNNING
 
 
+def _assert_failed_connect(
+    error: object, label: str, subject: str, workflow_id: str,
+) -> None:
+    """A handle operation whose server refuses the connection, as the core
+    builds it. The core pool opens its connection at the first statement, so
+    the statement fails and its workflow error wraps the broker error:
+    ``HandleDbOperationFailed`` with Python's message (the operation's label,
+    the workflow id and the workflow error's text, ``broker error: ...``),
+    retryable, and the core's class of the cause with the operation as its
+    subject and the broker error's own text."""
+    assert type(error) is HandleDbOperationFailed
+    assert error.workflow_id == workflow_id
+    assert error.retryable is True
+    prefix = f'{label} failed for workflow {workflow_id}: '
+    assert error.message.startswith(prefix)
+    cause_text = error.message.removeprefix(prefix)
+    assert type(error.exception) is CoreConnectionError
+    assert error.exception.subject == subject
+    assert error.exception.message != ''
+    assert cause_text == f'broker error: {error.exception.message}'
+    assert error.exception.retryable is True
+    assert str(error.exception) == f'{subject}: {error.exception.message}'
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestWorkflowHandleInfraErrors:
@@ -1414,7 +1440,8 @@ class TestWorkflowHandleInfraErrors:
     ) -> WorkflowHandle[Any]:
         """A workflow started on ``broker``, and a handle of it on a broker
         whose core cannot reach the database. The handle's reads and writes
-        run in the core; each fails at the connect."""
+        run in the core; each fails at its first statement, where the core
+        pool opens its connection."""
         task_a = make_simple_task(app, f'{name}_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a])
@@ -1439,6 +1466,9 @@ class TestWorkflowHandleInfraErrors:
         assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert status_r.err_value.workflow_id == handle.workflow_id
         assert status_r.err_value.retryable is True
+        _assert_failed_connect(
+            status_r.err_value, 'Status', 'workflow_status', handle.workflow_id,
+        )
 
     async def test_get_db_error_returns_taskresult_broker_error(
         self,
@@ -1457,6 +1487,46 @@ class TestWorkflowHandleInfraErrors:
 
         assert result.is_err()
         assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
+        # The core's message of the failed wait, as the handle built it.
+        message = result.unwrap_err().message
+        assert message is not None
+        assert message.startswith(f'Get failed for workflow {handle.workflow_id}: ')
+
+    async def test_result_for_db_error_names_the_node(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        unreachable_broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """result_for_async() and result_for() return
+        TaskResult(err=BROKER_ERROR) when the read fails, with Python 0.7's
+        message, which names the node."""
+        task_a = make_simple_task(app, 'result_for_db_err_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='result_for_db_err', tasks=[node_a],
+        )
+        started = await start_ok(spec, broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(
+            workflow_id=started.workflow_id, broker=unreachable_broker,
+        )
+        assert node_a.node_id is not None
+        prefix = (
+            f'DB query failed for result_for node {node_a.node_id} '
+            f'in workflow {handle.workflow_id}: '
+        )
+
+        async_result = await handle.result_for_async(node_a)
+        sync_result = await asyncio.to_thread(handle.result_for, node_a)
+
+        for result in (async_result, sync_result):
+            assert result.is_err()
+            error = result.unwrap_err()
+            assert error.error_code == OperationalErrorCode.BROKER_ERROR
+            assert error.message is not None
+            assert error.message.startswith(prefix)
+            assert error.message.removeprefix(prefix) != ''
 
     async def test_cancel_db_error_returns_err_db_operation_failed(
         self,
@@ -1477,6 +1547,9 @@ class TestWorkflowHandleInfraErrors:
         assert is_err(cancel_r)
         assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert cancel_r.err_value.retryable is True
+        _assert_failed_connect(
+            cancel_r.err_value, 'Cancel', 'cancel_workflow', handle.workflow_id,
+        )
         status = (
             await session.execute(
                 text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
@@ -1502,6 +1575,9 @@ class TestWorkflowHandleInfraErrors:
         assert is_err(results_r)
         assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert results_r.err_value.workflow_id == handle.workflow_id
+        _assert_failed_connect(
+            results_r.err_value, 'Results', 'workflow_node_results', handle.workflow_id,
+        )
 
     async def test_handle_methods_do_not_leak_db_exceptions(
         self,

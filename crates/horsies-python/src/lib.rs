@@ -168,7 +168,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_start::WorkflowStartFailed>()?;
     module.add_class::<operations::workflow_resume::WorkflowResumed>()?;
     module.add_class::<operations::workflow_resume::WorkflowNotPaused>()?;
-    module.add_class::<operations::workflow_resume::WorkflowResumeRecoveryFailed>()?;
     module.add_class::<operations::workflow_phase2::NodeFinishRequest>()?;
     module.add_class::<operations::workflow_phase2::NodeFinishedRecord>()?;
     module.add_class::<operations::workflow_phase2::NodeFinishFailed>()?;
@@ -334,7 +333,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_lifecycle::WorkflowCancelled>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowNotCancellable>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowAbsent>()?;
-    module.add_class::<operations::workflow_lifecycle::HandleFailed>()?;
     module.add_class::<operations::workflow_reads::WorkflowStatusRead>()?;
     module.add_class::<operations::workflow_reads::WorkflowCompletedRead>()?;
     module.add_class::<operations::workflow_reads::WorkflowEndedRead>()?;

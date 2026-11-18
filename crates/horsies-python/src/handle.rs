@@ -754,7 +754,8 @@ impl CoreHandle {
     }
 
     /// Pause one workflow tree (`horsies_workflow_pause`): `WorkflowPaused`,
-    /// `WorkflowNotRunning`, `WorkflowAbsent`, or `HandleFailed`. Writes, in
+    /// `WorkflowNotRunning`, `WorkflowAbsent`, or a generated handle error
+    /// class (`HandleDbOperationFailed`, `HandleStoredDataInvalid`). Writes, in
     /// one statement; a caller that leaves does not stop it. A row outside
     /// the function's contract raises `PanicException`.
     fn pause_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
@@ -826,8 +827,10 @@ impl CoreHandle {
     }
 
     /// Resume one workflow tree (`horsies_workflow_resume`): `WorkflowResumed`,
-    /// `WorkflowNotPaused`, `WorkflowResumeRecoveryFailed`, `WorkflowAbsent`
-    /// or `HandleFailed`. Writes; a caller that leaves does not stop it. The
+    /// `WorkflowNotPaused`, `WorkflowAbsent`, or a generated handle error
+    /// class (`HandleDbOperationFailed`, `HandleStoredDataInvalid`,
+    /// `HandleResumeRecoveryFailed`). Writes; a caller that leaves does not
+    /// stop it. The
     /// child starts it owes build their children through the child spec
     /// source, which runs on the callback thread while this thread waits
     /// with the GIL released. A build that raised `KeyboardInterrupt` or
@@ -995,8 +998,9 @@ impl CoreHandle {
     }
 
     /// Cancel one workflow tree (`horsies_workflow_cancel`):
-    /// `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or
-    /// `HandleFailed`. Writes, in one statement; a caller that leaves does
+    /// `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or a
+    /// generated handle error class (`HandleDbOperationFailed`,
+    /// `HandleStoredDataInvalid`). Writes, in one statement; a caller that leaves does
     /// not stop it. A row outside the function's contract raises
     /// `PanicException`.
     fn cancel_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
@@ -1027,7 +1031,8 @@ impl CoreHandle {
     }
 
     /// The status of one workflow: `WorkflowStatusRead`, `WorkflowAbsent` or
-    /// `HandleFailed`. Reads only; a caller that leaves drops the read.
+    /// a generated handle error class. Reads only; a caller that leaves drops
+    /// the read.
     fn workflow_status(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -1057,8 +1062,8 @@ impl CoreHandle {
 
     /// Wait for the end of one workflow, up to `timeout_ms` (no limit for
     /// None): `WorkflowCompletedRead`, `WorkflowEndedRead`,
-    /// `WorkflowPausedRead`, `WaitTimedOut`, `WorkflowAbsent` or
-    /// `HandleFailed`. Reads only; a caller that leaves drops the wait and
+    /// `WorkflowPausedRead`, `WaitTimedOut`, `WorkflowAbsent` or a generated
+    /// handle error class. Reads only; a caller that leaves drops the wait and
     /// its subscription. The call is bounded by the limit plus the bound of
     /// a blocking call, and not bounded with no limit; signals are checked
     /// every 100 ms, so a raised signal handler (Ctrl+C) ends the wait. A
@@ -1101,8 +1106,8 @@ impl CoreHandle {
     }
 
     /// The nodes of one workflow that store a result:
-    /// `WorkflowNodeResultsRead`, `WorkflowAbsent` or `HandleFailed`. Reads
-    /// only; a caller that leaves drops the read.
+    /// `WorkflowNodeResultsRead`, `WorkflowAbsent` or a generated handle
+    /// error class. Reads only; a caller that leaves drops the read.
     fn workflow_node_results(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -1131,8 +1136,8 @@ impl CoreHandle {
     }
 
     /// The stored result of one node: `StoredNodeResultRecord`,
-    /// `NodeResultNotStored` or `HandleFailed`. Reads only; a caller that
-    /// leaves drops the read.
+    /// `NodeResultNotStored` or a generated handle error class. Reads only; a
+    /// caller that leaves drops the read.
     fn workflow_node_result(
         &self,
         py: Python<'_>,
@@ -1167,8 +1172,8 @@ impl CoreHandle {
     }
 
     /// The nodes of one workflow in index order: `WorkflowNodesRead`,
-    /// `WorkflowAbsent` or `HandleFailed`. Reads only; a caller that leaves
-    /// drops the read.
+    /// `WorkflowAbsent` or a generated handle error class. Reads only; a
+    /// caller that leaves drops the read.
     fn workflow_nodes(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(

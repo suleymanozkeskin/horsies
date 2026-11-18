@@ -469,8 +469,10 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
 const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
     &[keyword("message", "str"), keyword("failure_result", "str")];
-const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | \
-     WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed";
+/// A failed handle operation is a generated class of
+/// `horsies._catalog.workflow_handle_errors`, built in Rust.
+const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed";
 const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
     &[positional("request", "NodeFinishRequest")];
 const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
@@ -492,18 +494,21 @@ const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
     keyword("max_rows", "int"),
     keyword("quarantine_after_attempts", "int"),
 ];
-const PAUSE_WORKFLOW_OUTCOME: &str =
-    "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
-const CANCEL_WORKFLOW_OUTCOME: &str =
-    "WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed";
-const WORKFLOW_STATUS_OUTCOME: &str = "WorkflowStatusRead | WorkflowAbsent | HandleFailed";
+const PAUSE_WORKFLOW_OUTCOME: &str = "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const CANCEL_WORKFLOW_OUTCOME: &str = "WorkflowCancelled | WorkflowNotCancellable | \
+     WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_STATUS_OUTCOME: &str =
+    "WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
 const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEndedRead | \
-     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed";
-const WORKFLOW_NODE_RESULTS_OUTCOME: &str =
-    "WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed";
-const WORKFLOW_NODE_RESULT_OUTCOME: &str =
-    "StoredNodeResultRecord | NodeResultNotStored | HandleFailed";
-const WORKFLOW_NODES_OUTCOME: &str = "WorkflowNodesRead | WorkflowAbsent | HandleFailed";
+     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | \
+     HandleStoredDataInvalid";
+const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_NODES_OUTCOME: &str =
+    "WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -2708,19 +2713,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "HandleFailed",
-        doc: "The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a\nstored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After\nDB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "WorkflowsDeleted",
         doc: "The workflow retention pass ended: a batch deleted no workflow, or the budget passed\nafter a batch.",
         constructor: Constructor::NoConstructor,
@@ -3103,17 +3095,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         doc: "The workflow exists and is not PAUSED. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("workflow_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "WorkflowResumeRecoveryFailed",
-        doc: "The resume committed; the parent advance or the recovery pass of the tree after it\nfailed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("message", "str"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
         methods: &[],
     },
     StubClass {
@@ -3875,10 +3856,20 @@ const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
 }];
 
 /// The generated classes of `horsies._catalog` that the annotations name.
-const IMPORTS: &[StubImport] = &[StubImport {
-    module: "horsies._catalog.monitoring_errors",
-    names: &["MonitoringQueryCoreError", "TaskActionCoreError"],
-}];
+const IMPORTS: &[StubImport] = &[
+    StubImport {
+        module: "horsies._catalog.monitoring_errors",
+        names: &["MonitoringQueryCoreError", "TaskActionCoreError"],
+    },
+    StubImport {
+        module: "horsies._catalog.workflow_handle_errors",
+        names: &[
+            "HandleDbOperationFailed",
+            "HandleResumeRecoveryFailed",
+            "HandleStoredDataInvalid",
+        ],
+    },
+];
 
 pub const CORE_MODULE: ModuleSurface = ModuleSurface {
     imports: IMPORTS,
