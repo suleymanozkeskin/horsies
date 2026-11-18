@@ -629,9 +629,7 @@ mod tests {
     }
 
     fn lazy_pool() -> TestPool {
-        TestPoolOptions::new()
-            .connect_lazy("postgresql://postgres@localhost/postgres")
-            .unwrap()
+        TestPoolOptions::new().connect_lazy("postgresql://postgres@localhost/postgres")
     }
 
     fn validation(text: &str) -> CandidateFailure {

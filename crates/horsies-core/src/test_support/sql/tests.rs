@@ -279,6 +279,30 @@ async fn a_closed_pool_refuses_checkouts() {
     assert!(matches!(refused, Err(Error::PoolClosed)));
 }
 
+/// A close waits until every checked-out session is returned, as sqlx's
+/// close did.
+#[tokio::test]
+async fn a_close_waits_for_the_checked_out_sessions() {
+    let (_database, pool) = pool_on_new_database().await;
+    let held = pool.acquire().await.expect("check out a session");
+    assert_eq!((pool.size(), pool.num_idle()), (1, 0));
+    let closing = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.close().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !closing.is_finished(),
+        "the close returned while a session was out"
+    );
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), closing)
+        .await
+        .expect("the close returns once the session is back")
+        .expect("join the close");
+    assert!(pool.is_closed());
+}
+
 /// A new session of a pool runs the pool's session setup first.
 #[tokio::test]
 async fn a_new_session_runs_the_session_setup() {

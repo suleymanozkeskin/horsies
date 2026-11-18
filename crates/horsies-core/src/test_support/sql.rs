@@ -29,6 +29,7 @@
 
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -989,6 +990,7 @@ impl TestPoolOptions {
                 url: url.to_owned(),
                 idle: Mutex::new(Vec::new()),
                 permits: Arc::new(Semaphore::new(self.max_connections as usize)),
+                closed: AtomicBool::new(false),
                 options: self,
             }),
         }
@@ -1000,8 +1002,10 @@ struct PoolShared {
     /// Returned sessions, the last returned at the end. At most
     /// `max_connections` (one per permit).
     idle: Mutex<Vec<TestConnection>>,
-    /// One permit per session that may be open. Closed when the pool closes.
+    /// One permit per checked-out session. Closed when the pool has closed.
     permits: Arc<Semaphore>,
+    /// Set by [`TestPool::close`]: checkouts are refused from then on.
+    closed: AtomicBool,
     options: TestPoolOptions,
 }
 
@@ -1032,6 +1036,9 @@ impl TestPool {
     /// [`TestConnection::connect`] and [`Error::Database`] of the session
     /// setup when a new session opens.
     pub(crate) async fn acquire(&self) -> Result<PooledConnection, Error> {
+        if self.is_closed() {
+            return Err(Error::PoolClosed);
+        }
         let bound = self.shared.options.acquire_timeout;
         let permit =
             match tokio::time::timeout(bound, Arc::clone(&self.shared.permits).acquire_owned())
@@ -1041,6 +1048,9 @@ impl TestPool {
                 Ok(Err(_closed)) => return Err(Error::PoolClosed),
                 Ok(Ok(permit)) => permit,
             };
+        if self.is_closed() {
+            return Err(Error::PoolClosed);
+        }
         let session = match self.take_idle() {
             Some(session) => session,
             None => self.open_new_session().await?,
@@ -1090,24 +1100,54 @@ impl TestPool {
         })
     }
 
-    /// Closes the pool: later checkouts fail with [`Error::PoolClosed`], the
-    /// idle sessions end now, and each checked-out session ends when it is
-    /// returned.
+    /// Closes the pool, as sqlx's close did: later checkouts fail with
+    /// [`Error::PoolClosed`], the idle sessions end now, and the call
+    /// returns once every checked-out session was returned (and ended). A
+    /// caller that may hold a session bounds the wait itself.
     pub(crate) async fn close(&self) {
+        self.shared.closed.store(true, Ordering::SeqCst);
+        drop(self.take_all_idle());
+        let max = self.shared.options.max_connections;
+        let returned = Arc::clone(&self.shared.permits)
+            .acquire_many_owned(max)
+            .await;
+        drop(returned);
         self.shared.permits.close();
-        let idle = std::mem::take(
+        drop(self.take_all_idle());
+    }
+
+    fn take_all_idle(&self) -> Vec<TestConnection> {
+        std::mem::take(
             &mut *self
                 .shared
                 .idle
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
-        );
-        drop(idle);
+        )
     }
 
     /// Whether [`TestPool::close`] ran.
     pub(crate) fn is_closed(&self) -> bool {
-        self.shared.permits.is_closed()
+        self.shared.closed.load(Ordering::SeqCst)
+    }
+
+    /// The open sessions: checked out and idle.
+    pub(crate) fn size(&self) -> u32 {
+        let checked_out = self
+            .shared
+            .options
+            .max_connections
+            .saturating_sub(self.shared.permits.available_permits() as u32);
+        checked_out.saturating_add(self.num_idle() as u32)
+    }
+
+    /// The idle sessions.
+    pub(crate) fn num_idle(&self) -> usize {
+        self.shared
+            .idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -1168,7 +1208,7 @@ impl Drop for PooledConnection {
         match session {
             PooledSession::Discarded => {}
             PooledSession::Held(session) => {
-                match self.shared.permits.is_closed() || session.client.is_closed() {
+                match self.shared.closed.load(Ordering::SeqCst) || session.client.is_closed() {
                     true => drop(session),
                     false => self
                         .shared

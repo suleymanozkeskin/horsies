@@ -884,9 +884,7 @@ mod p7_lifecycle_tests {
     /// A broker on a port that refuses connections: a refusal of the arguments must come before any read.
     fn unreachable_broker() -> PostgresBroker {
         PostgresBroker::from_test_url(
-            TestPool::connect_lazy("postgres://postgres@127.0.0.1:1/horsies_unreachable")
-                .expect("a lazy pool")
-                .url(),
+            "postgres://postgres@127.0.0.1:1/horsies_unreachable",
             crate::ClientFamily::Rust,
         )
     }

@@ -774,8 +774,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_failure_is_typed_instead_of_published_as_zero_health() {
         let pool = TestPoolOptions::new()
-            .connect_lazy("postgresql://postgres@127.0.0.1:1/horsies_unreachable")
-            .unwrap();
+            .connect_lazy("postgresql://postgres@127.0.0.1:1/horsies_unreachable");
         let error = recovery_pass(&pool, 0, 1, 3)
             .await
             .expect_err("a failed discovery/count query must cross the containment seam");
