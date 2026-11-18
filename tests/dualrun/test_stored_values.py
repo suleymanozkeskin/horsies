@@ -13,6 +13,7 @@ import pytest
 
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.catalog import (
+    ARGS_FROM_MARKER,
     ATTEMPT_ARCHIVE,
     LEAF_NAME,
     NODE_RESULT,
@@ -44,6 +45,7 @@ from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
 from tests.dualrun.rules import (
     ColumnSpec,
     DigestOf,
+    EachMarkedMember,
     EachMember,
     Exact,
     IdFamily,
@@ -585,9 +587,32 @@ def _child_failed_error(named: str) -> dict[str, object]:
     }
 
 
+def _unparsed_child_error(named: str) -> dict[str, object]:
+    return {
+        'error_code': 'RESULT_DESERIALIZATION_ERROR',
+        'message': (
+            f'Child workflow {named} is COMPLETED and its stored result does not '
+            'parse: the result is NULL'
+        ),
+        'data': {'workflow_id': named},
+    }
+
+
+def _args_from_entry(result: dict[str, object]) -> dict[str, object]:
+    """The entry that the engine writes for one ``args_from`` argument."""
+    return {
+        ARGS_FROM_MARKER: True,
+        'source_task_name': 'child',
+        'source_definition_key': 'tests.child.v1',
+        'inner': result,
+    }
+
+
 def _task_input(run: Run, named: str) -> dict[str, object]:
     return {
         'value': 1,
+        'upstream': _args_from_entry(_envelope(_skipped_error(named))),
+        'unparsed': _args_from_entry(_envelope(_unparsed_child_error(named))),
         '__h_workflow_meta__': {'workflow_id': run.workflow, 'task_index': 2},
         '__h_workflow_ctx__': {
             'workflow_id': named,
@@ -757,6 +782,140 @@ def test_each_member_steps_into_every_member_of_an_object_and_no_array_item() ->
         IdLabel(family=IdFamily.WORKFLOW, ordinal=1),
         IdLabel(family=IdFamily.WORKFLOW, ordinal=2),
     ]
+    assert _leaves(array_row[1]) == []
+
+
+TASK_INPUTS: Final = SnapshotCatalog(
+    tables=(
+        TableRules(
+            name='tasks',
+            columns=(
+                ColumnSpec(name='workflow', rule=WORKFLOW_ID),
+                ColumnSpec(name='input', rule=TASK_INPUT),
+            ),
+            order_by=('workflow',),
+            identity=('workflow',),
+        ),
+    ),
+)
+"""A workflow and the input of one of its tasks."""
+
+
+def _tasks_snapshot(task_input: str, run: datetime, workflow: str) -> NormalizedSnapshot:
+    raw = RawSnapshot(tables=(RawTable(name='tasks', rows=((workflow, task_input),)),))
+    match normalize_snapshot(raw, TASK_INPUTS, _window(run)):
+        case Ok(snapshot):
+            return snapshot
+        case Err(error):
+            raise AssertionError(f'normalize failed: {error}')
+
+
+def _task_cell(snapshot: NormalizedSnapshot, column: str) -> NormalizedValue:
+    table = snapshot.table('tasks')
+    (row,) = table.rows
+    return row[table.rules.position(column)]
+
+
+def test_an_input_member_without_the_args_from_marker_keeps_its_ids_raw() -> None:
+    """A user argument that looks like an ``args_from`` entry, without the
+    marker or with another value at it, is user data: it compares exactly."""
+
+    def member(named: str, marker: object) -> str:
+        entry = _args_from_entry(_envelope(_skipped_error(named)))
+        match marker:
+            case None:
+                del entry[ARGS_FROM_MARKER]
+            case _:
+                entry[ARGS_FROM_MARKER] = marker
+        return json.dumps({'lookalike': entry})
+
+    for marker in (None, False, 'true', 1):
+        reference = _tasks_snapshot(member(CHILD_A, marker), RUN_A, CHILD_A)
+        candidate = _tasks_snapshot(member(CHILD_B, marker), RUN_B, CHILD_B)
+
+        assert [
+            entry.column
+            for entry in compare_snapshots(reference, candidate).entries
+            if isinstance(entry, ColumnDifference)
+        ] == ['input'], marker
+        rendered = render_value(_task_cell(reference, 'input'))
+        assert CHILD_A in rendered, marker
+
+
+def test_an_args_from_entry_that_names_another_workflow_is_a_difference() -> None:
+    reference = _tasks_snapshot(
+        json.dumps({'upstream': _args_from_entry(_envelope(_skipped_error(CHILD_A)))}),
+        RUN_A,
+        workflow=CHILD_A,
+    )
+    candidate = _tasks_snapshot(
+        json.dumps({'upstream': _args_from_entry(_envelope(_skipped_error(PARENT_B)))}),
+        RUN_B,
+        workflow=CHILD_B,
+    )
+    same = _tasks_snapshot(
+        json.dumps({'upstream': _args_from_entry(_envelope(_skipped_error(CHILD_B)))}),
+        RUN_B,
+        workflow=CHILD_B,
+    )
+
+    assert compare_snapshots(reference, same).entries == ()
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, candidate).entries
+        if isinstance(entry, ColumnDifference)
+    ] == ['input']
+
+
+def test_each_marked_member_steps_into_marked_object_members_only() -> None:
+    rule = StoredJson(
+        storage=JsonStorage.TEXT,
+        format=Unversioned(),
+        paths=(
+            JsonPath(
+                steps=(EachMarkedMember(marker='mark'), Key(name='id')),
+                rule=WORKFLOW_ID,
+            ),
+        ),
+    )
+    catalog = SnapshotCatalog(
+        tables=(
+            TableRules(
+                name='maps',
+                columns=(
+                    ColumnSpec(name='name', rule=Exact()),
+                    ColumnSpec(name='doc', rule=rule),
+                ),
+                order_by=('name',),
+                identity=('name',),
+            ),
+        ),
+    )
+    rows = (
+        (
+            'object',
+            json.dumps(
+                {
+                    'x': {'mark': True, 'id': CHILD_A},
+                    'y': {'mark': False, 'id': PARENT_A},
+                    'z': {'id': PARENT_A},
+                },
+            ),
+        ),
+        ('array', json.dumps([{'mark': True, 'id': CHILD_A}])),
+    )
+
+    match normalize_snapshot(
+        RawSnapshot(tables=(RawTable(name='maps', rows=rows),)), catalog, _window(RUN_A)
+    ):
+        case Ok(snapshot):
+            pass
+        case Err(error):
+            raise AssertionError(f'normalize failed: {error}')
+    array_row, object_row = snapshot.table('maps').rows  # ordered by name
+
+    assert _leaves(object_row[1]) == [IdLabel(family=IdFamily.WORKFLOW, ordinal=1)]
+    assert PARENT_A in render_value(object_row[1])
     assert _leaves(array_row[1]) == []
 
 
