@@ -68,6 +68,16 @@ impl ClientStartError {
             Self::Start(error) => error.is_retryable(),
         }
     }
+
+    /// The error that the start met, as a workflow engine error: the broker
+    /// error of a failed install, or the start's own error. The cause of
+    /// `WorkflowStartError::EnqueueFailed`. Pure.
+    pub fn into_workflow_error(self) -> WorkflowError {
+        match self {
+            Self::SchemaInstall(error) => WorkflowError::Broker(error),
+            Self::Start(error) => error,
+        }
+    }
 }
 
 impl PostgresBroker {

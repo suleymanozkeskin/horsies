@@ -16,7 +16,7 @@ use chrono::Utc;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
-    child_producer, ChildProducer, ClientStartError, ClientStartOutcome, FailureCause,
+    child_producer, ChildProducer, ClientStartError, ClientStartOutcome, StartRefusalCause,
     WorkflowError, WorkflowStartError,
 };
 use uuid::Uuid;
@@ -97,7 +97,7 @@ impl WorkflowStarter {
             message,
             workflow_name: spec.name().to_owned(),
             workflow_id,
-            cause: FailureCause::PreconditionFailed,
+            cause: StartRefusalCause::Check,
         };
         let validation = |error: HorsiesError| validation_failed(error.to_string());
         if spec
@@ -117,13 +117,11 @@ impl WorkflowStarter {
         refuse_in_a_fork(format_args!("start of workflow '{}'", spec.name()));
         let handle = self.operation_handle();
         let broker = handle.initialized_broker().await.map_err(|error| {
-            WorkflowStartError::EnqueueFailed {
-                message: format!("Schema initialization failed: {error}"),
-                retryable: error.is_retryable(),
-                workflow_name: spec.name().to_owned(),
+            WorkflowStartError::start_failed(
+                spec.name(),
                 workflow_id,
-                cause: error.failure_cause(),
-            }
+                ClientStartError::SchemaInstall(error),
+            )
         })?;
         let started = broker
             .start_client_workflow(
@@ -138,19 +136,10 @@ impl WorkflowStarter {
             Ok(ClientStartOutcome::Started | ClientStartOutcome::Exists) => Ok(
                 WorkflowHandle::new(workflow_id, handle, Arc::clone(&self.workflows)),
             ),
-            Ok(ClientStartOutcome::IdTaken { existing_name }) => {
-                Err(WorkflowStartError::IdConflict {
-                    message: format!(
-                        "workflow_id '{workflow_id}' already exists for workflow name \
-                         '{existing_name}', cannot start workflow name '{}' with the same id",
-                        spec.name(),
-                    ),
-                    workflow_name: spec.name().to_owned(),
-                    workflow_id,
-                    existing_workflow_name: existing_name,
-                })
-            }
-            Err(error) => Err(start_error(&error, spec.name(), workflow_id)),
+            Ok(ClientStartOutcome::IdTaken { existing_name }) => Err(
+                WorkflowStartError::id_conflict(spec.name(), workflow_id, existing_name),
+            ),
+            Err(error) => Err(start_error(error, spec.name(), workflow_id)),
         }
     }
 
@@ -179,41 +168,37 @@ pub(crate) fn new_workflow_id() -> Uuid {
 /// The start error of the failed start `workflow_id` of `workflow_name`: a
 /// spec or a child spec that the core refuses is `VALIDATION_FAILED`; the
 /// schema install, the database, the client family check and a child build
-/// that raised are `ENQUEUE_FAILED`, with the retry rule of the cause. Pure.
+/// that raised are `ENQUEUE_FAILED`, with the retry rule of the cause. The
+/// error is the typed cause of the class. Pure.
 ///
 /// Panics: an error that a start never gives (a defect).
 fn start_error(
-    error: &ClientStartError,
+    error: ClientStartError,
     workflow_name: &str,
     workflow_id: Uuid,
 ) -> WorkflowStartError {
     match error {
-        ClientStartError::Start(WorkflowError::Serialization(_) | WorkflowError::Validation(_)) => {
-            WorkflowStartError::ValidationFailed {
-                message: error.to_string(),
-                workflow_name: workflow_name.to_owned(),
-                workflow_id,
-                cause: error.failure_cause(),
-            }
-        }
-        ClientStartError::SchemaInstall(_)
+        ClientStartError::Start(
+            refused @ (WorkflowError::Serialization(_) | WorkflowError::Validation(_)),
+        ) => WorkflowStartError::ValidationFailed {
+            message: refused.to_string(),
+            workflow_name: workflow_name.to_owned(),
+            workflow_id,
+            cause: StartRefusalCause::Error(refused),
+        },
+        failed @ (ClientStartError::SchemaInstall(_)
         | ClientStartError::Start(
             WorkflowError::Database(_)
             | WorkflowError::Broker(_)
             | WorkflowError::StepContract(_)
             | WorkflowError::ChildSpecSource(_),
-        ) => WorkflowStartError::EnqueueFailed {
-            message: error.to_string(),
-            retryable: error.is_retryable(),
-            workflow_name: workflow_name.to_owned(),
-            workflow_id,
-            cause: error.failure_cause(),
-        },
+        )) => WorkflowStartError::start_failed(workflow_name, workflow_id, failed),
         ClientStartError::Start(
-            WorkflowError::WorkflowNotFound { .. } | WorkflowError::InvalidStatus(_),
+            ref unexpected @ (WorkflowError::WorkflowNotFound { .. }
+            | WorkflowError::InvalidStatus(_)),
         ) => panic!(
             "the start of workflow {workflow_id} returned an error outside the start catalog: \
-             {error}"
+             {unexpected}"
         ),
     }
 }
@@ -309,11 +294,14 @@ mod tests {
             ),
         ];
         for (error, code) in cases {
-            let failed = start_error(&error, "nightly", Uuid::nil());
-            assert_eq!(failed.code(), code, "{error}");
-            assert_eq!(failed.workflow_name(), "nightly", "{error}");
-            assert_eq!(failed.workflow_id(), Uuid::nil(), "{error}");
-            assert_eq!(failed.failure_cause(), error.failure_cause(), "{error}");
+            let text = error.to_string();
+            let cause = error.failure_cause();
+            let failed = start_error(error, "nightly", Uuid::nil());
+            assert_eq!(failed.code(), code, "{text}");
+            assert_eq!(failed.message(), text);
+            assert_eq!(failed.workflow_name(), "nightly", "{text}");
+            assert_eq!(failed.workflow_id(), Uuid::nil(), "{text}");
+            assert_eq!(failed.failure_cause(), cause, "{text}");
         }
     }
 }

@@ -45,6 +45,7 @@ use crate::catalog::{CodeCatalog, CodeEnum};
 use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
 use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::task::send_types::TaskSendError;
+use crate::core::workflow::start_types::{StartRefusalCause, WorkflowStartError};
 use crate::failure_cause::FailureCause;
 use crate::monitoring::{
     HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorSource, TaskActionError,
@@ -306,6 +307,17 @@ impl ExceptionCause for BrokerCheckCause {
     }
 }
 
+/// The workflow error that refused a start is that error's exception; a
+/// check of the client or the core is `NoCause()`.
+impl ExceptionCause for StartRefusalCause {
+    fn exception_value(&self) -> ExceptionValue {
+        match self {
+            Self::Error(error) => error.exception_value(),
+            Self::Check => ExceptionValue::NoCause,
+        }
+    }
+}
+
 /// Stored history data outside the read contract is a
 /// `HistoryContractError` with the error's text.
 impl ExceptionCause for HistoryContractSource {
@@ -395,6 +407,7 @@ pub const ERROR_CATALOGS: &[ErrorCatalog] = &[
     <MonitoringQueryError as ErrorEnum>::ERROR_CATALOG,
     <TaskActionError as ErrorEnum>::ERROR_CATALOG,
     <TaskSendError as ErrorEnum>::ERROR_CATALOG,
+    <WorkflowStartError as ErrorEnum>::ERROR_CATALOG,
 ];
 
 /// The Python type of a field of a generated record class.

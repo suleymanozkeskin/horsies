@@ -46,6 +46,10 @@ from horsies.core.workflows.lifecycle import (
     start_workflow,
     start_workflow_async,
 )
+from horsies.core.workflows.start_types import (
+    WorkflowStartEnqueueFailed,
+    WorkflowStartIdConflict,
+)
 from tests.sync_facade_support import SHAPE_DEPTH_BOUND, outcome_shape
 
 pytestmark = [pytest.mark.unit]
@@ -468,11 +472,20 @@ def _spec(
 START_ANSWERS: Final[dict[str, object]] = {
     'started': _record(core.WorkflowStarted),
     'exists': _record(core.WorkflowExists),
-    'id_taken': _record(core.WorkflowIdTaken, existing_name='other.flow'),
-    'start_failed': _record(
-        core.WorkflowStartFailed,
+    'id_taken': WorkflowStartIdConflict(
+        message=(
+            f"workflow_id '{WORKFLOW_ID}' already exists for workflow name "
+            "'other.flow', cannot start workflow name 'blocking_forms.flow' with the same id"
+        ),
+        workflow_name='blocking_forms.flow',
+        workflow_id=WORKFLOW_ID,
+        existing_workflow_name='other.flow',
+    ),
+    'start_failed': WorkflowStartEnqueueFailed(
         message='connection refused',
         retryable=True,
+        workflow_name='blocking_forms.flow',
+        workflow_id=WORKFLOW_ID,
         exception=CONNECTION_LOST,
     ),
     'core_cannot_run_the_call': CORE_REFUSAL,

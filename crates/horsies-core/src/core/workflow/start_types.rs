@@ -3,6 +3,9 @@
 /// Mirrors Python's `python/horsies/core/workflows/start_types.py`.
 use uuid::Uuid;
 
+use crate::broker::workflow_start::ClientStartError;
+use crate::error_catalog::ErrorEnum;
+use crate::workflow_engine::error::WorkflowError;
 use crate::FailureCause;
 
 /// Categorized workflow start failure codes.
@@ -40,61 +43,177 @@ impl std::fmt::Display for WorkflowStartErrorCode {
 /// The failure of a workflow start: one variant per Python class of
 /// `python/horsies/core/workflows/start_types.py` that the core or a client
 /// of the core produces, each with the facts of its state only. Carried
-/// inside `Err(...)` of a [`WorkflowStartResult`].
+/// inside `Err(...)` of a [`WorkflowStartResult`]. Each variant's doc is
+/// its Python class doc (`ErrorCatalog`, module
+/// `horsies._catalog.workflow_start_errors`).
 ///
 /// The class that only the Python client produces is not a variant:
-/// `WorkflowStartBrokerNotConfigured`.
-#[derive(Debug, Clone)]
+/// `WorkflowStartBrokerNotConfigured`. A variant with an `exception` carries
+/// its typed cause, which the client builds that exception from
+/// (`ErrorClassValues`).
+#[derive(Debug, horsies_core_derive::ErrorCatalog, horsies_core_derive::ErrorClassValues)]
+#[error_catalog(
+    module = "workflow_start_errors",
+    code = "WorkflowStartErrorCode",
+    union = "WorkflowStartCoreError",
+    union_doc = "Every failure of a workflow start that the core gives: one class per state."
+)]
 pub enum WorkflowStartError {
-    /// Python `WorkflowStartValidationFailed`: the spec, its arguments or
-    /// the error passed to a retry was refused. Nothing was written.
-    /// `workflow_id` is the id of the start: the caller's id, or the id
-    /// minted for it, as in Python. `cause` is what refused it (Python
-    /// `exception`).
+    /// The spec, its args or the retry input was refused. Nothing was written.
+    ///
+    /// The same start is refused again. ``exception`` is ``NoCause()`` when a
+    /// check refused the input without a Python exception. The retry methods
+    /// refuse this error.
+    // `workflow_id` is the id of the start: the caller's id, or the id
+    // minted for it, as in Python.
+    #[error_class(
+        class = "WorkflowStartValidationFailed",
+        code = "ValidationFailed",
+        never_retryable,
+        exception = "BaseException | NoCause"
+    )]
     ValidationFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Str")]
         workflow_name: String,
+        #[error_slot(python = "UuidText")]
         workflow_id: Uuid,
-        cause: FailureCause,
+        /// The error that refused the start, or a check.
+        #[error_slot(cause)]
+        cause: StartRefusalCause,
     },
-    /// Python `WorkflowStartIdConflict`: the id holds the workflow
-    /// `existing_workflow_name`. Nothing was written.
+    /// The workflow id exists for another workflow name. Nothing was written.
+    ///
+    /// ``existing_workflow_name`` names the workflow that holds the id. A start
+    /// with the same id is refused again; use another id. The retry methods
+    /// refuse this error.
+    #[error_class(
+        class = "WorkflowStartIdConflict",
+        code = "WorkflowIdConflict",
+        never_retryable
+    )]
     IdConflict {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Str")]
         workflow_name: String,
+        #[error_slot(python = "UuidText")]
         workflow_id: Uuid,
+        #[error_slot(python = "Str")]
         existing_workflow_name: String,
     },
-    /// Python `WorkflowStartEnqueueFailed`: the connect, the schema install
-    /// or the start failed. Nothing was committed, or the commit reply was
-    /// lost: a start again with the same id finds the workflow. `cause` is
-    /// what the start met (Python `exception`).
+    /// Schema initialization or the start transaction failed with a database or driver error.
+    ///
+    /// ``retryable`` is the driver classification of the cause: ``True`` when
+    /// the condition may clear, for example a lost connection. The transaction
+    /// rolled back, or its commit outcome is unknown. ``retry_start(err)``
+    /// starts again with the same id; a workflow that the failed attempt
+    /// committed comes back as the existing handle.
+    #[error_class(
+        class = "WorkflowStartEnqueueFailed",
+        code = "EnqueueFailed",
+        exception = "BaseException"
+    )]
     EnqueueFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(python = "Str")]
         workflow_name: String,
+        #[error_slot(python = "UuidText")]
         workflow_id: Uuid,
-        cause: FailureCause,
+        /// The failed connect, schema install, client family check,
+        /// statement or child build.
+        #[error_slot(cause)]
+        cause: WorkflowError,
     },
-    /// Python `WorkflowStartAsyncContext`: a sync or blocking start on a
-    /// thread that runs an event loop or a tokio runtime. Nothing was
-    /// written; `retry_start` completes the start with `workflow_id`.
+    /// Sync ``start()`` or ``retry_start()`` was called on a thread that runs an event loop.
+    ///
+    /// Nothing was written: the wait would stall that loop. ``retry_start_async(err)``
+    /// starts the workflow with the same id; a sync call on that thread returns
+    /// this error again.
+    // The Rust client's blocking starts give it on a thread that runs a
+    // tokio runtime; `retry_start` completes the start with `workflow_id`.
+    #[error_class(
+        class = "WorkflowStartAsyncContext",
+        code = "AsyncContext",
+        never_retryable
+    )]
     AsyncContext {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Str")]
         workflow_name: String,
+        #[error_slot(python = "UuidText")]
         workflow_id: Uuid,
     },
 }
 
-impl WorkflowStartError {
-    /// The catalog code of the variant. Pure.
-    pub fn code(&self) -> WorkflowStartErrorCode {
+/// The cause of a refused start (`exception` of
+/// `WorkflowStartValidationFailed`): the workflow error that refused the
+/// spec or its arguments, or a check of the client or the core that found
+/// the refusal with no error. Python builds `NoCause()` for a check.
+#[derive(Debug, thiserror::Error)]
+pub enum StartRefusalCause {
+    /// The error that refused the start.
+    #[error(transparent)]
+    Error(#[from] WorkflowError),
+    /// A check refused the start; no error was raised.
+    #[error("a check refused the start")]
+    Check,
+}
+
+impl StartRefusalCause {
+    /// The cause of the error; a check is a failed precondition. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::ValidationFailed { .. } => WorkflowStartErrorCode::ValidationFailed,
-            Self::IdConflict { .. } => WorkflowStartErrorCode::WorkflowIdConflict,
-            Self::EnqueueFailed { .. } => WorkflowStartErrorCode::EnqueueFailed,
-            Self::AsyncContext { .. } => WorkflowStartErrorCode::AsyncContext,
+            Self::Error(error) => error.failure_cause(),
+            Self::Check => FailureCause::PreconditionFailed,
         }
+    }
+}
+
+impl WorkflowStartError {
+    /// The id `workflow_id` of the start of `workflow_name` belongs to the
+    /// workflow `existing_workflow_name`, with Python's message. Nothing was
+    /// written. Pure.
+    pub fn id_conflict(
+        workflow_name: &str,
+        workflow_id: Uuid,
+        existing_workflow_name: String,
+    ) -> Self {
+        Self::IdConflict {
+            message: format!(
+                "workflow_id '{workflow_id}' already exists for workflow name \
+                 '{existing_workflow_name}', cannot start workflow name '{workflow_name}' with \
+                 the same id"
+            ),
+            workflow_name: workflow_name.to_owned(),
+            workflow_id,
+            existing_workflow_name,
+        }
+    }
+
+    /// The start `workflow_id` of `workflow_name` failed with `error`: its
+    /// text is the message, its rule the retry flag, and the error itself
+    /// (the broker error of a failed install) the cause. Nothing committed,
+    /// or the commit outcome is unknown. Pure.
+    pub fn start_failed(workflow_name: &str, workflow_id: Uuid, error: ClientStartError) -> Self {
+        Self::EnqueueFailed {
+            message: error.to_string(),
+            retryable: error.is_retryable(),
+            workflow_name: workflow_name.to_owned(),
+            workflow_id,
+            cause: error.into_workflow_error(),
+        }
+    }
+
+    /// The catalog code of the variant (the derive's one mapping,
+    /// [`ErrorEnum::error_code`]). Pure.
+    pub fn code(&self) -> WorkflowStartErrorCode {
+        ErrorEnum::error_code(self)
     }
 
     /// What failed and why. Pure.
@@ -143,9 +262,8 @@ impl WorkflowStartError {
     /// runtime thread, is a failed precondition. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::ValidationFailed { cause, .. } | Self::EnqueueFailed { cause, .. } => {
-                cause.clone()
-            }
+            Self::ValidationFailed { cause, .. } => cause.failure_cause(),
+            Self::EnqueueFailed { cause, .. } => cause.failure_cause(),
             Self::IdConflict { .. } | Self::AsyncContext { .. } => FailureCause::PreconditionFailed,
         }
     }
@@ -207,7 +325,7 @@ pub fn validate_start_retry(
                 ),
                 workflow_name: spec_name.to_owned(),
                 workflow_id: error.workflow_id(),
-                cause: FailureCause::PreconditionFailed,
+                cause: StartRefusalCause::Check,
             });
         }
     };
@@ -219,7 +337,7 @@ pub fn validate_start_retry(
             ),
             workflow_name: spec_name.to_owned(),
             workflow_id,
-            cause: FailureCause::PreconditionFailed,
+            cause: StartRefusalCause::Check,
         });
     }
     Ok(workflow_id)
@@ -228,6 +346,17 @@ pub fn validate_start_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::BrokerError;
+    use crate::error_catalog::{
+        ErrorClassValues, ErrorSlot, ExceptionType, ExceptionValue, SlotData, SlotRepr, SlotType,
+    };
+
+    /// A lost connection: the cause of a failed start that may clear.
+    fn connection_lost() -> WorkflowError {
+        WorkflowError::Broker(BrokerError::ConnectionFailed(
+            "connection refused".to_owned(),
+        ))
+    }
 
     #[test]
     fn error_code_display() {
@@ -253,7 +382,7 @@ mod tests {
             retryable: true,
             workflow_name: "my_pipeline".to_owned(),
             workflow_id,
-            cause: FailureCause::Connection,
+            cause: connection_lost(),
         };
         let s = format!("{}", err);
         assert!(s.contains("ENQUEUE_FAILED"));
@@ -274,7 +403,9 @@ mod tests {
                     message: "m".to_owned(),
                     workflow_name: name(),
                     workflow_id,
-                    cause: FailureCause::ContractViolation,
+                    cause: StartRefusalCause::Error(WorkflowError::InvalidStatus(
+                        "BOGUS".to_owned(),
+                    )),
                 },
                 WorkflowStartErrorCode::ValidationFailed,
                 FailureCause::ContractViolation,
@@ -295,7 +426,7 @@ mod tests {
                     retryable: false,
                     workflow_name: name(),
                     workflow_id,
-                    cause: FailureCause::Connection,
+                    cause: connection_lost(),
                 },
                 WorkflowStartErrorCode::EnqueueFailed,
                 FailureCause::Connection,
@@ -330,7 +461,7 @@ mod tests {
             retryable: true,
             workflow_name: "test-wf".to_owned(),
             workflow_id,
-            cause: FailureCause::Connection,
+            cause: connection_lost(),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_ok());
@@ -368,7 +499,7 @@ mod tests {
             message: "Bad DAG".to_owned(),
             workflow_name: "test-wf".to_owned(),
             workflow_id: Uuid::new_v4(),
-            cause: FailureCause::PreconditionFailed,
+            cause: StartRefusalCause::Check,
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_err());
@@ -402,12 +533,208 @@ mod tests {
             retryable: true,
             workflow_name: "other-workflow".to_owned(),
             workflow_id: Uuid::new_v4(),
-            cause: FailureCause::Connection,
+            cause: connection_lost(),
         };
         let result = validate_start_retry(&error, "my-workflow");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), WorkflowStartErrorCode::ValidationFailed);
         assert!(err.message().contains("cross-workflow"));
+    }
+
+    /// The classes of the start catalog have Python's names, slots and
+    /// order (`python/horsies/core/workflows/start_types.py`).
+    #[test]
+    fn the_start_classes_have_python_s_slots_in_python_s_order() {
+        let catalog = <WorkflowStartError as ErrorEnum>::ERROR_CATALOG;
+        assert_eq!(catalog.python_module, "workflow_start_errors");
+        assert_eq!(catalog.union, "WorkflowStartCoreError");
+        let names: Vec<&str> = catalog
+            .classes
+            .iter()
+            .map(|class| class.python_class)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "WorkflowStartValidationFailed",
+                "WorkflowStartIdConflict",
+                "WorkflowStartEnqueueFailed",
+                "WorkflowStartAsyncContext",
+            ]
+        );
+        let field = |name: &'static str, repr: SlotRepr| ErrorSlot::Field {
+            name,
+            python_type: SlotType::Str,
+            repr,
+        };
+        let workflow_id = ErrorSlot::Field {
+            name: "workflow_id",
+            python_type: SlotType::UuidText,
+            repr: SlotRepr::Shown,
+        };
+        assert_eq!(
+            catalog.classes[0].slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "VALIDATION_FAILED"
+                },
+                ErrorSlot::NeverRetryable,
+                field("message", SlotRepr::Hidden),
+                field("workflow_name", SlotRepr::Shown),
+                workflow_id,
+                ErrorSlot::Exception {
+                    python_type: ExceptionType::ExceptionOrNoCause
+                },
+            ]
+        );
+        assert_eq!(
+            catalog.classes[1].slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "WORKFLOW_ID_CONFLICT"
+                },
+                ErrorSlot::NeverRetryable,
+                field("message", SlotRepr::Hidden),
+                field("workflow_name", SlotRepr::Shown),
+                workflow_id,
+                field("existing_workflow_name", SlotRepr::Shown),
+            ]
+        );
+        assert_eq!(
+            catalog.classes[2].slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "ENQUEUE_FAILED"
+                },
+                field("message", SlotRepr::Hidden),
+                ErrorSlot::Field {
+                    name: "retryable",
+                    python_type: SlotType::Bool,
+                    repr: SlotRepr::Shown,
+                },
+                field("workflow_name", SlotRepr::Shown),
+                workflow_id,
+                ErrorSlot::Exception {
+                    python_type: ExceptionType::Exception
+                },
+            ]
+        );
+        assert_eq!(
+            catalog.classes[3].slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "ASYNC_CONTEXT"
+                },
+                ErrorSlot::NeverRetryable,
+                field("message", SlotRepr::Hidden),
+                field("workflow_name", SlotRepr::Shown),
+                workflow_id,
+            ]
+        );
+        assert!(catalog.classes[2]
+            .doc
+            .starts_with("Schema initialization or the start transaction failed"));
+    }
+
+    /// The id of a conflict is the canonical text of the UUID in the
+    /// message and in the class; the message is Python's.
+    #[test]
+    fn an_id_conflict_has_python_s_message_and_its_values() {
+        let workflow_id = Uuid::from_u128(0x0193_0000_0000_7000_8000_0000_0000_0001);
+        let error = WorkflowStartError::id_conflict("nightly", workflow_id, "weekly".to_owned());
+        assert_eq!(error.code(), WorkflowStartErrorCode::WorkflowIdConflict);
+        assert_eq!(
+            error.message(),
+            format!(
+                "workflow_id '{workflow_id}' already exists for workflow name 'weekly', cannot \
+                 start workflow name 'nightly' with the same id"
+            )
+        );
+        let values = error.slot_values();
+        let named: Vec<(&str, SlotData<'_>)> = values
+            .into_iter()
+            .map(|slot| (slot.name, slot.value))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("message", SlotData::Str(error.message())),
+                ("workflow_name", SlotData::Str("nightly")),
+                ("workflow_id", SlotData::UuidText(workflow_id)),
+                ("existing_workflow_name", SlotData::Str("weekly")),
+            ]
+        );
+    }
+
+    /// A failed install keeps Python's message (the install's prefix), and
+    /// its exception is the broker error's own exception: its own text and
+    /// its retry rule.
+    #[test]
+    fn a_failed_install_is_enqueue_failed_with_the_broker_error_as_its_exception() {
+        let workflow_id = Uuid::from_u128(7);
+        let broker_error = || BrokerError::ConnectionFailed("connection refused".to_owned());
+        let error = WorkflowStartError::start_failed(
+            "nightly",
+            workflow_id,
+            ClientStartError::SchemaInstall(broker_error()),
+        );
+        assert_eq!(error.code(), WorkflowStartErrorCode::EnqueueFailed);
+        assert_eq!(
+            error.message(),
+            format!("Schema initialization failed: {}", broker_error())
+        );
+        assert!(error.retryable());
+        assert_eq!(error.workflow_id(), workflow_id);
+        assert_eq!(error.failure_cause(), FailureCause::Connection);
+        let exception = error
+            .slot_values()
+            .into_iter()
+            .find(|slot| slot.name == "exception")
+            .map(|slot| slot.value);
+        assert_eq!(
+            exception,
+            Some(SlotData::Exception(ExceptionValue::CoreFailure {
+                text: broker_error().to_string(),
+                retryable: true,
+                cause: FailureCause::Connection,
+            }))
+        );
+    }
+
+    /// A refusal that a check found has `NoCause()` as its exception; a
+    /// refusal by a workflow error has that error's exception.
+    #[test]
+    fn a_refusal_by_a_check_has_no_cause_and_one_by_an_error_has_its_exception() {
+        let refused = |cause: StartRefusalCause| WorkflowStartError::ValidationFailed {
+            message: "refused".to_owned(),
+            workflow_name: "nightly".to_owned(),
+            workflow_id: Uuid::from_u128(8),
+            cause,
+        };
+        let exception_of = |error: &WorkflowStartError| {
+            error
+                .slot_values()
+                .into_iter()
+                .find(|slot| slot.name == "exception")
+                .map(|slot| slot.value)
+        };
+        let by_check = refused(StartRefusalCause::Check);
+        assert_eq!(
+            exception_of(&by_check),
+            Some(SlotData::Exception(ExceptionValue::NoCause))
+        );
+        assert_eq!(by_check.failure_cause(), FailureCause::PreconditionFailed);
+        let by_error = refused(StartRefusalCause::Error(WorkflowError::Validation(
+            "unresolved queue".to_owned(),
+        )));
+        assert_eq!(
+            exception_of(&by_error),
+            Some(SlotData::Exception(ExceptionValue::CoreFailure {
+                text: "workflow validation error: unresolved queue".to_owned(),
+                retryable: false,
+                cause: FailureCause::PreconditionFailed,
+            }))
+        );
     }
 }

@@ -453,8 +453,10 @@ const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
 const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | \
      AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
 
+/// A refused or failed start is a generated class of
+/// `horsies._catalog.workflow_start_errors`, built in Rust.
 const START_WORKFLOW_OUTCOME: &str =
-    "WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed";
+    "WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed";
 const START_WORKFLOW_PARAMETERS: &[StubParameter] =
     &[positional("request", "WorkflowStartRequest")];
 const REGISTER_CHILD_SPEC_SOURCE_PARAMETERS: &[StubParameter] = &[positional(
@@ -2914,16 +2916,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "WorkflowIdTaken",
-        doc: "A workflow with this id exists under another name. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("existing_name", "str"),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "NodeFinishRequest",
         doc: "One frozen phase 2. Another facts or wake value raises ValueError.",
         constructor: Constructor::Parameters(NODE_FINISH_REQUEST_PARAMETERS),
@@ -3084,18 +3076,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         doc: "The workflow exists and is not PAUSED. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("workflow_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "WorkflowStartFailed",
-        doc: "The connect, the schema install, the client family check, the statement or an owed\nchild start failed, or a child build did not run. Nothing committed, or the commit\noutcome is unknown: a resend with the same id then finds the workflow.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
         methods: &[],
     },
 ];
@@ -3873,6 +3853,10 @@ const IMPORTS: &[StubImport] = &[
             "HandleResumeRecoveryFailed",
             "HandleStoredDataInvalid",
         ],
+    },
+    StubImport {
+        module: "horsies._catalog.workflow_start_errors",
+        names: &["WorkflowStartEnqueueFailed", "WorkflowStartIdConflict"],
     },
 ];
 
