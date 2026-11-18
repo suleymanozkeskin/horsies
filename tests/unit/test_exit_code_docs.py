@@ -1,4 +1,8 @@
-"""The exit codes of the worker and its children, against the pages that list them."""
+"""The exit codes of the worker and its children, against the pages that list them.
+
+The codes come from the core's exit-code catalog (``horsies._catalog.exit_codes``,
+rendered by ``horsies-codegen``).
+"""
 
 from __future__ import annotations
 
@@ -7,13 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from horsies.core.worker.child_main import (
+from horsies._catalog import exit_codes
+from horsies._catalog.exit_codes import (
     BOOT_FAILED_EXIT_CODE,
+    LIVENESS_LOCK_LOST_EXIT_CODE,
     PROTOCOL_MISMATCH_EXIT_CODE,
+    REPARENT_FAILED_EXIT_CODE,
+    RUNNER_HEARTBEAT_LOST_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 )
-from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
-from horsies.core.worker.runner_heartbeat import RUNNER_HEARTBEAT_LOST_EXIT_CODE
 
 pytestmark = [pytest.mark.unit]
 
@@ -22,6 +28,13 @@ MIGRATION_PAGE = REPO / 'website/src/content/docs/migrations/migration-to-0-7-0.
 CLI_PAGES = (
     REPO / 'website/src/content/docs/cli.md',
     REPO / 'python/horsies/docs/cli.md',
+)
+# The codes of the ``horsies`` command itself: a clean end, an error, a usage
+# error. They are not codes of the core.
+CLI_CODES = frozenset({0, 1, 2})
+# Every exit code of the core: the worker process and its children.
+CORE_CODES = frozenset(
+    getattr(exit_codes, name) for name in exit_codes.__all__
 )
 # Codes that are new or changed in 0.7.0, with the process that exits.
 CHANGED_IN_0_7_0 = {
@@ -94,3 +107,26 @@ def test_each_cli_page_lists_the_protocol_mismatch_exit_of_a_child(page: Path) -
 
     assert PROTOCOL_MISMATCH_EXIT_CODE in rows
     assert 'protocol version' in rows[PROTOCOL_MISMATCH_EXIT_CODE][1]
+
+
+@pytest.mark.parametrize(
+    'page',
+    CLI_PAGES,
+    ids=lambda page: str(page.relative_to(REPO)),
+)
+def test_each_exit_code_of_a_cli_page_is_a_code_of_the_core(page: Path) -> None:
+    rows = _table_rows(_section(page.read_text(), '## Exit Codes'))
+
+    assert set(rows) - CLI_CODES <= CORE_CODES
+
+
+@pytest.mark.parametrize(
+    'page',
+    CLI_PAGES,
+    ids=lambda page: str(page.relative_to(REPO)),
+)
+def test_each_cli_page_lists_the_liveness_lock_exit(page: Path) -> None:
+    rows = _table_rows(_section(page.read_text(), '## Exit Codes'))
+
+    assert LIVENESS_LOCK_LOST_EXIT_CODE in rows
+    assert 'liveness lock' in rows[LIVENESS_LOCK_LOST_EXIT_CODE][1]

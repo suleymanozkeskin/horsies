@@ -105,7 +105,7 @@ class TestWorkflowHandle:
     ) -> None:
         broker = MagicMock()
         handle: WorkflowHandle[Any] = WorkflowHandle(
-            workflow_id=str(uuid.uuid4()), broker=broker,
+            workflow_id=uuid.uuid4(), broker=broker,
         )
 
         result = asyncio.run(handle.get_async(timeout_ms=timeout_ms))

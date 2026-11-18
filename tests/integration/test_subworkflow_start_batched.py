@@ -108,7 +108,7 @@ async def _start_parent(
     )
     r = await start_workflow_async(spec, broker)
     assert not is_err(r), r
-    return r.ok_value.workflow_id
+    return str(r.ok_value.workflow_id)
 
 
 async def _child_id(session: AsyncSession, parent_id: str) -> str:
@@ -283,7 +283,7 @@ class TestBulkChildStart:
 
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        resume_r = await resume_workflow(broker, child_id)
+        resume_r = await resume_workflow(broker, uuid.UUID(child_id))
         assert not is_err(resume_r), resume_r
         good_status = (
             await session.execute(
@@ -381,7 +381,7 @@ class TestBulkChildStart:
 
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        resume_r = await resume_workflow(broker, child_id)
+        resume_r = await resume_workflow(broker, uuid.UUID(child_id))
         assert not is_err(resume_r), resume_r
         fast_status = (
             await session.execute(

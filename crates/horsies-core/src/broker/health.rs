@@ -445,6 +445,72 @@ mod tests {
         assert!(result.is_err(), "unknown fields must be rejected");
     }
 
+    /// Python `test_health_models.py::TestWorkerPingRequest::test_roundtrip_through_json_io`:
+    /// a request with a target keeps each field through its wire text.
+    #[test]
+    fn ping_request_round_trip_keeps_each_field() {
+        let req = WorkerPingRequest {
+            correlation_id: "abc123".to_owned(),
+            reply_channel: "horsies_worker_pong_abc123".to_owned(),
+            target_worker_id: Some("worker-7".to_owned()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: WorkerPingRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.correlation_id, "abc123");
+        assert_eq!(back.reply_channel, "horsies_worker_pong_abc123");
+        assert_eq!(back.target_worker_id.as_deref(), Some("worker-7"));
+    }
+
+    /// Python `test_health_models.py::TestWorkerPingRequest::test_rejects_extra_fields`.
+    #[test]
+    fn ping_request_rejects_unknown_fields() {
+        let result: Result<WorkerPingRequest, _> = serde_json::from_str(
+            r#"{"correlation_id":"c","reply_channel":"r","target_worker_id":null,"rogue":1}"#,
+        );
+        assert!(result.is_err(), "unknown fields must be rejected");
+    }
+
+    /// Python `test_health_models.py::TestWorkerPingRequest::test_rejects_missing_required`.
+    #[test]
+    fn ping_request_rejects_a_missing_reply_channel() {
+        let result: Result<WorkerPingRequest, _> =
+            serde_json::from_str(r#"{"correlation_id":"c"}"#);
+        assert!(result.is_err(), "a request needs its reply channel");
+    }
+
+    /// Python `test_health_models.py::TestWorkerPongPayload::test_roundtrip_through_json_io`.
+    #[test]
+    fn pong_payload_round_trip_keeps_each_field() {
+        let pong = WorkerPongPayload {
+            correlation_id: "abc".to_owned(),
+            worker_id: "w1".to_owned(),
+            hostname: "host".to_owned(),
+            pid: 999,
+        };
+        let json = serde_json::to_string(&pong).unwrap();
+        let back: WorkerPongPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.correlation_id, "abc");
+        assert_eq!(back.worker_id, "w1");
+        assert_eq!(back.hostname, "host");
+        assert_eq!(back.pid, 999);
+    }
+
+    /// Python `test_health_models.py::TestWorkerPongPayload::test_rejects_non_integer_pid`.
+    #[test]
+    fn pong_payload_rejects_a_pid_that_is_not_an_integer() {
+        let result: Result<WorkerPongPayload, _> = serde_json::from_str(
+            r#"{"correlation_id":"c","worker_id":"w","hostname":"h","pid":"not-a-pid"}"#,
+        );
+        assert!(result.is_err(), "a pid must be an integer");
+    }
+
+    /// Python `test_health_models.py::TestResultModels::test_channel_constant`:
+    /// the shared ping channel name is stable.
+    #[test]
+    fn the_ping_channel_name_is_stable() {
+        assert_eq!(WORKER_PING_CHANNEL, "horsies_worker_ping");
+    }
+
     fn stored_row() -> StoredWorkerState {
         let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 16, 12, 0, 0).unwrap();
         StoredWorkerState {

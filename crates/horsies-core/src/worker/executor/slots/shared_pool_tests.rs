@@ -14,12 +14,12 @@ use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, CancelGraceMs,
-    ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
-    DispatchNumber, ExecutorThreads, InitFrame, LeftoverName, LoopBlockedFrame, LoopCulprit,
-    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, RssReading,
-    RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
-    SharedThreadChild, SharedWork, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs,
-    ThreadSeats,
+    ChildAfterFrame, ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
+    ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads, InitFrame, LeftoverName,
+    LoopBlockedFrame, LoopCulprit, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame,
+    ResultEnvelopeText, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild,
+    SharedResultFrame, SharedRunFrame, SharedThreadChild, SharedWork, StuckWork, TaskInputText,
+    TaskSendPool, TaskTimeoutMs, ThreadSeats,
 };
 use crate::worker::executor::supervisor::{
     BootFailure, BootFailureCause, ChildCommand, ChildExit, LossCause, ReapedExit, Spawner,
@@ -287,6 +287,7 @@ async fn a_shared_seat_reports_the_result_of_its_run() {
         run: run_ref(),
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope())),
         rss: RssReading::Unreadable,
+        child: ChildAfterFrame::ServesOn,
     });
     assert_eq!(
         run_one(
@@ -315,6 +316,7 @@ async fn a_stuck_async_run_ends_at_its_timeout_and_retries_isolated() {
             run: run_ref(),
             end: SeatEnd::TimedOut,
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         }),
     ];
     assert_eq!(

@@ -9,21 +9,17 @@ all use it, so only a policy that validates as `RetryPolicy` reaches
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.codec.json_io import Json, SerializationError
+from horsies.core.codec.json_io import Json
 from horsies.core.codec.task_options import (
     InvalidRetryPolicy,
     stored_max_retries,
 )
 from horsies.core.models.tasks import MAX_RETRY_ATTEMPTS, RetryPolicy
 from horsies.core.types.result import Err, Ok
-from horsies.core.workflows.engine import _build_enqueued_task_params
-from horsies.core.workflows.lifecycle import root_retry_and_deadline
 
 pytestmark = [pytest.mark.unit]
 
@@ -155,40 +151,3 @@ class TestStoredMaxRetries:
             )
 
 
-class TestWorkflowPaths:
-    def test_the_fast_path_root_refuses_a_negative_limit(self) -> None:
-        with pytest.raises(SerializationError, match='max_retries: Input should be'):
-            root_retry_and_deadline(
-                json.dumps({'retry_policy': _policy(max_retries=-1)}), 'root'
-            )
-
-    def test_the_fast_path_root_stores_a_valid_limit(self) -> None:
-        max_retries, _ = root_retry_and_deadline(
-            json.dumps({'retry_policy': _policy(max_retries=4)}), 'root'
-        )
-        assert max_retries == 4
-
-    @pytest.mark.asyncio
-    async def test_node_promotion_refuses_a_negative_limit(self) -> None:
-        arguments: dict[str, Any] = {
-            'task_name': 'node.task',
-            'node_input': '{}',
-            'workflow_sent_at': datetime(2026, 1, 1, tzinfo=timezone.utc),
-            'queue_name': 'default',
-            'priority': 50,
-            'args_from': None,
-            'workflow_ctx_from': None,
-            'task_options_str': json.dumps(
-                {'retry_policy': _policy(max_retries=-1)},
-            ),
-            'all_dep_results': {},
-            'all_dep_task_names': None,
-            'broker': None,
-            'all_dep_definition_keys': None,
-        }
-        outcome = await _build_enqueued_task_params(
-            MagicMock(), 'workflow-1', 3, **arguments
-        )
-        assert isinstance(outcome, Err)
-        assert outcome.err_value.message.startswith('Invalid retry_policy for task 3:')
-        assert 'max_retries: Input should be' in outcome.err_value.message

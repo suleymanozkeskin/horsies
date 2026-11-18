@@ -34,7 +34,12 @@ from horsies.core.models.boot_failure import (
     cut_text,
     describe_boot_cause,
 )
-from horsies.core.worker.run_return import ResultEnvelope, StoppedBeforeRunning
+from horsies.core.worker.run_return import (
+    CoreStoppedAfterBody,
+    CoreStoppedBeforeStart,
+    ResultEnvelope,
+    StoppedBeforeRunning,
+)
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
     OptionsUnreadable,
@@ -191,8 +196,16 @@ type NoLeftWork = NoTaskLoop | LoopHoldsNoTask
 """After the task, no asyncio task that it started is on a task loop of the
 child: the child has no loop, or its loop holds no task."""
 
-type RunEnd = ResultEnvelope | StoppedBeforeRunning
-"""How a run ended: its result envelope, or a stop before its start."""
+type RunEnd = (
+    ResultEnvelope | StoppedBeforeRunning | CoreStoppedBeforeStart | CoreStoppedAfterBody
+)
+"""How a run ended: its result envelope, or a stop before its start. A
+start that the stopped core of the child refused (``CoreStoppedBeforeStart``)
+goes out as ``OWNERSHIP_UNCONFIRMED``; a body that finished before the
+finalizing marker met the stopped core (``CoreStoppedAfterBody``) goes out
+with its result. In both cases the child ends itself once its frame is
+written, and the frame says so (``child_after_frame``), so the worker sends
+it no other run."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,6 +474,25 @@ def _run_end(end: RunEnd) -> core.TaskResult | core.StoppedBeforeRunning:
             return _returned(end)
         case StoppedBeforeRunning(reason=reason):
             return core.StoppedBeforeRunning(reason=reason)
+        case CoreStoppedBeforeStart():
+            return core.StoppedBeforeRunning(reason='OWNERSHIP_UNCONFIRMED')
+        case CoreStoppedAfterBody(result=result):
+            return _returned(result)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def child_after_frame(end: SeatEnd) -> Literal['SERVES_ON', 'ENDS_ITSELF']:
+    """What the child does once the result frame that reports ``end`` is
+    written. A run that met the stopped core of the child
+    (``CoreStoppedBeforeStart``, ``CoreStoppedAfterBody``) ends the child
+    (``child_main.end_child_after_frame``); the worker then sends it no
+    other run and waits for its exit. Every other end serves on. Pure."""
+    match end:
+        case CoreStoppedBeforeStart() | CoreStoppedAfterBody():
+            return 'ENDS_ITSELF'
+        case ResultEnvelope() | StoppedBeforeRunning() | SeatTimedOut():
+            return 'SERVES_ON'
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -469,7 +501,12 @@ def _seat_end(
     end: SeatEnd,
 ) -> core.TaskResult | core.StoppedBeforeRunning | Literal['TIMED_OUT']:
     match end:
-        case ResultEnvelope() | StoppedBeforeRunning():
+        case (
+            ResultEnvelope()
+            | StoppedBeforeRunning()
+            | CoreStoppedBeforeStart()
+            | CoreStoppedAfterBody()
+        ):
             return _run_end(end)
         case SeatTimedOut():
             return 'TIMED_OUT'
@@ -525,6 +562,7 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
                 end=_run_end(end),
                 rss_mb=_rss(rss),
                 task_loop=_task_loop(task_loop),
+                child=child_after_frame(end),
             )
         case BodyReturnedFrame(task_id=task_id, returned=returned, left=left):
             return core.BodyReturnedFrame(
@@ -536,7 +574,11 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
             return core.LeftWorkStuckFrame(task_id=task_id, still=_left(still))
         case SharedResultFrame(dispatch=dispatch, task_id=task_id, end=end, rss=rss):
             return core.SharedResultFrame(
-                dispatch=dispatch, task_id=task_id, end=_seat_end(end), rss_mb=_rss(rss),
+                dispatch=dispatch,
+                task_id=task_id,
+                end=_seat_end(end),
+                rss_mb=_rss(rss),
+                child=child_after_frame(end),
             )
         case DeadlineFiredFrame(dispatch=dispatch, task_id=task_id):
             return core.DeadlineFiredFrame(dispatch=dispatch, task_id=task_id)

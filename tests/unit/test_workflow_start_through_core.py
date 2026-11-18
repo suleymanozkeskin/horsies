@@ -3,8 +3,8 @@
 The spec crosses as workflow spec data in a ``WorkflowStartRequest``; the
 core answers ``WorkflowStarted``, ``WorkflowExists``, ``WorkflowIdTaken`` or
 ``WorkflowStartFailed``. Prevalidation stays in Python, before any core
-call. The Python start statements are tested on the reference caller
-(``test_workflow_start_catches.py``, ``test_workflow_start_retry_loop.py``).
+call. The core writes the start and resends it
+(``crates/horsies-core/src/broker/workflow_start.rs``).
 """
 
 from __future__ import annotations
@@ -207,7 +207,7 @@ class TestStartAnswers:
             )
 
         assert is_ok(result)
-        assert result.ok_value.workflow_id == WORKFLOW_ID
+        assert result.ok_value.workflow_id == uuid.UUID(WORKFLOW_ID)
         arguments = request_class.call_args.kwargs
         assert arguments['workflow_id'] == uuid.UUID(WORKFLOW_ID)
         assert arguments['sent_at'] == SENT_AT
@@ -297,8 +297,7 @@ class TestStartAnswers:
 
 class TestNodeRowAsserts:
     """The node rows assert what spec construction guarantees, before any core
-    call (``top_node_rows``). The tests of the reference caller were
-    ``test_workflow_start_catches.py::TestTransactionAsserts``."""
+    call (``top_node_rows``)."""
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_task_node_with_positional_args_fails_an_assert_that_names_it(

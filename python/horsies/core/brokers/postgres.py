@@ -39,6 +39,9 @@ from horsies._core import (
     SendPayloadMismatch,
     SendAsyncContext,
     SendPayloadTooLarge,
+    SendRefusalByRule,
+    SendRefusalByValueRule,
+    SendRefusalUnreadableJson,
     SendSuppressed,
     SendValidationFailed,
     StartAfterDelay as CoreStartAfterDelay,
@@ -1176,6 +1179,9 @@ type CoreSendOutcome = (
     | SendPayloadTooLarge
     | SendKeyConflict
 )
+type CoreRefusalCause = (
+    SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule
+)
 type RerunInputPolicy = Literal['APP_DEFAULT', 'KEEP', 'DROP']
 
 
@@ -1183,8 +1189,21 @@ def _invalid_input(message: str) -> Err[BrokerInvalidInput]:
     return Err(BrokerInvalidInput(message=message, exception=NoCause()))
 
 
+def _command_rule_refused(task_name: str, rule: str) -> Err[BrokerInvalidInput]:
+    """A rule of the version-1 command refused a value that the core's
+    request cannot hold: ``INVALID_INPUT`` with the rule as a ``ValueError``,
+    the refusal of Python's ``EnqueueCommandV1``. The core answers a value
+    that its request holds with the same message and cause
+    (``SendRefusalByValueRule``). Pure."""
+    return Err(BrokerInvalidInput(
+        message=f'enqueue input refused for {task_name}: {rule}',
+        exception=ValueError(rule),
+    ))
+
+
 def _enqueue_start_of(
     *,
+    task_name: str,
     sent_at: datetime,
     enqueued_at: datetime | None,
     enqueue_delay_seconds: int | None,
@@ -1195,15 +1214,18 @@ def _enqueue_start_of(
     instants, and a delay that fits in 64 bits. Pure but for the
     construction of the start value; nothing is written on a refusal.
 
-    The core refuses a ``sent_at`` in the future of a send that starts now.
+    A naive ``good_until`` and a delay below the 64-bit range break a rule of
+    the version-1 command (``_command_rule_refused``); the other refusals
+    have no cause. The core refuses a ``sent_at`` in the future of a send
+    that starts now.
     """
     if enqueued_at is not None and enqueue_delay_seconds is not None:
         return _invalid_input('Cannot specify both enqueued_at and enqueue_delay_seconds')
-    for label, instant in (
-        ('sent_at', sent_at), ('enqueued_at', enqueued_at), ('good_until', good_until),
-    ):
+    for label, instant in (('sent_at', sent_at), ('enqueued_at', enqueued_at)):
         if instant is not None and instant.tzinfo is None:
             return _invalid_input(f'{label} must be timezone-aware')
+    if good_until is not None and good_until.tzinfo is None:
+        return _command_rule_refused(task_name, 'good_until must be timezone-aware')
     match (enqueued_at, enqueue_delay_seconds):
         case (None, None):
             return Ok(CoreStartNow())
@@ -1211,12 +1233,40 @@ def _enqueue_start_of(
             return Ok(CoreStartAt(at))
         case (None, int() as delay_s) if SIGNED_64_BIT_MIN <= delay_s <= SIGNED_64_BIT_MAX:
             return Ok(CoreStartAfterDelay(delay_s))
+        case (None, int() as delay_s) if delay_s < SIGNED_64_BIT_MIN:
+            return _command_rule_refused(
+                task_name, 'enqueue_delay_seconds must be non-negative',
+            )
         case (None, int() as delay_s):
             return _invalid_input(
                 f'enqueue_delay_seconds {delay_s} is not a 64-bit integer',
             )
         case _:
             raise AssertionError('both start values are refused above')
+
+
+def _check_key_encodes(
+    task_name: str, idempotency_key: str | None,
+) -> Result[None, BrokerInvalidInput]:
+    """Refuse an idempotency key that UTF-8 cannot encode (a lone surrogate)
+    before the core's request reads it as UTF-8 text. The refusal is the one
+    of Python's ``ScopedIdempotencyKey``: ``INVALID_INPUT`` with the
+    ``UnicodeEncodeError`` as the cause. The core checks the other rules of
+    the key. Pure."""
+    match idempotency_key:
+        case None:
+            return Ok(None)
+        case str() as key:
+            try:
+                _ = key.encode('utf-8')
+            except UnicodeEncodeError as exc:
+                return Err(BrokerInvalidInput(
+                    message=f'idempotency key refused for {task_name}: {exc}',
+                    exception=exc,
+                ))
+            return Ok(None)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _rerun_input_policy(retain_rerun_input: bool | None) -> RerunInputPolicy:
@@ -1249,9 +1299,11 @@ def _enqueue_request(
 ) -> Result[EnqueueRequest, BrokerInvalidInput]:
     """The core's request of one send, after the client rules: the start
     (``_enqueue_start_of``), the input shape of a Python send
-    (``_parse_enqueue_input``: an object, or ``{}`` for none or JSON null)
-    and a priority that fits in 32 bits. Each refusal is ``INVALID_INPUT``
-    and writes nothing.
+    (``_parse_enqueue_input``: an object, or ``{}`` for none or JSON null),
+    a priority that fits in 32 bits (outside it, the command's priority
+    rule refuses it) and an idempotency key that UTF-8 encodes
+    (``_check_key_encodes``). Each refusal is ``INVALID_INPUT`` and writes
+    nothing.
 
     The core checks the rest at the send: the strict JSON rule of the input
     and the options, the retry limit and the class of the options, the
@@ -1259,6 +1311,7 @@ def _enqueue_request(
     class key, and a ``sent_at`` in the future of a send that starts now.
     """
     match _enqueue_start_of(
+        task_name=task_name,
         sent_at=sent_at,
         enqueued_at=enqueued_at,
         enqueue_delay_seconds=enqueue_delay_seconds,
@@ -1274,7 +1327,12 @@ def _enqueue_request(
         case Ok(ok_value=stored_input):
             pass
     if not SIGNED_32_BIT_MIN <= priority <= SIGNED_32_BIT_MAX:
-        return _invalid_input(f'priority {priority} is not a 32-bit integer')
+        return _command_rule_refused(task_name, 'priority must be between 1 and 100')
+    match _check_key_encodes(task_name, idempotency_key):
+        case Err() as refused:
+            return refused
+        case Ok():
+            pass
     return Ok(EnqueueRequest(
         task_id=task_id,
         task_name=task_name,
@@ -1305,15 +1363,20 @@ def _enqueue_core_error(
     ))
 
 
-def _refusal_cause(cause_text: str | None) -> SerializationError | NoCause:
-    """The exception of a refused text: the JSON reader's error, as the
-    Python read gives it, or ``NoCause()`` when a rule refused a value that
-    reads. Pure."""
-    match cause_text:
-        case None:
+def _refusal_cause(cause: CoreRefusalCause) -> SerializationError | ValueError | NoCause:
+    """The exception of a core refusal, as Python's broker gave it: the JSON
+    reader's error as a ``SerializationError``, the rule of the version-1
+    command or of the scoped idempotency key as a ``ValueError``, and
+    ``NoCause()`` when another rule refused a value that reads. Pure."""
+    match cause:
+        case SendRefusalUnreadableJson(reader_error=reader_error):
+            return SerializationError(reader_error)
+        case SendRefusalByValueRule(rule=rule):
+            return ValueError(rule)
+        case SendRefusalByRule():
             return NoCause()
-        case str():
-            return SerializationError(cause_text)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _enqueue_result(outcome: CoreSendOutcome) -> Result[UUID, BrokerEnqueueError]:
@@ -1322,7 +1385,7 @@ def _enqueue_result(outcome: CoreSendOutcome) -> Result[UUID, BrokerEnqueueError
     - ``Enqueued``: ``Ok`` with the sent id, or the id that holds the key
       for a key replay.
     - ``SendValidationFailed``: ``INVALID_INPUT`` or
-      ``INVALID_TASK_OPTIONS``, with the JSON reader's error as the cause.
+      ``INVALID_TASK_OPTIONS``, with the cause of ``_refusal_cause``.
     - ``SendEnqueueFailed``: ``ENQUEUE_FAILED`` with the core's exception of
       the cause.
     - ``SendPayloadMismatch``: ``PAYLOAD_MISMATCH``.
@@ -1336,16 +1399,16 @@ def _enqueue_result(outcome: CoreSendOutcome) -> Result[UUID, BrokerEnqueueError
         case Enqueued(task_id=task_id):
             return Ok(task_id)
         case SendValidationFailed(
-            code='INVALID_INPUT', message=message, cause_text=cause_text,
+            code='INVALID_INPUT', message=message, cause=cause,
         ):
             return Err(BrokerInvalidInput(
-                message=message, exception=_refusal_cause(cause_text),
+                message=message, exception=_refusal_cause(cause),
             ))
         case SendValidationFailed(
-            code='INVALID_TASK_OPTIONS', message=message, cause_text=cause_text,
+            code='INVALID_TASK_OPTIONS', message=message, cause=cause,
         ):
             return Err(BrokerInvalidTaskOptions(
-                message=message, exception=_refusal_cause(cause_text),
+                message=message, exception=_refusal_cause(cause),
             ))
         case SendValidationFailed(code=code):
             raise AssertionError(f'the core send refused with the code {code}')
@@ -2335,11 +2398,13 @@ class PostgresBroker:
 
         Failures (``_enqueue_request``, ``_enqueue_result``):
         - ``INVALID_INPUT`` / ``INVALID_TASK_OPTIONS``: refused before any
-          statement; nothing was written.
+          statement; nothing was written. A rule of the version-1 command
+          (an empty retention class key included) or of the idempotency key
+          has its ``ValueError`` as the cause, as Python's broker gave it.
         - ``ENQUEUE_FAILED``: the row may or may not exist; ``retryable`` is
           the core's classification. A database of the other client family
-          and a retention class key that no class derives are not
-          retryable.
+          and a retention class key that is not empty and that no class
+          derives are not retryable.
         - ``PAYLOAD_MISMATCH``, ``IDEMPOTENCY_KEY_CONFLICT``: nothing was
           written.
 

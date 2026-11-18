@@ -3,8 +3,12 @@
 //! A read returns the JSON text of its core model (`MonitoringJson`); the
 //! Python client validates it into its Pydantic model with one
 //! `model_validate_json`, and the web handler writes the same text. An
-//! expected failure is `MonitoringFailed` with its catalog code. The task
-//! detail of an id that no table holds is `TaskDetailAbsent`. Every read
+//! expected failure is the generated class of the core's
+//! `MonitoringQueryError` (`MonitoringQueryDbOperationFailed` or
+//! `MonitoringQueryHistoryContractViolation` of
+//! `horsies._catalog.monitoring_errors`), built in Rust (`catalog_errors`)
+//! with the read as the subject of its exception. The task detail of an id
+//! that no table holds is `TaskDetailAbsent`. Every read
 //! sends one statement in autocommit and writes nothing; it does not install
 //! the schema, as Python's monitoring reads do not.
 
@@ -15,7 +19,7 @@ use horsies_core::catalog::CodeEnum;
 use horsies_core::monitoring::{
     get_task_detail, get_workflow_node, get_workflow_run, list_schedules, list_tasks,
     list_workflow_names, list_workflow_runs, task_breakdown, task_facets, task_stats,
-    ErrorCategory, HistoryWindow, MonitoringQueryError, MonitoringQueryErrorCode, SortDirection,
+    ErrorCategory, HistoryWindow, MonitoringQueryError, SortDirection,
     TaskBreakdownQuery as CoreTaskBreakdownQuery, TaskDetailRead,
     TaskFacetsQuery as CoreTaskFacetsQuery, TaskFilters, TaskGroupBy,
     TaskListQuery as CoreTaskListQuery, TaskSortField, TaskStatsQuery as CoreTaskStatsQuery,
@@ -27,7 +31,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
-use crate::core_failures::FailureException;
+use crate::catalog_errors::catalog_error;
 use crate::handle::BrokerConnection;
 use crate::operations::arguments::utc_instant;
 
@@ -38,19 +42,41 @@ pub struct MonitoringJson {
     pub json: String,
 }
 
-/// An expected failure of a monitoring read. Nothing changed: a read writes
-/// nothing.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct MonitoringFailed {
-    /// A member of `MonitoringQueryErrorCode`, as its wire value.
-    pub code: String,
-    /// The cause, with the read that failed.
-    pub message: String,
-    pub retryable: bool,
-    /// The cause, with the read as its subject (for example
-    /// `task list query`).
-    pub exception: FailureException,
+/// An expected failure of a monitoring read: the read that failed and the
+/// core's error. Nothing changed: a read writes nothing. Python reads it as
+/// the generated class of the error, with `subject` as the subject of its
+/// exception.
+#[derive(Debug)]
+pub struct ReadFailed {
+    /// The read, for example `task list query`.
+    pub subject: &'static str,
+    pub error: MonitoringQueryError,
+}
+
+impl ReadFailed {
+    /// The failed connect before the read `subject`: no statement ran.
+    /// Pure.
+    fn connect(subject: &'static str, error: BrokerError) -> Self {
+        Self {
+            subject,
+            error: MonitoringQueryError::connect_failed(subject, error),
+        }
+    }
+
+    /// The failure of the read `subject` that the core reports. Pure.
+    fn read(subject: &'static str, error: MonitoringQueryError) -> Self {
+        Self { subject, error }
+    }
+}
+
+impl<'py> IntoPyObject<'py> for ReadFailed {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        catalog_error(py, self.subject, &self.error)
+    }
 }
 
 /// The subject of the exception of a failed detail read.
@@ -69,7 +95,7 @@ pub struct TaskDetailAbsent {
 #[derive(Debug)]
 pub enum ReadOutcome {
     Json(MonitoringJson),
-    Failed(MonitoringFailed),
+    Failed(ReadFailed),
 }
 
 impl<'py> IntoPyObject<'py> for ReadOutcome {
@@ -90,7 +116,7 @@ impl<'py> IntoPyObject<'py> for ReadOutcome {
 pub enum DetailOutcome {
     Json(MonitoringJson),
     Absent(TaskDetailAbsent),
-    Failed(MonitoringFailed),
+    Failed(ReadFailed),
 }
 
 impl<'py> IntoPyObject<'py> for DetailOutcome {
@@ -430,29 +456,6 @@ fn sort_direction(value: &str) -> Result<SortDirection, String> {
         .ok_or_else(|| format!("sort_dir: {value:?} is not 'asc' or 'desc'"))
 }
 
-/// The record of a failure of the read `operation` that the core reports.
-pub fn read_failed(operation: &'static str, error: MonitoringQueryError) -> MonitoringFailed {
-    MonitoringFailed {
-        code: error.code().wire_value().to_owned(),
-        message: error.message().to_owned(),
-        retryable: error.retryable(),
-        exception: FailureException::of(operation, &error),
-    }
-}
-
-/// The record of a failed connect of the handle's broker: no statement ran.
-/// The message names the read, as the core's read failures do.
-pub fn connect_failed(operation: &'static str, error: &BrokerError) -> MonitoringFailed {
-    MonitoringFailed {
-        code: MonitoringQueryErrorCode::DbOperationFailed
-            .wire_value()
-            .to_owned(),
-        message: format!("{operation} failed: {error}"),
-        retryable: error.is_retryable(),
-        exception: FailureException::of(operation, error),
-    }
-}
-
 /// The record of the JSON text of the core model `model`. A model that does
 /// not encode is a defect of the core: the operation panics with the
 /// model's name.
@@ -480,11 +483,11 @@ where
 {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return ReadOutcome::Failed(connect_failed(operation, &error)),
+        Err(error) => return ReadOutcome::Failed(ReadFailed::connect(operation, error)),
     };
     match read(broker).await {
         Ok(encoded) => ReadOutcome::Json(model_json(model, encoded)),
-        Err(error) => ReadOutcome::Failed(read_failed(operation, error)),
+        Err(error) => ReadOutcome::Failed(ReadFailed::read(operation, error)),
     }
 }
 
@@ -619,11 +622,11 @@ pub async fn list_tasks_operation(
     let operation = "task list query";
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return ReadOutcome::Failed(connect_failed(operation, &error)),
+        Err(error) => return ReadOutcome::Failed(ReadFailed::connect(operation, error)),
     };
     match list_tasks(&broker, &query).await {
         Ok(page) => ReadOutcome::Json(model_json("TaskListPage", serde_json::to_string(&page))),
-        Err(error) => ReadOutcome::Failed(read_failed(operation, error)),
+        Err(error) => ReadOutcome::Failed(ReadFailed::read(operation, error)),
     }
 }
 
@@ -635,11 +638,11 @@ pub async fn task_facets_operation(
     let operation = "task facets query";
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return ReadOutcome::Failed(connect_failed(operation, &error)),
+        Err(error) => return ReadOutcome::Failed(ReadFailed::connect(operation, error)),
     };
     match task_facets(&broker, &query).await {
         Ok(facets) => ReadOutcome::Json(model_json("Facets", serde_json::to_string(&facets))),
-        Err(error) => ReadOutcome::Failed(read_failed(operation, error)),
+        Err(error) => ReadOutcome::Failed(ReadFailed::read(operation, error)),
     }
 }
 
@@ -653,7 +656,7 @@ fn detail_outcome(read: Result<TaskDetailRead, MonitoringQueryError>) -> DetailO
             task_id: absent.task_id,
             reason: absent.reason.wire_value().to_owned(),
         }),
-        Err(error) => DetailOutcome::Failed(read_failed(DETAIL_SUBJECT, error)),
+        Err(error) => DetailOutcome::Failed(ReadFailed::read(DETAIL_SUBJECT, error)),
     }
 }
 
@@ -661,7 +664,7 @@ fn detail_outcome(read: Result<TaskDetailRead, MonitoringQueryError>) -> DetailO
 pub async fn task_detail_operation(connection: BrokerConnection, task_id: Uuid) -> DetailOutcome {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return DetailOutcome::Failed(connect_failed(DETAIL_SUBJECT, &error)),
+        Err(error) => return DetailOutcome::Failed(ReadFailed::connect(DETAIL_SUBJECT, error)),
     };
     detail_outcome(get_task_detail(&broker, task_id).await)
 }
@@ -725,16 +728,44 @@ mod tests {
 
     #[test]
     fn a_connect_failure_is_a_database_failure_that_names_the_read() {
-        let failed = connect_failed(
+        let failed = ReadFailed::connect(
             "task list query",
-            &BrokerError::ClaimContract("planned failure".to_owned()),
+            BrokerError::ClaimContract("planned failure".to_owned()),
         );
-        assert_eq!(failed.code, "DB_OPERATION_FAILED");
-        assert!(
-            failed.message.starts_with("task list query failed: "),
-            "{}",
-            failed.message
+        assert_eq!(failed.subject, "task list query");
+        assert_eq!(
+            failed.error.code(),
+            horsies_core::monitoring::MonitoringQueryErrorCode::DbOperationFailed
         );
-        assert!(!failed.retryable);
+        assert_eq!(
+            failed.error.message(),
+            "task list query failed: claim contract violation: planned failure"
+        );
+        assert!(!failed.error.retryable());
+        assert!(matches!(
+            failed.error.error_source(),
+            horsies_core::monitoring::MonitoringQueryErrorSource::Broker(
+                BrokerError::ClaimContract(_)
+            )
+        ));
+    }
+
+    /// A failure that the core reports keeps the read as its subject and
+    /// the core's error as it is.
+    #[test]
+    fn a_read_failure_keeps_the_read_and_the_core_s_error() {
+        let failed = ReadFailed::read(
+            DETAIL_SUBJECT,
+            MonitoringQueryError::connect_failed(
+                DETAIL_SUBJECT,
+                BrokerError::ConnectionFailed("refused".to_owned()),
+            ),
+        );
+        assert_eq!(failed.subject, "task detail query");
+        assert!(failed.error.retryable());
+        assert_eq!(
+            failed.error.message(),
+            "task detail query failed: connection failed: refused"
+        );
     }
 }

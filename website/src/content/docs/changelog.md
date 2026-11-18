@@ -139,13 +139,36 @@ before you upgrade a 0.7 deployment.
   (`Status failed for workflow <id>: <cause>`). The records `HandleFailed`
   and `WorkflowResumeRecoveryFailed` of `horsies._core` are removed.
   `workflow_id` and the id in the message are the canonical text of the
-  UUID: a `WorkflowHandle` made from another spelling of the same UUID
-  (upper case, braces) gets the canonical form there.
+  UUID.
   `HandleResumeRecoveryFailed.exception` holds the failure of the work
   after the commit alone, as in 0.7, and its `retryable` is the rule of that
   failure. A failed `result_for` read keeps the `BROKER_ERROR` message of
   0.7, which names the node: `DB query failed for result_for node
   <node_id> in workflow <id>: <cause>`.
+- **`HistoryContractError` is generated from the core, and the core builds
+  the error classes of the monitoring reads.** `HistoryContractError` is
+  rendered into `horsies._catalog.history_errors`, and
+  `horsies.core.history.errors` re-exports it; its name, base, doc and its
+  subclasses do not change. A failed monitoring read returns the
+  `MonitoringQueryError` class that the core builds, with the same
+  messages. The `exception` of `MonitoringQueryDbOperationFailed` is the
+  core's class of the cause with the cause's own text (the read is its
+  subject); the `exception` of `MonitoringQueryHistoryContractViolation` is
+  a `HistoryContractError` with the cause's own text, as in 0.7.
+
+- **`WorkflowHandle.workflow_id` is a `uuid.UUID`, and
+  `WorkflowHandle.for_id(text, broker)` parses a workflow id text.**
+  `for_id` returns `Ok(handle)` for every spelling that `uuid.UUID` accepts
+  (upper case, braces, `urn:uuid:`, no hyphens), or
+  `Err(HandleInvalidWorkflowId)` (new, exported from `horsies`: `message`,
+  `workflow_id_text`, `exception`) for text that is not a UUID; it reads
+  nothing. pyright refuses a `str` id in `WorkflowHandle(...)`, and
+  `pause_workflow`, `resume_workflow`, `pause_workflow_sync` and
+  `resume_workflow_sync` take a `uuid.UUID`. A handle that a start returns
+  holds the UUID that the start sent. The handle methods no longer parse the
+  id at each call: in 0.7 a handle made from text that is not a UUID
+  returned `DB_OPERATION_FAILED` from each call. The `workflow_id` of the
+  handle error classes stays a `str`, the canonical text of the UUID.
 
 - **The core builds the error classes of the broker.** A failed ping,
   task info read, result read, worker state read, class read, task list
@@ -176,6 +199,23 @@ before you upgrade a 0.7 deployment.
   runs on the core. `CoreStopped` means that a background task of the core
   panicked, a defect in horsies: restart the process.
 
+- **A worker child whose core stopped ends itself.** It never serves on
+  with a stopped core (`CoreStopped`) or as a fork of a child
+  (`ForkedAfterCoreStart`). The child exits with code 80, and the worker
+  starts a new child; the frame that the child sends last says that it
+  ends itself, so the worker sends it no other task. At the start of a
+  task, before task code ran, the
+  worker releases the claim with no attempt charged, and the new child runs
+  the task. After a body that finished, the child reports the result and
+  the worker writes it as for any task: the task keeps its result, with no
+  second run. A body that the refusal ended (a core call of the body raised
+  it) has no result: the child reports nothing, and the task takes the
+  crashed-child path (`WORKER_CRASHED`) and its retry policy, as does every
+  other run of a shared child whose body still runs at the exit. A fork
+  exits at once and writes nothing to the worker. The last log line of the
+  child names the cause; the worker logs the replacement of a child that
+  held no task at error level.
+
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of
   `BrokerIdempotencyKeyConflict`; the `task_id` of `Horsies.get_result`,
@@ -186,7 +226,7 @@ before you upgrade a 0.7 deployment.
   and the rerun outcomes; `mint_task_id()`; and in `horsies.monitoring`,
   `get_task_detail`, `cancel_task` and the task ids of their models. Text
   becomes a task id only at the web API path. Workflow ids keep their text
-  type.
+  type, except `WorkflowHandle.workflow_id`.
 
 - **One `input_json` holds the task input.** `TaskSendPayload.input_json`
   (the keyword arguments as one JSON object, or `None` for none) replaces

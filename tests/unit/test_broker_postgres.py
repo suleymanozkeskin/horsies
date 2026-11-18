@@ -8,7 +8,6 @@ error handling, and delegation patterns.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -31,6 +30,9 @@ from horsies._core import (
     SendKeyConflict,
     SendPayloadMismatch,
     SendPayloadTooLarge,
+    SendRefusalByRule,
+    SendRefusalByValueRule,
+    SendRefusalUnreadableJson,
     SendSuppressed,
     SendValidationFailed,
     StartAfterDelay as CoreStartAfterDelay,
@@ -89,7 +91,6 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
-from tests.dualrun.reference import enqueue_caller
 from tests.broker_resources_support import (
     pin_resources,
     resources_of,
@@ -106,11 +107,6 @@ def _pinned(broker: Any) -> Any:
     return broker._build_resources()
 
 
-def _set_resources(broker: Any, **parts: Any) -> None:
-    """Replace parts of the pinned resource set (white-box test helper)."""
-    pin_resources(broker, dataclasses.replace(_pinned(broker), **parts))
-
-
 def _listener_of(broker: Any) -> Any:
     """The listener inside the pinned resource set."""
     match _pinned(broker).listener:
@@ -118,12 +114,6 @@ def _listener_of(broker: Any) -> Any:
             return listener
         case ListenerDisabled():
             raise AssertionError('broker has no listener')
-
-
-# The Python send before the switch, kept as the dual-run reference. The
-# tests of it pass a mocked broker's loose values (text ids), as they did
-# through the method, so it is called untyped.
-_python_enqueue_async: Any = enqueue_caller.enqueue_async
 
 
 _CONNECTION_LOST = CoreConnectionError('task_info', 'connection lost', True)
@@ -186,56 +176,6 @@ def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
 # ---------------------------------------------------------------------------
 # TestEnqueueAsync
 # ---------------------------------------------------------------------------
-
-
-def _make_enqueue_session() -> AsyncMock:
-    """Build a mock session for enqueue_async tests.
-
-    The broker now uses SQLAlchemy Core INSERT ... RETURNING, so we mock
-    session.execute() to return a result whose .fetchone() returns a
-    non-None row (simulating a successful INSERT RETURNING id).
-    """
-    session = AsyncMock()
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=None)
-
-    # execute() returns a CursorResult-like mock whose fetchone()
-    # returns a non-None row, indicating the INSERT succeeded.
-    mock_result = MagicMock()
-    mock_result.fetchone.return_value = MagicMock()  # non-None = row inserted
-    session.execute = AsyncMock(return_value=mock_result)
-
-    return session
-
-
-_SENT_TASK_ID = UUID('0198c0de-0000-7000-8000-0000000000a1')
-
-
-def _make_enqueue_engine(
-    *,
-    outcome: str = 'INSERTED',
-    task_id: UUID = _SENT_TASK_ID,
-) -> tuple[MagicMock, AsyncMock]:
-    """Mock async engine for the enqueue statement.
-
-    Every enqueue executes one ``horsies_enqueue_task`` statement on an
-    AUTOCOMMIT connection from the broker's runtime engine — no session, no
-    commit. Returns ``(engine, connection)``; the statement answers one row
-    ``(outcome, task_id)``.
-    """
-    conn = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.fetchall.return_value = [(outcome, task_id)]
-    conn.execute = AsyncMock(return_value=mock_result)
-    conn.execution_options = AsyncMock(return_value=conn)
-
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=conn)
-    ctx.__aexit__ = AsyncMock(return_value=None)
-
-    engine = MagicMock()
-    engine.connect = MagicMock(return_value=ctx)
-    return engine, conn
 
 
 _NO_SERVER_URL = 'postgresql://u:p@127.0.0.1:9/db'
@@ -548,7 +488,9 @@ class TestEnqueueThroughCore:
                 'good_until must be timezone-aware',
                 id='naive-good-until',
             ),
-            pytest.param({'priority': 2**31}, 'not a 32-bit integer', id='priority-range'),
+            pytest.param(
+                {'priority': 2**31}, 'priority must be between 1 and 100', id='priority-range',
+            ),
             pytest.param(
                 {'enqueue_delay_seconds': 2**63}, 'not a 64-bit integer', id='delay-range',
             ),
@@ -575,16 +517,26 @@ class TestEnqueueThroughCore:
         ],
     )
     @pytest.mark.parametrize(
-        ('cause_text', 'cause_class'),
-        [('expected value at line 1', SerializationError), (None, NoCause)],
+        ('cause', 'cause_class'),
+        [
+            pytest.param(
+                MagicMock(spec=SendRefusalUnreadableJson, reader_error='expected value at line 1'),
+                SerializationError,
+                id='unreadable-json',
+            ),
+            pytest.param(MagicMock(spec=SendRefusalByRule), NoCause, id='by-rule'),
+            pytest.param(
+                MagicMock(spec=SendRefusalByValueRule, rule='priority must be between 1 and 100'),
+                ValueError,
+                id='by-value-rule',
+            ),
+        ],
     )
     async def test_a_core_refusal_keeps_its_code_and_cause(
-        self, code: str, error_class: type, cause_text: str | None, cause_class: type,
+        self, code: str, error_class: type, cause: MagicMock, cause_class: type,
     ) -> None:
         broker = self._broker_answering(
-            MagicMock(
-                spec=SendValidationFailed, code=code, message='refused', cause_text=cause_text,
-            ),
+            MagicMock(spec=SendValidationFailed, code=code, message='refused', cause=cause),
         )
 
         result = await self._send(broker)
@@ -1954,22 +1906,21 @@ class TestCloseAsyncErrorPaths:
         assert err.exception is not None
 
 
-class _DatabaseMustNotRun:
-    """Broker wiring for a refused input: any database use fails the test."""
-
-    def __init__(self) -> None:
-        self.broker = _make_broker()
-        self.engine, self.conn = _make_enqueue_engine()
-        self.session = _make_enqueue_session()
-        _set_resources(
-            self.broker,
-            engine=self.engine,
-            session_factory=MagicMock(return_value=self.session),
-        )
-
-    def assert_nothing_ran(self) -> None:
-        self.conn.execute.assert_not_awaited()
-        self.session.execute.assert_not_awaited()
+def _assert_refused_with_cause(
+    result: Any, *, message: str, cause_type: type[BaseException], cause_text: str,
+) -> None:
+    """The outcome of Python's broker for a value that a rule refused:
+    INVALID_INPUT, not retryable, with ``message`` and a cause of exactly
+    ``cause_type`` whose text is ``cause_text``."""
+    match result:
+        case Err(BrokerInvalidInput(message=refused_message, exception=cause) as refused):
+            assert refused.code is BrokerErrorCode.INVALID_INPUT
+            assert refused.retryable is False
+            assert refused_message == message
+            assert type(cause) is cause_type, repr(cause)
+            assert str(cause) == cause_text
+        case other:
+            raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
 
 
 REFUSED_KWARGS = ['5', '"a"', '[1]', 'true', '0', 'false', '""', '[]', '']
@@ -1981,10 +1932,7 @@ class TestEnqueueInputRefusal:
 
     The send runs on the real core handle with no server
     (``_refusing_broker``): a send that reached the database would fail as
-    ENQUEUE_FAILED. ``test_command_rule_is_refused_with_its_cause`` and
-    ``test_idempotency_key_is_refused`` still run on the Python send before
-    the switch (``tests/dualrun/reference/enqueue_caller.py``): the facade
-    gives those refusals another cause."""
+    ENQUEUE_FAILED, so a refusal also shows that nothing was written."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('input_json', REFUSED_KWARGS)
@@ -2008,21 +1956,70 @@ class TestEnqueueInputRefusal:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        'overrides',
+        ('overrides', 'message', 'rule'),
         [
-            pytest.param({'task_name': ''}, id='empty-task-name'),
-            pytest.param({'queue_name': ''}, id='empty-queue-name'),
-            pytest.param({'priority': 0}, id='priority-below'),
-            pytest.param({'priority': 101}, id='priority-above'),
-            pytest.param({'good_until': datetime(2030, 1, 1)}, id='naive-good-until'),
-            pytest.param({'enqueue_delay_seconds': -1}, id='negative-delay'),
-            pytest.param({'retention_class_key': ''}, id='empty-retention-key'),
+            pytest.param(
+                {'task_name': ''},
+                'enqueue input refused for : task_name must be non-empty',
+                'task_name must be non-empty',
+                id='empty-task-name',
+            ),
+            pytest.param(
+                {'queue_name': ''},
+                'enqueue input refused for my_task: queue_name must be non-empty',
+                'queue_name must be non-empty',
+                id='empty-queue-name',
+            ),
+            pytest.param(
+                {'priority': 0},
+                'enqueue input refused for my_task: priority must be between 1 and 100',
+                'priority must be between 1 and 100',
+                id='priority-below',
+            ),
+            pytest.param(
+                {'priority': 101},
+                'enqueue input refused for my_task: priority must be between 1 and 100',
+                'priority must be between 1 and 100',
+                id='priority-above',
+            ),
+            pytest.param(
+                {'priority': 2**31},
+                'enqueue input refused for my_task: priority must be between 1 and 100',
+                'priority must be between 1 and 100',
+                id='priority-beyond-32-bits',
+            ),
+            pytest.param(
+                {'good_until': datetime(2030, 1, 1)},
+                'enqueue input refused for my_task: good_until must be timezone-aware',
+                'good_until must be timezone-aware',
+                id='naive-good-until',
+            ),
+            pytest.param(
+                {'enqueue_delay_seconds': -1},
+                'enqueue input refused for my_task: enqueue_delay_seconds must be non-negative',
+                'enqueue_delay_seconds must be non-negative',
+                id='negative-delay',
+            ),
+            pytest.param(
+                {'enqueue_delay_seconds': SIGNED_64_BIT_MIN - 1},
+                'enqueue input refused for my_task: enqueue_delay_seconds must be non-negative',
+                'enqueue_delay_seconds must be non-negative',
+                id='delay-below-64-bits',
+            ),
+            pytest.param(
+                {'retention_class_key': ''},
+                'enqueue input refused for my_task: retention_class_key must be non-empty',
+                'retention_class_key must be non-empty',
+                id='empty-retention-key',
+            ),
         ],
     )
     async def test_command_rule_is_refused_with_its_cause(
-        self, overrides: dict[str, Any],
+        self, overrides: dict[str, Any], message: str, rule: str,
     ) -> None:
-        wiring = _DatabaseMustNotRun()
+        """Python's ``EnqueueCommandV1`` refuses each value with a
+        ``ValueError`` of its rule (``_command_fingerprint`` of
+        ``tests/dualrun/reference/enqueue_caller.py``, and 0.7.0)."""
         values: dict[str, Any] = {
             'task_name': 'my_task',
             'queue_name': 'default',
@@ -2030,43 +2027,74 @@ class TestEnqueueInputRefusal:
         }
         values.update(overrides)
 
-        result = await _python_enqueue_async(
-            wiring.broker,
-            task_id='t', send_kind=SendKind.FIRST, **values,
+        result = await _refusing_broker().enqueue_async(
+            task_id=SEND_TASK_ID, send_kind=SendKind.FIRST, **values,
         )
 
-        assert is_err(result)
-        match result.err_value:
-            case BrokerInvalidInput(exception=cause):
-                assert isinstance(cause, ValueError)
-            case other:
-                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
-        wiring.assert_nothing_ran()
+        _assert_refused_with_cause(
+            result, message=message, cause_type=ValueError, cause_text=rule,
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        'key',
+        ('key', 'cause_type', 'cause_text'),
         [
-            pytest.param('', id='empty'),
-            pytest.param('k' * 256, id='over-the-byte-bound'),
-            pytest.param('\ud800', id='not-utf8-encodable'),
+            pytest.param('', ValueError, 'idempotency key must be non-empty', id='empty'),
+            pytest.param(
+                'k' * 256,
+                ValueError,
+                'idempotency key must be at most 255 UTF-8 bytes',
+                id='over-the-byte-bound',
+            ),
+            pytest.param(
+                '\ud800',
+                UnicodeEncodeError,
+                "'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed",
+                id='not-utf8-encodable',
+            ),
         ],
     )
-    async def test_idempotency_key_is_refused(self, key: str) -> None:
-        wiring = _DatabaseMustNotRun()
-
-        result = await _python_enqueue_async(
-            wiring.broker,
-            'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), idempotency_key=key,
+    async def test_idempotency_key_is_refused(
+        self, key: str, cause_type: type[BaseException], cause_text: str,
+    ) -> None:
+        """Python's ``ScopedIdempotencyKey`` refuses each key with a
+        ``ValueError``; a key that UTF-8 cannot encode, with the
+        ``UnicodeEncodeError`` of the encode (``_enqueue_key`` of
+        ``tests/dualrun/reference/enqueue_caller.py``, and 0.7.0)."""
+        result = await _refusing_broker().enqueue_async(
+            'my_task',
+            task_id=SEND_TASK_ID,
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            idempotency_key=key,
         )
 
-        assert is_err(result)
-        match result.err_value:
-            case BrokerInvalidInput(exception=cause):
-                assert isinstance(cause, ValueError)
-            case other:
-                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
-        wiring.assert_nothing_ran()
+        _assert_refused_with_cause(
+            result,
+            message=f'idempotency key refused for my_task: {cause_text}',
+            cause_type=cause_type,
+            cause_text=cause_text,
+        )
+
+    def test_sync_send_refuses_a_key_utf8_cannot_encode(self) -> None:
+        """The sync form refuses the key as the async form does."""
+        result = _refusing_broker().enqueue(
+            'my_task',
+            task_id=SEND_TASK_ID,
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            idempotency_key='\ud800',
+        )
+
+        cause_text = (
+            "'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed"
+        )
+        _assert_refused_with_cause(
+            result,
+            message=f'idempotency key refused for my_task: {cause_text}',
+            cause_type=UnicodeEncodeError,
+            cause_text=cause_text,
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('field', ['sent_at', 'enqueued_at'])

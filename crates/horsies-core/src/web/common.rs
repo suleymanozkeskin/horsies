@@ -590,7 +590,7 @@ mod tests {
         assert_eq!(
             status(MonitoringQueryError::HistoryContractViolation {
                 message: "read failed".to_owned(),
-                source: read_source(),
+                source: crate::monitoring::HistoryContractSource(read_source()),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
         );

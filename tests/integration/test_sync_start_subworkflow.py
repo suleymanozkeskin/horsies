@@ -151,7 +151,7 @@ def test_a_sync_start_with_a_sub_workflow_root_runs_build_with(
 
     assert is_ok(started), started
     handle = started.ok_value
-    assert handle.workflow_id == workflow_id
+    assert handle.workflow_id == uuid.UUID(workflow_id)
     with SEEN_LOCK:
         seen = list(SEEN)
     # build_with ran once, with the node input, on a thread other than the
