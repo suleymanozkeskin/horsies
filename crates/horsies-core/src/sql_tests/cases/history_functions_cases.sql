@@ -1176,6 +1176,92 @@ SELECT fixture_check(
     )
 );
 
+-- The pending row of a moved workflow task pins its leaf until the quarantine copies the result and repoints the
+-- row. The leaf then detaches and drops, and phase 2 writes the node from the copy. The move of this script holds
+-- the leaf lock in shared mode until the end of the transaction; a lock of this session does not block its own
+-- calls, so the lock checks of the cases above are not repeated here.
+SELECT fixture_leaf('standard_1d', '2021-01-17 00:00:00+00');
+INSERT INTO ids VALUES
+    ('repoint_workflow', gen_random_uuid()),
+    ('repoint_task', fixture_uuid7(now() - interval '1 minute')),
+    ('repoint_node', gen_random_uuid());
+SELECT fixture_workflow((SELECT id FROM ids WHERE name = 'repoint_workflow'));
+SELECT fixture_task((SELECT id FROM ids WHERE name = 'repoint_task'), 'RUNNING', 'standard_1d', TRUE, TRUE,
+    '{"a":9}', NULL, NULL);
+SELECT fixture_node((SELECT id FROM ids WHERE name = 'repoint_node'),
+    (SELECT id FROM ids WHERE name = 'repoint_workflow'), 0, (SELECT id FROM ids WHERE name = 'repoint_task'));
+SELECT fixture_move((SELECT id FROM ids WHERE name = 'repoint_task'), 'FAILED', 'FAIL_RUNNING',
+    '2021-01-17 10:00:00+00', '{"e":9}', 'E', 'r');
+CREATE TEMP TABLE begin_repoint_blocked AS
+    SELECT * FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_17');
+SELECT fixture_check(
+    'quarantine repoint: the pending row of a moved workflow task makes its leaf PENDING_BLOCKED',
+    (SELECT b.outcome = 'PENDING_BLOCKED' AND b.blocker_count = 1 AND b.attachment = 'ATTACHED'
+     FROM begin_repoint_blocked AS b)
+);
+CREATE TEMP TABLE quarantine_repoint AS
+    SELECT * FROM horsies_phase2_quarantine_one((SELECT id FROM ids WHERE name = 'repoint_task'));
+SELECT fixture_check(
+    'quarantine repoint: the verified copy is REPOINTED and the pending row no longer names the leaf',
+    (SELECT q.verdict = 'REPOINTED' FROM quarantine_repoint AS q)
+    AND (SELECT p.recovery_source = 'QUARANTINE' AND p.history_class IS NULL AND p.history_anchor IS NULL
+                AND p.quarantine_task_id = p.task_id
+         FROM horsies_workflow_phase2_pending AS p WHERE p.task_id = (SELECT id FROM ids WHERE name = 'repoint_task'))
+    AND (SELECT convert_from(q.result_payload, 'UTF8') = '{"e":9}' AND q.retention_class_key = 'standard_1d'
+                AND q.terminal_at = '2021-01-17 10:00:00+00'
+         FROM horsies_workflow_phase2_quarantine AS q
+         WHERE q.task_id = (SELECT id FROM ids WHERE name = 'repoint_task'))
+);
+CREATE TEMP TABLE begin_repointed AS
+    SELECT * FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_17');
+SELECT fixture_check(
+    'quarantine repoint: with the pending row repointed, the leaf is DETACHABLE',
+    (SELECT b.outcome = 'DETACHABLE' FROM begin_repointed AS b)
+);
+ALTER TABLE horsies_task_history_standard_1d DETACH PARTITION horsies_task_history_standard_1d_2021_01_17;
+CREATE TEMP TABLE record_repointed AS
+    SELECT * FROM horsies_record_leaf_detached('horsies_task_history_standard_1d_2021_01_17');
+SELECT fixture_check(
+    'quarantine repoint: after the detach the history row is in the detached leaf, not in the history tree',
+    (SELECT r.outcome = 'RECORDED' FROM record_repointed AS r)
+    AND NOT EXISTS (
+        SELECT 1 FROM horsies_task_history WHERE task_id = (SELECT id FROM ids WHERE name = 'repoint_task')
+    )
+    AND EXISTS (
+        SELECT 1 FROM horsies_task_history_standard_1d_2021_01_17
+        WHERE task_id = (SELECT id FROM ids WHERE name = 'repoint_task')
+    )
+);
+SELECT pg_advisory_unlock(horsies_task_history_leaf_lock_key('standard_1d', '2021-01-17 00:00:00+00'));
+CREATE TEMP TABLE drop_repointed AS
+    SELECT * FROM horsies_drop_detached_leaf('horsies_task_history_standard_1d_2021_01_17');
+SELECT fixture_check(
+    'quarantine repoint: the detached leaf is DROPPED; the quarantine copy and the repointed pending row stay',
+    (SELECT d.outcome = 'DROPPED' FROM drop_repointed AS d)
+    AND to_regclass('horsies_task_history_standard_1d_2021_01_17') IS NULL
+    AND EXISTS (
+        SELECT 1 FROM horsies_workflow_phase2_quarantine
+        WHERE task_id = (SELECT id FROM ids WHERE name = 'repoint_task')
+    )
+    AND (SELECT p.recovery_source = 'QUARANTINE' FROM horsies_workflow_phase2_pending AS p
+         WHERE p.task_id = (SELECT id FROM ids WHERE name = 'repoint_task'))
+);
+CREATE TEMP TABLE consume_repointed AS
+    SELECT * FROM horsies_phase2_consume((SELECT id FROM ids WHERE name = 'repoint_task'), 'FAILED');
+SELECT fixture_check(
+    'quarantine repoint: phase 2 writes the node from the copy after the drop and deletes both recovery rows',
+    (SELECT c.disposition = 'APPLIED_TO_NODE' FROM consume_repointed AS c)
+    AND (SELECT n.status = 'FAILED' AND n.result = '{"e":9}'
+         FROM horsies_workflow_tasks AS n WHERE n.id = (SELECT id FROM ids WHERE name = 'repoint_node'))
+    AND NOT EXISTS (
+        SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = (SELECT id FROM ids WHERE name = 'repoint_task')
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM horsies_workflow_phase2_quarantine
+        WHERE task_id = (SELECT id FROM ids WHERE name = 'repoint_task')
+    )
+);
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Phase 2 and the format versions of its source row
 ------------------------------------------------------------------------------------------------------------------------
