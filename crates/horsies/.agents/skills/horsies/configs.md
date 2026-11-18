@@ -269,8 +269,10 @@ fn with_schedules(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Er
   (`Option<JsonText>`), written by the strict writer: an integer keeps
   every digit (`u128::MAX`). `JsonTextRefused` is a value that does not
   write as strict JSON (a non-finite float, deeper than 300 levels).
-- A JSON config text keeps the text of its `input` member. A TOML config
-  text refuses an `input` member.
+- A config text of any serde format (TOML, JSON) gives its `input` member
+  as its value, written by the same strict writer. In a config file, an
+  integer of `input` must fit `i64` or `u64`; set an input with a wider
+  integer in code with `.input(&value)`.
 - A time of day is a chrono `NaiveTime` in whole seconds, in the
   schedule's time zone. `Weekday` and `Month` are enums of the crate.
 - The scheduler checks each enabled schedule before it connects: its task

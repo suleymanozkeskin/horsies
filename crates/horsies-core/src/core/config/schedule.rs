@@ -776,11 +776,17 @@ pub struct TaskSchedule {
     pub pattern: SchedulePattern,
     /// The task input as its JSON text, stored as the task row's `input`.
     /// `None` (no member, or `null` in a config text) is a task without
-    /// input. A config read keeps the member's text, and the builder writes
-    /// the text with the strict writer, so an integer outside the `i64` and
-    /// `u64` range keeps every digit. It replaced `args` and `kwargs`; a
-    /// config that names either is refused as an unknown key.
-    #[serde(default)]
+    /// input. The builder writes the text with the strict writer, so an
+    /// integer outside the `i64` and `u64` range keeps every digit. A config
+    /// text of any serde format (TOML, JSON) gives the member's value, which
+    /// the read writes with the same writer: there an integer must fit `i64`
+    /// or `u64`, because serde_json's untyped read gives a wider one as an
+    /// `f64`. It replaced `args` and `kwargs`; a config that names either is
+    /// refused as an unknown key.
+    #[serde(
+        default,
+        deserialize_with = "crate::core::codec::optional_json_text_of_any_format"
+    )]
     pub input: Option<JsonText>,
     /// Target queue name (None = default).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1683,7 +1689,7 @@ mod tests {
         assert_eq!(sched.queue_name.as_deref(), Some("high"));
         assert_eq!(
             sched.input.as_ref().map(JsonText::get),
-            Some(r#"{ "key": "val" }"#)
+            Some(r#"{"key":"val"}"#)
         );
     }
 
@@ -1691,8 +1697,7 @@ mod tests {
     const U128_MAX_TEXT: &str = "340282366920938463463374607431768211455";
 
     /// #1892: the builder writes the task's input with the strict writer,
-    /// so `u128::MAX` keeps every digit; a config read keeps the member's
-    /// text, which decodes to `u128::MAX`.
+    /// so `u128::MAX` keeps every digit and decodes to `u128::MAX`.
     #[test]
     fn an_input_of_u128_max_keeps_every_digit() {
         let pattern = SchedulePattern::Interval(IntervalSchedule {
@@ -1702,22 +1707,51 @@ mod tests {
         let built = TaskSchedule::new("wide", "my_task", pattern)
             .input(&BTreeMap::from([("n", u128::MAX)]))
             .expect("a map of an integer writes as JSON");
-        let written = format!(r#"{{"n":{U128_MAX_TEXT}}}"#);
-        assert_eq!(
-            built.input.as_ref().map(JsonText::get),
-            Some(written.as_str())
-        );
+        let input = built.input.expect("the builder sets the input");
+        assert_eq!(input.get(), format!(r#"{{"n":{U128_MAX_TEXT}}}"#));
+        let decoded: BTreeMap<String, u128> = input.decode().expect("the text decodes");
+        assert_eq!(decoded.get("n"), Some(&u128::MAX));
+    }
 
+    /// The limit of a config file: serde_json's untyped read gives an
+    /// integer outside the `i64` and `u64` range as an `f64`, so the input
+    /// holds the float. An input with such an integer is set with the
+    /// builder. With serde_json's `arbitrary_precision`, serde_json gives the
+    /// number in another form, so the case holds only without it.
+    #[cfg(not(feature = "arbitrary-precision"))]
+    #[test]
+    fn a_config_integer_outside_i64_and_u64_reads_as_a_float() {
         let read: TaskSchedule = serde_json::from_str(&format!(
             r#"{{"name": "wide", "task_name": "my_task",
                 "pattern": {{"type": "interval", "seconds": 30}},
                 "input": {{"n": {U128_MAX_TEXT}}}}}"#
         ))
         .expect("a schedule with a wide input reads");
-        let input = read.input.expect("the input member is kept");
-        assert_eq!(input.get(), format!(r#"{{"n": {U128_MAX_TEXT}}}"#));
-        let decoded: BTreeMap<String, u128> = input.decode().expect("the text decodes");
-        assert_eq!(decoded.get("n"), Some(&u128::MAX));
+        assert_eq!(
+            read.input.as_ref().map(JsonText::get),
+            Some(r#"{"n":3.402823669209385e+38}"#)
+        );
+    }
+
+    /// A JSON config text gives the `input` member as its value: the read
+    /// writes it with the strict writer, compact, in the member order of the
+    /// text. An integer of the `i64` and `u64` range keeps every digit.
+    #[test]
+    fn a_json_schedule_input_reads_as_its_strict_json_text() {
+        let config: ScheduleConfig = serde_json::from_str(
+            r#"{"schedules": [{"name": "a", "task_name": "t",
+                "pattern": {"type": "interval", "seconds": 30},
+                "input": {"region": "eu", "max": 18446744073709551615,
+                          "min": -9223372036854775808,
+                          "tags": ["a", null, true], "owner": {"id": 7}}}]}"#,
+        )
+        .expect("a schedule with input reads");
+        assert_eq!(
+            config.schedules[0].input.as_ref().map(JsonText::get),
+            Some(
+                r#"{"region":"eu","max":18446744073709551615,"min":-9223372036854775808,"tags":["a",null,true],"owner":{"id":7}}"#
+            )
+        );
     }
 
     /// A config input of `null` is a schedule without input, as no member.
@@ -1731,16 +1765,112 @@ mod tests {
         assert_eq!(read.input, None);
     }
 
-    /// Only serde_json gives the text of a value: a TOML config with an
-    /// `input` member is refused, and one without it reads with no input.
+    /// A TOML config text gives the `input` member as its value: the read
+    /// writes it with the strict writer, the text that the builder writes
+    /// for the same value. A TOML config without `input` reads with no input.
     #[test]
-    fn a_toml_schedule_input_is_refused() {
+    fn a_toml_schedule_input_reads_as_its_json_text() {
         let without = one_schedule_toml(r#"{ type = "interval", seconds = 30 }"#);
         let config: ScheduleConfig =
             toml::from_str(&without).expect("a schedule without input reads");
         assert_eq!(config.schedules[0].input, None);
-        let with = format!("{without}input = {{ n = 1 }}\n");
-        assert!(toml::from_str::<ScheduleConfig>(&with).is_err());
+
+        let with = format!(
+            "{without}input = {{ region = \"eu\", limit = -9223372036854775808, \
+             ratio = 1e-5, dry_run = false }}\n"
+        );
+        let config: ScheduleConfig = toml::from_str(&with).expect("a schedule with input reads");
+        let expected =
+            r#"{"region":"eu","limit":-9223372036854775808,"ratio":1e-05,"dry_run":false}"#;
+        assert_eq!(
+            config.schedules[0].input.as_ref().map(JsonText::get),
+            Some(expected)
+        );
+        #[derive(serde::Serialize)]
+        struct ReportInput {
+            region: &'static str,
+            limit: i64,
+            ratio: f64,
+            dry_run: bool,
+        }
+        let built = JsonText::of(&ReportInput {
+            region: "eu",
+            limit: i64::MIN,
+            ratio: 1e-5,
+            dry_run: false,
+        })
+        .expect("the same value writes as JSON");
+        assert_eq!(built.get(), expected);
+    }
+
+    /// A nested TOML input (an array of arrays, an inline table, a
+    /// sub-table) reads as one JSON text, members in the order of the file.
+    #[test]
+    fn a_nested_toml_schedule_input_reads_as_its_json_text() {
+        let text = format!(
+            "{}\n[schedules.input]\nmatrix = [[1, 2], [], [3]]\n\
+             owner = {{ name = \"ops\", tags = [\"a\", \"b\"] }}\n\n\
+             [schedules.input.window]\nhours = 2\n",
+            one_schedule_toml(r#"{ type = "interval", seconds = 30 }"#)
+        );
+        let config: ScheduleConfig =
+            toml::from_str(&text).expect("a schedule with a nested input reads");
+        assert_eq!(
+            config.schedules[0].input.as_ref().map(JsonText::get),
+            Some(
+                r#"{"matrix":[[1,2],[],[3]],"owner":{"name":"ops","tags":["a","b"]},"window":{"hours":2}}"#
+            )
+        );
+    }
+
+    /// A non-finite float has no JSON form: a TOML input with `nan` or
+    /// `inf` is refused with the cause.
+    #[test]
+    fn a_non_finite_toml_input_float_is_refused() {
+        let without = one_schedule_toml(r#"{ type = "interval", seconds = 30 }"#);
+        for value in ["nan", "inf", "-inf"] {
+            let refused =
+                toml::from_str::<ScheduleConfig>(&format!("{without}input = {{ x = {value} }}\n"))
+                    .expect_err("a non-finite float is refused");
+            assert!(refused.to_string().contains("non-finite"), "{refused}");
+        }
+    }
+
+    /// The config read bounds the nesting of an input at
+    /// [`crate::core::codec::MAX_JSON_DEPTH`] levels, the bound of the strict
+    /// read rule: an input of that many nested arrays reads, and one more
+    /// level is refused. `serde_json::from_value` has no depth bound of its
+    /// own, so the read reaches the bound.
+    #[test]
+    fn a_config_input_deeper_than_the_strict_read_bound_is_refused() {
+        let schedule_with_depth = |depth: usize| {
+            let mut input = serde_json::Value::Array(Vec::new());
+            for _ in 1..depth {
+                input = serde_json::Value::Array(vec![input]);
+            }
+            serde_json::json!({
+                "name": "deep",
+                "task_name": "t",
+                "pattern": {"type": "interval", "seconds": 30},
+                "input": input,
+            })
+        };
+        let limit = crate::core::codec::MAX_JSON_DEPTH;
+        let read: TaskSchedule = serde_json::from_value(schedule_with_depth(limit))
+            .expect("an input at the bound reads");
+        let expected = format!("{}{}", "[".repeat(limit), "]".repeat(limit));
+        assert_eq!(
+            read.input.as_ref().map(JsonText::get),
+            Some(expected.as_str())
+        );
+        let refused = serde_json::from_value::<TaskSchedule>(schedule_with_depth(limit + 1))
+            .expect_err("one more level is refused");
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("nested deeper than {limit} levels")),
+            "{refused}"
+        );
     }
 
     /// The builder refuses an input that does not write as JSON, and one
