@@ -20,7 +20,7 @@ from pydantic import SecretStr
 
 from horsies import Execution as PublicExecution
 from horsies.core.app import Horsies
-from horsies.core.codec.json_io import Json, SerializationError
+from horsies.core.codec.json_io import Json
 from horsies.core.codec.task_options import (
     InvalidExecution,
     serialize_task_options,
@@ -564,49 +564,6 @@ class TestStoredExecution:
     )
     def test_a_grace_on_another_class_is_refused(self, options: Json) -> None:
         assert 'only SHARED_ASYNC has one' in _refused_detail(options)
-
-
-class TestWorkflowPaths:
-    def test_a_fast_path_root_without_options_is_isolated(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        assert root_execution(None, 'root') is Execution.ISOLATED
-
-    def test_a_fast_path_root_reads_its_class(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        options = json.dumps({'execution': 'SHARED_THREAD', 'cancel_grace_ms': None})
-        assert root_execution(options, 'root') is Execution.SHARED_THREAD
-
-    def test_a_fast_path_root_with_empty_options_text_raises(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        # The decorator stores None for no options; an empty text is not JSON.
-        with pytest.raises(SerializationError, match='Corrupt task_options for root node root'):
-            root_execution('', 'root')
-
-    def test_a_fast_path_root_with_an_invalid_class_raises(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        with pytest.raises(SerializationError, match='Invalid execution for root node'):
-            root_execution(json.dumps({'execution': 'PARALLEL'}), 'root')
-
-    @staticmethod
-    def _promotion_arguments(task_options: str | None) -> dict[str, Any]:
-        return {
-            'task_name': 'node.task',
-            'node_input': '{}',
-            'workflow_sent_at': datetime(2026, 1, 1, tzinfo=timezone.utc),
-            'queue_name': 'default',
-            'priority': 50,
-            'args_from': None,
-            'workflow_ctx_from': None,
-            'task_options_str': task_options,
-            'all_dep_results': {},
-            'all_dep_task_names': None,
-            'broker': None,
-            'all_dep_definition_keys': None,
-        }
 
 
 class TestPerSendOptions:

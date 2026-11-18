@@ -61,6 +61,9 @@ from horsies._core import (
     PendingExpiryBoundReached,
     PendingExpiryDrained,
     PendingExpiryFailed,
+    StaleRunningRecovered,
+    StaleRunningScanFailed,
+    StaleRunningScanFull,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -122,10 +125,6 @@ from horsies.core.manifest import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.models.workflow_pg import (
-    WorkflowModel as _WorkflowModel,
-    WorkflowTaskModel as _WorkflowTaskModel,
-)
 from horsies.core.types.core_failure import (
     CoreCallRefusal,
     call_refusal_or_raise,
@@ -179,9 +178,6 @@ from horsies.core.utils.wait_timeout import wait_timeout_seconds
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
 from horsies.core.logging import enable_statement_echo, get_logger
-
-# Ensure workflow tables are registered in SQLAlchemy metadata.
-_ = (_WorkflowModel, _WorkflowTaskModel)
 
 
 def _operation_failed(
@@ -2344,6 +2340,89 @@ class PostgresBroker:
             return _monitoring_call_failed('get_expired_tasks', call_refusal_or_raise(exc))
         return self._task_list_answer('get_expired_tasks', outcome)
 
+    async def mark_stale_tasks_as_failed(
+        self,
+        stale_threshold_ms: int = 300_000,
+        finalizing_stale_threshold_ms: int = 300_000,
+    ) -> BrokerResult[int]:
+        """Recover RUNNING tasks whose runner stopped beating: a crash retry
+        when the task's policy allows it, else the failure. One core pass.
+
+        The reaper of each worker runs the same pass when
+        ``RecoveryConfig.auto_fail_stale_running`` is on. This method runs
+        it on demand, also when that setting is off.
+
+        The core reads at most one scan batch of 1,000 candidates with
+        ``horsies_stale_running_scan``, without a lock; a full batch leaves
+        the rest to the next pass and a warning is logged. Each candidate is
+        then one ``horsies_finish_stale_attempt`` statement that commits
+        alone: it judges staleness again under the task advisory lock and the
+        row lock and writes the attempt with the retry or the move, with the
+        crash result that the core builds. A scheduled retry also wakes its
+        queue (best effort). Returns the number of tasks retried or failed; a
+        refused candidate is not counted, and a candidate whose statement
+        failed is logged on ``horsies.broker`` and skipped.
+
+        Failures, each ``CLEANUP_FAILED``; nothing was written:
+        - the scan, the connect or the client family check failed;
+          ``retryable`` is the core's classification of the cause;
+        - a threshold below 0 or above 2,147,483,647 ms; not retryable;
+        - the core of this process cannot run the pass (``CoreCallRefusal``);
+          ``retryable`` follows ``core_error_retryable``.
+
+        A cancel of the caller does not stop the pass: the core runs it to
+        its end.
+        """
+        thresholds = (stale_threshold_ms, finalizing_stale_threshold_ms)
+        for threshold_ms in thresholds:
+            if not SIGNED_64_BIT_MIN <= threshold_ms <= SIGNED_64_BIT_MAX:
+                refusal = f'the stale threshold {threshold_ms} ms is not a 64-bit integer'
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'mark_stale_tasks_as_failed failed: {refusal}',
+                        retryable=False,
+                        exception=OverflowError(refusal),
+                    ),
+                )
+        try:
+            outcome = await self._core_handle.mark_stale_running_async(
+                stale_threshold_ms, finalizing_stale_threshold_ms,
+            )
+        except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=f'mark_stale_tasks_as_failed failed: {refusal}',
+                    retryable=core_error_retryable(refusal),
+                    exception=refusal,
+                ),
+            )
+        match outcome:
+            case StaleRunningRecovered(recovered=recovered):
+                return Ok(recovered)
+            case StaleRunningScanFull(recovered=recovered, scan_batch=scan_batch):
+                self.logger.warning(
+                    'mark_stale_tasks_as_failed read a full scan batch of %s '
+                    'candidates; the rest is recovered next pass',
+                    scan_batch,
+                )
+                return Ok(recovered)
+            case StaleRunningScanFailed(
+                message=message, retryable=retryable, exception=exception,
+            ):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'mark_stale_tasks_as_failed failed: {message}',
+                        retryable=retryable,
+                        exception=exception,
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
     async def expire_pending_tasks(self) -> BrokerResult[int]:
         """Expire PENDING tasks whose ``good_until`` deadline passed: one core
         pass.
@@ -2553,6 +2632,67 @@ class PostgresBroker:
                     BrokerOperationFailed(
                         code=BrokerErrorCode.CLEANUP_FAILED,
                         message=f'audit_orphaned_workflow_tasks failed: {message}',
+                        retryable=retryable,
+                        exception=exception,
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def terminate_orphaned_workflow_tasks(self) -> BrokerResult[int]:
+        """Cancel one bounded page of orphan workflow tasks and return the
+        number cancelled: one core call.
+
+        The reaper of each worker runs the same page every
+        ``RecoveryConfig.orphan_task_audit_interval_ms`` when
+        ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks`` is on. This
+        method runs one page on demand, also when that setting is off.
+
+        The page is the one of ``audit_orphaned_workflow_tasks``: the core
+        runs ``horsies_cancel_orphaned_tasks`` with a page of 500 rows, in one
+        transaction, and the scanned PENDING and CLAIMED workflow tasks that
+        no runnable node links move to history as CANCELLED.
+
+        Failures, each ``CLEANUP_FAILED``; nothing committed (after a lost
+        ``COMMIT`` reply, the outcome is unknown):
+        - another sweep holds the cursor: the page is refused at once; the
+          ``exception`` is ``CoreServerError``, whose ``sqlstate`` is
+          ``'55P03'``;
+        - a database failure, or a page outside the function's contract;
+          ``retryable`` is the core's classification of the cause;
+        - the core of this process cannot run the page (``CoreCallRefusal``);
+          ``retryable`` follows ``core_error_retryable``.
+
+        A cancel of the caller does not stop the page: the core runs it to
+        its end.
+        """
+        try:
+            outcome = await self._core_handle.audit_orphaned_workflow_tasks_async()
+        except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=f'terminate_orphaned_workflow_tasks failed: {refusal}',
+                    retryable=core_error_retryable(refusal),
+                    exception=refusal,
+                ),
+            )
+        match outcome:
+            case OrphanPageAudited(cancelled=cancelled):
+                return Ok(cancelled)
+            case (
+                OrphanAuditLockBusy(
+                    message=message, retryable=retryable, exception=exception,
+                )
+                | OrphanAuditFailed(
+                    message=message, retryable=retryable, exception=exception,
+                )
+            ):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'terminate_orphaned_workflow_tasks failed: {message}',
                         retryable=retryable,
                         exception=exception,
                     ),

@@ -28,7 +28,7 @@ from horsies._core import CoreContractViolation
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import period_class_key
-from horsies.core.history.reads.detail import TaskAbsenceReason
+from horsies import TaskAbsenceReason
 from horsies.core.history.rerun.operations import (
     NotEligibleReason,
     RerunEnqueued,

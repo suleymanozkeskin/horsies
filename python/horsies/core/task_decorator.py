@@ -165,7 +165,6 @@ from horsies.core.errors import (
 
 P = ParamSpec('P')
 T = TypeVar('T')
-E = TypeVar('E')
 _UNSET: Final[object] = object()
 
 

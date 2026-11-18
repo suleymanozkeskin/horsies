@@ -21,6 +21,7 @@ from __future__ import annotations
 
 
 import uuid
+from typing import Final
 
 import pytest
 from pydantic import SecretStr
@@ -31,7 +32,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
 )
-from horsies.core.history.names import TASK_RESULT_FUNCTION
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskStatus
 from horsies.core.types.result import is_err
@@ -49,6 +49,10 @@ __all__ = ['make_database']
 that ran before any history leaf existed."""
 
 pytestmark = [pytest.mark.integration]
+
+TASK_RESULT_FUNCTION: Final = 'horsies_task_result_staged'
+"""The published history reader of a task result
+(``horsies_publish_history_readers``)."""
 
 
 async def seed_history_task(

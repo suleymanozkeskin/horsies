@@ -5,7 +5,8 @@ its statement; a step that promotes a sub-workflow node builds its child
 before it calls ``horsies_workflow_child_start``. Both take the same steps,
 in the order of ``enqueue_subworkflow_task`` (``core/workflows/engine.py``):
 
-1. the depth limit (``MAX_SUBWORKFLOW_DEPTH``);
+1. the depth limit (``MAX_SUBWORKFLOW_DEPTH``), which the core checks before
+   it asks for the child;
 2. the load of the child definition by its ``definition_key``;
 3. the node input: the stored kwargs, decoded against the child's
    ``build_with`` signature;
@@ -56,7 +57,11 @@ from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.retention import queue_retention_class
-from horsies.core.workflows.sql import SubWorkflowParams, TaskNodeFacts
+from horsies.core.workflows.sql import (
+    SubWorkflowParams,
+    TaskNodeFacts,
+    task_node_facts,
+)
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -420,12 +425,16 @@ def _built_spec(
     return child_spec
 
 
-def build_child(
+def build_child_within_depth(
     broker: PostgresBroker,
     node: ChildOfNode,
     dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    child_depth: int,
 ) -> ChildBuild:
-    """Build the child of ``node``. Does no I/O; it runs the child's ``build_with``.
+    """The child of ``node`` at ``child_depth``, which the core checked against
+    ``MAX_SUBWORKFLOW_DEPTH`` before it asks: the load of the definition, the
+    input, ``build_with``, then the node rows. Does no I/O; it runs the child's
+    ``build_with``.
 
     ``dependency_results`` holds the result of each terminal dependency of
     the node, by index; an ``args_from`` key whose dependency has no entry
@@ -436,34 +445,6 @@ def build_child(
             a value of a child node row does not serialize. These come from
             the task function and from a spec that ``build_with`` proved, so
             this is a defect.
-    """
-    child_depth = node.parent_depth + 1
-    if child_depth > MAX_SUBWORKFLOW_DEPTH:
-        return _failed(
-            node,
-            (
-                f'Subworkflow not started: the child workflow would have depth '
-                f'{child_depth}, and the limit is {MAX_SUBWORKFLOW_DEPTH} '
-                f'(workflow {node.workflow_name}:{node.task_index})'
-            ),
-            OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED,
-        )
-    return build_child_within_depth(broker, node, dependency_results, child_depth)
-
-
-def build_child_within_depth(
-    broker: PostgresBroker,
-    node: ChildOfNode,
-    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
-    child_depth: int,
-) -> ChildBuild:
-    """``build_child`` after its depth check, for a child at ``child_depth``,
-    which is within ``MAX_SUBWORKFLOW_DEPTH``: the load of the definition,
-    the input, ``build_with``, then the node rows. Does no I/O; it runs the
-    child's ``build_with``.
-
-    Raises:
-        SerializationError: as ``build_child``.
     """
     assert child_depth <= MAX_SUBWORKFLOW_DEPTH, (
         f'the child of {node.workflow_name}:{node.task_index} is at depth {child_depth}, '
@@ -602,15 +583,20 @@ def task_node_row(
 ) -> NodeRow:
     """The row of a task node of a spec, on ``queue_name`` at ``priority``.
 
-    Raises:
-        SerializationError: the task options do not parse or validate, or the
-            node kwargs do not serialize (a defect).
-    """
-    from horsies.core.workflows.lifecycle import start_task_node_facts
+    The row carries the task options as text and the retention class key of
+    the node's queue. The core reads the retry limit, the execution class and
+    the deadline from the options (``node_task_facts``,
+    ``crates/horsies-core/src/workflow_engine/start.rs``) and refuses options
+    that do not validate.
 
+    Raises:
+        SerializationError: the task options of a node with a ``good_until``
+            do not parse to a JSON object, or the node kwargs do not
+            serialize (a defect).
+    """
     task_options = task_options_with_good_until(node, owner)
-    facts = start_task_node_facts(
-        task_options, node.name, queue_retention_class(broker, queue_name),
+    facts = task_node_facts(
+        queue_retention_class=queue_retention_class(broker, queue_name),
     )
     dependencies, args_from, context = _graph_columns(node)
     return NodeRow(

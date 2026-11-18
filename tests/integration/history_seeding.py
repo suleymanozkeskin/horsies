@@ -33,7 +33,6 @@ from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     DEFAULT_RETENTION_DAYS,
 )
-from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.attempt_snapshot_support import encode_attempt_snapshot
 
 WORKFLOW_PHASE2_PENDING: Final = 'horsies_workflow_phase2_pending'
@@ -89,7 +88,24 @@ _CREATE_HEARTBEAT_LEAF_SQL = text(
     'CAST(:lower_anchor AS timestamptz))'
 )
 _REGISTERED_OUTCOMES: Final = frozenset({'REGISTERED', 'VERIFIED', 'HORIZON_UPDATED'})
+_PUBLISH_READERS_SQL = text(
+    'SELECT outcome, absent_leaves FROM horsies_publish_history_readers()'
+)
+_PUBLICATION_OUTCOMES: Final = frozenset({'PUBLISHED', 'ALREADY_CURRENT'})
 _COVERED_OUTCOMES: Final = frozenset({'CREATED', 'ALREADY_CONFORMANT', 'INDEX_REPAIRED'})
+
+
+async def publish_history_readers(connection: AsyncConnection) -> None:
+    """Publish the history readers from the leaf catalog, in the caller's
+    transaction: one call of ``horsies_publish_history_readers``
+    (0008_history_maintenance_functions.sql), the renderer that the core's
+    coverage pass calls. An outcome other than PUBLISHED or ALREADY_CURRENT
+    fails the caller with an ``AssertionError``; a database error propagates
+    and aborts the caller's transaction.
+    """
+    row = (await connection.execute(_PUBLISH_READERS_SQL)).one()
+    if row.outcome not in _PUBLICATION_OUTCOMES:
+        raise AssertionError(f'reader publication returned {row.outcome!r}')
 
 
 async def ensure_history_seedable(connection: AsyncConnection) -> None:
@@ -143,7 +159,7 @@ async def ensure_history_seedable(connection: AsyncConnection) -> None:
                 f'heartbeat coverage refused: {leaf.outcome} {leaf.leaf_name} '
                 f'{leaf.conflict_kind}'
             )
-    _ = await StagedLoaderPublisher().republish(connection)
+    await publish_history_readers(connection)
     await connection.execute(ITEST_TASK_ROWS_VIEW_DDL)
 
 

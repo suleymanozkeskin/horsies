@@ -6,15 +6,15 @@ line that pyright must refuse carries an ignore comment for its rule. The
 config makes an unneeded ignore comment an error, so a cause that
 ``raise ... from`` accepts without a match, a field on the wrong variant,
 ``NoCause()`` as a cause, an optional status, or a string compare on the
-parsed history status fails the check.
+parsed status of a task read (``TaskInfo.status``, live or from history)
+fails the check.
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from horsies import NoCause, TaskStatus
-from horsies.core.history.reads.detail import HistoryTaskDetail
+from horsies import NoCause, TaskInfo, TaskStatus
 from horsies.monitoring import (
     MonitoringQueryDbOperationFailed,
     MonitoringQueryError,
@@ -124,6 +124,6 @@ def task_action_causes_are_exceptions() -> None:
     )
 
 
-def the_history_status_is_parsed(detail: HistoryTaskDetail) -> None:
-    _ = detail.status is TaskStatus.COMPLETED
-    _ = detail.status == 'COMPLETED'  # pyright: ignore[reportUnnecessaryComparison]
+def the_history_status_is_parsed(info: TaskInfo) -> None:
+    _ = info.status is TaskStatus.COMPLETED
+    _ = info.status == 'COMPLETED'  # pyright: ignore[reportUnnecessaryComparison]

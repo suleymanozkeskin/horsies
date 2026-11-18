@@ -20,8 +20,8 @@ from pydantic import SecretStr
 from horsies._core import SchemaStatusRecord, TooManyPendingCalls
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.baseline.migration import BASELINE_VERSION
 from horsies.web.schema import (
+    BASELINE_VERSION,
     EXPECTED_SCHEMA_VERSION,
     SchemaProbe,
     SchemaState,

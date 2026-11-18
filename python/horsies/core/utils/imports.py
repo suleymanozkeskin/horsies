@@ -23,7 +23,7 @@ from horsies.core.logging import get_logger
 logger = get_logger('imports')
 
 # Cache: realpath → list of module names registered in sys.modules.
-# Avoids O(n) scan of sys.modules on every import_file_path / unload_file_path call.
+# Avoids O(n) scan of sys.modules on every import_file_path call.
 _realpath_to_modules: dict[str, list[str]] = {}
 
 
@@ -203,37 +203,6 @@ def _basename_alias_is_safe(basename: str, file_path: str) -> bool:
     return origin is not None and os.path.realpath(origin) == file_path
 
 
-def unload_file_path(file_path: str) -> list[str]:
-    """Unload all modules loaded from the given file path.
-
-    Returns the list of removed module names.
-    """
-    file_path = os.path.realpath(file_path)
-    removed: list[str] = []
-
-    # Try cache first (O(1))
-    cached_names = _realpath_to_modules.pop(file_path, None)
-    if cached_names:
-        for name in cached_names:
-            if sys.modules.pop(name, None) is not None:
-                removed.append(name)
-        return removed
-
-    # Fallback: linear scan for modules not loaded via import_file_path
-    for name, mod in list(sys.modules.items()):
-        mod_file = getattr(mod, '__file__', None)
-        if not mod_file:
-            continue
-        try:
-            if os.path.realpath(mod_file) == file_path:
-                sys.modules.pop(name, None)
-                removed.append(name)
-        except OSError:
-            # Ignore odd module __file__ values that cannot be resolved
-            continue
-    return removed
-
-
 # Legacy alias for backward compatibility
 def import_by_path(path: str, module_name: str | None = None) -> Any:
     """
@@ -246,36 +215,3 @@ def import_by_path(path: str, module_name: str | None = None) -> Any:
         return import_file_path(path, module_name)
     else:
         return import_module_path(path)
-
-
-# Keep this for tests that import it directly
-def compute_package_path_from_fs(file_path: str) -> tuple[str | None, str | None]:
-    """
-    Walk up directory tree looking for __init__.py to determine package structure.
-
-    NOTE: This function is kept for backward compatibility with tests.
-    New code should not rely on this for import resolution.
-
-    Returns (dotted_module_name, package_root) if a package chain is found,
-    otherwise (None, None).
-    """
-    file_path = os.path.realpath(file_path)
-    module_name = os.path.splitext(os.path.basename(file_path))[0]
-    current_dir = os.path.dirname(file_path)
-
-    components = [module_name]
-    while True:
-        init_path = os.path.join(current_dir, '__init__.py')
-        if not os.path.exists(init_path):
-            break
-        package_name = os.path.basename(current_dir)
-        components.append(package_name)
-        current_dir = os.path.dirname(current_dir)
-
-    if len(components) == 1:
-        return (None, None)
-
-    components.reverse()
-    dotted_name = '.'.join(components)
-    package_root = current_dir
-    return (dotted_name, package_root)

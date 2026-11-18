@@ -25,7 +25,6 @@ import horsies._catalog.task_send
 import horsies._catalog.workflow_handle
 import horsies._catalog.workflow_start
 from horsies.core.brokers import result_types
-from horsies.core.history.reads import detail
 from horsies.core.models import task_send_types, tasks
 from horsies.core.models.workflow import enums, handle_types
 from horsies.core.types import status
@@ -201,7 +200,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
         ('PENDING', 'READY', 'ENQUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED'),
     ),
     (
-        detail.TaskAbsenceReason,
+        horsies.TaskAbsenceReason,
         horsies._catalog.history.TaskAbsenceReason,
         ('PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED'),
     ),
@@ -289,10 +288,6 @@ def test_is_terminal_holds_exactly_for_the_terminal_members(
 ) -> None:
     for member in status_class:
         assert getattr(member, 'is_terminal') is (member in public), member
-
-
-def test_workflow_task_terminal_values_are_the_terminal_member_values() -> None:
-    assert sorted(enums.WF_TASK_TERMINAL_VALUES) == ['COMPLETED', 'FAILED', 'SKIPPED']
 
 
 def test_the_built_in_registry_holds_every_generated_member() -> None:

@@ -230,7 +230,7 @@ from .core.models.boot_failure import (
     TaskLoopCreateFailed,
     ThreadStartRefused,
 )
-from .core.history.reads.detail import TaskAbsenceReason
+from ._catalog.history import TaskAbsenceReason
 from .core.history.rerun.operations import (
     NotEligibleReason,
     RerunEnqueued,

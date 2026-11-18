@@ -22,9 +22,9 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from horsies.core.baseline.migration import load_baseline_migration
-from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.attempt_snapshot_support import encode_attempt_snapshot
+from tests.baseline_sql import baseline_sql
+from tests.integration.history_seeding import publish_history_readers
 from tests.task_ids import mint_task_id
 from horsies.core.utils.url import sqlalchemy_url
 
@@ -59,11 +59,10 @@ async def install_baseline_schema(connection: AsyncConnection) -> None:
     psycopg sends it with the simple query protocol and reads no
     placeholders in it. It joins the caller's transaction.
     """
-    migration = load_baseline_migration()
     raw = await connection.get_raw_connection()
     driver = raw.driver_connection
     assert driver is not None, 'the engine has a driver connection'
-    await driver.execute(migration.sql.encode('utf-8'))
+    await driver.execute(baseline_sql().encode('utf-8'))
 
 
 def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-def]
@@ -292,7 +291,7 @@ async def prepare_move_storage(
             f'leaf coverage of {class_key} refused: {leaf.outcome} {leaf.leaf_name} '
             f'{leaf.conflict_kind}'
         )
-    _ = await StagedLoaderPublisher().republish(connection)
+    await publish_history_readers(connection)
 
 
 async def insert_live_task(
