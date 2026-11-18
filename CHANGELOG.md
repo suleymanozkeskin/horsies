@@ -105,6 +105,18 @@ before you upgrade a 0.7 deployment.
   `TaskActionError` are the generated union of the catalog plus the classes
   that only the Python client produces.
 
+- **The send error classes and the send payload are generated from the
+  core.** The seven classes of the core's send catalog
+  (`TaskSendSuppressed`, `TaskSendAsyncContext`,
+  `TaskSendValidationFailed`, `TaskSendEnqueueFailed`,
+  `TaskSendPayloadMismatch`, `TaskSendPayloadTooLarge`,
+  `TaskSendIdempotencyKeyConflict`), `TaskSendPayload`, `RetentionClassKey`
+  and `DEFAULT_RETENTION_CLASS_KEY` are rendered into `horsies._catalog`
+  from the core's records. Their names, fields, defaults and docs do not
+  change, and the old import paths re-export them. `TaskSendError` is the
+  generated union `TaskSendCoreError` plus `TaskSendEventLoopLimit` and
+  `TaskSendLoopRunnerFailed`, which only the Python client produces.
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async
