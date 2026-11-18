@@ -44,7 +44,7 @@ use crate::broker::{BrokerCheckCause, BrokerError, BrokerOperationSource};
 use crate::catalog::{CodeCatalog, CodeEnum};
 use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
 use crate::core::lifecycle::OutcomeDecodeError;
-use crate::core::task::send_types::TaskSendError;
+use crate::core::task::send_types::{TaskSendError, TaskSendPayload};
 use crate::failure_cause::FailureCause;
 use crate::monitoring::{
     HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorSource, TaskActionError,
@@ -175,6 +175,11 @@ pub enum SlotData<'a> {
     Str(&'a str),
     /// `bool`.
     Bool(bool),
+    /// `int`: any integer field of 64 bits or less, widened.
+    Int(i128),
+    /// `TaskSendPayload`, the record [`TASK_SEND_PAYLOAD`]: a client builds
+    /// it from [`TaskSendPayload::record_values`].
+    TaskSendPayload(&'a TaskSendPayload),
     /// `uuid.UUID`.
     Uuid(Uuid),
     /// `str` holding the text of the UUID.
@@ -576,6 +581,33 @@ pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
 /// Every record class that the Python package gets, in render order.
 pub const ERROR_RECORDS: &[RecordClass] = &[TASK_SEND_PAYLOAD];
 
+/// The value of one field of a generated record class, by the field's
+/// Python type ([`RecordFieldType`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordValue<'a> {
+    /// `str`.
+    Str(&'a str),
+    /// `int`.
+    Int(i64),
+    /// `datetime`, aware, in UTC.
+    DateTime(chrono::DateTime<chrono::Utc>),
+    /// `str | None`.
+    OptionalStr(Option<&'a str>),
+    /// `int | None`.
+    OptionalInt(Option<i64>),
+    /// `datetime | None`, aware, in UTC.
+    OptionalDateTime(Option<chrono::DateTime<chrono::Utc>>),
+    /// `RetentionClassKey | None`: the key text, or `None` for forever.
+    OptionalRetentionClassKey(Option<String>),
+}
+
+/// The value of one field of a generated record class, with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordFieldValue<'a> {
+    pub name: &'static str,
+    pub value: RecordValue<'a>,
+}
+
 /// The unions of the failures of one operation that the core produces, in
 /// render order. Python's public union of the operation adds its
 /// client-only classes.
@@ -844,6 +876,71 @@ mod tests {
                 "TaskSendPayloadTooLarge",
                 "TaskSendIdempotencyKeyConflict",
             ]
+        );
+    }
+
+    /// The payload's values name the fields of its record, in the record's
+    /// order, each in the value form of the field's type. The default class
+    /// is its key, and forever is `None`.
+    #[test]
+    fn the_payload_values_are_the_fields_of_its_record() {
+        let payload = |retention: crate::core::config::EnqueueRetention| TaskSendPayload {
+            task_name: "report".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 50,
+            input_json: r#"{"x":1}"#.to_owned(),
+            sent_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            good_until: None,
+            enqueue_delay_seconds: Some(30),
+            task_options: None,
+            idempotency_key: Some("key".to_owned()),
+            retention,
+        };
+        let defaulted = payload(crate::core::config::EnqueueRetention::Default);
+        let values = defaulted.record_values();
+        let names: Vec<&str> = values.iter().map(|field| field.name).collect();
+        let record_names: Vec<&str> = TASK_SEND_PAYLOAD
+            .fields
+            .iter()
+            .map(|field| field.name)
+            .collect();
+        assert_eq!(names, record_names);
+        for (value, field) in values.iter().zip(TASK_SEND_PAYLOAD.fields) {
+            let in_its_form = matches!(
+                (&value.value, field.python_type),
+                (RecordValue::Str(_), RecordFieldType::Str)
+                    | (RecordValue::Int(_), RecordFieldType::Int)
+                    | (RecordValue::DateTime(_), RecordFieldType::DateTime)
+                    | (RecordValue::OptionalStr(_), RecordFieldType::OptionalStr)
+                    | (RecordValue::OptionalInt(_), RecordFieldType::OptionalInt)
+                    | (
+                        RecordValue::OptionalDateTime(_),
+                        RecordFieldType::OptionalDateTime
+                    )
+                    | (
+                        RecordValue::OptionalRetentionClassKey(_),
+                        RecordFieldType::OptionalRetentionClassKey
+                    )
+            );
+            assert!(
+                in_its_form,
+                "{}: {:?} for {:?}",
+                field.name, value.value, field.python_type
+            );
+        }
+        assert_eq!(
+            values.last().map(|field| &field.value),
+            Some(&RecordValue::OptionalRetentionClassKey(Some(
+                DEFAULT_RETENTION_CLASS_KEY.to_owned()
+            )))
+        );
+        let forever = payload(crate::core::config::EnqueueRetention::Forever);
+        assert_eq!(
+            forever
+                .record_values()
+                .last()
+                .map(|field| field.value.clone()),
+            Some(RecordValue::OptionalRetentionClassKey(None))
         );
     }
 

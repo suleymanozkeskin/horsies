@@ -360,6 +360,12 @@ fn values_arm(variant: &Variant) -> syn::Result<TokenStream> {
                 ::core::convert::AsRef::<str>::as_ref(#name)
             )),
             "Bool" => quote!(::horsies_core::error_catalog::SlotData::Bool(*#name)),
+            "Int" => quote!(::horsies_core::error_catalog::SlotData::Int(
+                ::core::convert::Into::<i128>::into(*#name)
+            )),
+            "TaskSendPayload" => quote!(::horsies_core::error_catalog::SlotData::TaskSendPayload(
+                ::core::borrow::Borrow::<::horsies_core::TaskSendPayload>::borrow(#name)
+            )),
             "Uuid" => quote!(::horsies_core::error_catalog::SlotData::Uuid(*#name)),
             "UuidText" => quote!(::horsies_core::error_catalog::SlotData::UuidText(*#name)),
             "TaskStatus" => quote!(::horsies_core::error_catalog::SlotData::member(#name)),
@@ -767,6 +773,38 @@ mod tests {
              ::horsies_core::error_catalog::SlotValue{name:\"task_id\",value:::horsies_core::error_catalog::SlotData::Uuid(*task_id),},\
              ::horsies_core::error_catalog::SlotValue{name:\"workflow_id\",value:::horsies_core::error_catalog::SlotData::UuidText(*workflow_id),},\
              ::horsies_core::error_catalog::SlotValue{name:\"current_status\",value:::horsies_core::error_catalog::SlotData::member(current_status),},]"
+        ), "{text}");
+    }
+
+    /// An `Int` slot is widened into `SlotData::Int`, and a `TaskSendPayload`
+    /// slot (a `Box` or the struct) is borrowed as the payload.
+    #[test]
+    fn an_int_and_a_payload_slot_have_their_value_forms() {
+        let text = values_text(syn::parse_quote! {
+            #[error_catalog(module = "task_send_errors", code = "TaskSendErrorCode", union = "U", union_doc = "u")]
+            enum SendError {
+                /// The payload is too large.
+                #[error_class(class = "TaskSendPayloadTooLarge", code = "PayloadTooLarge")]
+                PayloadTooLarge {
+                    #[error_slot(python = "Str", hidden)]
+                    message: String,
+                    #[error_slot(python = "Int")]
+                    size_bytes: u64,
+                },
+                /// The id holds another command.
+                #[error_class(class = "TaskSendPayloadMismatch", code = "PayloadMismatch")]
+                PayloadMismatch {
+                    #[error_slot(python = "TaskSendPayload", hidden)]
+                    payload: Box<TaskSendPayload>,
+                },
+            }
+        })
+        .expect("the derive accepts the enum");
+        assert!(text.contains(
+            "::horsies_core::error_catalog::SlotValue{name:\"size_bytes\",value:::horsies_core::error_catalog::SlotData::Int(::core::convert::Into::<i128>::into(*size_bytes)),}"
+        ), "{text}");
+        assert!(text.contains(
+            "::horsies_core::error_catalog::SlotValue{name:\"payload\",value:::horsies_core::error_catalog::SlotData::TaskSendPayload(::core::borrow::Borrow::<::horsies_core::TaskSendPayload>::borrow(payload)),}"
         ), "{text}");
     }
 
