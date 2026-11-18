@@ -205,27 +205,30 @@ mod tests {
         let file_shared = maps(&[(SHARED_URL_VARIABLE, "postgresql://a:b@h:9/other")]);
         assert_eq!(
             resolve_database_settings_from(&direct, &file_direct)
-                .unwrap()
+                .expect("the direct environment URL resolves")
                 .database_name,
             "direct"
         );
         assert_eq!(
             resolve_database_settings_from(&BTreeMap::new(), &file_direct)
-                .unwrap()
+                .expect("the direct .env URL resolves")
                 .database_name,
             "file"
         );
-        let settings = resolve_database_settings_from(&shared, &file_shared).unwrap();
+        let settings = resolve_database_settings_from(&shared, &file_shared)
+            .expect("the shared environment URL resolves");
         assert_eq!(settings.database_name, ACME_DATABASE_NAME);
         assert!(settings.url.contains("sslmode=require"));
         assert_eq!(
             settings.source,
             "environment DATABASE_URL (database -> acme_demo)"
         );
-        let settings = resolve_database_settings_from(&BTreeMap::new(), &file_shared).unwrap();
+        let settings = resolve_database_settings_from(&BTreeMap::new(), &file_shared)
+            .expect("the shared .env URL resolves");
         assert_eq!(settings.database_name, ACME_DATABASE_NAME);
         assert_eq!(settings.source, ".env DATABASE_URL (database -> acme_demo)");
-        let settings = resolve_database_settings_from(&BTreeMap::new(), &BTreeMap::new()).unwrap();
+        let settings = resolve_database_settings_from(&BTreeMap::new(), &BTreeMap::new())
+            .expect("the built-in default URL resolves");
         assert_eq!(settings.database_name, ACME_DATABASE_NAME);
     }
 
@@ -236,7 +239,7 @@ mod tests {
             let direct_env = maps(&[(ACME_URL_VARIABLE, &format!("{scheme}://a:b@h:9/direct"))]);
             assert_eq!(
                 resolve_database_settings_from(&direct_env, &BTreeMap::new())
-                    .unwrap()
+                    .expect("a direct environment URL of each accepted scheme resolves")
                     .database_name,
                 "direct"
             );
@@ -244,7 +247,7 @@ mod tests {
             let direct_file = maps(&[(ACME_URL_VARIABLE, &format!("{scheme}://a:b@h:9/file"))]);
             assert_eq!(
                 resolve_database_settings_from(&BTreeMap::new(), &direct_file)
-                    .unwrap()
+                    .expect("a direct .env URL of each accepted scheme resolves")
                     .database_name,
                 "file"
             );
@@ -253,7 +256,8 @@ mod tests {
                 SHARED_URL_VARIABLE,
                 &format!("{scheme}://a:b@h:9/shared?sslmode=require"),
             )]);
-            let shared = resolve_database_settings_from(&shared_env, &BTreeMap::new()).unwrap();
+            let shared = resolve_database_settings_from(&shared_env, &BTreeMap::new())
+                .expect("a shared environment URL of each accepted scheme resolves");
             assert_eq!(shared.database_name, ACME_DATABASE_NAME);
             assert_eq!(
                 shared.psycopg_dsn,
@@ -266,13 +270,14 @@ mod tests {
             )]);
             assert_eq!(
                 resolve_database_settings_from(&BTreeMap::new(), &shared_file)
-                    .unwrap()
+                    .expect("a shared .env URL of each accepted scheme resolves")
                     .database_name,
                 ACME_DATABASE_NAME
             );
         }
 
-        let default = resolve_database_settings_from(&BTreeMap::new(), &BTreeMap::new()).unwrap();
+        let default = resolve_database_settings_from(&BTreeMap::new(), &BTreeMap::new())
+            .expect("the built-in default URL resolves");
         assert_eq!(default.url, DEFAULT_DATABASE_URL);
         assert_eq!(default.psycopg_dsn, DEFAULT_DATABASE_URL);
     }
@@ -298,7 +303,8 @@ mod tests {
             SHARED_URL_VARIABLE,
             "postgresql+psycopg://user:p%40ss@example:5432/horsies?sslmode=require",
         )]);
-        let settings = resolve_database_settings_from(&source, &BTreeMap::new()).unwrap();
+        let settings = resolve_database_settings_from(&source, &BTreeMap::new())
+            .expect("a shared URL with a driver suffix resolves");
         assert_eq!(
             settings.url,
             "postgresql+psycopg://user:p%40ss@example:5432/acme_demo?sslmode=require"
