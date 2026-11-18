@@ -64,7 +64,11 @@ def _socket_inodes(pid: int) -> list[int]:
     for entry in sorted(fd_dir.iterdir(), key=lambda path: int(path.name)):
         if int(entry.name) in STANDARD_STREAMS:
             continue
-        target = os.readlink(entry)
+        try:
+            target = os.readlink(entry)
+        except FileNotFoundError:
+            # A descriptor that the process closed after the listing.
+            continue
         if target.startswith('socket:['):
             found.append(int(target.removeprefix('socket:[').removesuffix(']')))
     return found
