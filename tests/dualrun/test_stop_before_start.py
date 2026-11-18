@@ -25,7 +25,7 @@ import pytest
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_runner
 from horsies.core.worker.child_runner import DeadlineBeforeStart
-from horsies.core.worker.run_return import StoppedBeforeRunning
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, StoppedBeforeRunning
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -125,7 +125,9 @@ def _seed(connection: Connection) -> _Seed:
     return _Seed(worker_id=worker_id, dispatches=tuple(dispatches))
 
 
-def _stop_reason(result: StoppedBeforeRunning | DeadlineBeforeStart | None) -> str:
+def _stop_reason(
+    result: StoppedBeforeRunning | DeadlineBeforeStart | CoreStoppedBeforeStart | None,
+) -> str:
     match result:
         case None:
             return 'STARTED'
@@ -133,6 +135,8 @@ def _stop_reason(result: StoppedBeforeRunning | DeadlineBeforeStart | None) -> s
             return reason
         case DeadlineBeforeStart():
             raise AssertionError('a start with no deadline ended at its deadline')
+        case CoreStoppedBeforeStart(stopped=stopped):
+            raise AssertionError(f'the core of the test process stopped: {stopped}')
 
 
 def _reference_stop(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:

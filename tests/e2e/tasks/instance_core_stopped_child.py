@@ -115,7 +115,7 @@ def healthcheck() -> TaskResult[str, TaskError]:
 
 
 @app.task(task_name='e2e_core_stops_after_return')
-def stops_after_return(marker_path: str) -> TaskResult[int, TaskError]:
+def stops_after_return(*, marker_path: str) -> TaskResult[int, TaskError]:
     """Arm the panic, which comes ``STOP_DELAY_S`` later, and return the
     process id of the child."""
     _stop_the_core(STOP_DELAY_S, marker_path)
@@ -132,7 +132,7 @@ def child_pid() -> TaskResult[int, TaskError]:
     task_name='e2e_core_stops_in_body',
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
 )
-def stops_in_body(first_run_path: str, marker_path: str) -> TaskResult[int, TaskError]:
+def stops_in_body(*, first_run_path: str, marker_path: str) -> TaskResult[int, TaskError]:
     """The first run (no file at ``first_run_path``) writes that file, stops
     the core of its child and waits for the stop, at most ``STOP_WAIT_S``.
     Every run returns the process id of its child."""

@@ -47,7 +47,7 @@ from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
 )
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, ResultEnvelope
 from horsies.core.worker.shared_child import (
     SeatReturn,
     SetRunning,
@@ -167,6 +167,8 @@ def _run(frame: core.SharedRunFrame) -> SeatReturn:
                     results.append(returned)
                 case DeadlineBeforeStart():
                     raise AssertionError('a start that is always allowed was refused')
+                case CoreStoppedBeforeStart(stopped=stopped):
+                    raise AssertionError(f'the core of the test process stopped: {stopped}')
 
     seat = threading.Thread(target=body, name='horsies-seat-0')
     seat.start()

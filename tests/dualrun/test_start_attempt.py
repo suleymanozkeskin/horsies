@@ -24,7 +24,7 @@ import pytest
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_pool, child_runner
 from horsies.core.worker.child_runner import DeadlineBeforeStart
-from horsies.core.worker.run_return import StoppedBeforeRunning
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, StoppedBeforeRunning
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -115,7 +115,9 @@ def _reference_start(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
         }
 
 
-def _reference_spelling(result: StoppedBeforeRunning | DeadlineBeforeStart | None) -> str:
+def _reference_spelling(
+    result: StoppedBeforeRunning | DeadlineBeforeStart | CoreStoppedBeforeStart | None,
+) -> str:
     """The end of a start of the version-2 child as the reference names it:
     ``STARTED``, or the version-1 spelling of its stop reason
     (``NODE_NOT_LINKED`` is ``WORKFLOW_CHECK_FAILED``)."""
@@ -130,6 +132,8 @@ def _reference_spelling(result: StoppedBeforeRunning | DeadlineBeforeStart | Non
                     raise AssertionError(f'the stop of a start gave {wire!r}')
         case DeadlineBeforeStart():
             raise AssertionError('a start with no deadline ended at its deadline')
+        case CoreStoppedBeforeStart(stopped=stopped):
+            raise AssertionError(f'the core of the test process stopped: {stopped}')
 
 
 def _candidate_start(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
