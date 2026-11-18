@@ -8,151 +8,32 @@ its member. Callers match on the variant.
 
 The retry methods take a ``TaskSendRetryable`` and send its stored
 ``TaskSendPayload`` again; they need no user arguments.
+
+The classes of the core's send catalog and ``TaskSendPayload`` are generated
+from horsies-core into ``horsies._catalog.task_send_errors`` and re-exported
+here. The classes that only this client produces are defined here, and
+``TaskSendError`` is the generated union plus them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import ClassVar
 from uuid import UUID
 
 from horsies._catalog.task_send import TaskSendErrorCode as TaskSendErrorCode
-from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
-from horsies.core.history.periods import RetentionClassKey
-from horsies.core.types.error_detail import NoCause
+from horsies._catalog.task_send_errors import (
+    TaskSendAsyncContext as TaskSendAsyncContext,
+    TaskSendCoreError as TaskSendCoreError,
+    TaskSendEnqueueFailed as TaskSendEnqueueFailed,
+    TaskSendIdempotencyKeyConflict as TaskSendIdempotencyKeyConflict,
+    TaskSendPayload as TaskSendPayload,
+    TaskSendPayloadMismatch as TaskSendPayloadMismatch,
+    TaskSendPayloadTooLarge as TaskSendPayloadTooLarge,
+    TaskSendSuppressed as TaskSendSuppressed,
+    TaskSendValidationFailed as TaskSendValidationFailed,
+)
 from horsies.core.types.result import Result
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendPayload:
-    """Serialized envelope for idempotent retry.
-
-    All value fields are pre-serialized to avoid round-trip issues.
-    The retry methods extract this payload directly — no user args needed.
-    """
-
-    task_name: str
-    queue_name: str
-    priority: int
-    # The task input as JSON text: the keyword arguments as one object, or
-    # None for a send with none (stored as ``{}``).
-    input_json: str | None
-    sent_at: datetime
-    good_until: datetime | None
-    enqueue_delay_seconds: int | None
-    task_options: str | None
-    # The caller's idempotency key, distinct from task identity. Riding the
-    # payload keeps the uncertain-commit resend keyed: a replayed send
-    # claims with the same key it first sent.
-    idempotency_key: str | None = None
-    # The retention class snapshotted at enqueue. ``None`` means forever,
-    # so the field defaults to the immutable 30-day class rather than to
-    # ``None`` — a payload that never had the field set must not read as
-    # a forever request on replay.
-    retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendSuppressed:
-    """Sends are suppressed in this process. Nothing was serialized or written.
-
-    Suppression is active during the worker and scheduler import phase,
-    during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
-    methods refuse this error.
-    """
-
-    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.SEND_SUPPRESSED
-    message: str = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendAsyncContext:
-    """A sync send or schedule ran inside a running event loop. Nothing was written.
-
-    The payload is prepared. ``retry_send_async(err)`` or
-    ``retry_schedule_async(err)`` completes the same dispatch with the same
-    task id. A sync retry from the same loop returns this error again.
-    """
-
-    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ASYNC_CONTEXT
-    task_id: UUID
-    payload: TaskSendPayload = field(repr=False)
-    message: str = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendValidationFailed:
-    """The input was refused before anything was written.
-
-    ``exception`` is the cause, or ``NoCause()`` when a check refused the
-    input without a Python exception. The retry methods refuse this error.
-    """
-
-    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.VALIDATION_FAILED
-    message: str = field(repr=False)
-    exception: BaseException | NoCause = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendEnqueueFailed:
-    """The broker or the database failed during enqueue. The row may or may not exist.
-
-    ``retryable`` is the driver classification of the cause. ``retry_send(err)``
-    sends the same task id and payload again; the broker returns the existing
-    task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
-    the failure by a data check.
-    """
-
-    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ENQUEUE_FAILED
-    task_id: UUID
-    payload: TaskSendPayload = field(repr=False)
-    message: str = field(repr=False)
-    retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendPayloadMismatch:
-    """The task id exists with a different command or idempotency key. Nothing was written.
-
-    The message names which one differs. The retry methods refuse this error.
-    """
-
-    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.PAYLOAD_MISMATCH
-    task_id: UUID
-    payload: TaskSendPayload = field(repr=False)
-    message: str = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendPayloadTooLarge:
-    """The serialized kwargs exceed ``payload.reject_bytes``. Nothing was written.
-
-    ``size_bytes`` is the length of the serialized kwargs and ``limit_bytes``
-    the configured limit. The retry methods refuse this error.
-    """
-
-    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.PAYLOAD_TOO_LARGE
-    message: str = field(repr=False)
-    size_bytes: int
-    limit_bytes: int
-
-
-@dataclass(slots=True, frozen=True)
-class TaskSendIdempotencyKeyConflict:
-    """The idempotency key is reserved by another task with a different command.
-
-    Nothing was written. ``owner_task_id`` names the task that holds the key.
-    The retry methods accept this error: a retry after the reservation ends
-    is accepted, and a retry before that returns the same error.
-    """
-
-    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
-    task_id: UUID
-    payload: TaskSendPayload = field(repr=False)
-    message: str = field(repr=False)
-    owner_task_id: UUID
 
 
 @dataclass(slots=True, frozen=True)
@@ -185,18 +66,11 @@ class TaskSendLoopRunnerFailed:
     exception: BaseException = field(repr=False)
 
 
-type TaskSendError = (
-    TaskSendSuppressed
-    | TaskSendAsyncContext
-    | TaskSendValidationFailed
-    | TaskSendEnqueueFailed
-    | TaskSendPayloadMismatch
-    | TaskSendPayloadTooLarge
-    | TaskSendIdempotencyKeyConflict
-    | TaskSendEventLoopLimit
-    | TaskSendLoopRunnerFailed
-)
-"""Every failure of a send or schedule: one variant per ``TaskSendErrorCode``."""
+type TaskSendError = TaskSendCoreError | TaskSendEventLoopLimit | TaskSendLoopRunnerFailed
+"""Every failure of a send or schedule: one variant per ``TaskSendErrorCode``.
+
+``TaskSendCoreError`` holds the classes of the core's catalog; the event
+loop limit and the loop runner failure are produced by this client only."""
 
 type TaskSendRetryable = (
     TaskSendEnqueueFailed

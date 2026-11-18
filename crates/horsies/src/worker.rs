@@ -295,6 +295,57 @@ mod tests {
         assert!(WorkerPlan::of_manifest(&manifest).is_ok());
     }
 
+    /// The worker of `config` with the profile `web`: the app accepts the
+    /// config, the manifest asks for no preload process, and the plan builds.
+    fn assert_web_starts_with_no_preload(config: AppConfig) {
+        let app = Horsies::new(config).unwrap();
+        let manifest = app.worker_manifest_of(WorkerStart::profile("web")).unwrap();
+        assert_eq!(
+            manifest.profiles["web"].preload,
+            horsies_core::worker_manifest::Preload::NoPreload
+        );
+        assert!(WorkerPlan::of_manifest(&manifest).is_ok());
+    }
+
+    /// A profile built from `..WorkerProfile::default()` with no `preload`
+    /// has `ChildPreload::NoPreload`, and its worker starts.
+    #[test]
+    fn a_default_profile_starts_with_no_preload() {
+        let profile = WorkerProfile {
+            isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
+                IsolatedChildCount::try_from(2).unwrap(),
+            )),
+            ..WorkerProfile::default()
+        };
+        assert_eq!(profile.preload, ChildPreload::NoPreload);
+        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let _previous = config.worker_profiles.insert("web".to_owned(), profile);
+        assert_web_starts_with_no_preload(config);
+    }
+
+    /// A TOML profile without the `preload` key reads as
+    /// `ChildPreload::NoPreload`, and its worker starts. `toml` is built
+    /// with the `cli` feature.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_toml_profile_without_preload_starts() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[broker]
+database_url = "postgresql://localhost/horsies"
+
+[worker_profiles.web]
+isolated = { kind = "isolated_children", count = 2 }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.worker_profiles["web"].preload,
+            ChildPreload::NoPreload
+        );
+        assert_web_starts_with_no_preload(config);
+    }
+
     #[test]
     fn an_unknown_profile_is_refused_with_python_s_report() {
         let manifest = app()

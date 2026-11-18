@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final, NewType
 
+from horsies._catalog.retention_class import RetentionClassKey as RetentionClassKey
 from horsies.core.types.result import Err, Ok, Result
 
 MIN_RETENTION_DAYS: Final = 1
@@ -33,12 +34,6 @@ RetentionDays = NewType('RetentionDays', int)
 A NewType is a static marker: anyone can call ``RetentionDays(n)``, and
 pyright makes the convention hold for typed callers."""
 
-RetentionClassKey = NewType('RetentionClassKey', str)
-"""The key of a finite period class. ``period_class_key`` builds it.
-
-The enqueue paths take this type, so a raw string key is a type error at
-a typed call site, not a row that has no partition later. Like
-``RetentionDays``, it is static only: ``RetentionClassKey('x')`` runs."""
 
 
 @dataclass(frozen=True, slots=True)

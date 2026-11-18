@@ -162,7 +162,10 @@ impl ThreadCounts {
         )
     }
 
-    /// The counts of the report line in `stdout`.
+    /// The counts of the report line in `stdout`. The line may start with
+    /// the test harness's `test <name> ... `: with `--nocapture` the harness
+    /// writes that text before the test runs, and the report follows it on
+    /// the same line.
     ///
     /// # Panics
     ///
@@ -170,7 +173,7 @@ impl ThreadCounts {
     fn parse(stdout: &str) -> ThreadCounts {
         let line = stdout
             .lines()
-            .find_map(|line| line.strip_prefix(REPORT_PREFIX))
+            .find_map(|line| line.split_once(REPORT_PREFIX).map(|(_, counts)| counts))
             .unwrap_or_else(|| panic!("the child printed no report line:\n{stdout}"));
         let mut counts = [None; 4];
         for pair in line.split_whitespace() {
@@ -199,6 +202,24 @@ impl ThreadCounts {
             idle: read(3),
         }
     }
+}
+
+/// The report line is read where the test harness prints it: after
+/// `test <name> ... ` on the same line.
+#[test]
+fn the_report_is_read_after_the_harness_prefix_of_its_line() {
+    let counts = ThreadCounts {
+        before_app: 2,
+        after_app: 2,
+        after_send: 4,
+        idle: 4,
+    };
+    let stdout = format!(
+        "\nrunning 1 test\ntest {CHILD_TEST} ... {}\nok\n",
+        counts.line()
+    );
+
+    assert_eq!(ThreadCounts::parse(&stdout), counts);
 }
 
 /// The child: a producer app on the database of [`CHILD_URL_VARIABLE`]

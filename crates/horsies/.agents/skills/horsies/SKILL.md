@@ -92,7 +92,7 @@ use std::convert::Infallible;
 use std::process::ExitCode;
 
 use horsies::{
-    task, AppConfig, ChildPreload, Horsies, IsolatedChildCount, IsolatedChildren,
+    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
     IsolatedSetting, TaskError, WorkerProfile,
 };
 
@@ -106,7 +106,6 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
         isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
             IsolatedChildCount::try_from(4)?,
         )),
-        preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     };
     let config = AppConfig {
@@ -136,8 +135,9 @@ fn main() -> ExitCode {
 ```
 
 - `Horsies::new` does no I/O. The app connects at its first operation.
-- A Rust worker profile needs `preload: ChildPreload::NoPreload`.
-  `Horsies::new` refuses another value with `HRS-218`.
+- A Rust worker profile does not set `preload`. The default,
+  `ChildPreload::NoPreload`, is the only value that a Rust worker takes;
+  `Horsies::new` refuses `Library` and `App` with `HRS-218`.
 - `run` blocks its thread. Inside a tokio runtime it prints why and
   returns exit code 1.
 

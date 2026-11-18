@@ -767,3 +767,55 @@ async fn the_task_list_page_reads_the_history_leaves_on_the_enqueue_index_and_pr
     drop(client);
     database.drop().await;
 }
+
+/// The task stats of the last day with no filter
+/// (`horsies_monitoring_task_stats`).
+const LAST_DAY_STATS: &str = "SELECT * FROM horsies_monitoring_task_stats(
+         now() - interval '1 day', now(), '{}', '{}', '{}', '{}', '{}', FALSE, '{}', '{}'
+     )";
+
+/// Python `test_task_history_detail_reads.py::TestPagesFacetsAggregates::test_aggregate_plan_visits_no_out_of_range_leaf`,
+/// on the status counts of `horsies_monitoring_task_stats`: the count
+/// statement is planned with the window bounds as values, so a leaf outside
+/// the window is pruned and the plan does not name it. The current
+/// `standard_30d` leaf and the forever leaf are in the window and read; the
+/// leaf of ten days back is not.
+#[tokio::test]
+#[serial]
+async fn the_task_stats_read_prunes_the_history_leaves_outside_the_window() {
+    let database = SpecDatabase::create().await;
+    let current_leaf = standard_leaf(&database.pool, 0).await;
+    let old_leaf = standard_leaf(&database.pool, 10).await;
+    seed_history_population(&database.pool).await;
+    let (client, notices) = connect_collecting_notices(database.url()).await;
+
+    client.batch_execute("BEGIN").await.expect("begin");
+    client
+        .batch_execute(NESTED_PLAN_SETTINGS)
+        .await
+        .expect("send the nested plans as notices");
+    let rows = client
+        .query(LAST_DAY_STATS, &[])
+        .await
+        .expect("read the task stats");
+    client.batch_execute("ROLLBACK").await.expect("rollback");
+    let plans =
+        std::mem::take(&mut *notices.lock().unwrap_or_else(PoisonError::into_inner)).join("\n");
+
+    assert_eq!(rows.len(), 7, "one row per task status");
+    let count_plan = plans
+        .split("duration:")
+        .find(|plan| plan.contains("WITH side_counts AS"))
+        .unwrap_or_else(|| panic!("no plan of the count statement: {plans}"));
+    assert!(
+        count_plan.contains(&format!(" on {current_leaf} ")),
+        "{count_plan}"
+    );
+    assert!(
+        count_plan.contains(" on horsies_task_history_forever_open "),
+        "{count_plan}"
+    );
+    assert!(!count_plan.contains(&old_leaf), "{count_plan}");
+    drop(client);
+    database.drop().await;
+}
