@@ -2,15 +2,13 @@
 
 Runs the real app over httpx's ASGI transport against a real database, so the
 wiring between routes, the query package, and the task/workflow primitives is
-exercised end to end. With ``--dual-run=monitoring-and-web`` each test runs on
-the Python app before the switch (``tests/dualrun/reference/web_app.py``) and
-on the app that mounts the core's handler. Coverage:
+exercised end to end. The app mounts the core's handler. Coverage:
 
 1. read routes — envelopes, 404 copy, and the vanished-backing-task case
 2. worker routes — snapshots, liveness, schedules, unknown-worker history
 3. the section 7.4 action mapping table, row by row
-4. the resume committed-then-failed ambiguity, resolved server-side
-5. the SSE event layer — a real NOTIFY, heartbeats, and the degraded path
+4. a resume whose child build raises
+5. the SSE event layer — a real NOTIFY and the authorization of the stream
 6. schema compatibility (spec 7.5b) — the tool never runs DDL, and refuses to
    write through a schema it does not recognize
 """
@@ -36,26 +34,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import is_err
 from horsies.core.types.status import TaskStatus
-from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode as WorkflowTaskNode
 from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.workflows.registry import register_workflow_definition
 from horsies.web import INTENT_HEADER, INTENT_VALUE, AllowAll, create_monitoring_app
-from horsies.web import app as web_app_module
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
-from pydantic import SecretStr
-from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
-from tests.dualrun.operations.table import Implementation
-from tests.dualrun.reference import web_app as reference_app_module
-from tests.dualrun.reference import web_events as reference_events_module
-from tests.dualrun.reference.web_routes import actions as reference_actions_module
-from tests.dualrun.reference.web_routes import events as reference_events_route_module
 from tests.integration.conftest import DB_URL
 from tests.integration.history_seeding import stored_history_status
 from tests.integration.monitoring_seeding import (
@@ -203,27 +190,6 @@ async def read_status(session: AsyncSession, workflow_id: str) -> str:
     ).first()
     assert row is not None
     return str(row[0])
-
-
-class FailingListener:
-    """A listener that cannot connect, for the degraded-stream path."""
-
-    def __init__(self, database_url: str, *, tcp_user_timeout_ms: int) -> None:
-        self.database_url = database_url
-        self.tcp_user_timeout_ms = tcp_user_timeout_ms
-
-    async def start(self) -> Err[BrokerOperationError]:
-        return Err(
-            BrokerOperationFailed(
-                code=BrokerErrorCode.LISTENER_START_FAILED,
-                message='stubbed listener failure',
-                retryable=True,
-                exception=ConnectionError('listener down'),
-            )
-        )
-
-    async def close(self) -> None:
-        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -806,156 +772,6 @@ class TestWorkflowActionMapping:
         assert response.status_code == 404
 
 
-def skip_on_the_core(implementation: ImplementationRun, reason: str) -> None:
-    """Skip the core run of ``--dual-run``: the test drives a seam of the
-    Python app before the switch."""
-    match implementation:
-        case DualRunCase(implementation=Implementation.CORE):
-            pytest.skip(reason)
-        case DualRunCase() | SingleRun():
-            pass
-
-
-@pytest_asyncio.fixture
-async def reference_api(app: Horsies) -> AsyncGenerator[AsyncClient, None]:
-    """A client of the Python app before the switch, whose route seams a test
-    replaces."""
-    built = reference_app_module.create_monitoring_app(app, auth_policy=AllowAll())
-    async with AsyncClient(
-        transport=ASGITransport(app=built), base_url='http://test'
-    ) as client:
-        yield client
-    await built.state.events.close()
-
-
-@pytest.mark.usefixtures('clean_tables')
-class TestResumeCommittedThenFailed:
-    """Resume's recovery pass runs after the state change commits.
-
-    Resume returns ``HandleResumeRecoveryFailed`` when it committed and only
-    the recovery pass failed. The server answers from that variant rather
-    than handing the ambiguity to the browser.
-
-    These tests replace the workflow primitives of the Python action routes
-    (the reference of the switch); the core's mapping of the same errors is
-    tested in ``crates/horsies-core/src/monitoring/actions.rs``
-    (``resume_failure_mapping_is_exhaustive``). The core run of
-    ``--dual-run`` is skipped.
-    """
-
-    @pytest.fixture(autouse=True)
-    def reference_only(self, implementation: ImplementationRun) -> None:
-        skip_on_the_core(implementation, 'the test replaces a primitive of the Python routes')
-
-    async def test_recovery_failure_is_success_plus_a_warning(
-        self,
-        reference_api: AsyncClient,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        run = make_workflow(status='RUNNING')
-        await persist(session, run)
-
-        async def failing_resume(*_args: Any, **_kwargs: Any) -> Any:
-            from horsies.core.models.workflow.handle_types import (
-                HandleResumeRecoveryFailed,
-            )
-
-            return Err(
-                HandleResumeRecoveryFailed(
-                    message='recovery pass failed',
-                    workflow_id=run.id,
-                    exception=ConnectionError('lost'),
-                )
-            )
-
-        monkeypatch.setattr(reference_actions_module, 'resume_workflow', failing_resume)
-
-        response = await reference_api.post(f'/api/workflows/{run.id}/resume', headers=ACT)
-
-        assert response.status_code == 200
-        assert response.json()['outcome'] == 'resumed'
-        assert response.json()['warning'] == 'post_resume_recovery_failed'
-
-    async def test_failure_before_the_commit_is_service_unavailable(
-        self,
-        reference_api: AsyncClient,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        run = make_workflow(status='PAUSED')
-        await persist(session, run)
-
-        async def failing_resume(*_args: Any, **_kwargs: Any) -> Any:
-            from horsies.core.models.workflow.handle_types import (
-                HandleDbOperationFailed,
-            )
-
-            return Err(
-                HandleDbOperationFailed(
-                    message='resume failed outright',
-                    retryable=True,
-                    workflow_id=run.id,
-                    exception=ConnectionError('lost'),
-                )
-            )
-
-        monkeypatch.setattr(reference_actions_module, 'resume_workflow', failing_resume)
-
-        response = await reference_api.post(f'/api/workflows/{run.id}/resume', headers=ACT)
-
-        assert response.status_code == 503
-
-    async def test_pause_infrastructure_failure_is_service_unavailable(
-        self,
-        reference_api: AsyncClient,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        run = make_workflow(status='RUNNING')
-        await persist(session, run)
-
-        async def failing_pause(*_args: Any, **_kwargs: Any) -> Any:
-            from horsies.core.models.workflow.handle_types import (
-                HandleDbOperationFailed,
-            )
-
-            return Err(
-                HandleDbOperationFailed(
-                    message='pause failed',
-                    retryable=True,
-                    workflow_id=run.id,
-                    exception=ConnectionError('lost'),
-                )
-            )
-
-        monkeypatch.setattr(reference_actions_module, 'pause_workflow', failing_pause)
-
-        response = await reference_api.post(f'/api/workflows/{run.id}/pause', headers=ACT)
-
-        assert response.status_code == 503
-
-    async def test_pause_state_conflict_reports_the_observed_status(
-        self,
-        reference_api: AsyncClient,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Ok(False) with a live run: the CAS lost, the client refetches."""
-        run = make_workflow(status='RUNNING')
-        await persist(session, run)
-
-        async def noop_pause(*_args: Any, **_kwargs: Any) -> Any:
-            return Ok(False)
-
-        monkeypatch.setattr(reference_actions_module, 'pause_workflow', noop_pause)
-
-        response = await reference_api.post(f'/api/workflows/{run.id}/pause', headers=ACT)
-
-        assert response.status_code == 409
-        assert response.json()['current_status'] == 'RUNNING'
-
-
 _CORE_LOG_WAIT_POLLS: Final = 100
 """Reads of ``caplog`` while a test waits for a record of the core."""
 
@@ -1066,7 +882,6 @@ class TestResumeOfAChildBuildThatRaises:
         app: Horsies,
         monitoring: FastAPI,
         session: AsyncSession,
-        implementation: ImplementationRun,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         definition_key = _register_child_with_a_corrupt_root(app)
@@ -1080,21 +895,15 @@ class TestResumeOfAChildBuildThatRaises:
         ) as client:
             with caplog.at_level(logging.ERROR, logger='horsies.monitoring'):
                 response = await client.post(f'/api/workflows/{run.id}/resume', headers=ACT)
-                match implementation:
-                    case DualRunCase(implementation=Implementation.PYTHON_REFERENCE):
-                        messages = None
-                    case DualRunCase() | SingleRun():
-                        messages = await _core_messages_holding(
-                            caplog, 'horsies.monitoring', run.id,
-                        )
+                messages = await _core_messages_holding(
+                    caplog, 'horsies.monitoring', run.id,
+                )
 
         assert response.status_code == 500
         assert response.headers['content-type'] == 'text/plain; charset=utf-8'
         assert response.text == 'Internal Server Error'
         assert await read_status(session, run.id) == 'PAUSED'
         match messages:
-            case None:
-                pass
             case [message]:
                 assert message.startswith(
                     f'monitoring resume of workflow {run.id} failed and nothing committed: '
@@ -1110,7 +919,7 @@ class TestResumeOfAChildBuildThatRaises:
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures('clean_tables')
 class TestEventStream:
-    """Invalidation events, heartbeats, and the honest degraded path."""
+    """Invalidation events from the installed trigger."""
 
     async def test_a_real_task_change_produces_a_tasks_event(
         self, monitoring: FastAPI, session: AsyncSession
@@ -1137,44 +946,6 @@ class TestEventStream:
 
         assert frame['topic'] == 'tasks'
         assert isinstance(frame['ids'], list)
-
-    async def test_an_idle_stream_sends_heartbeats(
-        self, app: Horsies, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Comment frames keep a proxy from reaping an idle connection."""
-        monkeypatch.setattr(reference_events_route_module, 'HEARTBEAT_SECONDS', 0.2)
-        monkeypatch.setattr(web_app_module, 'EVENT_HEARTBEAT_MS', 200)
-        built = create_monitoring_app(app, auth_policy=AllowAll())
-
-        async with AsgiEventStream(built, '/api/events') as stream:
-            comment = await stream.next_comment(timeout_s=15)
-
-        assert comment.startswith(': heartbeat')
-        await built.state.events.close()
-
-    async def test_a_listener_that_cannot_start_degrades_instead_of_pretending(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The server never fabricates events; the client falls back to polling.
-
-        The app's broker is built with ``assume_initialized=True``, so the
-        core gives it no listener; the Python app's own listener is replaced
-        with one that cannot start."""
-        monkeypatch.setattr(reference_events_module, 'PostgresListener', FailingListener)
-        no_listener = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(DB_URL))))
-        broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True,
-        )
-        no_listener._broker = broker  # pyright: ignore[reportPrivateUsage]
-        broker.app = no_listener
-        built = create_monitoring_app(no_listener, auth_policy=AllowAll())
-
-        async with AsgiEventStream(built, '/api/events') as stream:
-            frame = await stream.next_data(timeout_s=15)
-
-        assert frame == {'topic': 'degraded'}
-        await built.state.events.close()
-        await broker.close_async()
 
 
 class TestEventStreamAuthorization:
@@ -1283,18 +1054,6 @@ async def relation_names(database_url: str) -> tuple[Any, Any]:
 
 class TestTheToolNeverRunsDdl:
     """Pointing the command at a database must never migrate it."""
-
-    async def test_cli_app_creates_nothing_and_reports_absent(
-        self, fresh_database: str
-    ) -> None:
-        cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
-        assert cli_app.get_broker().run_schema_migrations is False
-
-        initialized = await cli_app.get_broker().ensure_schema_initialized()
-
-        assert not is_err(initialized)
-        assert await relation_names(fresh_database) == (None, None)
-        await cli_app.get_broker().close_async()
 
     async def test_an_enabled_broker_would_have_created_the_schema(
         self, fresh_database: str

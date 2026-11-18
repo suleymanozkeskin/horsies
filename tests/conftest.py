@@ -12,10 +12,6 @@ from dotenv import load_dotenv
 # Load test environment before any test module imports
 load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env.test')
 
-# The integration dual-run of a module switch (--dual-run=<module>). It
-# imports no horsies module at import.
-pytest_plugins = ('tests.dualrun.operations.plugin',)
-
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers, and create the session database when needed.
