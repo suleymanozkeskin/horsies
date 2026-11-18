@@ -169,6 +169,22 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     'get_class_report_async': (
         'class_report_async', lambda b: asyncio.run(b.get_class_report_async()),
     ),
+    'ping_workers_blocking': (
+        'ping_workers',
+        lambda b: b._ping_workers_blocking(
+            target_worker_id=None, timeout_seconds=2.0, min_responses=None,
+        ),
+    ),
+    'list_worker_states_blocking': ('worker_states', lambda b: b._list_worker_states_blocking()),
+    'get_worker_state_blocking': (
+        'worker_state', lambda b: b._get_worker_state_blocking(_WORKER_ID),
+    ),
+    'get_worker_state_history_blocking': (
+        'worker_state_history',
+        lambda b: b._get_worker_state_history_blocking(_WORKER_ID, limit=None),
+    ),
+    'get_class_coverage_blocking': ('class_coverage', lambda b: b._get_class_coverage_blocking()),
+    'get_class_report_blocking': ('class_report', lambda b: b._get_class_report_blocking()),
 }
 
 _TASK_LISTS_AND_PASSES: Final[dict[str, tuple[str, BrokerCall]]] = {
@@ -339,7 +355,7 @@ class TestWorkflowStart:
     def test_a_start_raises_the_refusal(
         self, broker: PostgresBroker, form: str, refusal: CoreError,
     ) -> None:
-        call = _raising(broker, 'start_workflow_async', refusal)
+        call = _raising(broker, form, refusal)
 
         match form:
             case 'start_workflow_async':
@@ -360,9 +376,9 @@ HandleCall = Callable[[WorkflowHandle[Any]], object]
 
 _HANDLE_CALLS: Final[dict[str, tuple[str, HandleCall]]] = {
     'status_async': ('workflow_status_async', lambda h: asyncio.run(h.status_async())),
-    'status': ('workflow_status_async', lambda h: h.status()),
+    'status': ('workflow_status', lambda h: h.status()),
     'get_async': ('wait_workflow_result_async', lambda h: asyncio.run(h.get_async())),
-    'get': ('wait_workflow_result_async', lambda h: h.get()),
+    'get': ('wait_workflow_result', lambda h: h.get()),
     'result_for_async': (
         'workflow_node_result_async',
         lambda h: asyncio.run(h.result_for_async(NodeKey[int](node_id='first'))),
@@ -372,6 +388,14 @@ _HANDLE_CALLS: Final[dict[str, tuple[str, HandleCall]]] = {
     'cancel_async': ('cancel_workflow_async', lambda h: asyncio.run(h.cancel_async())),
     'pause_async': ('pause_workflow_async', lambda h: asyncio.run(h.pause_async())),
     'resume_async': ('resume_workflow_async', lambda h: asyncio.run(h.resume_async())),
+    'result_for': (
+        'workflow_node_result', lambda h: h.result_for(NodeKey[int](node_id='first')),
+    ),
+    'results': ('workflow_node_results', lambda h: h.results()),
+    'tasks': ('workflow_nodes', lambda h: h.tasks()),
+    'cancel': ('cancel_workflow', lambda h: h.cancel()),
+    'pause': ('pause_workflow', lambda h: h.pause()),
+    'resume': ('resume_workflow', lambda h: h.resume()),
 }
 
 
@@ -392,13 +416,11 @@ _LIFECYCLE_CALLS: Final[dict[str, tuple[str, BrokerCall]]] = {
     'pause_workflow': (
         'pause_workflow_async', lambda b: asyncio.run(pause_workflow(b, _WORKFLOW_ID)),
     ),
-    'pause_workflow_sync': ('pause_workflow_async', lambda b: pause_workflow_sync(b, _WORKFLOW_ID)),
+    'pause_workflow_sync': ('pause_workflow', lambda b: pause_workflow_sync(b, _WORKFLOW_ID)),
     'resume_workflow': (
         'resume_workflow_async', lambda b: asyncio.run(resume_workflow(b, _WORKFLOW_ID)),
     ),
-    'resume_workflow_sync': (
-        'resume_workflow_async', lambda b: resume_workflow_sync(b, _WORKFLOW_ID),
-    ),
+    'resume_workflow_sync': ('resume_workflow', lambda b: resume_workflow_sync(b, _WORKFLOW_ID)),
 }
 
 

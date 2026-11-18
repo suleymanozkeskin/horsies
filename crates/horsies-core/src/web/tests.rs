@@ -813,6 +813,75 @@ fn the_runtime_config_is_the_text_of_python_json_dumps() {
     );
 }
 
+/// Python `tests/unit/test_web_app_shell.py::TestStaticServing::test_built_assets_are_served`:
+/// a built asset is served with the bytes of its file.
+#[tokio::test]
+async fn a_built_asset_is_served_with_its_bytes() {
+    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+
+    let asset = router
+        .oneshot(request(Method::GET, "/assets/app.js"))
+        .await
+        .unwrap();
+
+    assert_eq!(asset.status(), StatusCode::OK);
+    let body = to_bytes(asset.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"console.log('horsies')");
+}
+
+/// Python `tests/unit/test_web_app_shell.py::TestStaticServing::test_no_custom_css_means_no_extra_stylesheet`:
+/// with no custom stylesheet, the page gets no stylesheet link.
+#[tokio::test]
+async fn no_custom_css_means_no_extra_stylesheet() {
+    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+
+    let page = router.oneshot(request(Method::GET, "/")).await.unwrap();
+
+    assert_eq!(page.status(), StatusCode::OK);
+    let page = String::from_utf8(
+        to_bytes(page.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(page.contains("window.__HORSIES_UI__"), "{page}");
+    assert!(!page.contains("<link rel=\"stylesheet\""), "{page}");
+}
+
+/// Python `tests/unit/test_web_app_shell.py::test_base_href_is_always_a_directory`:
+/// the base of the page ends with a slash under every mount, so relative
+/// asset URLs resolve against the mount.
+#[test]
+fn the_base_href_is_always_a_directory() {
+    for (root_path, base) in [
+        ("", "<base href=\"/\">"),
+        ("/monitoring", "<base href=\"/monitoring/\">"),
+        ("/a/b", "<base href=\"/a/b/\">"),
+    ] {
+        let page = inject("<html><head></head><body></body></html>", root_path, None);
+        assert!(page.contains(base), "{root_path:?}: {page}");
+    }
+}
+
+/// Python `tests/unit/test_web_app_shell.py::test_asset_resolution_rejects_traversal`:
+/// a request path resolves to an asset only for a built file inside the
+/// tree; not for the page, an empty path, a missing file, or a path that
+/// leaves the tree.
+#[test]
+fn an_asset_resolves_only_to_a_built_file_inside_the_tree() {
+    let assets = MemoryAssets::standard();
+    let resolve = |path: &str| {
+        safe_asset_path(path)
+            .and_then(|asset_path| super::spa::AssetStore::get(assets.as_ref(), &asset_path))
+    };
+
+    assert!(resolve("assets/app.js").is_some());
+    for path in ["../../etc/passwd", "index.html", "", "nope.js"] {
+        assert!(resolve(path).is_none(), "{path:?}");
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
@@ -868,6 +937,8 @@ async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
     }
 }
 
+/// Python `tests/unit/test_web_app_shell.py::TestMissingBuild`: the page
+/// names the missing build and the command that builds it; the API answers.
 #[tokio::test]
 async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     let state = test_state(
@@ -884,10 +955,13 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
         .await
         .unwrap();
     assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(json(page).await["detail"]
-        .as_str()
-        .unwrap()
-        .contains("bun run build, then rebuild horsies-core"));
+    let page = json(page).await;
+    let detail = page["detail"].as_str().unwrap();
+    assert!(detail.contains("assets are not built"), "{detail}");
+    assert!(
+        detail.contains("bun run build, then rebuild horsies-core"),
+        "{detail}"
+    );
     assert_eq!(
         router
             .oneshot(request(Method::GET, "/api/meta"))

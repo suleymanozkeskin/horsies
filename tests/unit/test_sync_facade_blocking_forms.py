@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Final, TypeVar
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -20,12 +22,26 @@ import pytest
 from pydantic import SecretStr
 
 from horsies._core import (
+    AllSlotsServingRecord,
     BrokerFailure,
+    BudgetLoadRecord,
+    ClassCoverageRecord,
+    ClassReportRecord,
     CoreConnectionError,
     CoreStartFailed,
     DatabasePingRecord,
     HandleClosed,
+    OldestWaitingRecord,
+    PendingStreamRecord,
+    StreamCoverageRecord,
+    StreamServedRecord,
+    StreamUnservedRecord,
     TooManyPendingCalls,
+    WorkerClassLoadRecord,
+    WorkerPongRecord,
+    WorkerPongsRecord,
+    WorkerStateAbsent,
+    WorkerStatesRecord,
 )
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import (
@@ -47,6 +63,11 @@ from horsies.core.types.status import TaskStatus
 from tests.broker_resources_support import resources_of
 from tests.sync_facade_support import outcome_shape
 from tests.unit.test_broker_postgres import _make_broker, _pinned
+from tests.unit.test_broker_worker_reads_in_core import (
+    _SLOTS_DOWN_RECORD,
+    _record as _core_record,
+    _state_record,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -434,3 +455,223 @@ def test_close_with_nothing_open_runs_no_event_loop(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr('horsies.core.brokers.postgres.asyncio.run', no_event_loop)
 
     assert broker.close() == Ok(None)
+
+
+# =============================================================================
+# Horsies monitoring reads and the worker ping: the CoreHandle blocking forms
+# =============================================================================
+
+
+def _failure_of(code: str) -> MagicMock:
+    return _core_record(
+        BrokerFailure,
+        code=code,
+        message=f'{code}: connection refused',
+        retryable=code != 'INVALID_INPUT',
+        exception=CONNECTION_LOST,
+    )
+
+
+_STATES: Final = _core_record(
+    WorkerStatesRecord,
+    states=[
+        _state_record('w1', _core_record(AllSlotsServingRecord)),
+        _state_record('w2', _SLOTS_DOWN_RECORD),
+    ],
+)
+_COVERAGE: Final = _core_record(
+    ClassCoverageRecord,
+    checked_at=_AT,
+    live_workers=1,
+    streams=[
+        _core_record(
+            StreamCoverageRecord,
+            queue_name='a',
+            execution='ISOLATED',
+            state=_core_record(StreamServedRecord, workers=1, capacity=4),
+        ),
+    ],
+)
+_REPORT: Final = _core_record(
+    ClassReportRecord,
+    checked_at=_AT,
+    streams=[
+        _core_record(
+            PendingStreamRecord,
+            queue_name='a',
+            execution='ISOLATED',
+            wait=_core_record(OldestWaitingRecord, enqueued_at=_AT, wait=timedelta(seconds=90)),
+            state=_core_record(StreamUnservedRecord),
+        ),
+    ],
+    workers=[
+        _core_record(
+            WorkerClassLoadRecord,
+            worker_id='w1',
+            snapshot_at=_AT,
+            budgets=[
+                _core_record(
+                    BudgetLoadRecord,
+                    budget='ISOLATED',
+                    capacity=4,
+                    serves=['ISOLATED'],
+                    in_flight=1,
+                ),
+            ],
+        ),
+    ],
+)
+
+
+@dataclass(frozen=True)
+class MonitoringFacade:
+    """A sync facade of ``Horsies``, its async form, the blocking form of the
+    core handle that it calls, with the arguments it passes, and each answer
+    of its catalog."""
+
+    blocking: Callable[[Horsies], object]
+    awaited: Callable[[Horsies], Awaitable[object]]
+    blocking_form: str
+    arguments: tuple[object, ...]
+    keywords: dict[str, object]
+    answers: dict[str, object]
+
+
+MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
+    'ping_workers': MonitoringFacade(
+        blocking=lambda app: app.ping_workers(
+            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+        ),
+        awaited=lambda app: app.ping_workers_async(
+            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+        ),
+        blocking_form='ping_workers',
+        arguments=(),
+        keywords={'target_worker_id': 'w1', 'timeout_seconds': 0.5, 'min_responses': 1},
+        answers={
+            'pongs': _core_record(
+                WorkerPongsRecord,
+                pongs=[
+                    _core_record(
+                        WorkerPongRecord,
+                        worker_id='w1',
+                        hostname='host-1',
+                        pid=101,
+                        round_trip_ms=1.25,
+                    ),
+                ],
+            ),
+            'invalid_input': _failure_of('INVALID_INPUT'),
+            'listener_disabled': _failure_of('LISTENER_DISABLED'),
+            'ping_failed': _failure_of('WORKER_PING_FAILED'),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'list_worker_states': MonitoringFacade(
+        blocking=lambda app: app.list_worker_states(),
+        awaited=lambda app: app.list_worker_states_async(),
+        blocking_form='worker_states',
+        arguments=(),
+        keywords={},
+        answers={
+            'states': _STATES,
+            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_worker_state': MonitoringFacade(
+        blocking=lambda app: app.get_worker_state('w1'),
+        awaited=lambda app: app.get_worker_state_async('w1'),
+        blocking_form='worker_state',
+        arguments=('w1',),
+        keywords={},
+        answers={
+            'state': _state_record('w1', _SLOTS_DOWN_RECORD),
+            'absent': _core_record(WorkerStateAbsent),
+            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_worker_state_history': MonitoringFacade(
+        blocking=lambda app: app.get_worker_state_history('w1', limit=5),
+        awaited=lambda app: app.get_worker_state_history_async('w1', limit=5),
+        blocking_form='worker_state_history',
+        arguments=('w1',),
+        keywords={'limit': 5},
+        answers={
+            'states': _STATES,
+            'invalid_input': _failure_of('INVALID_INPUT'),
+            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_class_coverage': MonitoringFacade(
+        blocking=lambda app: app.get_class_coverage(),
+        awaited=lambda app: app.get_class_coverage_async(),
+        blocking_form='class_coverage',
+        arguments=(),
+        keywords={},
+        answers={
+            'coverage': _COVERAGE,
+            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+    'get_class_report': MonitoringFacade(
+        blocking=lambda app: app.get_class_report(),
+        awaited=lambda app: app.get_class_report_async(),
+        blocking_form='class_report',
+        arguments=(),
+        keywords={},
+        answers={
+            'report': _REPORT,
+            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'core_cannot_run_the_call': CORE_REFUSAL,
+        },
+    ),
+}
+
+MONITORING_CASES: Final = [
+    (facade, answer)
+    for facade, entry in MONITORING_FACADES.items()
+    for answer in entry.answers
+]
+
+
+@pytest.mark.parametrize(
+    ('facade', 'answer'), MONITORING_CASES, ids=[f'{f}-{a}' for f, a in MONITORING_CASES],
+)
+def test_a_monitoring_facade_gives_the_outcome_of_its_async_form(
+    facade: str, answer: str,
+) -> None:
+    entry = MONITORING_FACADES[facade]
+    handle = _answering(entry.blocking_form, entry.answers[answer])
+    app, runner = _app_with_core_handle(handle)
+
+    blocking = entry.blocking(app)
+    awaited = asyncio.run(_awaited(entry.awaited(app)))
+
+    assert outcome_shape(blocking) == outcome_shape(awaited)
+    getattr(handle, entry.blocking_form).assert_called_once_with(
+        *entry.arguments, **entry.keywords,
+    )
+    runner.call.assert_not_called()
+
+
+@pytest.mark.parametrize('facade', list(MONITORING_FACADES))
+def test_a_monitoring_facade_refuses_another_code_as_its_async_form_does(facade: str) -> None:
+    """A failure code outside the facade's catalog is a defect in both forms."""
+    entry = MONITORING_FACADES[facade]
+    handle = _answering(entry.blocking_form, _failure_of('CLEANUP_FAILED'))
+    app, _ = _app_with_core_handle(handle)
+
+    with pytest.raises(AssertionError, match='CLEANUP_FAILED') as blocking:
+        entry.blocking(app)
+    with pytest.raises(AssertionError, match='CLEANUP_FAILED') as awaited:
+        asyncio.run(_awaited(entry.awaited(app)))
+
+    assert str(blocking.value) == str(awaited.value)
+
+
+async def _awaited(awaitable: Awaitable[object]) -> object:
+    return await awaitable

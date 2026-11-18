@@ -966,6 +966,50 @@ mod tests {
         assert_eq!(batches, 3);
     }
 
+    /// Every column of a `horsies_stale_running_scan` row, with a NULL
+    /// `started_at`.
+    static SCAN_ROW_WITHOUT_A_START: TypedStatement = TypedStatement::new(
+        "scan_row_without_a_start",
+        "SELECT gen_random_uuid() AS task_id, 0 AS retry_count, 3 AS max_retries, \
+                NULL::text AS task_options, NULL::timestamptz AS good_until, \
+                'w-1'::text AS claimed_by_worker_id, 7 AS worker_pid, \
+                'host-a'::text AS worker_hostname, 'proc-a'::text AS worker_process_name, \
+                NULL::timestamptz AS started_at, now() AS db_now",
+        &[],
+    );
+
+    /// Python `tests/unit/test_stale_running.py::TestCandidate::test_a_row_without_a_start_is_a_defect`:
+    /// a scan row without a start is outside the scan's contract; its read
+    /// fails closed on `started_at`.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_scan_row_without_a_start_does_not_read() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let rows = run_reserved(
+            &core,
+            StatementLog::Off,
+            &SCAN_ROW_WITHOUT_A_START.bind().finish(),
+        )
+        .await
+        .expect("the row statement runs");
+
+        let refused = read_rows(&rows, &SCAN_ROW_WITHOUT_A_START, stale_candidate)
+            .expect_err("a row without a start does not read");
+
+        assert!(
+            matches!(
+                refused,
+                RowDecodeError::Column {
+                    column: "started_at",
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        core.close();
+    }
+
     #[tokio::test]
     async fn a_failed_batch_reports_the_rows_of_the_batches_before_it() {
         let failure = BrokerError::ClaimContract("planned failure".to_owned());

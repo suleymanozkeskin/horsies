@@ -42,6 +42,23 @@ before you upgrade a 0.7 deployment.
   raised instead (see below). Only a workflow start and a workflow resume
   keep a resource set per event loop. The sync send pool is gone.
 
+- **Every sync call runs on the calling thread.** The sync methods of
+  `Horsies` (`get_result`, `get_task_info`, `ping_database`,
+  `ping_workers`, `list_worker_states`, `get_worker_state`,
+  `get_worker_state_history`, `get_class_coverage`, `get_class_report`) and
+  of `WorkflowHandle` (`status`, `get`, `result_for`, `results`, `tasks`,
+  `cancel`, `pause`, `resume`), `start_workflow`, `WorkflowSpec.start`,
+  `pause_workflow_sync`, `resume_workflow_sync` and `PostgresBroker.close`
+  call the core's blocking form on the calling thread, with the GIL
+  released and signals checked every 100 ms: Ctrl+C ends a blocking wait,
+  `WorkflowHandle.get()` with no limit included. Their outcomes are those of
+  the async forms. No sync call starts the broker's `horsies-loop` thread,
+  and none returns `LOOP_RUNNER_FAILED`; the error types keep the variant.
+  A sync call that does not end within 30 minutes returns its failure code
+  with `CoreCallTimedOut`; a wait (`get()`, `get_result()`, `ping_workers()`)
+  is bounded by its limit plus 30 minutes, and a wait with no limit is not
+  bounded.
+
 - **The `exception` of a database failure is the core's class of the
   cause.** Where a call ran on the core and failed, the `exception` field of
   its error (for example `BrokerOperationFailed.exception`,
@@ -651,10 +668,11 @@ unless it starts with "Added".
 - **`TaskSendError` is the closed catalog of Python's send codes:**
   `SendSuppressed`, `AsyncContext { task_id, payload }` (a blocking send on
   a thread that runs a tokio runtime; nothing was written),
-  `ValidationFailed`, `EnqueueFailed { retryable }` (the row may or may not
-  exist), `PayloadMismatch`, `IdempotencyKeyConflict { owner_task_id }` and
-  `PayloadTooLarge { size_bytes, limit_bytes }`, each with only the facts of
-  its state. `retry_send` and `retry_schedule` accept only `AsyncContext`,
+  `ValidationFailed { cause }`, `EnqueueFailed { retryable, cause }` (the
+  row may or may not exist), `PayloadMismatch`, `IdempotencyKeyConflict {
+  owner_task_id }` and `PayloadTooLarge { size_bytes, limit_bytes }`, each
+  with only the facts of its state. `cause` is what the send met
+  (`failure_cause()`, Python's `exception`). `retry_send` and `retry_schedule` accept only `AsyncContext`,
   `EnqueueFailed` and `IdempotencyKeyConflict`, send the same task id and
   payload, and refuse the error of another task or of the other method.
 - **A resend is a repeat.** With `resend_on_transient_err`, a retryable
@@ -828,13 +846,15 @@ unless it starts with "Added".
   `retryable` and `cause` become the methods `code()`, `message()`,
   `retryable()` and `failure_cause()`.
 - **`WorkflowStartError` is an enum with one variant per state.**
-  `ValidationFailed` (with `workflow_id: Option<Uuid>`), `IdConflict` (with
+  `ValidationFailed` (with `workflow_id` and `cause`), `IdConflict` (with
   `workflow_id` and `existing_workflow_name`, the name that holds the id),
-  `EnqueueFailed` (with `workflow_id` and `retryable`) and `AsyncContext`
-  (with `workflow_id`); each has `message` and `workflow_name`. The fields
-  become the methods `code()`, `message()`, `retryable()`,
-  `workflow_name()` and `workflow_id()`. Only `ValidationFailed` can lack
-  a workflow id, so `retry_start` no longer refuses an error without one.
+  `EnqueueFailed` (with `workflow_id`, `retryable` and `cause`) and
+  `AsyncContext` (with `workflow_id`); each has `message` and
+  `workflow_name`. The fields become the methods `code()`, `message()`,
+  `retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()`.
+  Every variant has the id of its start, as in Python: a start mints its id
+  before its checks, so `start_workflow::<D>()` before the registration of
+  `D` names the id it minted.
 - **`HandleOperationError` is an enum with one variant per state.**
   `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`),
   `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and

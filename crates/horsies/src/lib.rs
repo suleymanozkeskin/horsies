@@ -148,6 +148,7 @@ pub mod __private {
                 "task '{task_name}' is not registered in this process; call \
                  {task_name}::register(&mut app) when main builds the app"
             ),
+            cause: horsies_core::FailureCause::PreconditionFailed,
         }
     }
 

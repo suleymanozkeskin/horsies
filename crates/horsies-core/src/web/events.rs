@@ -234,8 +234,10 @@ impl SubscriberQueue {
     }
 
     /// Queue one item. A full queue drops its items and takes one refresh
-    /// event per topic instead; a degraded marker is kept after them. A
-    /// closed queue takes nothing.
+    /// event per topic instead. A degraded marker among the dropped items,
+    /// or `item` when it is the marker, is queued after the refresh events,
+    /// so the stream still ends; an event `item` is covered by the refresh
+    /// events. A closed queue takes nothing.
     fn push(&self, item: StreamItem) {
         {
             let mut state = self.lock();
@@ -245,11 +247,12 @@ impl SubscriberQueue {
             match state.items.len() < SUBSCRIBER_QUEUE_CAPACITY {
                 true => state.items.push_back(item),
                 false => {
+                    let ends = item.is_none() || state.items.iter().any(Option::is_none);
                     state.items.clear();
                     state.items.extend(refresh_events().into_iter().map(Some));
-                    match item {
-                        Some(_covered_by_the_refresh) => {}
-                        None => state.items.push_back(None),
+                    match ends {
+                        true => state.items.push_back(None),
+                        false => {}
                     }
                 }
             }
@@ -686,6 +689,113 @@ mod queue_tests {
         let items = drain(&queue).await;
         assert_eq!(items.len(), CHANNEL_TOPICS.len() + 1);
         assert_eq!(items.last(), Some(&None));
+    }
+
+    /// A queue at its bound, of `tasks` events.
+    fn full_queue() -> SubscriberQueue {
+        let queue = SubscriberQueue::default();
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY {
+            queue.push(event("tasks", &index.to_string()));
+        }
+        queue
+    }
+
+    /// One refresh event per topic, then the degraded marker: the items of
+    /// an overflowed queue of a stream that ends.
+    fn refreshes_then_the_marker() -> Vec<StreamItem> {
+        let mut items: Vec<StreamItem> = refresh_events().into_iter().map(Some).collect();
+        items.push(None);
+        items
+    }
+
+    /// Python `tests/unit/test_web_event_stream_queue.py::TestRefreshEvents::test_one_event_with_no_ids_per_topic`:
+    /// the refresh is one event with no ids per topic, in the order of the
+    /// topics.
+    #[test]
+    fn the_refresh_is_one_event_with_no_ids_per_topic() {
+        let refresh = |topic: &str| TopicEvent {
+            topic: topic.to_owned(),
+            ids: Vec::new(),
+        };
+
+        assert_eq!(
+            refresh_events(),
+            vec![refresh("tasks"), refresh("workflows"), refresh("workers")]
+        );
+        assert_eq!(refresh_events().len(), CHANNEL_TOPICS.len());
+    }
+
+    /// Python `tests/unit/test_web_event_stream_queue.py::TestPushStreamItem`
+    /// (`test_the_queue_is_bounded`, `test_a_queue_at_the_capacity_holds_every_item`):
+    /// the bound is 256 items, and a queue at the bound holds every item it
+    /// took, the last one last.
+    #[tokio::test]
+    async fn a_queue_at_its_bound_of_256_items_holds_every_item() {
+        assert_eq!(SUBSCRIBER_QUEUE_CAPACITY, 256);
+        let queue = full_queue();
+
+        let items = drain(&queue).await;
+
+        assert_eq!(items.len(), SUBSCRIBER_QUEUE_CAPACITY);
+        assert_eq!(
+            items.last(),
+            Some(&event(
+                "tasks",
+                &(SUBSCRIBER_QUEUE_CAPACITY - 1).to_string()
+            ))
+        );
+    }
+
+    /// Python `tests/unit/test_web_event_stream_queue.py::TestPushStreamItem::test_an_end_marker_past_the_capacity_stays_after_the_refreshes`.
+    #[tokio::test]
+    async fn an_end_marker_past_the_bound_stays_after_the_refreshes() {
+        let queue = full_queue();
+
+        queue.push(None);
+
+        assert_eq!(drain(&queue).await, refreshes_then_the_marker());
+    }
+
+    /// Python `tests/unit/test_web_event_stream_queue.py::TestPushStreamItem::test_a_dropped_end_marker_is_queued_again_last`:
+    /// an event that overflows a queue that holds the degraded marker drops
+    /// the marker with the events and queues it again after the refresh
+    /// events, so the stream still ends.
+    #[tokio::test]
+    async fn a_dropped_end_marker_is_queued_again_last() {
+        let queue = SubscriberQueue::default();
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY - 1 {
+            queue.push(event("tasks", &index.to_string()));
+        }
+        queue.push(None);
+
+        queue.push(event("tasks", "late"));
+
+        assert_eq!(drain(&queue).await, refreshes_then_the_marker());
+    }
+
+    /// Python `tests/unit/test_web_event_stream_queue.py::TestBroadcasterStreams::test_a_published_event_past_the_capacity_gives_refreshes`:
+    /// a broker with no listener degrades the stream, which holds its
+    /// marker; events published past the bound leave the refresh events,
+    /// then the marker.
+    #[tokio::test]
+    async fn a_degraded_stream_keeps_its_marker_when_events_overflow_it() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(pool)));
+        let subscription = broadcaster.subscribe().await;
+        assert!(broadcaster.degraded());
+
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY {
+            broadcaster
+                .publish(event("tasks", &index.to_string()))
+                .await;
+        }
+
+        assert_eq!(
+            drain(&subscription.queue).await,
+            refreshes_then_the_marker()
+        );
     }
 
     #[tokio::test]

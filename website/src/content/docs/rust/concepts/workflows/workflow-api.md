@@ -230,13 +230,13 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 
 ### WorkflowStartError
 
-`WorkflowStartError` is an enum with one variant per state. Every variant has `message` and `workflow_name`; the methods `code()`, `message()`, `retryable()`, `workflow_name()` and `workflow_id()` (`Option<Uuid>`) read them.
+`WorkflowStartError` is an enum with one variant per state. Every variant has `message`, `workflow_name` and `workflow_id`, the id of the start: the caller's, or the id minted for it before the checks. The methods `code()`, `message()`, `retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()` read them.
 
 | Variant | `code()` | Other fields |
 |---------|----------|--------------|
-| `ValidationFailed` | `ValidationFailed` | `workflow_id: Option<Uuid>`: `None` for a refusal before the start had an id |
+| `ValidationFailed` | `ValidationFailed` | `workflow_id`, `cause` (what refused the start) |
 | `IdConflict` | `WorkflowIdConflict` | `workflow_id`, `existing_workflow_name` |
-| `EnqueueFailed` | `EnqueueFailed` | `workflow_id`, `retryable` |
+| `EnqueueFailed` | `EnqueueFailed` | `workflow_id`, `retryable`, `cause` (what the start met) |
 | `AsyncContext` | `AsyncContext` | `workflow_id` |
 
 `retryable()` is `false` for every variant but `EnqueueFailed`.
