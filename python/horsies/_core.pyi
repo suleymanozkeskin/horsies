@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from typing import Literal, final
 
+from horsies._catalog.broker_errors import BrokerInvalidInput, BrokerInvalidJsonPayload, BrokerListenerDisabled, BrokerOperationFailed
 from horsies._catalog.monitoring_errors import TaskActionCoreError
 from horsies._catalog.workflow_handle_errors import HandleDbOperationFailed, HandleResumeRecoveryFailed, HandleStoredDataInvalid
 
@@ -137,9 +138,9 @@ class CoreHandle:
         """
     def close_async(self) -> asyncio.Future[HandleClosed]:
         """The awaitable form of the method above."""
-    def ping_database(self) -> DatabasePingRecord | BrokerFailure:
+    def ping_database(self) -> DatabasePingRecord | BrokerOperationFailed:
         """Ping the database."""
-    def ping_database_async(self) -> asyncio.Future[DatabasePingRecord | BrokerFailure]:
+    def ping_database_async(self) -> asyncio.Future[DatabasePingRecord | BrokerOperationFailed]:
         """The awaitable form of the method above."""
     def check_connectivity(self) -> ConnectivityPassed | ConnectivityRefused:
         """The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL
@@ -149,12 +150,12 @@ class CoreHandle:
         """The worker connection step of the live check: each profile against the server connection
         limit. No profile, or PgBouncer transaction mode, connects nothing. Reads only.
         """
-    def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerFailure:
+    def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed:
         """Apply the embedded migrations, check the schema version, then run the startup coverage
         pass that creates the history leaves of the current UTC day and the lookahead, once per
         handle. Writes.
         """
-    def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerFailure]:
+    def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed]:
         """The awaitable form of the method above."""
     def with_install_coverage(self, install_coverage: InstallCoverage) -> CoreHandle:
         """A new handle of the same manifest and pool profile whose schema install ends with the
@@ -316,16 +317,16 @@ class CoreHandle:
         """The nodes of one workflow in index order. Reads only."""
     def workflow_nodes_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid]:
         """The awaitable form of the method above."""
-    def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
+    def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload:
         """The info of one task. Installs the schema once per handle first; then reads only."""
-    def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
+    def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload]:
         """The awaitable form of the method above."""
-    def raw_result_record(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> RawResultRecordRecord | RawResultAbsent | BrokerFailure:
+    def raw_result_record(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput:
         """The result of one task, waiting up to timeout_ms (no limit for None) while it has not
         finished. Installs the schema once per handle first; then reads only. Bounded by the limit
         plus the bound of a blocking call; not bounded with no limit.
         """
-    def raw_result_record_async(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[RawResultRecordRecord | RawResultAbsent | BrokerFailure]:
+    def raw_result_record_async(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput]:
         """The awaitable form of the method above. A cancelled await drops the wait."""
     def monitoring_list_tasks_async(self, query: TaskListQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
         """One page of the task list: the JSON text of the core's TaskListPage. Reads only, in one
@@ -366,56 +367,56 @@ class CoreHandle:
         """Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,
         in one statement.
         """
-    def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
+    def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput]:
         """The RUNNING tasks whose latest runner beat, or their start, is older than the
         threshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is
         INVALID_INPUT before any core call. Reads only, in one statement.
         """
-    def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
+    def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput]:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
         """
-    def ping_workers(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> WorkerPongsRecord | BrokerFailure:
+    def ping_workers(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled:
         """Ping the workers and collect the distinct replies within the window, on the process
         listener. A refused argument is INVALID_INPUT before any core call; a handle with no
         listener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus
         the bound of a blocking call; not bounded for an infinite window.
         """
-    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerFailure]:
+    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled]:
         """The awaitable form of the method above. A cancelled await drops the wait and the reply
         subscription.
         """
-    def worker_states(self) -> WorkerStatesRecord | BrokerFailure:
+    def worker_states(self) -> WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput:
         """The latest state snapshot per worker, idle workers included. Reads only, in one
         statement.
         """
-    def worker_states_async(self) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+    def worker_states_async(self) -> asyncio.Future[WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput]:
         """The awaitable form of the method above. A cancelled await drops the read."""
-    def worker_state(self, worker_id: str) -> WorkerStateRecord | WorkerStateAbsent | BrokerFailure:
+    def worker_state(self, worker_id: str) -> WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed:
         """The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads
         only, in one statement.
         """
-    def worker_state_async(self, worker_id: str) -> asyncio.Future[WorkerStateRecord | WorkerStateAbsent | BrokerFailure]:
+    def worker_state_async(self, worker_id: str) -> asyncio.Future[WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed]:
         """The awaitable form of the method above."""
-    def worker_state_history(self, worker_id: str, *, limit: int | None) -> WorkerStatesRecord | BrokerFailure:
+    def worker_state_history(self, worker_id: str, *, limit: int | None) -> WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput:
         """The state snapshots of one worker, newest first: at most limit, or every retained one for
         None. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint
         is MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one
         statement.
         """
-    def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+    def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput]:
         """The awaitable form of the method above."""
-    def class_coverage(self) -> ClassCoverageRecord | BrokerFailure:
+    def class_coverage(self) -> ClassCoverageRecord | BrokerOperationFailed:
         """The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves
         it. Reads only, in one statement.
         """
-    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | BrokerFailure]:
+    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | BrokerOperationFailed]:
         """The awaitable form of the method above."""
-    def class_report(self) -> ClassReportRecord | BrokerFailure:
+    def class_report(self) -> ClassReportRecord | BrokerOperationFailed:
         """The pending streams with their oldest wait and coverage, and the budget load of each
         live worker. Reads only, in one statement.
         """
-    def class_report_async(self) -> asyncio.Future[ClassReportRecord | BrokerFailure]:
+    def class_report_async(self) -> asyncio.Future[ClassReportRecord | BrokerOperationFailed]:
         """The awaitable form of the method above."""
 
 
@@ -582,19 +583,6 @@ class ReleaseClaimsRequest:
     repeated task id or another placement raises ValueError.
     """
     def __init__(self, *, worker_id: str, claims: list[tuple[uuid.UUID, datetime.datetime]], placement: Literal['SAME_CLASS', 'ISOLATED']) -> None: ...
-
-
-@final
-class BrokerFailure:
-    """An expected failure of a broker operation."""
-    @property
-    def code(self) -> Literal['SCHEMA_INIT_FAILED', 'ENQUEUE_FAILED', 'PAYLOAD_MISMATCH', 'IDEMPOTENCY_KEY_CONFLICT', 'TASK_INFO_QUERY_FAILED', 'MONITORING_QUERY_FAILED', 'DB_PING_FAILED', 'WORKER_PING_FAILED', 'CLEANUP_FAILED', 'CLOSE_FAILED', 'LISTENER_START_FAILED', 'LISTENER_SUBSCRIBE_FAILED', 'NO_BROKER', 'NO_TYPE_AVAILABLE', 'INVALID_JSON_PAYLOAD', 'INVALID_TASK_OPTIONS', 'EVENT_LOOP_LIMIT', 'ASYNC_CONTEXT', 'LOOP_RUNNER_FAILED', 'INVALID_INPUT', 'LISTENER_DISABLED', 'WAIT_INSIDE_TASK']: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def retryable(self) -> bool: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final

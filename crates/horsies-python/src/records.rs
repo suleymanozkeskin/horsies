@@ -4,51 +4,39 @@
 //! failures are values, not exceptions. The Python client maps them into its
 //! public result types.
 
-use horsies_core::{BrokerError, BrokerErrorCode, BrokerOperationError};
+use horsies_core::BrokerOperationError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
-use crate::core_failures::FailureException;
+use crate::catalog_errors::catalog_error;
 
-/// An expected failure of a broker operation: the catalog code, the cause
-/// and whether a repeat of the same call can succeed. `exception` is the
-/// cause as a `CoreFailure` leaf class, with the operation as its subject.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An expected failure of a broker operation: the core's value, with the
+/// operation that failed. Python reads it as the generated class of `error`
+/// (`horsies._catalog.broker_errors`), with `subject` as the subject of the
+/// core exception class in its `exception` slot; a check of the core gives
+/// `NoCause()` there.
+#[derive(Debug)]
 pub struct BrokerFailure {
-    /// A member of `BrokerErrorCode`, as its wire value.
-    pub code: String,
-    pub message: String,
-    pub retryable: bool,
-    pub exception: FailureException,
+    /// The operation that failed, for example `ping_database`.
+    pub subject: &'static str,
+    pub error: BrokerOperationError,
 }
 
 impl BrokerFailure {
-    /// The failure `code` of the operation `subject` that met `error`: a
-    /// failed connect, or a failure of a broker call that returns
-    /// `BrokerError`.
-    pub fn from_broker_error(
-        subject: &'static str,
-        code: BrokerErrorCode,
-        error: &BrokerError,
-    ) -> Self {
-        Self {
-            code: code.to_string(),
-            message: error.to_string(),
-            retryable: error.is_retryable(),
-            exception: FailureException::of(subject, error),
-        }
-    }
-
-    /// The failure of the operation `subject` that a broker call answered
-    /// with `error`.
+    /// The failure of the operation `subject` that a broker call, or a core
+    /// constructor of the operation's code, answered with `error`. Pure.
     pub fn of_operation_error(subject: &'static str, error: BrokerOperationError) -> Self {
-        Self {
-            code: error.code().to_string(),
-            message: error.message().to_owned(),
-            retryable: error.retryable(),
-            exception: FailureException::of_operation_error(subject, &error),
-        }
+        Self { subject, error }
+    }
+}
+
+impl<'py> IntoPyObject<'py> for BrokerFailure {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        catalog_error(py, self.subject, &self.error)
     }
 }
 
@@ -84,7 +72,7 @@ where
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
             Self::Done(record) => record.into_bound_py_any(py),
-            Self::Failed(failure) => failure.into_bound_py_any(py),
+            Self::Failed(failure) => failure.into_pyobject(py),
         }
     }
 }

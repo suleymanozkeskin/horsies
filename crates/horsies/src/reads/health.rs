@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use horsies_core::{
-    BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationFailedCode, ClassCoverage,
-    ClassReport, DatabasePing, ExpiredTaskRow, PostgresBroker, StaleMinutes, StaleTaskRow,
-    WorkerPong, WorkerStateSnapshot,
+    BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationFailedCode,
+    BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing, ExpiredTaskRow,
+    PostgresBroker, StaleMinutes, StaleTaskRow, WorkerPong, WorkerStateSnapshot,
 };
 
 use crate::process_state::refuse_in_a_fork;
@@ -203,18 +203,23 @@ impl Horsies {
         self.reads_handle()
             .initialized_broker()
             .await
-            .map_err(|error| connect_failure(code, &error))
+            .map_err(|error| connect_failure(code, read, error))
     }
 }
 
-/// The failure of a connect or an install before a health read. Pure.
-fn connect_failure(code: BrokerOperationFailedCode, error: &BrokerError) -> BrokerOperationError {
-    BrokerOperationError::OperationFailed {
+/// The failure of a connect or an install before the health read `read`,
+/// with Python's message (`{read} failed: {error}`) and the broker error as
+/// its cause. Pure.
+fn connect_failure(
+    code: BrokerOperationFailedCode,
+    read: &str,
+    error: BrokerError,
+) -> BrokerOperationError {
+    BrokerOperationError::operation_failed(
         code,
-        message: error.to_string(),
-        retryable: error.is_retryable(),
-        cause: error.failure_cause(),
-    }
+        format!("{read} failed: {error}"),
+        BrokerOperationSource::Broker(error),
+    )
 }
 
 #[cfg(test)]
@@ -225,14 +230,22 @@ mod tests {
     fn a_connect_failure_has_the_code_of_the_read_and_the_retry_rule_of_the_cause() {
         let failure = connect_failure(
             BrokerOperationFailedCode::DbPingFailed,
-            &BrokerError::ListenerClosed,
+            "ping_database",
+            BrokerError::ListenerClosed,
         );
         assert_eq!(failure.code(), horsies_core::BrokerErrorCode::DbPingFailed);
         assert_eq!(
             failure.retryable(),
             BrokerError::ListenerClosed.is_retryable()
         );
-        assert!(!failure.message().is_empty());
+        assert_eq!(
+            failure.message(),
+            "ping_database failed: the broker's listener stopped"
+        );
+        assert_eq!(
+            failure.failure_cause(),
+            horsies_core::FailureCause::Connection
+        );
     }
 
     #[test]

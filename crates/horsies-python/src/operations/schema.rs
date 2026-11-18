@@ -10,7 +10,7 @@
 
 use horsies_core::manifest::SchemaMode;
 use horsies_core::web::{SchemaProbe, SchemaState, SchemaStatus};
-use horsies_core::{expected_schema_version, BrokerErrorCode};
+use horsies_core::{expected_schema_version, BrokerOperationError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
@@ -96,10 +96,9 @@ pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return InstallOutcome::Failed(BrokerFailure::from_broker_error(
+            return InstallOutcome::Failed(BrokerFailure::of_operation_error(
                 INSTALL_SUBJECT,
-                BrokerErrorCode::SchemaInitFailed,
-                &error,
+                BrokerOperationError::schema_init_failed(error),
             ))
         }
     };
@@ -107,10 +106,9 @@ pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
         Ok(()) => InstallOutcome::Installed(SchemaInstalled {
             version: expected_schema_version(),
         }),
-        Err(error) => InstallOutcome::Failed(BrokerFailure::from_broker_error(
+        Err(error) => InstallOutcome::Failed(BrokerFailure::of_operation_error(
             INSTALL_SUBJECT,
-            BrokerErrorCode::SchemaInitFailed,
-            &error,
+            BrokerOperationError::schema_init_failed(error),
         )),
     }
 }

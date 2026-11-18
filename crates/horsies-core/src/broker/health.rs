@@ -13,9 +13,8 @@ use serde_json::{Map, Value};
 use sqlx::FromRow;
 
 use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
-use crate::broker::result_types::{BrokerOperationError, BrokerOperationFailedCode, BrokerResult};
+use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
 use crate::broker::slot_health::{parse_slot_health, SlotHealth};
-use crate::failure_cause::FailureCause;
 
 /// Shared inbound channel every worker subscribes to. A ping NOTIFY carries a
 /// [`WorkerPingRequest`]; each worker replies on the request's `reply_channel`.
@@ -182,7 +181,7 @@ impl WorkerStateColumn {
     "worker {worker_id} snapshot at {snapshot_at}: {} is unreadable: {reason}",
     column.as_str()
 )]
-pub(crate) struct WorkerStateUnreadable {
+pub struct WorkerStateUnreadable {
     pub(crate) worker_id: String,
     pub(crate) snapshot_at: DateTime<Utc>,
     pub(crate) column: WorkerStateColumn,
@@ -283,20 +282,18 @@ pub fn ping_listener_disabled() -> BrokerOperationError {
 /// (`ping_workers_async`). `timeout_seconds` is the given value as the
 /// caller wrote it. Nothing ran.
 pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError::InvalidInput {
-        message: format!("timeout_seconds must be positive, got {timeout_seconds}"),
-        cause: FailureCause::PreconditionFailed,
-    }
+    BrokerOperationError::invalid_input(format!(
+        "timeout_seconds must be positive, got {timeout_seconds}"
+    ))
 }
 
 /// The refusal of a worker ping `min_responses` below 1: `INVALID_INPUT`,
 /// not retryable, with Python's text (`ping_workers_async`).
 /// `min_responses` is the given value as the caller wrote it. Nothing ran.
 pub fn ping_min_responses_refused(min_responses: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError::InvalidInput {
-        message: format!("min_responses must be >= 1 when set, got {min_responses}"),
-        cause: FailureCause::PreconditionFailed,
-    }
+    BrokerOperationError::invalid_input(format!(
+        "min_responses must be >= 1 when set, got {min_responses}"
+    ))
 }
 
 /// The worker state history limit, by Python's rule
@@ -315,10 +312,7 @@ pub fn checked_history_limit(limit: Option<i64>) -> BrokerResult<Option<i64>> {
 /// (`get_worker_state_history_async`). `limit` is the given value as the
 /// caller wrote it. Nothing ran.
 pub fn worker_history_limit_refused(limit: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError::InvalidInput {
-        message: format!("limit must be positive when set, got {limit}"),
-        cause: FailureCause::PreconditionFailed,
-    }
+    BrokerOperationError::invalid_input(format!("limit must be positive when set, got {limit}"))
 }
 
 /// The snapshots of stored rows, for the read `operation`. The first row that
@@ -341,13 +335,12 @@ pub(crate) fn read_worker_snapshot(
     operation: &str,
     row: StoredWorkerState,
 ) -> BrokerResult<WorkerStateSnapshot> {
-    row.into_snapshot()
-        .map_err(|unreadable| BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::MonitoringQueryFailed,
-            message: format!("{operation} failed: {unreadable}"),
-            retryable: false,
-            cause: FailureCause::ContractViolation,
-        })
+    row.into_snapshot().map_err(|unreadable| {
+        BrokerOperationError::monitoring_query_failed(
+            operation,
+            BrokerOperationSource::Snapshot(unreadable),
+        )
+    })
 }
 
 /// The listed states of the worker list rows, for the read `operation`.

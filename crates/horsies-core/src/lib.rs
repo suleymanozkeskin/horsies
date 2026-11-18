@@ -66,13 +66,14 @@ pub use crate::core::codec::{JsonText, JsonTextRefused};
 
 // broker re-exports
 pub use crate::broker::{
-    expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerResult, CheckInterruption, CheckedSend, ConnectivityRefusal,
-    DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError,
-    PostgresBroker, RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure,
-    StaleTaskRow, StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead,
-    TaskInfoRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    expected_schema_version, BrokerCheckCause, BrokerError, BrokerErrorCode, BrokerOperationError,
+    BrokerOperationFailedCode, BrokerOperationSource, BrokerResult, CheckInterruption, CheckedSend,
+    ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError,
+    ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead, RawResultRecord,
+    SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, StoredEnvelopeRefused,
+    StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow, WorkerPingRequest,
+    WorkerPingStep, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
+    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.

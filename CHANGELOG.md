@@ -142,6 +142,19 @@ before you upgrade a 0.7 deployment.
   0.7, which names the node: `DB query failed for result_for node
   <node_id> in workflow <id>: <cause>`.
 
+- **The core builds the error classes of the broker.** A failed ping,
+  task info read, result read, worker state read, class read, task list
+  or schema install returns the `BrokerOperationFailed`,
+  `BrokerInvalidInput`, `BrokerInvalidJsonPayload` or
+  `BrokerListenerDisabled` class that the core builds, with the message of
+  0.7: `ping_database failed: <cause>`, `ping_workers failed: <cause>`,
+  `get_task_info failed for <task_id>: <cause>`, `Broker error while
+  retrieving task <task_id>: <cause>`, `<read> failed: <cause>`. The
+  record `BrokerFailure` of `horsies._core` is removed. `exception` is the
+  core's class of the cause with its own text, or `NoCause()` for a check
+  of the core; a refused class read and a worker snapshot that does not
+  read give `CoreContractViolation` (0.7: `ValueError`).
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async
@@ -980,6 +993,21 @@ unless it starts with "Added".
   `HandleOperation::ResultFor` variant holds the `node_id`. A blocking form
   whose process runtime did not start has the cause
   `BrokerError::ProcessRuntime` (new).
+- **`BrokerOperationError` carries typed causes.** `OperationFailed` has
+  `cause: BrokerOperationSource` (new: `Broker(BrokerError)`,
+  `ClassRead(ClassReadRefused)`, `Snapshot(WorkerStateUnreadable)`,
+  `Listen(ListenError)`, `TaskInfoMoved { task_id, passes }`,
+  `ArgumentUnreadable`); `EnqueueFailed`, `InvalidJsonPayload`,
+  `InvalidTaskOptions` and `InvalidInput` have `cause: BrokerCheckCause`
+  (new: `Error(BrokerError)` or `Check`). `BrokerOperationError` is no
+  longer `Clone`, and its `Error::source` is the cause. Constructors per
+  operation code build Python's message: `schema_init_failed`,
+  `task_info_query_failed`, `task_info_invalid_json`,
+  `raw_result_query_failed`, `monitoring_query_failed`,
+  `monitoring_query_refused`, `db_ping_failed`, `worker_ping_failed`
+  (with `WorkerPingStep`, new), `invalid_input`, `operation_failed`. The
+  messages of the health reads, `get_task_info` and the result reads gain
+  the operation's prefix, as Python's.
 - **`MonitoringQueryError` and `TaskActionError` are enums with one
   variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
   `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,

@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies._core import (
-    BrokerFailure,
     CoreConnectionError,
     TaskListComplete,
     TaskListTruncated,
@@ -151,13 +150,7 @@ class TestAnswers:
         cause = CoreConnectionError('get_expired_tasks', 'connection refused', retryable)
         broker = _broker_answering(
             'expired_tasks_async',
-            _record(
-                BrokerFailure,
-                code='MONITORING_QUERY_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=cause,
-            ),
+            BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED, message=message, retryable=retryable, exception=cause),
         )
 
         result = await broker.get_expired_tasks()
@@ -191,7 +184,7 @@ class TestAnswers:
     async def test_another_code_from_the_core_is_a_defect(self) -> None:
         broker = _broker_answering(
             'expired_tasks_async',
-            _record(BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+            BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='DB_PING_FAILED'):

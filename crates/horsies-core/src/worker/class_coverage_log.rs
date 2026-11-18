@@ -266,7 +266,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::broker::result_types::{BrokerOperationError, BrokerOperationFailedCode};
+    use crate::broker::result_types::BrokerOperationError;
 
     fn stream(queue: &str, execution: Execution, state: StreamCoverageState) -> StreamCoverage {
         StreamCoverage {
@@ -504,12 +504,13 @@ mod tests {
     fn a_failed_check_logs_one_warning_per_interval() {
         let now = Instant::now();
         let mut log = due_log(now);
-        let failed: BrokerResult<ClassCoverage> = Err(BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::MonitoringQueryFailed,
-            message: "get_class_coverage refused: worker w1 ...".to_owned(),
-            retryable: false,
-            cause: crate::failure_cause::FailureCause::ContractViolation,
-        });
+        let failed: BrokerResult<ClassCoverage> =
+            Err(BrokerOperationError::monitoring_query_refused(
+                "get_class_coverage",
+                crate::broker::class_coverage::ClassReadRefused {
+                    reason: "worker w1 ...".to_owned(),
+                },
+            ));
 
         let first = log.lines(&failed, now);
         let second = log.lines(&failed, now + Duration::from_secs(30));

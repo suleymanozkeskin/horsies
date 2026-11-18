@@ -25,6 +25,12 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
+from horsies.core.brokers.result_types import (
+    BrokerInvalidInput,
+    BrokerInvalidJsonPayload,
+    BrokerListenerDisabled,
+    BrokerOperationFailed,
+)
 from horsies.core.models.workflow.handle_types import (
     HandleDbOperationFailed,
     HandleResumeRecoveryFailed,
@@ -120,8 +126,13 @@ def describe(outcome: object) -> JsonValue:
             return [name, outcome.code.value, outcome.retryable]
         case core.WorkflowStartFailed(retryable=retryable):
             return [name, retryable]
-        case core.BrokerFailure(code=code, retryable=retryable):
-            return [name, code, retryable]
+        case (
+            BrokerOperationFailed()
+            | BrokerInvalidInput()
+            | BrokerInvalidJsonPayload()
+            | BrokerListenerDisabled()
+        ):
+            return [name, outcome.code.value, outcome.retryable]
         case core.WorkerStatesRecord(states=states):
             return [name, len(states)]
         case core.WorkerPongsRecord(pongs=pongs):

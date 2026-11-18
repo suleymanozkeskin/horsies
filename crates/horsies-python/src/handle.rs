@@ -16,7 +16,7 @@ use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::worker_manifest::parse_worker_profiles;
 use horsies_core::{
-    BrokerError, BrokerErrorCode, ClientFamily, CoverageRequest, PoolProfile, PostgresBroker,
+    BrokerError, BrokerOperationError, ClientFamily, CoverageRequest, PoolProfile, PostgresBroker,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -312,7 +312,7 @@ impl CoreHandle {
         )
     }
 
-    /// Ping the database: `DatabasePingRecord` or `BrokerFailure` with
+    /// Ping the database: `DatabasePingRecord` or the generated broker error class with
     /// `DB_PING_FAILED`.
     fn ping_database(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
@@ -381,7 +381,7 @@ impl CoreHandle {
     /// Apply the embedded migrations, check the schema version, then run the
     /// startup coverage pass, once per handle: `SchemaInstalled`,
     /// `SchemaInstallNotRun` (an `OBSERVE_ONLY` or `ASSUME_INITIALIZED`
-    /// handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
+    /// handle), or the generated broker error class with `SCHEMA_INIT_FAILED`. Writes.
     fn install_schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -1253,7 +1253,7 @@ impl CoreHandle {
     }
 
     /// The info of one task: `TaskInfoRecord`, `TaskInfoNotFound`, or
-    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED` or
+    /// the generated broker error class with `TASK_INFO_QUERY_FAILED` or
     /// `INVALID_JSON_PAYLOAD`. Installs the schema once per handle first;
     /// then reads only.
     #[pyo3(signature = (task_id, *, include_result, include_failed_reason, include_attempts))]
@@ -1307,7 +1307,7 @@ impl CoreHandle {
 
     /// The result of one task, waiting up to `timeout_ms` (no limit for
     /// `None`) while it has not finished: `RawResultRecordRecord` (no result
-    /// when the limit passed first), `RawResultAbsent`, or `BrokerFailure`
+    /// when the limit passed first), `RawResultAbsent`, or the generated broker error class
     /// with `TASK_INFO_QUERY_FAILED` or `INVALID_JSON_PAYLOAD`. Installs the
     /// schema once per handle first; then reads only. The wait takes a wake
     /// from the process listener, or reads again every 200 ms in an
@@ -1544,7 +1544,7 @@ impl CoreHandle {
     /// The RUNNING tasks whose latest runner beat, or their start when they
     /// have no beat, is older than `threshold_minutes`
     /// (`horsies_list_stale_tasks`): `TaskListComplete`,
-    /// `TaskListTruncated`, or `BrokerFailure` with `INVALID_INPUT` or
+    /// `TaskListTruncated`, or the generated broker error class with `INVALID_INPUT` or
     /// `MONITORING_QUERY_FAILED`. The threshold follows Python's rule: a
     /// `bool`, a value that is not an `int`, or one outside 0 to 525,600
     /// minutes is `INVALID_INPUT` in a future that is already done, before
@@ -1577,7 +1577,7 @@ impl CoreHandle {
 
     /// The PENDING tasks whose `good_until` passed before a worker took them
     /// (`horsies_list_expired_tasks`): `TaskListComplete`,
-    /// `TaskListTruncated`, or `BrokerFailure` with
+    /// `TaskListTruncated`, or the generated broker error class with
     /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
     /// only: its caller, `PostgresBroker.get_expired_tasks`, is a coroutine.
     /// A cancelled await drops the read.
@@ -1594,7 +1594,7 @@ impl CoreHandle {
 
     /// Ping the workers and collect the distinct replies within the window
     /// (`PostgresBroker::ping_workers`, on the process listener):
-    /// `WorkerPongsRecord`, or `BrokerFailure` with `INVALID_INPUT`,
+    /// `WorkerPongsRecord`, or the generated broker error class with `INVALID_INPUT`,
     /// `LISTENER_DISABLED` (an `ASSUME_INITIALIZED` handle has no listener)
     /// or `WORKER_PING_FAILED`. The arguments and the handle's listener follow
     /// Python's rules (`ping_request`); a refused argument, or a handle with
@@ -1657,7 +1657,7 @@ impl CoreHandle {
     }
 
     /// The latest state snapshot per worker, idle workers included:
-    /// `WorkerStatesRecord` or `BrokerFailure` with
+    /// `WorkerStatesRecord` or the generated broker error class with
     /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
     /// that leaves drops the read.
     fn worker_states(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1685,7 +1685,7 @@ impl CoreHandle {
     }
 
     /// The latest state snapshot of one worker: `WorkerStateRecord`,
-    /// `WorkerStateAbsent` (no snapshot), or `BrokerFailure` with
+    /// `WorkerStateAbsent` (no snapshot), or the generated broker error class with
     /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
     /// that leaves drops the read.
     fn worker_state(&self, py: Python<'_>, worker_id: String) -> PyResult<Py<PyAny>> {
@@ -1718,7 +1718,7 @@ impl CoreHandle {
 
     /// The state snapshots of one worker, newest first: at most `limit`, or
     /// every retained one for `None`. `WorkerStatesRecord`, or
-    /// `BrokerFailure` with `INVALID_INPUT` (a limit of 0 or less) or
+    /// the generated broker error class with `INVALID_INPUT` (a limit of 0 or less) or
     /// `MONITORING_QUERY_FAILED`. A limit of 0 or less, and a limit that
     /// Python's statement refused, answer at once, before any core call
     /// (`history_limit`); a limit that is not an `int` or `None` raises
@@ -1769,7 +1769,7 @@ impl CoreHandle {
     }
 
     /// The fleet check: for each (queue, class) with PENDING rows, whether a
-    /// live worker serves it. `ClassCoverageRecord` or `BrokerFailure` with
+    /// live worker serves it. `ClassCoverageRecord` or the generated broker error class with
     /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
     /// that leaves drops the read.
     fn class_coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1798,7 +1798,7 @@ impl CoreHandle {
 
     /// The pending streams with their oldest wait and coverage, and the
     /// budget load of each live worker. `ClassReportRecord` or
-    /// `BrokerFailure` with `MONITORING_QUERY_FAILED`. Reads only, in one
+    /// the generated broker error class with `MONITORING_QUERY_FAILED`. Reads only, in one
     /// statement; a caller that leaves drops the read.
     fn class_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
@@ -1845,10 +1845,9 @@ fn ping_database_operation(
         let broker = match connection.broker().await {
             Ok(broker) => broker,
             Err(error) => {
-                return Outcome::Failed(BrokerFailure::from_broker_error(
+                return Outcome::Failed(BrokerFailure::of_operation_error(
                     "ping_database",
-                    BrokerErrorCode::DbPingFailed,
-                    &error,
+                    BrokerOperationError::db_ping_failed(error),
                 ))
             }
         };

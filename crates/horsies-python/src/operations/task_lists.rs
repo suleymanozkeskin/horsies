@@ -3,7 +3,7 @@
 //! (`PostgresBroker::get_stale_tasks`, `PostgresBroker::get_expired_tasks`).
 //!
 //! The outcome is `TaskListComplete`, `TaskListTruncated` (the first `bound`
-//! rows; more rows match), or `BrokerFailure` with `INVALID_INPUT` (a stale
+//! rows; more rows match), or the generated broker error class with `INVALID_INPUT` (a stale
 //! threshold that the rule refuses; nothing ran) or `MONITORING_QUERY_FAILED`.
 //! Each row is the `dict` of Python's public API, with its keys in Python's
 //! order and the task id as `uuid.UUID`. Each list sends one statement in
@@ -11,14 +11,13 @@
 
 use chrono::TimeDelta;
 use horsies_core::{
-    BoundedTaskList, BrokerError, BrokerErrorCode, ExpiredTaskRow, StaleMinutes, StaleTaskRow,
-    StaleThresholdRefusal,
+    BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationSource, ExpiredTaskRow,
+    StaleMinutes, StaleTaskRow, StaleThresholdRefusal,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyInt, PyList};
 use pyo3::IntoPyObjectExt;
 
-use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
@@ -133,15 +132,16 @@ pub fn stale_threshold(
 }
 
 /// The failure of a list whose broker did not connect: no statement ran.
-/// The message names the read, as the core's read failures do; the read is
-/// the subject of the exception.
-pub(crate) fn connect_failed(operation: &'static str, error: &BrokerError) -> BrokerFailure {
-    BrokerFailure {
-        code: BrokerErrorCode::MonitoringQueryFailed.to_string(),
-        message: format!("{operation} failed: {error}"),
-        retryable: error.is_retryable(),
-        exception: FailureException::of(operation, error),
-    }
+/// `MONITORING_QUERY_FAILED` with Python's message of the read (`{operation}
+/// failed: {error}`); the read is the subject of the exception.
+pub(crate) fn connect_failed(operation: &'static str, error: BrokerError) -> BrokerFailure {
+    BrokerFailure::of_operation_error(
+        operation,
+        BrokerOperationError::monitoring_query_failed(
+            operation,
+            BrokerOperationSource::Broker(error),
+        ),
+    )
 }
 
 /// The RUNNING tasks whose latest runner beat, or their start, is older
@@ -152,7 +152,7 @@ pub async fn stale_tasks_operation(
 ) -> TaskListOutcome<StaleTaskRow> {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return TaskListOutcome::Failed(connect_failed("get_stale_tasks", &error)),
+        Err(error) => return TaskListOutcome::Failed(connect_failed("get_stale_tasks", error)),
     };
     match broker.get_stale_tasks(threshold.minutes()).await {
         Ok(list) => TaskListOutcome::Listed(list),
@@ -168,7 +168,7 @@ pub async fn expired_tasks_operation(
 ) -> TaskListOutcome<ExpiredTaskRow> {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return TaskListOutcome::Failed(connect_failed("get_expired_tasks", &error)),
+        Err(error) => return TaskListOutcome::Failed(connect_failed("get_expired_tasks", error)),
     };
     match broker.get_expired_tasks().await {
         Ok(list) => TaskListOutcome::Listed(list),
@@ -234,15 +234,18 @@ mod tests {
     fn a_connect_failure_names_the_list_and_is_a_monitoring_failure() {
         let failed = connect_failed(
             "get_expired_tasks",
-            &BrokerError::ClaimContract("planned failure".to_owned()),
+            BrokerError::ClaimContract("planned failure".to_owned()),
         );
-        assert_eq!(failed.code, "MONITORING_QUERY_FAILED");
-        assert!(
-            failed.message.starts_with("get_expired_tasks failed: "),
-            "{}",
-            failed.message
+        assert_eq!(failed.subject, "get_expired_tasks");
+        assert_eq!(
+            failed.error.code(),
+            horsies_core::BrokerErrorCode::MonitoringQueryFailed
         );
-        assert!(!failed.retryable);
+        assert_eq!(
+            failed.error.message(),
+            "get_expired_tasks failed: claim contract violation: planned failure"
+        );
+        assert!(!failed.error.retryable());
     }
 
     /// The task id of the list rows of these tests.

@@ -183,7 +183,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::claim_settle::SettleFailed>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<scheduler::CoreScheduler>()?;
-    module.add_class::<records::BrokerFailure>()?;
     module.add_class::<records::DatabasePingRecord>()?;
     module.add_class::<records::HandleClosed>()?;
     module.add_class::<operations::connectivity::ConnectivityPassed>()?;

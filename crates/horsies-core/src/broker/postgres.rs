@@ -41,8 +41,8 @@ use crate::broker::health::{
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
-    BrokerOperationError, BrokerOperationFailedCode, BrokerResult, RawResultRead, RawResultRecord,
-    StoredEnvelopeText, TaskInfoRead,
+    BrokerCheckCause, BrokerOperationError, BrokerOperationSource, BrokerResult, RawResultRead,
+    RawResultRecord, StoredEnvelopeText, TaskInfoRead, WorkerPingStep,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow};
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
@@ -64,7 +64,6 @@ use crate::core::history::maintenance::coverage::CoverageRequest;
 use crate::db::{
     PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
 };
-use crate::failure_cause::FailureCause;
 
 use crate::broker::pools::{
     CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
@@ -2065,15 +2064,13 @@ impl PostgresBroker {
                 TaskInfoPass::BecameLive => {}
             }
         }
-        Err(BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::TaskInfoQueryFailed,
-            message: format!(
-                "task {task_id} was absent from the live table and live in the history read \
-                 on {TASK_INFO_READ_PASSES} passes in a row"
-            ),
-            retryable: true,
-            cause: FailureCause::PreconditionFailed,
-        })
+        Err(BrokerOperationError::task_info_query_failed(
+            task_id,
+            BrokerOperationSource::TaskInfoMoved {
+                task_id,
+                passes: TASK_INFO_READ_PASSES,
+            },
+        ))
     }
 
     /// One pass of [`Self::get_task_info_with_attempts`]: the live row, else
@@ -2091,27 +2088,29 @@ impl PostgresBroker {
                 task_info_row,
             )
             .await
-            .map_err(|error| BrokerOperationError::OperationFailed {
-                code: BrokerOperationFailedCode::TaskInfoQueryFailed,
-                message: error.to_string(),
-                retryable: error.is_retryable(),
-                cause: error.failure_cause(),
+            .map_err(|error| {
+                BrokerOperationError::task_info_query_failed(
+                    task_id,
+                    BrokerOperationSource::Broker(error),
+                )
             })?
             .into_iter()
             .next();
 
         match row {
             Some(r) => {
-                let mut info = r.into_task_info().map_err(task_info_history_error)?;
+                let mut info = r
+                    .into_task_info()
+                    .map_err(|error| task_info_history_error(task_id, error))?;
                 if include_attempts {
                     info.attempts = Some(
                         self.get_task_attempts(task_id)
                             .await
-                            .map_err(task_info_history_error)?
+                            .map_err(|error| task_info_history_error(task_id, error))?
                             .into_iter()
                             .map(task_attempt_info_from_row)
                             .collect::<Result<Vec<_>, _>>()
-                            .map_err(task_info_history_error)?,
+                            .map_err(|error| task_info_history_error(task_id, error))?,
                     );
                 }
                 Ok(TaskInfoPass::Read(TaskInfoRead::Found(Box::new(info))))
@@ -2119,7 +2118,7 @@ impl PostgresBroker {
             None => {
                 let detail = Box::pin(self.fetch_history_detail(task_id))
                     .await
-                    .map_err(task_info_history_error)?;
+                    .map_err(|error| task_info_history_error(task_id, error))?;
                 match detail {
                     TaskDetailResult::History(detail) => history_task_info(
                         detail,
@@ -2247,12 +2246,7 @@ impl PostgresBroker {
             Ok(_row) => Ok(DatabasePing {
                 latency_ms: start.elapsed().as_secs_f64() * 1000.0,
             }),
-            Err(error) => Err(BrokerOperationError::OperationFailed {
-                code: BrokerOperationFailedCode::DbPingFailed,
-                message: format!("database ping failed: {error}"),
-                retryable: error.is_retryable(),
-                cause: error.failure_cause(),
-            }),
+            Err(error) => Err(BrokerOperationError::db_ping_failed(error)),
         }
     }
 
@@ -2302,20 +2296,19 @@ impl PostgresBroker {
             .listener
             .subscribe_payloads(reply_channel.clone(), default_payload_capacity())
             .await
-            .map_err(|error| worker_ping_subscribe_error(&error))?;
+            .map_err(worker_ping_subscribe_error)?;
 
         let request = WorkerPingRequest {
             correlation_id: correlation_id.clone(),
             reply_channel: reply_channel.as_str().to_owned(),
             target_worker_id: target_worker_id.map(str::to_owned),
         };
-        let payload =
-            serde_json::to_string(&request).map_err(|e| BrokerOperationError::OperationFailed {
-                code: BrokerOperationFailedCode::WorkerPingFailed,
-                message: format!("ping_workers payload encode failed: {}", e),
-                retryable: false,
-                cause: FailureCause::ContractViolation,
-            })?;
+        let payload = serde_json::to_string(&request).map_err(|error| {
+            BrokerOperationError::worker_ping_failed(
+                WorkerPingStep::PayloadEncode,
+                BrokerOperationSource::Broker(BrokerError::Serialization(error)),
+            )
+        })?;
 
         let _notified = self
             .execute_main(
@@ -2326,7 +2319,7 @@ impl PostgresBroker {
                     .finish(),
             )
             .await
-            .map_err(|error| worker_ping_statement_error("ping notify", error))?;
+            .map_err(worker_ping_statement_error)?;
         // The window and each round trip start when the NOTIFY has committed
         // (Python's `sent_at`); a reply that arrived before waits in the
         // reply queue.
@@ -2347,12 +2340,10 @@ impl PostgresBroker {
                 // a full reply queue, are lost; the window goes on.
                 Ok(PayloadEvent::Gap | PayloadEvent::Overflowed) => continue,
                 Ok(PayloadEvent::Stopped) => {
-                    return Err(BrokerOperationError::OperationFailed {
-                        code: BrokerOperationFailedCode::WorkerPingFailed,
-                        message: "ping_workers reply wait failed: the listener stopped".to_owned(),
-                        retryable: true,
-                        cause: FailureCause::Connection,
-                    });
+                    return Err(BrokerOperationError::worker_ping_failed(
+                        WorkerPingStep::ReplyWait,
+                        BrokerOperationSource::Broker(BrokerError::ListenerClosed),
+                    ));
                 }
                 Ok(PayloadEvent::Payload(reply)) => {
                     let Some(pong) = decode_pong(&reply, &correlation_id, start.elapsed()) else {
@@ -2588,7 +2579,7 @@ impl PostgresBroker {
         let open = self
             .core
             .pools()
-            .map_err(|error| raw_result_operation_error(BrokerError::from(error)))?;
+            .map_err(|error| raw_result_operation_error(task_id, BrokerError::from(error)))?;
         let read = read_task_result(
             open.main(),
             self.statement_log,
@@ -2596,7 +2587,7 @@ impl PostgresBroker {
             task_id,
         )
         .await
-        .map_err(raw_result_operation_error)?;
+        .map_err(|error| raw_result_operation_error(task_id, error))?;
         match read {
             TaskResultRead::Live(live) => {
                 raw_result_from_live(task_id, live.task_name, &live.status)
@@ -2618,7 +2609,7 @@ impl PostgresBroker {
                 raw_result_probe_row,
             )
             .await
-            .map_err(raw_result_operation_error)?;
+            .map_err(|error| raw_result_operation_error(task_id, error))?;
         let Some(row) = live.into_iter().next() else {
             return self.history_raw_result_probe(task_id).await;
         };
@@ -2629,7 +2620,7 @@ impl PostgresBroker {
         let detail = self
             .fetch_history_detail(task_id)
             .await
-            .map_err(raw_result_operation_error)?;
+            .map_err(|error| raw_result_operation_error(task_id, error))?;
         raw_result_from_history_detail(task_id, detail)
     }
 
@@ -2716,18 +2707,20 @@ mod rerun_family_error_tests {
 /// `TASK_INFO_QUERY_FAILED`, retryable by the driver classification. A
 /// history result is checked in [`history_task_info`]; the live row holds no
 /// result.
-fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
+fn task_info_history_error(task_id: Uuid, error: BrokerError) -> BrokerOperationError {
     match &error {
-        BrokerError::Serialization(_) => BrokerOperationError::InvalidJsonPayload {
-            message: error.to_string(),
-            cause: error.failure_cause(),
-        },
-        _ => BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::TaskInfoQueryFailed,
-            message: error.to_string(),
-            retryable: error.is_retryable(),
-            cause: error.failure_cause(),
-        },
+        BrokerError::Serialization(_) => {
+            let detail = error.to_string();
+            BrokerOperationError::task_info_invalid_json(
+                task_id,
+                &detail,
+                BrokerCheckCause::Error(error),
+            )
+        }
+        _ => BrokerOperationError::task_info_query_failed(
+            task_id,
+            BrokerOperationSource::Broker(error),
+        ),
     }
 }
 
@@ -2778,7 +2771,7 @@ fn raw_result_from_live(
 ) -> BrokerResult<RawResultProbe> {
     let status: crate::core::TaskStatus = status
         .parse()
-        .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+        .map_err(|error| raw_result_operation_error(task_id, BrokerError::InvalidStatus(error)))?;
     let record = RawResultRecord {
         task_id,
         task_name,
@@ -2808,11 +2801,14 @@ fn raw_result_from_history_result(
     let status: crate::core::TaskStatus = history
         .status
         .parse()
-        .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+        .map_err(|error| raw_result_operation_error(task_id, BrokerError::InvalidStatus(error)))?;
     if !status.is_terminal() {
-        return Err(raw_result_operation_error(BrokerError::InvalidStatus(
-            format!("history task {task_id} has non-terminal status {status}"),
-        )));
+        return Err(raw_result_operation_error(
+            task_id,
+            BrokerError::InvalidStatus(format!(
+                "history task {task_id} has non-terminal status {status}"
+            )),
+        ));
     }
     let text = match &history.payload {
         HistoryResultPayload::Absent => None,
@@ -2825,7 +2821,10 @@ fn raw_result_from_history_result(
                 digest,
             )
             .map_err(|error| {
-                raw_result_operation_error(BrokerError::HistoryReadContract(error.to_string()))
+                raw_result_operation_error(
+                    task_id,
+                    BrokerError::HistoryReadContract(error.to_string()),
+                )
             })?,
         ),
     };
@@ -2849,12 +2848,15 @@ fn raw_result_from_history_detail(
             // Parsed at the history read (`HistoryTaskDetail.status`).
             let status: crate::core::TaskStatus = detail.status;
             if !status.is_terminal() {
-                return Err(raw_result_operation_error(BrokerError::InvalidStatus(
-                    format!("history task {task_id} has non-terminal status {status}"),
-                )));
+                return Err(raw_result_operation_error(
+                    task_id,
+                    BrokerError::InvalidStatus(format!(
+                        "history task {task_id} has non-terminal status {status}"
+                    )),
+                ));
             }
             let raw_result = history_result_text(&detail)
-                .map_err(raw_result_operation_error)?
+                .map_err(|error| raw_result_operation_error(task_id, error))?
                 .map(stored_envelope_text)
                 .transpose()?
                 .flatten();
@@ -2874,27 +2876,29 @@ fn stored_envelope_text(text: String) -> BrokerResult<Option<StoredEnvelopeText>
     StoredEnvelopeText::parse(text).map_err(|refused| invalid_raw_result(refused.to_string()))
 }
 
+/// `INVALID_JSON_PAYLOAD` of a raw result read: a check of the core refused
+/// the stored result; `message` names the refusal.
 fn invalid_raw_result(message: String) -> BrokerOperationError {
     BrokerOperationError::InvalidJsonPayload {
         message,
-        cause: FailureCause::ContractViolation,
+        cause: BrokerCheckCause::Check,
     }
 }
 
-fn raw_result_operation_error(error: BrokerError) -> BrokerOperationError {
+/// The error of a raw result read of `task_id`, by Python's rule: stored
+/// data that does not read is `INVALID_JSON_PAYLOAD` with the error's text;
+/// every other failure is `TASK_INFO_QUERY_FAILED` with Python's message
+/// (`Broker error while retrieving task {task_id}: {error}`), retryable by
+/// the error's rule.
+fn raw_result_operation_error(task_id: Uuid, error: BrokerError) -> BrokerOperationError {
     match &error {
         BrokerError::Serialization(_)
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidStatus(_) => BrokerOperationError::InvalidJsonPayload {
             message: error.to_string(),
-            cause: error.failure_cause(),
+            cause: BrokerCheckCause::Error(error),
         },
-        _ => BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::TaskInfoQueryFailed,
-            message: error.to_string(),
-            retryable: error.is_retryable(),
-            cause: error.failure_cause(),
-        },
+        _ => BrokerOperationError::raw_result_query_failed(task_id, error),
     }
 }
 
@@ -2912,10 +2916,15 @@ fn history_result_envelope(detail: &HistoryTaskDetail) -> BrokerResult<Option<St
         Err(error) => Err(error.to_string()),
     };
     checked.map_err(|cause| {
-        invalid_raw_result(format!(
+        let detail_text = format!(
             "History result envelope failed validation for task {}: {cause}",
             detail.task_id
-        ))
+        );
+        BrokerOperationError::task_info_invalid_json(
+            detail.task_id,
+            &detail_text,
+            BrokerCheckCause::Check,
+        )
     })
 }
 
@@ -2955,6 +2964,7 @@ fn history_task_info(
     include_failed_reason: bool,
     include_attempts: bool,
 ) -> BrokerResult<TaskInfo<StoredEnvelopeText>> {
+    let task_id = detail.task_id;
     let status = detail.status;
     let result = match include_result {
         false => None,
@@ -2974,7 +2984,7 @@ fn history_task_info(
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()
-        .map_err(task_info_history_error)?;
+        .map_err(|error| task_info_history_error(task_id, error))?;
     Ok(TaskInfo {
         task_id: detail.task_id,
         task_name: detail.task_name,
@@ -3074,52 +3084,41 @@ fn list_shape_error(statement: &TypedStatement, shape: ListShapeError) -> Broker
 /// `retryable` is the classification of the cause, as Python's
 /// `_operation_failed`.
 fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError::OperationFailed {
-        code: BrokerOperationFailedCode::MonitoringQueryFailed,
-        message: format!("{operation} failed: {error}"),
-        retryable: error.is_retryable(),
-        cause: error.failure_cause(),
-    }
+    BrokerOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
 }
 
 /// The error of a refused reply subscription of `ping_workers`, as Python
 /// (`python/horsies/core/brokers/postgres.py:2821-2865`): a broker with no listener
 /// is `LISTENER_DISABLED`, not retryable; any other refusal is
 /// `WORKER_PING_FAILED` with the listener's retryable flag.
-fn worker_ping_subscribe_error(error: &ListenError) -> BrokerOperationError {
+fn worker_ping_subscribe_error(error: ListenError) -> BrokerOperationError {
     match error {
         ListenError::NoSessionUrl => BrokerOperationError::ListenerDisabled {
             message: format!("ping_workers needs a listener: {error}"),
         },
         ListenError::PlanRefused(_) | ListenError::Subscribe(_) => {
-            BrokerOperationError::OperationFailed {
-                code: BrokerOperationFailedCode::WorkerPingFailed,
-                message: format!("ping_workers reply subscribe failed: {error}"),
-                retryable: error.is_retryable(),
-                cause: error.failure_cause(),
-            }
+            BrokerOperationError::worker_ping_failed(
+                WorkerPingStep::ReplySubscribe,
+                BrokerOperationSource::Listen(error),
+            )
         }
     }
 }
 
-/// Build a `WORKER_PING_FAILED` broker error for a failed core statement of
-/// a ping. `retryable` is the classification of the cause.
-fn worker_ping_statement_error(operation: &str, error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError::OperationFailed {
-        code: BrokerOperationFailedCode::WorkerPingFailed,
-        message: format!("ping_workers {operation} failed: {error}"),
-        retryable: error.is_retryable(),
-        cause: error.failure_cause(),
-    }
+/// Build a `WORKER_PING_FAILED` broker error for the failed NOTIFY of a
+/// ping, with Python's message (`ping_workers failed: {error}`). `retryable`
+/// is the classification of the cause.
+fn worker_ping_statement_error(error: BrokerError) -> BrokerOperationError {
+    BrokerOperationError::worker_ping_failed(
+        WorkerPingStep::Notify,
+        BrokerOperationSource::Broker(error),
+    )
 }
 
 /// Build an `INVALID_INPUT` broker error: an argument was refused before
 /// anything ran, and the same argument is refused again.
 fn invalid_input(message: String) -> BrokerOperationError {
-    BrokerOperationError::InvalidInput {
-        message,
-        cause: FailureCause::PreconditionFailed,
-    }
+    BrokerOperationError::invalid_input(message)
 }
 
 /// Decode a pong notification, discarding malformed or mismatched replies.
@@ -4647,8 +4646,8 @@ mod broker_operation_error_tests {
             BrokerError::RowDecode(RowDecodeError::NoRow { statement: "read" })
         )
         .retryable());
-        assert!(worker_ping_statement_error("notify", checkout_timed_out()).retryable());
-        assert!(!worker_ping_statement_error("notify", pool_closed()).retryable());
+        assert!(worker_ping_statement_error(checkout_timed_out()).retryable());
+        assert!(!worker_ping_statement_error(pool_closed()).retryable());
     }
 }
 
@@ -5450,14 +5449,45 @@ mod task_info_code_tests {
     use crate::broker::result_types::BrokerErrorCode;
     use crate::db::StatementFailure;
 
+    /// The task of the reads in these tests.
+    const TASK_INFO_TEST_ID: Uuid = Uuid::from_u128(0x0192_b3a4_0000_7000_8000_0000_0000_0002);
+
     #[test]
     fn a_result_that_does_not_parse_is_invalid_json_payload() {
         let parse_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let detail =
+            BrokerError::Serialization(serde_json::from_str::<serde_json::Value>("{").unwrap_err())
+                .to_string();
 
-        let error = task_info_history_error(BrokerError::Serialization(parse_error));
+        let error =
+            task_info_history_error(TASK_INFO_TEST_ID, BrokerError::Serialization(parse_error));
 
         assert_eq!(error.code(), BrokerErrorCode::InvalidJsonPayload);
         assert!(!error.retryable());
+        // Python's message of a task info read names the task.
+        assert_eq!(
+            error.message(),
+            format!("get_task_info failed for {TASK_INFO_TEST_ID}: {detail}")
+        );
+    }
+
+    /// A task that moved between the two reads on every pass is
+    /// `TASK_INFO_QUERY_FAILED`, retryable, with Python's message.
+    #[test]
+    fn a_task_that_moved_on_every_pass_is_retryable_with_python_s_message() {
+        let error = BrokerOperationError::task_info_query_failed(
+            TASK_INFO_TEST_ID,
+            BrokerOperationSource::TaskInfoMoved {
+                task_id: TASK_INFO_TEST_ID,
+                passes: TASK_INFO_READ_PASSES,
+            },
+        );
+
+        assert_eq!(error.code(), BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(error.retryable());
+        assert!(error.message().starts_with(&format!(
+            "get_task_info failed for {TASK_INFO_TEST_ID}: task {TASK_INFO_TEST_ID} was absent"
+        )));
     }
 
     #[test]
@@ -5466,7 +5496,7 @@ mod task_info_code_tests {
             BrokerError::InvalidStatus("BOGUS".to_owned()),
             BrokerError::HistoryReadContract("unknown task-attempt outcome".to_owned()),
         ] {
-            let mapped = task_info_history_error(error);
+            let mapped = task_info_history_error(TASK_INFO_TEST_ID, error);
             assert_eq!(mapped.code(), BrokerErrorCode::TaskInfoQueryFailed);
             assert!(!mapped.retryable());
         }
@@ -5474,7 +5504,10 @@ mod task_info_code_tests {
 
     #[test]
     fn a_database_failure_is_task_info_query_failed_with_the_driver_flag() {
-        let mapped = task_info_history_error(BrokerError::Database(sqlx::Error::PoolTimedOut));
+        let mapped = task_info_history_error(
+            TASK_INFO_TEST_ID,
+            BrokerError::Database(sqlx::Error::PoolTimedOut),
+        );
 
         assert_eq!(mapped.code(), BrokerErrorCode::TaskInfoQueryFailed);
         assert!(mapped.retryable());
@@ -5482,20 +5515,25 @@ mod task_info_code_tests {
 
     #[test]
     fn a_core_statement_failure_is_task_info_query_failed_with_its_transience() {
-        let timed_out =
-            task_info_history_error(BrokerError::Statement(StatementFailure::NotSent {
+        let timed_out = task_info_history_error(
+            TASK_INFO_TEST_ID,
+            BrokerError::Statement(StatementFailure::NotSent {
                 statement: "select_task_attempts",
                 cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
                     role: crate::db::PoolRole::Main,
                     waited: Duration::from_secs(30),
                 }),
-            }));
+            }),
+        );
         assert_eq!(timed_out.code(), BrokerErrorCode::TaskInfoQueryFailed);
         assert!(timed_out.retryable());
 
-        let undecodable = task_info_history_error(BrokerError::RowDecode(RowDecodeError::NoRow {
-            statement: "live_task_exists",
-        }));
+        let undecodable = task_info_history_error(
+            TASK_INFO_TEST_ID,
+            BrokerError::RowDecode(RowDecodeError::NoRow {
+                statement: "live_task_exists",
+            }),
+        );
         assert_eq!(undecodable.code(), BrokerErrorCode::TaskInfoQueryFailed);
         assert!(!undecodable.retryable());
     }

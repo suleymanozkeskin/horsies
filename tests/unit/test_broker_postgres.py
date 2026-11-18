@@ -23,7 +23,6 @@ from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies._core import (
-    BrokerFailure,
     CoreConnectionError,
     CoreContractViolation,
     CorePreconditionFailed,
@@ -1787,13 +1786,7 @@ class TestGetRawResultRecordAsync:
         self,
     ) -> None:
         broker = self._broker_answering(
-            MagicMock(
-                spec=BrokerFailure,
-                code='INVALID_JSON_PAYLOAD',
-                message='Result archive digest mismatch',
-                retryable=False,
-                exception=_DIGEST_MISMATCH,
-            ),
+            BrokerInvalidJsonPayload(message='Result archive digest mismatch', exception=_DIGEST_MISMATCH),
         )
 
         result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
@@ -1809,13 +1802,7 @@ class TestGetRawResultRecordAsync:
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
         broker = self._broker_answering(
-            MagicMock(
-                spec=BrokerFailure,
-                code='TASK_INFO_QUERY_FAILED',
-                message='connection lost',
-                retryable=True,
-                exception=_CONNECTION_LOST,
-            ),
+            BrokerOperationFailed(code=BrokerErrorCode.TASK_INFO_QUERY_FAILED, message='connection lost', retryable=True, exception=_CONNECTION_LOST),
         )
 
         with caplog.at_level('ERROR', logger='horsies.broker'):
@@ -1857,7 +1844,7 @@ class TestGetRawResultRecordAsync:
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = self._broker_answering(
-            MagicMock(spec=BrokerFailure, code='INVALID_INPUT', message='x', retryable=False),
+            BrokerInvalidInput(message='x', exception=NoCause()),
         )
 
         with pytest.raises(AssertionError, match='INVALID_INPUT'):
@@ -2176,24 +2163,25 @@ class TestPingDatabase:
 
     @pytest.mark.asyncio
     async def test_a_failed_ping_is_db_ping_failed_with_the_core_classification(self) -> None:
-        broker = _make_broker()
-        broker._core_handle = self._handle(
-            MagicMock(
-                spec=BrokerFailure,
-                code='DB_PING_FAILED',
-                message='database ping failed: connection refused',
-                retryable=True,
-                exception=_CONNECTION_LOST,
-            ),
+        """The core's class is returned as it is: the core builds Python's
+        message (``ping_database failed: {error}``)."""
+        core_failure = BrokerOperationFailed(
+            code=BrokerErrorCode.DB_PING_FAILED,
+            message='ping_database failed: connection failed: refused',
+            retryable=True,
+            exception=_CONNECTION_LOST,
         )
+        broker = _make_broker()
+        broker._core_handle = self._handle(core_failure)
 
         result = await broker.ping_database_async()
 
         assert is_err(result)
         failed = result.err_value
+        assert failed is core_failure
         assert failed.code is BrokerErrorCode.DB_PING_FAILED
         assert failed.retryable is True
-        assert failed.message == 'ping_database failed: database ping failed: connection refused'
+        assert failed.message == 'ping_database failed: connection failed: refused'
         assert failed.exception is _CONNECTION_LOST
 
     @pytest.mark.asyncio
@@ -2216,7 +2204,7 @@ class TestPingDatabase:
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = _make_broker()
         broker._core_handle = self._handle(
-            MagicMock(spec=BrokerFailure, code='CLEANUP_FAILED', message='x', retryable=False),
+            BrokerOperationFailed(code=BrokerErrorCode.CLEANUP_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='CLEANUP_FAILED'):
@@ -3344,20 +3332,21 @@ class TestGetTaskInfoAsync:
 
     @pytest.mark.asyncio
     async def test_a_failed_read_is_task_info_query_failed(self) -> None:
-        broker = self._broker_answering(
-            MagicMock(
-                spec=BrokerFailure,
-                code='TASK_INFO_QUERY_FAILED',
-                message='pool timed out',
-                retryable=True,
-                exception=_CONNECTION_LOST,
-            ),
+        """The core's class is returned as it is: the core builds Python's
+        message (``get_task_info failed for {task_id}: {error}``)."""
+        core_failure = BrokerOperationFailed(
+            code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+            message=f'get_task_info failed for {TASK_INFO_ID}: pool timed out',
+            retryable=True,
+            exception=_CONNECTION_LOST,
         )
+        broker = self._broker_answering(core_failure)
 
         result = await broker.get_task_info_async(TASK_INFO_ID)
 
         assert is_err(result)
         failed = result.err_value
+        assert failed is core_failure
         assert isinstance(failed, BrokerOperationFailed)
         assert failed.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
         assert failed.retryable is True
@@ -3369,13 +3358,7 @@ class TestGetTaskInfoAsync:
         self,
     ) -> None:
         broker = self._broker_answering(
-            MagicMock(
-                spec=BrokerFailure,
-                code='INVALID_JSON_PAYLOAD',
-                message='stored result digest mismatch',
-                retryable=False,
-                exception=_DIGEST_MISMATCH,
-            ),
+            BrokerInvalidJsonPayload(message='stored result digest mismatch', exception=_DIGEST_MISMATCH),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
@@ -3402,7 +3385,7 @@ class TestGetTaskInfoAsync:
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = self._broker_answering(
-            MagicMock(spec=BrokerFailure, code='CLEANUP_FAILED', message='x', retryable=False),
+            BrokerOperationFailed(code=BrokerErrorCode.CLEANUP_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='CLEANUP_FAILED'):
@@ -3636,13 +3619,7 @@ class TestEnsureSchemaInitialized:
     @pytest.mark.asyncio
     async def test_a_failed_install_is_schema_init_failed_and_runs_again(self) -> None:
         broker = self._uninitialized(
-            MagicMock(
-                spec=BrokerFailure,
-                code='SCHEMA_INIT_FAILED',
-                message='the database was installed by the RUST client',
-                retryable=False,
-                exception=_FAMILY_MISMATCH,
-            ),
+            BrokerOperationFailed(code=BrokerErrorCode.SCHEMA_INIT_FAILED, message='the database was installed by the RUST client', retryable=False, exception=_FAMILY_MISMATCH),
         )
 
         first = await broker.ensure_schema_initialized()
@@ -3675,7 +3652,7 @@ class TestEnsureSchemaInitialized:
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = self._uninitialized(
-            MagicMock(spec=BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+            BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='DB_PING_FAILED'):

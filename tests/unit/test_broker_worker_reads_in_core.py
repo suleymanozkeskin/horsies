@@ -20,7 +20,6 @@ import pytest
 
 from horsies._core import (
     AllSlotsServingRecord,
-    BrokerFailure,
     CoreConnectionError,
     BudgetLoadRecord,
     ClassBudgetRecord,
@@ -494,13 +493,7 @@ class TestFailures:
         cause = CoreConnectionError(read, 'connection refused', retryable)
         broker = _broker_answering(
             method,
-            _record(
-                BrokerFailure,
-                code='MONITORING_QUERY_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=cause,
-            ),
+            BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED, message=message, retryable=retryable, exception=cause),
         )
 
         result = await call(broker)
@@ -519,7 +512,7 @@ class TestFailures:
         message = 'limit must be positive when set, got 0'
         broker = _broker_answering(
             'worker_state_history_async',
-            _record(BrokerFailure, code='INVALID_INPUT', message=message, retryable=False),
+            BrokerInvalidInput(message=message, exception=NoCause()),
         )
 
         result = await broker.get_worker_state_history_async('w1', limit=0)
@@ -551,7 +544,7 @@ class TestFailures:
         self, method: str, read: str, call: _Read,
     ) -> None:
         broker = _broker_answering(
-            method, _record(BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+            method, BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='DB_PING_FAILED'):
@@ -617,7 +610,7 @@ class TestWorkerPing:
         message = 'ping_workers needs a listener: this broker has no listener'
         broker = _broker_answering(
             'ping_workers_async',
-            _record(BrokerFailure, code='LISTENER_DISABLED', message=message, retryable=False),
+            BrokerListenerDisabled(message=message),
         )
 
         result = await broker.ping_workers_async()
@@ -627,17 +620,11 @@ class TestWorkerPing:
     @pytest.mark.parametrize('retryable', [True, False])
     @pytest.mark.asyncio
     async def test_a_ping_failure_keeps_its_message_and_retry_rule(self, retryable: bool) -> None:
-        message = 'ping_workers ping notify failed: connection refused'
+        message = 'ping_workers failed: connection refused'
         cause = CoreConnectionError('ping_workers', 'connection refused', retryable)
         broker = _broker_answering(
             'ping_workers_async',
-            _record(
-                BrokerFailure,
-                code='WORKER_PING_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=cause,
-            ),
+            BrokerOperationFailed(code=BrokerErrorCode.WORKER_PING_FAILED, message=message, retryable=retryable, exception=cause),
         )
 
         result = await broker.ping_workers_async()
@@ -671,7 +658,7 @@ class TestWorkerPing:
     async def test_another_code_from_the_core_is_a_defect(self) -> None:
         broker = _broker_answering(
             'ping_workers_async',
-            _record(BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+            BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='DB_PING_FAILED'):
