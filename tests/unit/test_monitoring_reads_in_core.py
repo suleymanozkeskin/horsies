@@ -15,6 +15,7 @@ from typing import Final
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from horsies._core import (
     CoreConnectionError,
@@ -252,6 +253,18 @@ class TestFailures:
     async def test_the_python_only_loop_limit_from_the_core_is_a_defect(self) -> None:
         with pytest.raises(AssertionError, match='EVENT_LOOP_LIMIT'):
             await _list(_record(MonitoringFailed, code='EVENT_LOOP_LIMIT', message=MESSAGE, retryable=False))
+
+    @pytest.mark.asyncio
+    async def test_a_core_text_that_does_not_match_the_model_raises_its_error(self) -> None:
+        text = '{"rows": []}'
+        with pytest.raises(ValidationError) as expected:
+            _ = TaskListPage.model_validate_json(text)
+
+        with pytest.raises(ValidationError) as raised:
+            _ = await _list(_record(MonitoringJson, json=text))
+
+        assert raised.value.title == expected.value.title == 'TaskListPage'
+        assert raised.value.errors(include_url=False) == expected.value.errors(include_url=False)
 
     @pytest.mark.parametrize(
         ('raised', 'retryable'),
