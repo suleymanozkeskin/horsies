@@ -1457,7 +1457,7 @@ mod parse {
             ContextEntry::Unreadable(TaskResult::Err(TaskError {
                 exception: None,
                 error_code: OperationalErrorCode::ResultDeserializationError.into(),
-                data: Some(data),
+                data: Some(crate::core::codec::JsonText::of_engine_value(&data)),
                 message: Some(message),
                 kind: TaskErrorKind::Plain,
             }))

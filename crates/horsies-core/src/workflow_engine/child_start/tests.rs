@@ -388,7 +388,7 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
         Some("Failed to load subworkflow definition for child_start_parent:1")
     );
     assert_eq!(
-        missing.data,
+        missing.data_value(),
         Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
     );
     let too_deep = host_build(
@@ -413,7 +413,7 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
         )
     );
     assert_eq!(
-        too_deep.data,
+        too_deep.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
@@ -516,7 +516,7 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
         )
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
@@ -559,7 +559,7 @@ fn a_static_member_that_the_builder_refuses_fails_the_node_as_a_serialization_er
         )
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
@@ -612,7 +612,7 @@ fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization
         ))
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
@@ -652,7 +652,10 @@ fn a_source_with_no_stored_result_is_named_by_its_node_id() {
             "Dependency node fetch (index 0, task source_task) is COMPLETED with no stored result"
         )
     );
-    assert_eq!(error.data, Some(serde_json::json!({"dependency_index": 0})));
+    assert_eq!(
+        error.data_value(),
+        Some(serde_json::json!({"dependency_index": 0}))
+    );
 }
 
 /// An `args_from` text that does not parse fails the node with
@@ -676,7 +679,7 @@ fn an_args_from_text_that_does_not_parse_fails_the_node() {
         Some("Corrupt args_from JSON for subworkflow task 1")
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
@@ -731,7 +734,7 @@ fn a_stored_input_that_does_not_read_fails_the_node() {
             "{input}"
         );
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1})),
             "{input}"
         );
@@ -789,7 +792,7 @@ fn an_args_from_value_that_is_not_an_index_fails_the_node() {
         );
         assert_eq!(error.message.as_deref(), Some(expected), "{args_from}");
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1})),
             "{args_from}"
         );
@@ -933,7 +936,7 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
         Some("Failed to load subworkflow definition for child_start_parent:1")
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"definition_key": CHILD_KEY}))
     );
 }
@@ -1039,7 +1042,7 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
         Some("Failed to load subworkflow definition for child_start_failed_root:0")
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
     );
     assert_child_started(&pool, workflow_id, 1, 0).await;

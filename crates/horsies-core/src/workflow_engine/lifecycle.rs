@@ -301,10 +301,12 @@ fn paused_expiry_error(older_than: PausedWorkflowAge) -> Result<String, Workflow
     Ok(serde_json::to_string(&crate::core::TaskError {
         exception: None,
         error_code: crate::core::OutcomeCode::WorkflowExpired.into(),
-        data: Some(serde_json::json!({
-            "policy": "paused_workflow_auto_cancel_after",
-            "older_than_seconds": micros as f64 / 1_000_000.0,
-        })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({
+                "policy": "paused_workflow_auto_cancel_after",
+                "older_than_seconds": micros as f64 / 1_000_000.0,
+            }),
+        )),
         message: Some(message),
         kind: crate::core::TaskErrorKind::Plain,
     })?)
@@ -901,7 +903,7 @@ mod p7_lifecycle_tests {
             Some("paused_workflow_auto_cancel_after elapsed: 1:00:00.000250"),
         );
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({
                 "policy": "paused_workflow_auto_cancel_after",
                 "older_than_seconds": 3_600.000_25,

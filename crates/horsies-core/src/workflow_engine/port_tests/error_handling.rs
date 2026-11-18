@@ -398,7 +398,7 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
         "{error:?}"
     );
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "task_index": 1,

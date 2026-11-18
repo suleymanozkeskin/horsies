@@ -128,7 +128,12 @@ async fn test_explicit_error_result() {
         TaskOutcome::Failed(error) => {
             assert_eq!(error.code().text(), "DELIBERATE_ERROR");
             assert_eq!(error.message(), Some("This is intentional"));
-            assert_eq!(error.data(), Some(&serde_json::json!({ "key": "value" })));
+            assert_eq!(
+                error.data().map(|data| data
+                    .decode::<serde_json::Value>()
+                    .expect("the data decodes")),
+                Some(serde_json::json!({ "key": "value" }))
+            );
         }
         TaskOutcome::Succeeded(value) => panic!("e2e_error succeeded with {value}"),
     }
@@ -178,7 +183,11 @@ async fn test_task_timeout_fails_with_task_timeout() {
     assert_eq!(failed_code(&async_body, RESULT_WAIT).await, "TASK_TIMEOUT");
     match outcome(&async_body, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            let data = error.data().expect("TASK_TIMEOUT stores data");
+            let data: serde_json::Value = error
+                .data()
+                .expect("TASK_TIMEOUT stores data")
+                .decode()
+                .expect("the data decodes as a JSON value");
             assert_eq!(data["timeout_ms"], serde_json::json!(2_000));
             assert!(
                 data.get("cancel_end").is_none(),
@@ -508,7 +517,11 @@ async fn test_task_cancelled() {
     match outcome(&handle, Duration::from_secs(1)).await {
         TaskOutcome::Failed(error) => {
             assert_eq!(error.code().text(), "TASK_CANCELLED");
-            let data = error.data().expect("TASK_CANCELLED stores data");
+            let data: serde_json::Value = error
+                .data()
+                .expect("TASK_CANCELLED stores data")
+                .decode()
+                .expect("the data decodes as a JSON value");
             assert_eq!(
                 data["task_id"],
                 serde_json::json!(handle.task_id().to_string())
@@ -856,7 +869,11 @@ async fn test_exception_becomes_error() {
         TaskOutcome::Failed(error) => {
             assert_eq!(error.code().text(), "UNHANDLED_EXCEPTION");
             assert!(error.exception().is_some(), "a panic stores its record");
-            let data = error.data().expect("a panic stores data");
+            let data: serde_json::Value = error
+                .data()
+                .expect("a panic stores data")
+                .decode()
+                .expect("the data decodes as a JSON value");
             assert_eq!(data["exception_type"], serde_json::json!("panic"));
         }
         TaskOutcome::Succeeded(value) => panic!("e2e_panic succeeded with {value}"),
