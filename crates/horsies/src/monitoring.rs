@@ -16,6 +16,9 @@
 //!   which only [`resolve_monitoring_window`] builds.
 //! - [`cancel_task`] writes; the `*_action` functions write and answer as
 //!   the monitoring web routes do ([`ActionOutcome`]).
+//! - In a process that was forked without `exec` after the core's process
+//!   runtime started, every function panics before it connects: a fork is a
+//!   state of the process, never a result.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -24,6 +27,7 @@ use horsies_core::monitoring as core_monitoring;
 use horsies_core::{BrokerError, ChildSpecSource, PostgresBroker};
 use uuid::Uuid;
 
+use crate::process_state::refuse_in_a_fork;
 use crate::Horsies;
 
 pub use horsies_core::monitoring::resolve_monitoring_window;
@@ -160,6 +164,7 @@ pub async fn cancel_task(
     task_id: Uuid,
     include_running: bool,
 ) -> TaskActionResult<TaskCancelled> {
+    refuse_in_a_fork(format_args!("Task cancel of task {task_id}"));
     match app.reads_handle().broker().await {
         Ok(broker) => core_monitoring::cancel_task(&broker, task_id, include_running).await,
         Err(error) => Err(TaskActionError {
@@ -224,10 +229,16 @@ pub(crate) fn resume_children(app: &Horsies) -> Arc<dyn ChildSpecSource> {
 /// `operation`. Installs no schema.
 ///
 /// Errors: `DB_OPERATION_FAILED` with the retry rule of the failed connect.
+///
+/// # Panics
+///
+/// In a fork, without `exec`, of the process that started the core's
+/// process runtime. Nothing ran.
 async fn monitoring_broker(
     app: &Horsies,
     operation: &str,
 ) -> MonitoringResult<Arc<PostgresBroker>> {
+    refuse_in_a_fork(format_args!("the monitoring {operation}"));
     app.reads_handle()
         .broker()
         .await
@@ -246,11 +257,17 @@ fn connect_failed(operation: &str, error: BrokerError) -> MonitoringQueryError {
 
 /// Run the workflow action `run` on `app`'s broker; a failed connect is
 /// answered 503 with the cause (`<subject> failed: <cause>`).
+///
+/// # Panics
+///
+/// In a fork, without `exec`, of the process that started the core's
+/// process runtime. Nothing ran.
 async fn action<F, Fut>(app: &Horsies, subject: &str, run: F) -> ActionOutcome
 where
     F: FnOnce(Arc<PostgresBroker>) -> Fut,
     Fut: Future<Output = ActionOutcome>,
 {
+    refuse_in_a_fork(format_args!("{subject}"));
     match app.reads_handle().broker().await {
         Ok(broker) => run(broker).await,
         Err(error) => core_monitoring::connect_failed_action(&format!("{subject} failed: {error}")),

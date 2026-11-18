@@ -17,9 +17,9 @@
 //! the app's handle.
 //!
 //! A send in a process that was forked without `exec` after the core's
-//! process runtime started panics ([`forked_send`]): a fork is a state of
-//! the process, never a send result, as Python's sends raise
-//! `ForkedAfterCoreStart`.
+//! process runtime started panics (`process_state::refuse_in_a_fork`): a
+//! fork is a state of the process, never a send result, as Python's sends
+//! raise `ForkedAfterCoreStart`.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -30,9 +30,6 @@ use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::WholeSeconds;
-use horsies_core::process_runtime::{
-    process_runtime, process_runtime_status, ProcessRuntimeRefusal, ProcessRuntimeStatus,
-};
 use horsies_core::{
     child_producer, mint_task_id, ChildProducer, Execution, PayloadPolicy, RetentionConfig,
     SendKind, TaskOptions, TaskSendError, TaskSendPayload,
@@ -43,6 +40,7 @@ use uuid::Uuid;
 
 use super::options::{send_retention, TaskSendOptions};
 use crate::app::SendSuppression;
+use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
 use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
 
@@ -443,14 +441,14 @@ where
     /// # Panics
     ///
     /// In a fork, without `exec`, of the process that started the core's
-    /// process runtime ([`refuse_a_send_in_a_fork`]). Nothing was sent.
+    /// process runtime ([`refuse_in_a_fork`]). Nothing was sent.
     pub(crate) async fn enqueue_with_resends(
         &self,
         task_id: Uuid,
         payload: TaskSendPayload,
         first: SendKind,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        refuse_a_send_in_a_fork(&self.task_name);
+        refuse_in_a_fork(format_args!("send of task '{}'", self.task_name));
         let resends = match self.context.resend_on_transient_err {
             true => RESEND_COUNT,
             false => 0,
@@ -470,35 +468,6 @@ where
             message: format!("{message} (task {})", self.task_name),
         }
     }
-}
-
-/// Panics when this process is a fork, without `exec`, of the process that
-/// started the core's process runtime ([`forked_send`]). Starts nothing.
-pub(crate) fn refuse_a_send_in_a_fork(task_name: &str) {
-    match process_runtime_status() {
-        ProcessRuntimeStatus::NotStarted | ProcessRuntimeStatus::Running => {}
-        ProcessRuntimeStatus::Inherited => match process_runtime() {
-            Err(ProcessRuntimeRefusal::ForkedAfterStart { core_pid, this_pid }) => {
-                forked_send(task_name, core_pid, this_pid)
-            }
-            Ok(_) | Err(ProcessRuntimeRefusal::StartFailed { .. }) => {
-                unreachable!("the runtime of a parent process is refused as a fork")
-            }
-        },
-    }
-}
-
-/// The panic of a send of task `task_name` in process `this_pid`, a fork
-/// without `exec` of process `core_pid`, where the core's process runtime
-/// started. The fork is a state of the process: no send in it can run, so
-/// it is never a [`TaskSendError`] (Python raises `ForkedAfterCoreStart`).
-pub(crate) fn forked_send(task_name: &str, core_pid: u32, this_pid: u32) -> ! {
-    panic!(
-        "send of task '{task_name}' refused: the core runtime started in process {core_pid}, \
-         and this process ({this_pid}) is a fork of it without exec; nothing was sent. Start \
-         the child process with exec (for example std::process::Command), or fork before the \
-         parent's first call that runs on the core"
-    )
 }
 
 /// Which retry method checks an error.
@@ -1139,24 +1108,5 @@ mod tests {
             matches!(refused, TaskSendError::SendSuppressed { .. }),
             "{refused}"
         );
-    }
-
-    /// #1938: a send in a fork is a state of the process, never a send
-    /// result. The panic names the task, both processes and the fix.
-    #[test]
-    #[should_panic(
-        expected = "send of task 'send_invoice' refused: the core runtime started in \
-                               process 10, and this process (11) is a fork of it without exec; \
-                               nothing was sent. Start the child process with exec"
-    )]
-    fn a_send_in_a_fork_panics_with_both_processes_and_the_fix() {
-        forked_send("send_invoice", 10, 11);
-    }
-
-    /// The test process is not a fork of the process that started the
-    /// runtime, so the fork check lets a send through.
-    #[test]
-    fn the_fork_check_lets_a_send_through_outside_a_fork() {
-        refuse_a_send_in_a_fork("send_invoice");
     }
 }

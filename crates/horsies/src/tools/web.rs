@@ -185,8 +185,7 @@ fn serve(_args: &WebArgs) -> Result<(), WebError> {
 /// UI until `SIGTERM` or `SIGINT`.
 #[cfg(feature = "web")]
 fn serve(args: &WebArgs) -> Result<(), WebError> {
-    use horsies_core::process_runtime::process_runtime;
-
+    use crate::process_state::runtime_for;
     use crate::web::{Actions, MonitoringConfig, MonitoringUiConfig};
     use crate::{Horsies, SchemaMode};
 
@@ -221,8 +220,8 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
         BuiltPolicy::ViewOnly => crate::web::router(&app, monitoring, crate::web::ViewOnly),
         BuiltPolicy::TrustedHeader(policy) => crate::web::router(&app, monitoring, policy),
     };
-    let runtime =
-        process_runtime().map_err(|refusal| WebError::RuntimeUnavailable(refusal.to_string()))?;
+    let runtime = runtime_for(format_args!("horsies web"))
+        .map_err(|failed| WebError::RuntimeUnavailable(failed.to_string()))?;
     runtime
         .runtime()
         .block_on(serve_router(router, &args.host, args.port))
