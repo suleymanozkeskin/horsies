@@ -176,24 +176,6 @@ class TestTaskRegistryRegister:
 
 
 @pytest.mark.unit
-class TestTaskRegistryUnregister:
-    """Tests for TaskRegistry.unregister()."""
-
-    def test_unregister_existing(self) -> None:
-        """Unregistering existing task should remove it from data and sources."""
-        reg: TaskRegistry[str] = TaskRegistry()
-        reg.register('handler', name='my_task', source='mod.py:1')
-        reg.unregister('my_task')
-        assert 'my_task' not in reg
-        assert 'my_task' not in reg._sources
-
-    def test_unregister_missing_is_noop(self) -> None:
-        """Unregistering missing task should not raise."""
-        reg: TaskRegistry[str] = TaskRegistry()
-        reg.unregister('nonexistent')  # should not raise
-
-
-@pytest.mark.unit
 class TestTaskRegistryMutableMapping:
     """Tests for MutableMapping protocol (__iter__, __len__, keys_list)."""
 

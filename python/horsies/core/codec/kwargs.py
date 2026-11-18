@@ -125,9 +125,6 @@ Engine-emitted ``__h_*`` keys after phase 6:
 - ``__h_task_result__`` (workflow / task result envelope, not in kwargs)
 - ``__h_outputless_terminals__`` (outputless workflow result envelope
   marker, not in kwargs)
-
-See ``codec/typed.py::_RESERVED_INTERNAL_KEYS`` for the authoritative
-list.
 """
 
 
@@ -188,11 +185,6 @@ def _keep_resolution(
             _RESOLVED_FUNCTIONS[task_fn] = (dict(hints), sig)
         case _:
             pass
-
-
-# Backwards-compatible alias for the previously private name. Kept until
-# the next sweep; new code should use ``resolve_hints_and_sig`` directly.
-_resolve_hints_and_sig = resolve_hints_and_sig
 
 
 def _hints_or_raise(

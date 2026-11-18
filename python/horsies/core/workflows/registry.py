@@ -1,8 +1,8 @@
-"""Registry for WorkflowSpec objects.
+"""Registry for WorkflowSpec objects and WorkflowDefinition classes.
 
-Provides access to TaskNode and SubWorkflowNode objects at runtime for
-subworkflow dispatch and node lookup. Workers that import workflow modules
-will automatically register the specs.
+A WorkflowSpec with SubWorkflowNodes registers itself by its name when it is
+created. A WorkflowDefinition registers by its ``definition_key``; the child
+build of a sub-workflow node loads the definition by that key.
 """
 
 from __future__ import annotations
@@ -12,8 +12,6 @@ from weakref import WeakValueDictionary
 
 if TYPE_CHECKING:
     from horsies.core.models.workflow import (
-        TaskNode,
-        SubWorkflowNode,
         WorkflowDefinition,
         WorkflowSpec,
     )
@@ -36,7 +34,7 @@ def _remove_spec_nodes(name: str, spec: 'WorkflowSpec[Any]') -> None:
 
 def register_workflow_spec(spec: 'WorkflowSpec[Any]') -> None:
     """
-    Register a WorkflowSpec for subworkflow dispatch and node lookup.
+    Register a WorkflowSpec by its name.
 
     Called automatically when WorkflowSpec is created with SubWorkflowNodes.
     """
@@ -61,54 +59,6 @@ def clear_workflow_registry() -> None:
     """Clear all registered workflow specs and node lookups."""
     _active_specs.clear()
     _nodes_by_spec.clear()
-
-
-def get_task_node(workflow_name: str, task_index: int) -> 'TaskNode[Any] | None':
-    """
-    Look up a TaskNode by workflow name and task index.
-
-    Returns None if not found (workflow not registered in this process).
-    """
-    from typing import cast
-    from horsies.core.models.workflow import TaskNode
-
-    node = _nodes_by_spec.get((workflow_name, task_index))
-    if node is not None and isinstance(node, TaskNode):
-        return cast('TaskNode[Any]', node)
-    return None
-
-
-def get_subworkflow_node(
-    workflow_name: str, task_index: int
-) -> 'SubWorkflowNode[Any] | None':
-    """
-    Look up a SubWorkflowNode by workflow name and task index.
-
-    Returns None if not found (workflow not registered in this process).
-    """
-    from typing import cast
-    from horsies.core.models.workflow import SubWorkflowNode
-
-    node = _nodes_by_spec.get((workflow_name, task_index))
-    if node is not None and isinstance(node, SubWorkflowNode):
-        return cast('SubWorkflowNode[Any]', node)
-    return None
-
-
-def get_node(
-    workflow_name: str, task_index: int
-) -> 'TaskNode[Any] | SubWorkflowNode[Any] | None':
-    """
-    Look up any node (TaskNode or SubWorkflowNode) by workflow name and task index.
-
-    Returns None if not found (workflow not registered in this process).
-    """
-    return _nodes_by_spec.get((workflow_name, task_index))
-
-
-def is_workflow_registered(name: str) -> bool:
-    """Check if a workflow is registered."""
-    return name in _active_specs
 
 
 def register_workflow_definition(
