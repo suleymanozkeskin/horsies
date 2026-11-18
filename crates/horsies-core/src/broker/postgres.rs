@@ -790,7 +790,7 @@ pub struct CheckedSend<'a> {
 
 impl<'a> CheckedSend<'a> {
     /// The refusals of one send that need no connection, in the order of
-    /// `_prepare_enqueue` (`horsies/core/brokers/postgres.py` at `v0.7.0`),
+    /// `_prepare_enqueue` (`core/brokers/postgres.py` of the `v0.7.0` package),
     /// which ran before the schema install:
     /// both `enqueued_at` and `enqueue_delay_seconds`; a `sent_at` in the
     /// future of a send that starts now; an input that the rules of a user

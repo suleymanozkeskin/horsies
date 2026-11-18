@@ -1757,7 +1757,7 @@ async fn fail_tree_orphan(
 
 /// The stored error of a RUNNING workflow with no node rows (recovery case 4): its start did not finish.
 ///
-/// Python 0.7.0 stored `{"error_code": "E400", ...}` (`horsies/core/workflows/recovery.py` at `v0.7.0`), which
+/// Python 0.7.0 stored `{"error_code": "E400", ...}` (`core/workflows/recovery.py` of the `v0.7.0` package), which
 /// is not a catalog error; the core stores the catalog code `WORKFLOW_START_INCOMPLETE` (approved rule), with
 /// the message of 0.7.0.
 fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serde_json::Error> {

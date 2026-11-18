@@ -156,7 +156,7 @@ pub type SendOutcome = Outcome<Enqueued>;
 
 /// Enqueue one task. The core's refusals that need no connection run first
 /// (`CheckedSend::check`), as `_prepare_enqueue` ran before the schema
-/// install (`horsies/core/brokers/postgres.py` at `v0.7.0`): a refused send
+/// install (`core/brokers/postgres.py` of the `v0.7.0` package): a refused send
 /// answers `INVALID_INPUT` or `INVALID_TASK_OPTIONS` with no connect and no
 /// statement. Then the schema is installed once per handle; a failed connect
 /// or install is `ENQUEUE_FAILED`, as Python's enqueue reports it. Writes; a
