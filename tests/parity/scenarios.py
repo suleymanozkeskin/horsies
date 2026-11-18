@@ -202,16 +202,18 @@ SCENARIOS: Final[tuple[Scenario, ...]] = (
         sends=(),
         workflows=(parity.CHAIN_NAME,),
     ),
-    # Layer 2: two workers. A worker claims only the classes that its
-    # profile has children for, so each task has one possible worker.
+    # Layer 2: two workers, and each task has one possible worker. A worker
+    # with isolated children also serves a shared class that it has no
+    # children for, through its ISOLATED budget; a worker with no isolated
+    # children serves only the classes of its own children (the core's
+    # `ClaimPlan::route`). So neither worker here serves the class of the
+    # other.
     Scenario(
         name='several_workers',
-        profiles=(parity.ISOLATED, parity.SHARED_ASYNC),
+        profiles=(parity.SHARED_ASYNC, parity.SHARED_THREAD),
         sends=(
-            _send('parity.add', ('a', 2), ('b', 3)),
             _send('parity.add_async', ('a', 2), ('b', 3)),
-            _send('parity.refuse', ('value', 7)),
-            _send('parity.refuse_async', ('value', 7)),
+            _send('parity.add_thread', ('a', 2), ('b', 3)),
         ),
         workflows=(),
     ),
