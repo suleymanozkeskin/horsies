@@ -104,16 +104,12 @@ enum Allowed {
     NotUserValue(&'static str),
     /// A user value on no production path.
     NoProductionCaller(&'static str),
-    /// A user value whose fix changes a public type: the open issue.
-    OpenIssue(&'static str),
 }
 
 impl Allowed {
     fn reason(self) -> &'static str {
         match self {
-            Self::NotUserValue(reason)
-            | Self::NoProductionCaller(reason)
-            | Self::OpenIssue(reason) => reason,
+            Self::NotUserValue(reason) | Self::NoProductionCaller(reason) => reason,
         }
     }
 }
@@ -224,17 +220,6 @@ const KNOWN_SITES: &[Known] = &[
         kind: SiteKind::ValueDeserialize,
         count: 1,
         allowed: Allowed::NotUserValue("the retention config"),
-    },
-    Known {
-        file: "crates/horsies-core/src/core/config/schedule.rs",
-        item: "TaskSchedule",
-        kind: SiteKind::DeserializeField,
-        count: 1,
-        allowed: Allowed::OpenIssue(
-            "#1892: the schedule input of the Rust client's config is a Value, built in code or \
-             read from a config text; the scheduler reads each input as its text (`input_json` \
-             of the manifest)",
-        ),
     },
     Known {
         file: "crates/horsies-core/src/core/history/archive/attempts.rs",
@@ -985,7 +970,7 @@ fn every_read_into_value_of_the_core_and_the_rust_client_is_listed() {
 
 #[test]
 fn each_listed_site_has_a_reason_and_a_file_of_a_scanned_crate() {
-    assert_eq!(KNOWN_SITES.len(), 25);
+    assert_eq!(KNOWN_SITES.len(), 24);
     for site in KNOWN_SITES {
         assert!(!site.allowed.reason().is_empty(), "{}", site.file);
         assert!(site.count > 0, "{}", site.file);
