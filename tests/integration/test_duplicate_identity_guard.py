@@ -11,18 +11,21 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Final
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from horsies.core.history.names import CLOCK_SKEW_EXCEPTIONS
 from tests.integration.task_history_harness import (
     HistorySchema,
     insert_live_task,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+
+CLOCK_SKEW_EXCEPTIONS: Final = 'horsies_task_history_clock_exceptions'
+"""The table of the moves whose clock ran ahead of the id birth."""
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
