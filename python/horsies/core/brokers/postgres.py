@@ -2128,7 +2128,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str,
         priority: int,
-        kwargs_json: str | None,
+        input_json: str | None,
         task_options: str | None,
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
     ) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
@@ -2144,7 +2144,7 @@ class PostgresBroker:
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            input_json=kwargs_json,
+            input_json=input_json,
             good_until=None,
             enqueue_delay_seconds=None,
             task_options=task_options,

@@ -263,13 +263,13 @@ class Scheduler:
         over ``payload.warn_bytes``, once per task and process."""
         for schedule in self.schedule_config.schedules:
             prepared_schedule = prepared.get(schedule.name)
-            if prepared_schedule is None or prepared_schedule.kwargs_json is None:
+            if prepared_schedule is None or prepared_schedule.input_json is None:
                 continue
             warn_if_payload_large(
                 self.app.config.payload,
                 task_name=schedule.task_name,
                 kind='kwargs',
-                payload_text=prepared_schedule.kwargs_json,
+                payload_text=prepared_schedule.input_json,
             )
 
     def _preload_task_modules(self) -> None:

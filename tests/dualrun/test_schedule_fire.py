@@ -175,12 +175,12 @@ async def _act_async(database: DualRunDatabase, case: _Case, fire: _Fire) -> Non
         match case:
             case _Case.SAME_COMMAND:
                 earlier = await reference.enqueue_slot(
-                    scheduler, schedule, slot_time=slot, kwargs_json=prepared.kwargs_json,
+                    scheduler, schedule, slot_time=slot, input_json=prepared.input_json,
                 )
                 assert is_ok(earlier), earlier
             case _Case.ANOTHER_COMMAND:
                 earlier = await reference.enqueue_slot(
-                    scheduler, schedule, slot_time=slot, kwargs_json='{"value":2}',
+                    scheduler, schedule, slot_time=slot, input_json='{"value":2}',
                 )
                 assert is_ok(earlier), earlier
             case _Case.ONE_SLOT | _Case.CATCH_UP | _Case.MISSING_STATE | _Case.MOVED_STATE:
@@ -463,12 +463,12 @@ async def _seed_after_start(database: DualRunDatabase, case: _TickCase, app: Hor
                 seeder,
                 schedule,
                 slot_time=slot,
-                kwargs_json=seeder._prepared_schedule(schedule).kwargs_json,
+                input_json=seeder._prepared_schedule(schedule).input_json,
             )
             assert is_ok(earlier), earlier
         case _TickCase.ANOTHER_COMMAND:
             earlier = await reference.enqueue_slot(
-                seeder, schedule, slot_time=slot, kwargs_json='{"value":2}',
+                seeder, schedule, slot_time=slot, input_json='{"value":2}',
             )
             assert is_ok(earlier), earlier
         case (

@@ -108,7 +108,7 @@ async def enqueue_slot(
     schedule: TaskSchedule,
     *,
     slot_time: datetime,
-    kwargs_json: str | None,
+    input_json: str | None,
 ) -> Result[UUID, BrokerEnqueueError]:
     """The old enqueue of one slot, with the given kwargs text.
 
@@ -129,7 +129,7 @@ async def enqueue_slot(
         queue_name=queue_name,
         task_id=task_id,
         send_kind=SendKind.FIRST,
-        input_json=kwargs_json,
+        input_json=input_json,
         priority=priority,
         sent_at=slot_time,
         task_options=prepared.task_options_json,
@@ -188,7 +188,7 @@ async def check_schedule(
             permanent_skip_slot: datetime | None = None
             for due_time in due_runs:
                 result = await enqueue_slot(
-                    scheduler, schedule, slot_time=due_time, kwargs_json=prepared.kwargs_json,
+                    scheduler, schedule, slot_time=due_time, input_json=prepared.input_json,
                 )
                 if is_err(result):
                     if not result.err_value.retryable:
@@ -225,7 +225,7 @@ async def check_schedule(
             await session.commit()
             return
         result = await enqueue_slot(
-            scheduler, schedule, slot_time=slot_time, kwargs_json=prepared.kwargs_json,
+            scheduler, schedule, slot_time=slot_time, input_json=prepared.input_json,
         )
         if is_err(result):
             if result.err_value.retryable:
