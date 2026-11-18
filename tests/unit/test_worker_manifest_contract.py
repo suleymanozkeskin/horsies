@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, cast
 
@@ -77,6 +79,13 @@ from horsies.core.worker.cpu_placement import ParentCpu
 from horsies.core.worker_manifest import (
     CHILD_MAIN_MODULE,
     PRELOAD_MAIN_MODULE,
+    ChildArgv,
+    CurrentDirectory,
+    CurrentDirectoryUnreadable,
+    LeftOutEntry,
+    MainModuleLocator,
+    child_argv,
+    child_sys_path,
     current_interpreter_flags,
     drain_timeout_ms,
     execution_of,
@@ -230,6 +239,9 @@ def _interpreter_state(*, isolated: int) -> SimpleNamespace:
     )
 
 
+CURRENT_DIRECTORY: Final = CurrentDirectory('/srv/cwd')
+
+
 def _launch() -> wire.ChildLaunchManifest:
     return python_child_launch(
         executable='/usr/bin/python3',
@@ -237,10 +249,12 @@ def _launch() -> wire.ChildLaunchManifest:
         app_locator='app.main:app',
         imports=['app.tasks'],
         sys_path_roots=['/srv/app'],
-        parent_sys_path=['/srv/app', '/usr/lib/python3.13'],
-        parent_argv=['horsies', 'worker', 'app.main:app'],
+        parent_sys_path=child_sys_path(
+            ['/srv/app', '/usr/lib/python3.13'], CURRENT_DIRECTORY,
+        ),
+        parent_argv=child_argv(['horsies', 'worker', 'app.main:app']),
         log_level='INFO',
-    )
+    ).unwrap()
 
 
 def _full_profile() -> WorkerProfile:
@@ -785,6 +799,197 @@ class TestValues:
         )
         monkeypatch.setattr(sys, 'warnoptions', [])
         assert current_interpreter_flags() == ()
+
+
+class _NoTextPath:
+    """An `os.PathLike` whose `__fspath__` gives neither `str` nor `bytes`."""
+
+    def __fspath__(self) -> str:
+        return cast('str', 7)
+
+    def __repr__(self) -> str:
+        return '_NoTextPath()'
+
+
+def _child_launch(
+    sys_path: list[object],
+    argv: list[object],
+    app_locator: str = 'app.main:app',
+) -> wire.ChildLaunchManifest:
+    return python_child_launch(
+        executable='/usr/bin/python3',
+        interpreter_flags=(),
+        app_locator=app_locator,
+        imports=(),
+        sys_path_roots=(),
+        parent_sys_path=child_sys_path(sys_path, CURRENT_DIRECTORY),
+        parent_argv=child_argv(argv),
+        log_level='INFO',
+    ).unwrap()
+
+
+class TestChildSysPath:
+    """`child_sys_path`: the `sys.path` of the worker as each child restores
+    it (Python 0.7.0 `_frame_sys_path`)."""
+
+    def test_text_entries_are_kept_in_their_order(self) -> None:
+        restored = child_sys_path(['/srv/app', '/usr/lib'], CURRENT_DIRECTORY)
+        assert restored.entries == ('/srv/app', '/usr/lib')
+        assert restored.left_out == ()
+
+    def test_the_empty_entry_is_the_current_directory(self) -> None:
+        restored = child_sys_path(['', '/srv/app'], CURRENT_DIRECTORY)
+        assert restored.entries == ('/srv/cwd', '/srv/app')
+
+    def test_the_empty_entry_is_left_out_when_the_current_directory_is_unreadable(
+        self,
+    ) -> None:
+        unreadable = CurrentDirectoryUnreadable('FileNotFoundError: gone')
+        restored = child_sys_path(['', '/srv/app'], unreadable)
+        assert restored.entries == ('/srv/app',)
+        assert restored.left_out == (
+            LeftOutEntry(
+                "''",
+                'the current directory cannot be read: FileNotFoundError: gone',
+            ),
+        )
+
+    def test_a_path_object_and_bytes_become_their_file_system_text(self) -> None:
+        restored = child_sys_path(
+            [Path('/srv/app'), b'/srv/lib', Path('')], CURRENT_DIRECTORY,
+        )
+        assert restored.entries == ('/srv/app', '/srv/lib', '.')
+        assert restored.left_out == ()
+
+    def test_an_object_that_is_not_a_path_is_left_out(self) -> None:
+        restored = child_sys_path(['/srv/app', 7, None, bytearray(b'/x')], CURRENT_DIRECTORY)
+        assert restored.entries == ('/srv/app',)
+        assert [left.entry for left in restored.left_out] == [
+            '7',
+            'None',
+            "bytearray(b'/x')",
+        ]
+        assert {left.reason for left in restored.left_out} == {
+            'it is not a str, bytes or os.PathLike path',
+        }
+
+    def test_a_path_like_whose_fspath_gives_no_text_is_left_out(self) -> None:
+        restored = child_sys_path([_NoTextPath(), '/srv/app'], CURRENT_DIRECTORY)
+        assert restored.entries == ('/srv/app',)
+        assert restored.left_out == (
+            LeftOutEntry('_NoTextPath()', 'it is not a str, bytes or os.PathLike path'),
+        )
+
+    def test_text_that_is_not_utf8_is_left_out(self) -> None:
+        undecodable = os.fsdecode(b'/srv/\xff')
+        restored = child_sys_path(
+            ['bad\udcff', b'/srv/\xff', Path(undecodable), '/srv/app'],
+            CURRENT_DIRECTORY,
+        )
+        assert restored.entries == ('/srv/app',)
+        assert [left.reason for left in restored.left_out] == [
+            'it is not valid UTF-8',
+        ] * 3
+
+    def test_a_current_directory_that_is_not_utf8_is_left_out(self) -> None:
+        restored = child_sys_path(['', '/srv/app'], CurrentDirectory('/srv/\udcff'))
+        assert restored.entries == ('/srv/app',)
+        assert restored.left_out == (LeftOutEntry("''", 'it is not valid UTF-8'),)
+
+
+class TestChildArgv:
+    """`child_argv`: the `sys.argv` of the worker as each child restores it
+    (Python 0.7.0 `_frame_text`)."""
+
+    def test_utf8_items_are_kept_in_their_order(self) -> None:
+        assert child_argv(['horsies', 'worker', 'app.main:app', 'ünï']) == ChildArgv(
+            ('horsies', 'worker', 'app.main:app', 'ünï'),
+        )
+
+    def test_a_code_point_that_is_not_utf8_is_written_as_its_escape(self) -> None:
+        assert child_argv(['horsies', 'bad\udcff']) == ChildArgv(
+            ('horsies', 'bad\\udcff'),
+        )
+
+    def test_an_item_that_is_not_text_is_its_str(self) -> None:
+        assert child_argv(['horsies', Path('/srv/app.py'), 3]) == ChildArgv(
+            ('horsies', '/srv/app.py', '3'),
+        )
+
+
+class TestMainModuleLocator:
+    """`python_child_launch` refuses an app locator in `__main__`: a child
+    is a new program with its own `__main__`."""
+
+    def test_a_locator_in_main_is_refused(self) -> None:
+        refused = python_child_launch(
+            executable='/usr/bin/python3',
+            interpreter_flags=(),
+            app_locator='__main__:app',
+            imports=(),
+            sys_path_roots=(),
+            parent_sys_path=child_sys_path([], CURRENT_DIRECTORY),
+            parent_argv=child_argv([]),
+            log_level='INFO',
+        )
+        assert refused.unwrap_err() == MainModuleLocator('__main__:app')
+
+    @pytest.mark.parametrize(
+        'locator',
+        ['app.__main__:app', '/srv/__main__.py:app', '__main__app:app'],
+    )
+    def test_a_module_or_file_named_after_main_is_accepted(self, locator: str) -> None:
+        launch = _child_launch([], [], app_locator=locator)
+        assert isinstance(launch.program, wire.ChildProgramPython)
+        assert launch.program.app_locator == locator
+
+
+def _document_launch(launch: wire.ChildLaunchManifest) -> dict[str, Any]:
+    """The child launch of the dumped document of a worker with `launch`."""
+    manifest = to_worker_manifest(
+        _app_config(worker_profiles={'batch': _full_profile()}),
+        profile='batch',
+        tasks={},
+        child_launch=launch,
+        idempotency_reservation_window=WINDOW,
+    )
+    document = cast('dict[str, Any]', json.loads(wire.dump_worker_manifest(manifest)))
+    return cast('dict[str, Any]', document['child_launch'])
+
+
+def _utf8_text(values: list[Any]) -> bool:
+    """Whether every value is text that UTF-8 can encode, as the parser of
+    the core takes it (`serde_json` refuses a lone surrogate)."""
+    return all(
+        isinstance(value, str) and not any(0xD800 <= ord(char) < 0xE000 for char in value)
+        for value in values
+    )
+
+
+class TestChildLaunchDocument:
+    """Regressions of #1950: the dumped document of each case is one that
+    the core takes. Before the fix, a `Path` on `sys.path` stopped the dump,
+    a number reached the document where the core reads text, and a lone
+    surrogate reached it as an escape that `serde_json` refuses."""
+
+    def test_a_path_object_on_sys_path_reaches_the_document_as_text(self) -> None:
+        launch = _child_launch([Path('/srv/app'), '/srv/lib'], ['horsies'])
+        program = _document_launch(launch)['program']
+        assert program['parent_sys_path'] == ['/srv/app', '/srv/lib']
+
+    def test_an_entry_that_is_not_a_path_does_not_reach_the_document(self) -> None:
+        launch = _child_launch([7, '/srv/lib'], ['horsies'])
+        program = _document_launch(launch)['program']
+        assert program['parent_sys_path'] == ['/srv/lib']
+        assert _utf8_text(program['parent_sys_path'])
+
+    def test_text_that_is_not_utf8_reaches_the_document_as_utf8_only(self) -> None:
+        launch = _child_launch(['bad\udcff', '/srv/lib'], ['horsies', 'bad\udcff'])
+        program = _document_launch(launch)['program']
+        assert program['parent_sys_path'] == ['/srv/lib']
+        assert program['parent_argv'] == ['horsies', 'bad\\udcff']
+        assert _utf8_text(program['parent_sys_path'])
+        assert _utf8_text(program['parent_argv'])
 
 
 class TestRecovery:
