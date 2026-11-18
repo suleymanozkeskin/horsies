@@ -1,6 +1,6 @@
 //! Render integer constants of horsies-core as modules of `_catalog`
-//! (`release_bounds.py`, `monitoring_bounds.py`, `broker_bounds.py`,
-//! `exit_codes.py`, `child_bounds.py`). Each
+//! (`monitoring_bounds.py`, `broker_bounds.py`, `exit_codes.py`,
+//! `child_bounds.py`). Each
 //! constant is a `Final` integer whose value is the core's constant, so a
 //! Python bound cannot differ from the bound that the core enforces: `check`
 //! fails when a core value changes and the module is not written again.
@@ -16,8 +16,8 @@ use horsies_core::monitoring::{
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 use horsies_core::{
-    CANCELLED_WRITE_END, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_RELEASED_CLAIMS,
-    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    CANCELLED_WRITE_END, LIVENESS_LOCK_LOST_EXIT_CODE, RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+    TASK_LIST_BOUND,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -43,20 +43,6 @@ pub struct ConstantModule {
     /// The constants, in module order.
     pub constants: &'static [CoreConstant],
 }
-
-const RELEASE_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
-    name: "MAX_RELEASED_CLAIMS",
-    doc:
-        "The most claims of one release request (`horsies_release_claims`); the core refuses more.",
-    value: MAX_RELEASED_CLAIMS as i64,
-}];
-
-/// The bound of the claim release.
-pub const RELEASE_BOUNDS: ConstantModule = ConstantModule {
-    file: "release_bounds.py",
-    doc: "The bound of the claim release of horsies-core, generated from its Rust constant.",
-    constants: &RELEASE_CONSTANTS,
-};
 
 const MONITORING_CONSTANTS: [CoreConstant; 7] = [
     CoreConstant {
@@ -209,13 +195,8 @@ pub const CHILD_BOUNDS: ConstantModule = ConstantModule {
 };
 
 /// Every generated module of core constants, in file order.
-pub const CONSTANT_MODULES: [ConstantModule; 5] = [
-    RELEASE_BOUNDS,
-    MONITORING_BOUNDS,
-    BROKER_BOUNDS,
-    EXIT_CODES,
-    CHILD_BOUNDS,
-];
+pub const CONSTANT_MODULES: [ConstantModule; 4] =
+    [MONITORING_BOUNDS, BROKER_BOUNDS, EXIT_CODES, CHILD_BOUNDS];
 
 /// The text of one module of core constants.
 pub fn render_constant_module(module: &ConstantModule) -> String {
@@ -278,10 +259,6 @@ mod tests {
 
     #[test]
     fn each_module_holds_the_core_values() {
-        let rendered = render_constant_module(&RELEASE_BOUNDS);
-        assert!(rendered.contains(&format!(
-            "\nMAX_RELEASED_CLAIMS: Final = {MAX_RELEASED_CLAIMS}\n"
-        )));
         let rendered = render_constant_module(&MONITORING_BOUNDS);
         for (name, value) in [
             (

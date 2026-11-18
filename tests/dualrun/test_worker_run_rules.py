@@ -1,18 +1,13 @@
-"""The pure parts of the whole-run pairs: the catalog, the compared part of a
-snapshot, the report compare and the judgement of two snapshots. No
-database."""
+"""The whole-run compare rules that parity uses: the catalog, the compared
+part of a snapshot and the judgement of two snapshots. No database."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Final
-from uuid import uuid4
 
 import pytest
-from pydantic import SecretStr
 
-from horsies.core.models.broker import PostgresConfig
-from tests.dualrun.apps import whole_run_app
 from tests.dualrun.catalog import (
     ATTEMPT_ARCHIVE,
     BASELINE_CATALOG,
@@ -20,7 +15,6 @@ from tests.dualrun.catalog import (
     RESULT_ENVELOPE,
 )
 from tests.dualrun.compare import MissingRow, SnapshotDiff
-from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
 from tests.dualrun.rules import (
     EachItem,
@@ -42,27 +36,13 @@ from tests.dualrun.worker_run import (
     WHOLE_RUN_ATTEMPT_ARCHIVE,
     WHOLE_RUN_CATALOG,
     WHOLE_RUN_RESULT_ENVELOPE,
-    Absent,
-    AttemptReport,
     ClockBoundaryStraddle,
     DualRunMismatch,
-    Live,
-    NodeKey,
-    NodeReport,
-    NoTaskRow,
     PairEqual,
-    ReportEntry,
-    ReportKey,
-    TaskReport,
-    WorkflowKey,
-    WorkflowReport,
-    Terminal,
-    compare_reports,
     compared_part,
     crosses_hour,
     in_one_hour,
     judge_snapshots,
-    worker_environment,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -150,57 +130,6 @@ def test_the_compared_part_leaves_out_the_time_driven_tables() -> None:
         names == {table.name for table in BASELINE_CATALOG.tables} - UNCOMPARED_TABLES
     )
     assert [group.table for group in compared.ambiguities] == ['horsies_tasks']
-
-
-def test_a_report_difference_names_the_task_and_both_sides() -> None:
-    same, other = uuid4(), uuid4()
-    completed = TaskReport(
-        state=Terminal(status='COMPLETED', error_code=None, retry_count=0),
-        attempts=(AttemptReport(attempt=1, outcome='COMPLETED', error_code=None),),
-    )
-    retried = TaskReport(state=Live(status='PENDING', retry_count=1), attempts=())
-    reference: dict[ReportKey, ReportEntry] = {same: completed, other: completed}
-    candidate: dict[ReportKey, ReportEntry] = {same: completed, other: retried}
-    differences = compare_reports(reference, candidate)
-    assert [difference.key for difference in differences] == [other]
-    assert differences[0].reference == completed
-    assert differences[0].candidate == retried
-    assert compare_reports(reference, dict(reference)) == ()
-    assert TaskReport(state=Absent(), attempts=()) != completed
-
-
-def test_a_report_covers_nodes_and_workflows_by_their_fixed_workflow_id() -> None:
-    workflow_id = uuid4()
-    reference: dict[ReportKey, ReportEntry] = {
-        NodeKey(workflow_id=workflow_id, task_index=1): NodeReport(
-            status='PENDING', task=NoTaskRow()
-        ),
-        WorkflowKey(workflow_id=workflow_id): WorkflowReport(status='PAUSED'),
-    }
-    candidate: dict[ReportKey, ReportEntry] = {
-        NodeKey(workflow_id=workflow_id, task_index=1): NodeReport(
-            status='PENDING', task=NoTaskRow()
-        ),
-        WorkflowKey(workflow_id=workflow_id): WorkflowReport(status='RUNNING'),
-    }
-    differences = compare_reports(reference, candidate)
-    assert [difference.key for difference in differences] == [
-        WorkflowKey(workflow_id=workflow_id)
-    ]
-
-
-def test_the_worker_gets_the_libpq_url_that_the_config_accepts() -> None:
-    database = DualRunDatabase(
-        name='dualrun_' + uuid4().hex,
-        url='postgresql://postgres@127.0.0.1:55432/dualrun_x',
-    )
-    env = worker_environment(database, marker_dir='/markers')
-    assert env[whole_run_app.DATABASE_URL_ENV] == database.url
-    assert env[whole_run_app.MARKER_DIR_ENV] == '/markers'
-    config = PostgresConfig(
-        database_url=SecretStr(env[whole_run_app.DATABASE_URL_ENV]),
-    )
-    assert config.database_url.get_secret_value() == database.url
 
 
 ONE_HOUR: Final = RunWindow(

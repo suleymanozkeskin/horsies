@@ -4,29 +4,19 @@
 ``envelope_of`` and ``stop_reason_of`` read the end of a run. ``wire_of``
 gives the version-1 wire tuple of that end, for tests that hand it to the
 finalize of the Python worker parent (``task_finished_handle``); the core
-worker reads the version-2 end itself. ``work_of_timeout`` gives the work of
-an isolated run from the stored timeout that the Python claim read.
+worker reads the version-2 end itself.
 """
 
 from __future__ import annotations
 
 from typing import assert_never
 
-from horsies.core.worker.child_runner import IsolatedWork, RunTheTask
 from horsies.core.worker.run_return import (
     ResultEnvelope,
     RunReturn,
     SetRunning,
     StopReason,
     StoppedBeforeRunning,
-)
-from horsies.core.worker.stored_timeout import (
-    CancelGraceInvalid,
-    NoTimeout,
-    OptionsUnreadable,
-    StoredTimeout,
-    TaskTimeout,
-    TimeoutValueInvalid,
 )
 
 type WireResult = tuple[bool, str, str | None]
@@ -83,17 +73,5 @@ def wire_of(returned: RunReturn) -> WireResult:
             return (True, text, None)
         case StoppedBeforeRunning(reason=reason):
             return (False, '', _version_one_reason(reason))
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def work_of_timeout(timeout: StoredTimeout) -> IsolatedWork:
-    """The work of an isolated run frame for the stored timeout of a row:
-    a refusal for options that the worker cannot use, else the run."""
-    match timeout:
-        case NoTimeout() | TaskTimeout():
-            return RunTheTask()
-        case OptionsUnreadable() | TimeoutValueInvalid() | CancelGraceInvalid():
-            return timeout
         case _ as unreachable:
             assert_never(unreachable)

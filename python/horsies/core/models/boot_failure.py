@@ -16,9 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Final, TypeAlias, assert_never, cast
+from typing import Final, TypeAlias, assert_never
 
-from horsies.core.types.result import Err, Ok, Result
 
 
 class ShortageErrno(Enum):
@@ -49,9 +48,6 @@ CLEARABLE_ERRNOS: Final[Mapping[int, ShortageErrno]] = MappingProxyType(
         errno.EAGAIN: ShortageErrno.EAGAIN,
     },
 )
-# The text that goes with a boot failure cause, in the worker state and in its
-# health report, has at most this many characters.
-MAX_BOOT_FAILURE_DETAIL_CHARS: Final = 2400
 
 
 def cut_text(text: str, limit: int) -> str:
@@ -168,13 +164,6 @@ ClearableBootCause: TypeAlias = ResourceShortage | ThreadStartRefused
 ModelBootCause: TypeAlias = ReportedBootCause | SpawnFailed
 
 
-@dataclass(frozen=True, slots=True)
-class BootCauseUnreadable:
-    """A stored or received cause is not one of the known shapes."""
-
-    reason: str
-
-
 def describe_boot_cause(cause: ModelBootCause) -> str:
     """Return the cause as short text for logs and error messages."""
     match cause:
@@ -194,55 +183,3 @@ def describe_boot_cause(cause: ModelBootCause) -> str:
             assert_never(unreachable)
 
 
-def boot_cause_json(cause: ModelBootCause) -> dict[str, str]:
-    """Encode a cause as a JSON object, for a frame or a stored row."""
-    match cause:
-        case AppLoadFailed():
-            return {'kind': 'app_load_failed'}
-        case ChildPoolSetupFailed():
-            return {'kind': 'child_pool_setup_failed'}
-        case ResourceShortage(errno_name=errno_name):
-            return {'kind': 'resource_shortage', 'errno': errno_name.value}
-        case TaskLoopCreateFailed():
-            return {'kind': 'task_loop_create_failed'}
-        case ThreadStartRefused():
-            return {'kind': 'thread_start_refused'}
-        case SpawnFailed():
-            return {'kind': 'spawn_failed'}
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def parse_boot_cause(value: object) -> Result[ModelBootCause, BootCauseUnreadable]:
-    """Build a cause from the JSON object that ``boot_cause_json`` made.
-
-    ``Err(BootCauseUnreadable)``: the value is not an object, or its ``kind``
-    or ``errno`` is not a known name. Reads only.
-    """
-    if not isinstance(value, dict):
-        return Err(BootCauseUnreadable('the cause is not a JSON object'))
-    fields = cast('Mapping[str, Any]', value)
-    match fields.get('kind'):
-        case 'app_load_failed':
-            return Ok(AppLoadFailed())
-        case 'child_pool_setup_failed':
-            return Ok(ChildPoolSetupFailed())
-        case 'resource_shortage':
-            return _parse_shortage(fields.get('errno'))
-        case 'task_loop_create_failed':
-            return Ok(TaskLoopCreateFailed())
-        case 'thread_start_refused':
-            return Ok(ThreadStartRefused())
-        case 'spawn_failed':
-            return Ok(SpawnFailed())
-        case other:
-            return Err(BootCauseUnreadable(f'unknown cause kind {other!r}'))
-
-
-def _parse_shortage(value: object) -> Result[ModelBootCause, BootCauseUnreadable]:
-    known = {member.value: member for member in ShortageErrno}
-    match value:
-        case str() if value in known:
-            return Ok(ResourceShortage(known[value]))
-        case _:
-            return Err(BootCauseUnreadable(f'unknown errno name {value!r}'))
