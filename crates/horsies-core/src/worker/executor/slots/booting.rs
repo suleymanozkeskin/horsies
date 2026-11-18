@@ -2,6 +2,7 @@
 //! (Python `core/worker/slots.py`, `_boot_child`, `_boot_attempt`). The
 //! rules read every slot of the worker on the [`PoolBoard`].
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -11,8 +12,9 @@ use crate::worker::executor::placement::{place_process, ChildCpus};
 use crate::worker::executor::protocol::{ChildFrame, InitFrame, ParentFrame, RssReading};
 use crate::worker::executor::supervisor::{
     boot_end_of, wait_for_exit, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause,
-    BootReply, ChildChannel, ChildCommand, ChildLost, ChildSource, FrameWait, LossCause,
-    MailboxBound, SpawnError, SpawnedChild, SpawnerHandle, CHILD_READY_TIMEOUT,
+    BootReply, ChildChannel, ChildCommand, ChildLost, ChildSource, FrameWait, LastRecord,
+    LossCause, MailboxBound, SpawnError, SpawnedChild, SpawnerHandle, CHILD_BOOT_ATTEMPTS,
+    CHILD_READY_TIMEOUT,
 };
 
 /// What a booting slot needs.
@@ -76,7 +78,8 @@ pub(super) async fn boot_child(slot: &BootSlot<'_>) -> Booted {
                         slot = index,
                         failed_boots = down.failed_boots.get(),
                         cause = %down.cause,
-                        "a slot is back in service",
+                        "{}",
+                        back_in_service_line(index, &down),
                     );
                 }
                 board.ready(
@@ -118,7 +121,9 @@ fn failed_boots_while_down(phase: &SlotPhase) -> u32 {
     }
 }
 
-/// Decide by the restart rules, record the slot's phase, and wait.
+/// Decide by the restart rules, record the failed boot, and wait (Python
+/// `_boot_child`). Every counted attempt is recorded, the last one too,
+/// before the pool fails.
 async fn after_failed_boot(
     board: &PoolBoard,
     index: usize,
@@ -139,13 +144,13 @@ async fn after_failed_boot(
             tracing::warn!(
                 slot = index,
                 kills_in_a_row,
-                "a booting child was killed from outside"
+                "{}",
+                outside_kill_line(index, kills_in_a_row),
             );
             pause(board, wait).await;
         }
         BootDecision::Retry { counted, wait } => {
-            board.set(index, SlotPhase::Booting);
-            tracing::warn!(slot = index, counted, failure = %failure, "a child boot attempt failed");
+            record_attempt_failed(board, index, counted, &failure);
             pause(board, wait).await;
         }
         BootDecision::SlotDown {
@@ -153,33 +158,28 @@ async fn after_failed_boot(
             failed_boots,
             wait,
         } => {
-            let down_since = match phase {
-                SlotPhase::Down(down) => down.down_since,
-                SlotPhase::Booting
-                | SlotPhase::Serving { .. }
-                | SlotPhase::Closing { .. }
-                | SlotPhase::Retiring => Utc::now(),
-            };
-            tracing::warn!(
-                slot = index,
+            let down = DownRecord {
                 counted,
-                failed_boots = failed_boots.get(),
-                wait_s = wait.as_secs_f64(),
-                failure = %failure,
-                "a slot is down",
-            );
-            board.set(
-                index,
-                SlotPhase::Down(DownState {
-                    cause: failure.cause,
-                    detail: failure.detail.as_str().to_owned(),
-                    down_since,
-                    failed_boots,
-                }),
-            );
+                failed_boots,
+                wait,
+            };
+            record_slot_down(board, index, &phase, down, &failure);
             pause(board, wait).await;
         }
-        BootDecision::Exhausted { attempts } => {
+        BootDecision::Exhausted { attempts, last } => {
+            match last {
+                LastRecord::AttemptFailed => {
+                    record_attempt_failed(board, index, attempts, &failure);
+                }
+                LastRecord::SlotDown { failed_boots, wait } => {
+                    let down = DownRecord {
+                        counted: attempts,
+                        failed_boots,
+                        wait,
+                    };
+                    record_slot_down(board, index, &phase, down, &failure);
+                }
+            }
             board.fail(PoolFailure::BootAttemptsExhausted {
                 attempts,
                 last: failure,
@@ -188,6 +188,102 @@ async fn after_failed_boot(
         }
     }
     AfterFailedBoot::BootAgain
+}
+
+/// The counts of a failed boot that put a slot down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DownRecord {
+    /// The counted attempts of the slot, with this one.
+    pub counted: u32,
+    /// The failed boots of the slot's down state, with this one.
+    pub failed_boots: NonZeroU32,
+    /// The wait before the next boot.
+    pub wait: Duration,
+}
+
+/// Record a failed attempt of a cause that repeats: the slot boots again
+/// (Python `_record_failed_boot`).
+fn record_attempt_failed(board: &PoolBoard, index: usize, counted: u32, failure: &BootFailure) {
+    board.set(index, SlotPhase::Booting);
+    tracing::warn!(
+        slot = index,
+        counted,
+        failure = %failure,
+        "{}",
+        attempt_failed_line(index, counted, failure),
+    );
+}
+
+/// Put the slot down after a failed boot of a cause that can clear, and log
+/// it (Python `_mark_down`). A slot that is already down (`phase`) keeps its
+/// `down_since`.
+fn record_slot_down(
+    board: &PoolBoard,
+    index: usize,
+    phase: &SlotPhase,
+    down: DownRecord,
+    failure: &BootFailure,
+) {
+    let down_since = match phase {
+        SlotPhase::Down(state) => state.down_since,
+        SlotPhase::Booting
+        | SlotPhase::Serving { .. }
+        | SlotPhase::Closing { .. }
+        | SlotPhase::Retiring => Utc::now(),
+    };
+    tracing::warn!(
+        slot = index,
+        counted = down.counted,
+        failed_boots = down.failed_boots.get(),
+        wait_s = down.wait.as_secs_f64(),
+        failure = %failure,
+        "{}",
+        slot_down_line(index, down, failure),
+    );
+    board.set(
+        index,
+        SlotPhase::Down(DownState {
+            cause: failure.cause,
+            detail: failure.detail.as_str().to_owned(),
+            down_since,
+            failed_boots: down.failed_boots,
+        }),
+    );
+}
+
+/// The log line of a slot that is down (Python `_mark_down`): the slot,
+/// the cause, the detail, the failed boots, the counted attempts and the
+/// wait before the next boot. Pure.
+pub(super) fn slot_down_line(index: usize, down: DownRecord, failure: &BootFailure) -> String {
+    format!(
+        "Slot {index} is down: {failure}. Failed boots: {}, counted attempts: \
+         {}/{CHILD_BOOT_ATTEMPTS}. Next boot in {:.1}s",
+        down.failed_boots.get(),
+        down.counted,
+        down.wait.as_secs_f64(),
+    )
+}
+
+/// The log line of a failed attempt of a cause that repeats (Python
+/// `_record_failed_boot`). Pure.
+pub(super) fn attempt_failed_line(index: usize, counted: u32, failure: &BootFailure) -> String {
+    format!("Child boot attempt {counted}/{CHILD_BOOT_ATTEMPTS} failed on slot {index}: {failure}")
+}
+
+/// The log line of a down slot whose child is ready (Python
+/// `_log_back_in_service`). Pure.
+pub(super) fn back_in_service_line(index: usize, down: &DownState) -> String {
+    format!(
+        "Slot {index} is back in service after {} failed boots ({})",
+        down.failed_boots.get(),
+        down.cause,
+    )
+}
+
+/// The log line of a booting replacement child that a kill from outside
+/// ended while another child serves (Python `_boot_child`). Pure.
+pub(super) fn outside_kill_line(index: usize, kills_in_a_row: u32) -> String {
+    format!("Replacement child on slot {index} was killed during boot, {kills_in_a_row} in a row")
 }
 
 fn spawn_failure(error: &SpawnError) -> Option<BootFailure> {
