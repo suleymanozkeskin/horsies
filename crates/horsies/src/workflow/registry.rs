@@ -37,7 +37,7 @@ use super::node::unread_node_member;
 use super::spec::{SpecBody, SpecNode, WorkflowSpec};
 use super::spec_data::client_spec;
 use super::sub_workflow::NodeParams;
-use crate::task::body::{decode_checked, DecodeFailure};
+use crate::task::body::{decode_checked, raw_value_of, value_parts, DecodeFailure, ValueParts};
 use crate::{AppConfig, ErrorCode, HorsiesError, ValidationReport};
 
 /// The hook that builds a child from params, as the error texts of a child
@@ -604,16 +604,18 @@ fn decode_params<P: Serialize + DeserializeOwned + 'static>(
 /// reads as `null`; the first member of an object binds to no field, with
 /// the text that the static check gives for a task with no parameters. A
 /// value that is not an object goes to the decode as it is: `null` decodes,
-/// and the decode refuses the others.
+/// and the decode refuses the others. The members are read as texts, with
+/// no number parse ([`value_parts`]); the callers pass a text that passed
+/// the strict read rule.
 ///
 /// Errors: [`ParamsBuildRefused::Member`] for a member;
 /// [`ParamsBuildRefused::Undecodable`] for a text that does not decode as
 /// `()`. Pure.
 fn decode_unit_params<P: DeserializeOwned>(text: &str) -> Result<P, ParamsBuildRefused> {
-    use serde_json::Value;
     let refused = |failure: DecodeFailure| params_refusal::<P>(&failure);
-    let unit_text = match decode_checked::<Value>(text.as_bytes()).map_err(refused)? {
-        Value::Object(members) => match members.into_iter().next() {
+    let params = raw_value_of(text.as_bytes()).map_err(refused)?;
+    let unit_text = match value_parts(params) {
+        ValueParts::Object(members) => match members.into_iter().next() {
             Some((key, _value)) => {
                 return Err(ParamsBuildRefused::Member {
                     cause: format!("{key}: unknown field `{key}`, there are no fields"),
@@ -622,29 +624,26 @@ fn decode_unit_params<P: DeserializeOwned>(text: &str) -> Result<P, ParamsBuildR
             }
             None => UNIT_PARAMS_TEXT,
         },
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) => {
-            text
-        }
+        ValueParts::List(_) | ValueParts::Null | ValueParts::Scalar => text,
     };
     decode_checked::<P>(unit_text.as_bytes()).map_err(refused)
 }
 
 /// The members of the params text `text` that are not named in
 /// `result_members`: the static members of the node input. A text that is
-/// not an object has none. Pure.
+/// not an object has none. The keys are read with no number parse
+/// ([`value_parts`]); the callers pass a text that passed the strict read
+/// rule. Pure.
 ///
 /// Errors: the decode failure of a text that does not read as JSON.
 fn static_members(text: &str, result_members: &[String]) -> Result<Vec<String>, DecodeFailure> {
-    use serde_json::Value;
-    Ok(match decode_checked::<Value>(text.as_bytes())? {
-        Value::Object(members) => members
+    Ok(match value_parts(raw_value_of(text.as_bytes())?) {
+        ValueParts::Object(members) => members
             .into_iter()
             .map(|(key, _value)| key)
             .filter(|key| !result_members.contains(key))
             .collect(),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) => {
-            Vec::new()
-        }
+        ValueParts::List(_) | ValueParts::Null | ValueParts::Scalar => Vec::new(),
     })
 }
 
