@@ -480,6 +480,32 @@ fn the_first_refused_member_in_the_text_is_named() {
     }
 }
 
+/// The params of [`a_params_member_of_400_digits_passes_the_key_check`]: a
+/// field that keeps the text of its value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WideParams {
+    amount: horsies_core::JsonText,
+}
+
+/// #1893: the static members and the read-back compare of params read
+/// members as texts and parse no number, so an integer of 400 digits in a
+/// `JsonText` field passes; `()` names the key of such a member.
+#[test]
+fn a_params_member_of_400_digits_passes_the_key_check() {
+    let wide = "9".repeat(400);
+    let text = format!(r#"{{"amount": {wide}}}"#);
+    let params = decode_params::<WideParams>(&text, &[]).unwrap();
+    assert_eq!(params.amount.get(), wide);
+    assert_eq!(
+        static_members(&text, &[]).unwrap(),
+        vec!["amount".to_owned()]
+    );
+    match decode_params::<()>(&text, &[]) {
+        Err(ParamsBuildRefused::Member { key, .. }) => assert_eq!(key, "amount"),
+        other => panic!("expected a member refusal, got {other:?}"),
+    }
+}
+
 #[test]
 fn params_that_fit_decode() {
     assert_eq!(

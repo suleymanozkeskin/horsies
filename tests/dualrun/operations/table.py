@@ -99,6 +99,18 @@ class ReferenceOnlyTest:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class LargeSeedTest:
+    """An integration test that seeds more rows into one table than the
+    capture reads by default (``tests.dualrun.capture.TABLE_ROW_LIMIT``), on
+    purpose: a list bound or a query plan needs them. The captures of its
+    pair read up to ``plugin.LARGE_SEED_ROW_LIMIT`` rows per table.
+    ``node_id`` is the pytest id without parameters."""
+
+    node_id: str
+    reason: str
+
+
 class TripwireHit(BaseException):
     """A run called the implementation of the other run: the rebinding missed
     a call path.
