@@ -1,15 +1,14 @@
 use chrono::Utc;
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
 use crate::test_support::child_specs::TestChildSpecs;
-use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::{TaskStatus, WorkflowStatus};
 
 use super::*;
@@ -49,13 +48,13 @@ impl TaskSeed {
     }
 }
 
-async fn clean_w3(pool: &PgPool) {
+async fn clean_w3(pool: &TestPool) {
     for statement in [
         "DELETE FROM horsies_workflows WHERE name LIKE 'w3_%'",
         "DELETE FROM horsies_task_history WHERE task_name LIKE 'w3_%'",
         "DELETE FROM horsies_tasks WHERE task_name LIKE 'w3_%'",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .execute(pool)
             .await
             .expect("clean W3 rows");
@@ -66,8 +65,8 @@ async fn clean_w3(pool: &PgPool) {
 /// (`horsies_tasks_status_live`; Python
 /// `tests/integration/monitoring_seeding.py:268-274`). A RUNNING row carries
 /// the process facts that its start writes.
-async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
-    sqlx::query(
+async fn seed_task(pool: &TestPool, seed: &TaskSeed) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
             started_at, claimed_at, claimed_by_worker_id, claim_expires_at, is_workflow_task,
@@ -98,7 +97,7 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
 }
 
 /// The success of a RUNNING plain task of `w3-worker`.
-async fn complete_task(pool: &PgPool, task_id: Uuid) {
+async fn complete_task(pool: &TestPool, task_id: Uuid) {
     let outcomes =
         terminal_writes::complete_plain_task(pool, task_id, "w3-worker", "{\"Ok\":true}")
             .await
@@ -110,7 +109,7 @@ async fn complete_task(pool: &PgPool, task_id: Uuid) {
 }
 
 /// The terminal failure of a RUNNING task of `w3-worker`, plain or workflow.
-async fn fail_task(pool: &PgPool, task_id: Uuid) {
+async fn fail_task(pool: &TestPool, task_id: Uuid) {
     let outcomes = terminal_writes::fail_running_task(
         pool,
         task_id,
@@ -125,8 +124,8 @@ async fn fail_task(pool: &PgPool, task_id: Uuid) {
     ));
 }
 
-async fn expire_task(pool: &PgPool, task_id: Uuid) {
-    sqlx::query("UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 minute' WHERE id = $1")
+async fn expire_task(pool: &TestPool, task_id: Uuid) {
+    sql::query("UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 minute' WHERE id = $1")
         .bind(task_id)
         .execute(pool)
         .await
@@ -154,9 +153,9 @@ fn body_json(outcome: &ActionOutcome) -> String {
     serde_json::to_string(outcome.body()).expect("serialize action body")
 }
 
-async fn seed_workflow(pool: &PgPool, status: WorkflowStatus) -> Uuid {
+async fn seed_workflow(pool: &TestPool, status: WorkflowStatus) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth,
              root_workflow_id, sent_at, created_at, started_at,
@@ -179,16 +178,16 @@ async fn seed_workflow(pool: &PgPool, status: WorkflowStatus) -> Uuid {
     workflow_id
 }
 
-async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+async fn workflow_status(pool: &TestPool, workflow_id: Uuid) -> String {
+    sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .fetch_one(pool)
         .await
         .expect("read W3 workflow status")
 }
 
-async fn seed_workflow_task_link(pool: &PgPool, workflow_id: Uuid, task_id: Uuid, status: &str) {
-    sqlx::query(
+async fn seed_workflow_task_link(pool: &TestPool, workflow_id: Uuid, task_id: Uuid, status: &str) {
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
@@ -285,7 +284,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
 async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     for (seed, include_running) in [
         (TaskSeed::pending(), false),
@@ -296,7 +295,7 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
         let outcome = cancel_task_action(&broker, seed.id, include_running).await;
         assert_eq!(outcome.status_code(), 200);
         assert!(body_json(&outcome).contains(&format!(r#""was_status":"{}""#, seed.status)));
-        let history = sqlx::query(
+        let history = sql::query(
             "SELECT status, error_code, final_failed_reason,
                     terminalization_kind, terminal_at
              FROM horsies_task_history WHERE task_id = $1",
@@ -305,32 +304,31 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
         .fetch_one(&pool)
         .await
         .expect("read cancelled W3 history");
-        assert_eq!(history.get::<String, _>("status"), "CANCELLED");
+        assert_eq!(history.get::<_, String>("status"), "CANCELLED");
         assert_eq!(
-            history.get::<Option<String>, _>("error_code").as_deref(),
+            history.get::<_, Option<String>>("error_code").as_deref(),
             Some("TASK_CANCELLED")
         );
         assert_eq!(
             history
-                .get::<Option<String>, _>("final_failed_reason")
+                .get::<_, Option<String>>("final_failed_reason")
                 .as_deref(),
             Some("Cancelled via monitoring API")
         );
         assert_eq!(
-            history.get::<String, _>("terminalization_kind"),
+            history.get::<_, String>("terminalization_kind"),
             "CANCEL_ADMIN"
         );
         assert!(history
-            .get::<Option<chrono::DateTime<Utc>>, _>("terminal_at")
+            .get::<_, Option<chrono::DateTime<Utc>>>("terminal_at")
             .is_some());
-        let live_count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
-                .bind(seed.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let live_count: i64 = sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+            .bind(seed.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let attempts: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+            sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
                 .bind(seed.id)
                 .fetch_one(&pool)
                 .await
@@ -347,7 +345,7 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
         r#"{"code":"TASK_NOT_CANCELLABLE","current_status":"RUNNING"}"#
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM horsies_tasks WHERE id = $1")
+        sql::query_scalar::<String>("SELECT status FROM horsies_tasks WHERE id = $1")
             .bind(running.id)
             .fetch_one(&pool)
             .await
@@ -369,7 +367,7 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
 async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let missing = Uuid::new_v4();
     let absent = cancel_task_action(&broker, missing, false).await;
@@ -421,7 +419,7 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
         r#"{"code":"TASK_IS_WORKFLOW_TASK"}"#
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM horsies_tasks WHERE id = $1")
+        sql::query_scalar::<String>("SELECT status FROM horsies_tasks WHERE id = $1")
             .bind(workflow_live.id)
             .fetch_one(&pool)
             .await
@@ -447,11 +445,10 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
 
 #[tokio::test]
 async fn task_and_workflow_database_failures_are_service_unavailable() {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(250))
-        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
-        .expect("lazy unreachable W3 pool");
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none");
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task = cancel_task(&broker, Uuid::new_v4(), false)
         .await
         .expect_err("task database failure");
@@ -467,7 +464,7 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
 async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let children = TestChildSpecs::empty();
 
     let running_to_pause = seed_workflow(&pool, WorkflowStatus::Running).await;
@@ -530,9 +527,9 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
 }
 
 /// A PENDING plain task with the columns of the baseline schema.
-async fn seed_baseline_pending_task(pool: &PgPool) -> Uuid {
+async fn seed_baseline_pending_task(pool: &TestPool) -> Uuid {
     let task_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -569,16 +566,16 @@ const LOCK_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(20)
 async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = std::sync::Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let broker = std::sync::Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     ));
     let task_id = seed_baseline_pending_task(&pool).await;
 
     let mut holder = pool.begin().await.expect("holder transaction");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))")
+    sql::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))")
         .bind(task_id)
-        .execute(holder.as_mut())
+        .execute(&mut *holder)
         .await
         .expect("hold the task advisory lock");
 
@@ -589,7 +586,7 @@ async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
 
     let mut cancel_waits = false;
     for _ in 0..LOCK_WAIT_POLLS {
-        let waiting: i64 = sqlx::query_scalar(
+        let waiting: i64 = sql::query_scalar(
             "SELECT count(*) FROM pg_stat_activity
              WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'
                AND query LIKE '%horsies_cancel_task(%'",
@@ -608,9 +605,9 @@ async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
         "the cancel must wait on the task advisory lock"
     );
 
-    sqlx::query("SELECT 1 FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
+    sql::query("SELECT 1 FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
         .bind(task_id)
-        .execute(holder.as_mut())
+        .execute(&mut *holder)
         .await
         .expect("the waiting cancel holds no row lock");
     holder.rollback().await.expect("release the holder's locks");

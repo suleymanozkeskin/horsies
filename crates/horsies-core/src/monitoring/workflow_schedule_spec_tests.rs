@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::sync::PoisonError;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -26,6 +25,7 @@ use crate::monitoring::{
     MonitoringQueryErrorCode, WorkflowNodeInfo, WorkflowRunsQuery,
 };
 use crate::test_support::connect_collecting_notices;
+use crate::test_support::sql::{self, TestPool};
 
 /// Upper bound of a span that counts up to now (Python
 /// `_LIVE_SPAN_CEILING_S`).
@@ -52,7 +52,7 @@ fn nodes_by_index(nodes: &[WorkflowNodeInfo]) -> BTreeMap<i32, &WorkflowNodeInfo
 /// Insert one schedule state row. A schedule that ran carries its last run
 /// fields and a positive run count, as the baseline CHECK requires.
 async fn seed_schedule(
-    pool: &PgPool,
+    pool: &TestPool,
     schedule_name: &str,
     next_run_in_seconds: i64,
     last_run: Option<(Uuid, i32)>,
@@ -61,7 +61,7 @@ async fn seed_schedule(
         Some((task_id, run_count)) => (Some(task_id), run_count),
         None => (None, 0),
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_schedule_state (
             schedule_name, next_run_at, last_run_at, last_task_id, run_count,
             config_hash, updated_at
@@ -538,12 +538,12 @@ const DEFAULT_SORT_LIST: &str = "SELECT * FROM horsies_monitoring_task_list(
 /// own enqueue time, then sampled. With only a few PENDING rows, a sort over
 /// another index costs the same as the ordered index and the planner's pick
 /// between them is arbitrary.
-async fn seed_plan_population(pool: &PgPool) {
+async fn seed_plan_population(pool: &TestPool) {
     for (status, task_name, started_at, rows) in [
         ("RUNNING", "'plan_task_' || (g % 5)", "NOW()", 500_i32),
         ("PENDING", "'plan_task_pending'", "NULL", 2_000_i32),
     ] {
-        sqlx::query(&format!(
+        sql::query(&format!(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at,
@@ -569,7 +569,7 @@ async fn seed_plan_population(pool: &PgPool) {
         .await
         .unwrap_or_else(|error| panic!("seed the {status} rows of the plan test: {error}"));
     }
-    sqlx::query("ANALYZE horsies_tasks")
+    sql::query("ANALYZE horsies_tasks")
         .execute(pool)
         .await
         .expect("sample the live table");
@@ -631,8 +631,8 @@ async fn the_task_list_page_reads_the_live_enqueue_index_in_both_directions() {
 
 /// Creates the `standard_30d` leaf of the UTC day `days_back` days before
 /// today, or finds it when it exists, and returns its name.
-async fn standard_leaf(pool: &PgPool, days_back: i32) -> String {
-    sqlx::query_scalar(
+async fn standard_leaf(pool: &TestPool, days_back: i32) -> String {
+    sql::query_scalar(
         "SELECT leaf_name FROM horsies_create_history_leaf(
              'standard_30d', date_trunc('day', now(), 'UTC') - make_interval(days => $1)
          )
@@ -650,8 +650,8 @@ async fn standard_leaf(pool: &PgPool, days_back: i32) -> String {
 /// and stops at the reach instead of sorting every row. The live rows are
 /// inserted RUNNING and moved in one statement through
 /// `horsies_move_task_to_history`, which takes the locked live row.
-async fn seed_history_population(pool: &PgPool) {
-    sqlx::query(
+async fn seed_history_population(pool: &TestPool) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -676,7 +676,7 @@ async fn seed_history_population(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("seed the running rows of the history plan test");
-    let moved: i64 = sqlx::query_scalar(
+    let moved: i64 = sql::query_scalar(
         "SELECT count(*) FROM (
              SELECT horsies_move_task_to_history(
                  t, 'COMPLETED', 'COMPLETE_FUSED', now(), '{\"ok\": true}', NULL, NULL
@@ -688,7 +688,7 @@ async fn seed_history_population(pool: &PgPool) {
     .await
     .expect("move the seeded rows to history");
     assert_eq!(moved, 600);
-    sqlx::query("ANALYZE horsies_task_history")
+    sql::query("ANALYZE horsies_task_history")
         .execute(pool)
         .await
         .expect("sample the history");

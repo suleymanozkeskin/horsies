@@ -8,17 +8,13 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::spec_support::{
     seed_live, seed_node, seed_run, seed_terminal, set_history_status, set_history_times, window,
     Ending, LiveTask, NodeKind, NodeSeed, RunSeed, SpecDatabase,
 };
-use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, WireProxy,
-};
+use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::PostgresBroker;
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand, TerminalizationOutcome};
@@ -28,6 +24,7 @@ use crate::monitoring::{
     MonitoringQueryErrorCode, SortDirection, TaskAbsenceReason, TaskDetail, TaskDetailNotFound,
     TaskDetailRead, TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery,
 };
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 
 /// Upper bound of a span that counts up to now (Python
 /// `_LIVE_SPAN_CEILING_S`): wide enough for a slow runner, tight enough to
@@ -36,11 +33,10 @@ const LIVE_SPAN_CEILING_S: i64 = 600;
 
 /// A broker on a server that does not answer (Python's `unreachable_broker`).
 fn unreachable_broker() -> PostgresBroker {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(250))
-        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
-        .expect("a lazy pool on an unreachable server");
-    PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)
+        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none");
+    PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
 }
 
 async fn page(broker: &PostgresBroker, query: TaskListQuery) -> TaskListPage {
@@ -92,8 +88,8 @@ fn uuid7_born_at(birth: DateTime<Utc>) -> Uuid {
 /// (`standard_30d`) whose upper anchor is `upper_anchor` (Python
 /// `_detached_period_leaf`). Only the absence rule reads it: it names no
 /// relation. The database of the test is dropped with it.
-async fn record_detached_period_leaf(pool: &PgPool, upper_anchor: DateTime<Utc>) {
-    sqlx::query(
+async fn record_detached_period_leaf(pool: &TestPool, upper_anchor: DateTime<Utc>) {
+    sql::query(
         "INSERT INTO horsies_task_history_leaf_catalog (
              leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
              index_schema_version, created_at, detached_at, dropped_at
@@ -274,7 +270,7 @@ async fn an_empty_stored_code_reads_as_no_code_and_no_category() {
 #[serial]
 async fn an_unsampled_live_table_gives_an_exact_total() {
     let database = SpecDatabase::create().await;
-    sqlx::query("UPDATE pg_class SET reltuples = -1 WHERE oid = 'horsies_tasks'::regclass")
+    sql::query("UPDATE pg_class SET reltuples = -1 WHERE oid = 'horsies_tasks'::regclass")
         .execute(&database.pool)
         .await
         .expect("mark the live table as unsampled");
@@ -298,18 +294,18 @@ async fn an_emptied_history_adds_nothing_to_the_unfiltered_total() {
     for ending in [Ending::Completed, Ending::Completed, Ending::failed("BOOM")] {
         seed_terminal(&database.pool, &LiveTask::pending("alpha_task"), ending).await;
     }
-    sqlx::query("ANALYZE horsies_tasks, horsies_task_history")
+    sql::query("ANALYZE horsies_tasks, horsies_task_history")
         .execute(&database.pool)
         .await
         .expect("sample both tables");
-    sqlx::query("TRUNCATE horsies_task_history")
+    sql::query("TRUNCATE horsies_task_history")
         .execute(&database.pool)
         .await
         .expect("empty the history");
     for _ in 0..2 {
         seed_live(&database.pool, &LiveTask::pending("alpha_task")).await;
     }
-    sqlx::query("ANALYZE horsies_tasks")
+    sql::query("ANALYZE horsies_tasks")
         .execute(&database.pool)
         .await
         .expect("sample the live table");
@@ -446,10 +442,10 @@ async fn the_task_detail_and_the_node_read_are_one_round_trip_each() {
         task_id: Some(task.id),
     };
     seed_node(&database.pool, &node).await;
-    let upstream = database_options(&database.pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
+    let upstream = database.pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
+    let broker = PostgresBroker::from_test_url(proxied.url(), crate::ClientFamily::Rust);
     let _warm_detail = detail_of(&broker, task.id).await;
     let _warm_node = get_workflow_node(&broker, run.id, 0)
         .await
@@ -489,7 +485,7 @@ async fn a_live_answer_of_the_reader_after_a_live_miss_is_a_contract_violation()
         task_id: Some(task_id),
     };
     seed_node(&database.pool, &node).await;
-    sqlx::query(
+    sql::query(
         "CREATE OR REPLACE FUNCTION horsies_task_detail_staged(p_task_id uuid)
          RETURNS TABLE (location text, task_row horsies_task_history)
          LANGUAGE sql STABLE AS $$ SELECT 'LIVE'::text, NULL::horsies_task_history $$",

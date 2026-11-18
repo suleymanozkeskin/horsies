@@ -9,15 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 
 use super::spec_support::{
     seed_failures, seed_live, seed_terminal, set_history_error_code, window, Ending, LiveTask,
     SpecDatabase,
 };
-use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, WireProxy,
-};
+use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::PostgresBroker;
 use crate::core::history::reads::pages::HistoryWindow;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
@@ -26,6 +23,7 @@ use crate::monitoring::{
     TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskStatsQuery,
     TaskSummary,
 };
+use crate::test_support::sql::{self, TestPool};
 
 /// The status cards in their fixed order (Python `_STATUS_ORDER`).
 const STATUS_ORDER: [&str; 7] = [
@@ -77,8 +75,8 @@ fn category_totals(pairs: &[(ErrorCategory, i64)]) -> BTreeMap<String, i64> {
 }
 
 /// `values` in the order of the database collation.
-async fn collated(pool: &PgPool, values: &[String]) -> Vec<String> {
-    sqlx::query_scalar("SELECT value FROM unnest($1::text[]) AS value ORDER BY value")
+async fn collated(pool: &TestPool, values: &[String]) -> Vec<String> {
+    sql::query_scalar("SELECT value FROM unnest($1::text[]) AS value ORDER BY value")
         .bind(values)
         .fetch_all(pool)
         .await
@@ -135,7 +133,7 @@ fn groups_with_totals(breakdown: &Breakdown) -> Vec<(BreakdownGroup, i64)> {
 }
 
 /// One failed task per family, each with the family's sample code.
-async fn seed_one_failure_per_family(pool: &PgPool) {
+async fn seed_one_failure_per_family(pool: &TestPool) {
     let codes: Vec<String> = FAMILY_SAMPLES
         .iter()
         .map(|(_, code)| (*code).to_owned())
@@ -205,10 +203,10 @@ async fn a_facets_poll_is_one_round_trip_for_both_sides() {
         Ending::failed("BOOM"),
     )
     .await;
-    let upstream = database_options(&database.pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
+    let upstream = database.pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
+    let broker = PostgresBroker::from_test_url(proxied.url(), crate::ClientFamily::Rust);
     let query = TaskFacetsQuery::new(window());
     let _warm_up = facets_of(&broker, &query).await;
 
@@ -894,7 +892,7 @@ async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
         seed_terminal(&database.pool, task, Ending::Completed).await;
     }
     let lower: DateTime<Utc> =
-        sqlx::query_scalar("SELECT terminal_at FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT terminal_at FROM horsies_task_history WHERE task_id = $1")
             .bind(at_lower.id)
             .fetch_one(&database.pool)
             .await
@@ -904,7 +902,7 @@ async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
         (before_lower.id, lower - Duration::microseconds(1)),
         (at_upper.id, upper),
     ] {
-        sqlx::query("UPDATE horsies_task_history SET terminal_at = $2 WHERE task_id = $1")
+        sql::query("UPDATE horsies_task_history SET terminal_at = $2 WHERE task_id = $1")
             .bind(task_id)
             .bind(terminal_at)
             .execute(&database.pool)
