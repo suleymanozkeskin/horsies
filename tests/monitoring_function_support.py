@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import psycopg.errors
 from sqlalchemy.exc import DBAPIError
 
-from horsies.core.history.archive.versions import archive_digest
+from tests.attempt_snapshot_support import snapshot_digest
 from tests.broker_resources_support import attach_resources, fake_resources
 
 type FunctionRow = Mapping[str, object]
@@ -98,7 +98,7 @@ def history_row(task_id: str, **columns: object) -> dict[str, object]:
         status='COMPLETED',
         terminal_at=DETAIL_TIME,
         execution=None,
-        attempt_snapshot_digest=archive_digest(_EMPTY_ATTEMPTS),
+        attempt_snapshot_digest=snapshot_digest(_EMPTY_ATTEMPTS),
     )
     row.update(columns)
     return row

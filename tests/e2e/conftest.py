@@ -311,7 +311,7 @@ def compute_test_command_fingerprint(
     these values stores, with the stored ``input`` text in its kwargs
     element. The returned sent_at is the one to store in the row.
     """
-    from horsies.core.history.identity.fingerprint import EnqueueCommandV1
+    from tests.command_fingerprint import EnqueueCommandV1
 
     if sent_at is None:
         sent_at = datetime.now(timezone.utc)

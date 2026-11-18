@@ -4,8 +4,64 @@ use serial_test::serial;
 
 use super::support::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::{TerminalizationCommand, TerminalizationKind, TerminalizationOutcome};
 use crate::test_support::sql;
+
+/// Python `TestAppliedCompletion::test_fused_completion_moves_the_row`: the
+/// fused completion moves the row to history with its result and the digest
+/// of the result, its last owner, and its one COMPLETED attempt in the
+/// snapshot; no live row and no live attempt row stay.
+#[tokio::test]
+#[serial]
+async fn fused_completion_moves_the_row() {
+    let pool = pool().await;
+    let task_id = seed_task(&pool, &TaskSeed::running()).await;
+    let result = r#"{"ok":true}"#;
+
+    let outcomes = terminalize(
+        &pool,
+        &TerminalizationCommand::CompleteTaskFused {
+            task_id,
+            fence: owned_claim(),
+            result_json: result.to_owned(),
+        },
+    )
+    .await
+    .expect("completion");
+
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied {
+                kind: TerminalizationKind::CompleteFused,
+                ..
+            }]
+        ),
+        "{outcomes:?}"
+    );
+    let history = history_row(&pool, task_id)
+        .await
+        .expect("the completion moved the row to history");
+    assert_eq!(history.status, "COMPLETED");
+    assert_eq!(history.terminalization_kind, "COMPLETE_FUSED");
+    assert_eq!(history.result_payload.as_deref(), Some(result.as_bytes()));
+    assert_eq!(history.last_claimed_worker_id.as_deref(), Some(WORKER));
+    let result_digest: Option<Vec<u8>> =
+        sql::query_scalar("SELECT result_digest FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the result digest");
+    assert_eq!(result_digest, Some(sha256_of(result.as_bytes())));
+    let attempts = archived_attempt_records(&pool, task_id).await;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].attempt(), 1);
+    assert_eq!(attempts[0].outcome(), "COMPLETED");
+    assert_eq!(attempts[0].worker_id(), Some(WORKER));
+    assert!(live_row(&pool, task_id).await.is_none());
+    assert!(live_attempts(&pool, task_id).await.is_empty());
+    cleanup_tasks(&pool, &[task_id]).await;
+}
 
 /// Python `TestAppliedCompletion::test_completed_is_never_eligible_even_with_retained_input`
 /// (the test map names it `test_completed_is_never_eligible_even_with_prepared_inline`):

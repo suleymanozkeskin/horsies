@@ -240,7 +240,7 @@ To fix it, restart the process. The core does not start again in the same proces
 | `RerunInputUnavailable.reference_locator` | Removed. `task_id` and `disposition` stay | Remove the read |
 | `horsies.core.utils.fingerprint.enqueue_fingerprint` | Removed | Remove the call |
 | `get_stale_tasks(stale_threshold_minutes)` with any value | An `int` from 0 to 525,600, else `INVALID_INPUT`. `get_stale_tasks` and `get_expired_tasks` return at most 10,000 rows | Give a value in the range |
-| `loads_json('')` and `loads_json(None)` in `horsies.core.codec.json_io` read as `null` | `loads_json` and `loads_json_bytes` refuse an empty text with `EmptyJsonTextError`, and take no `None`. They refuse an object that repeats a key | Check for `None` before the call |
+| `loads_json('')` and `loads_json(None)` in `horsies.core.codec.json_io` read as `null` | `loads_json` refuses an empty text with `EmptyJsonTextError`, and takes no `None`. It refuses an object that repeats a key | Check for `None` before the call |
 | `horsies.web.routes`, `horsies.web.events`, `horsies.web.read_cache`, `horsies.web.auth.view_guard`, `horsies.web.auth.act_guard`, `horsies.web.schema.schema_guard` | Removed. The core serves each route. The exports of `horsies.web` do not change | Mount `create_monitoring_app` |
 | `horsies/web/static/` in the wheel | Removed. `horsies._core` contains the web UI | Nothing to serve |
 | Syce, the terminal monitoring tool | Removed | Use the web UI |

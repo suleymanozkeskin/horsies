@@ -52,7 +52,6 @@ _PYDANTIC_PARSE_METHODS: Final = frozenset(
 _FROZEN_DUMPS: Final = Counter(
     {
         (_CODEC_MODULE, 'dumps_json'): 1,
-        (_CODEC_MODULE, 'dumps_canonical_json'): 1,
         # The manifest of the core holds only text, integers and booleans.
         ('python/horsies/_catalog/manifest.py', 'dump_producer_manifest'): 1,
         ('python/horsies/_catalog/worker_manifest.py', 'dump_worker_manifest'): 1,

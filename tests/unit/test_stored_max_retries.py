@@ -1,141 +1,21 @@
-"""The retry limit that enqueue stores, and the paths that refuse it.
+"""The bound of `RetryPolicy.max_retries` is the stored bound.
 
-`stored_max_retries` is the one reader of `retry_policy` in decoded task
-options. Enqueue, workflow node promotion, and the workflow fast-path root
-all use it, so only a policy that validates as `RetryPolicy` reaches
-`horsies_tasks.max_retries`.
+The baseline stores `max_retries` from 0 to 20 (`horsies_tasks`, CHECK
+`horsies_tasks_retry_range`), and the core reads the stored retry
+policy with the same bound (`crates/horsies-core/src/worker/retry.rs`,
+`stored_max_retries`). A `RetryPolicy` built in Python cannot pass it.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 import pytest
 
-from horsies.core.codec.json_io import Json
-from horsies.core.codec.task_options import (
-    InvalidRetryPolicy,
-    stored_max_retries,
-)
 from horsies.core.models.tasks import MAX_RETRY_ATTEMPTS, RetryPolicy
-from horsies.core.types.result import Err, Ok
 
 pytestmark = [pytest.mark.unit]
 
 
-def _policy(**fields: Any) -> dict[str, Any]:
-    """A valid exponential policy with `fields` replaced."""
-    policy: dict[str, Any] = {
-        'max_retries': 3,
-        'intervals': [5],
-        'backoff_strategy': 'exponential',
-        'jitter': True,
-        'auto_retry_for': ['TRANSIENT'],
-    }
-    policy.update(fields)
-    return policy
-
-
-REFUSED: list[tuple[Json, str]] = [
-    ({'retry_policy': [3]}, 'retry_policy is not an object: list'),
-    ({'retry_policy': 'fixed'}, 'retry_policy is not an object: str'),
-    ({'retry_policy': {}}, 'auto_retry_for: Field required'),
-    ({'retry_policy': _policy(max_retries=0)}, 'max_retries: Input should be greater'),
-    ({'retry_policy': _policy(max_retries=-1)}, 'max_retries: Input should be greater'),
-    (
-        {'retry_policy': _policy(max_retries=MAX_RETRY_ATTEMPTS + 1)},
-        'max_retries: Input should be less',
-    ),
-    (
-        {'retry_policy': _policy(max_retries=2.0)},
-        'max_retries: Input should be a valid integer',
-    ),
-    (
-        {'retry_policy': _policy(max_retries='3')},
-        'max_retries: Input should be a valid integer',
-    ),
-    (
-        {'retry_policy': _policy(max_retries=True)},
-        'max_retries: Input should be a valid integer',
-    ),
-    (
-        {'retry_policy': _policy(intervals=['5'])},
-        'intervals.0: Input should be a valid integer',
-    ),
-    (
-        {'retry_policy': _policy(intervals=[0])},
-        'intervals.0: Input should be greater than 0',
-    ),
-    (
-        {'retry_policy': _policy(intervals=[5, 10])},
-        'requires exactly one base interval',
-    ),
-    (
-        {'retry_policy': _policy(backoff_strategy='fixed', intervals=[5])},
-        'requires intervals length (1) to match max_retries (3)',
-    ),
-    (
-        {'retry_policy': _policy(backoff_strategy='linear')},
-        'backoff_strategy: Input should be',
-    ),
-    (
-        {'retry_policy': _policy(jitter='yes')},
-        'jitter: Input should be a valid boolean',
-    ),
-    (
-        {'retry_policy': _policy(max_delay_seconds=0)},
-        'max_delay_seconds: Input should be greater',
-    ),
-    (
-        {'retry_policy': _policy(auto_retry_for=[])},
-        'auto_retry_for: List should have at least 1',
-    ),
-    ({'retry_policy': _policy(auto_retry_for=['bad code'])}, 'auto_retry_for'),
-    ({'retry_policy': _policy(surprise=1)}, 'surprise: Extra inputs are not permitted'),
-]
-
-
 class TestStoredMaxRetries:
-    def test_options_without_a_policy_store_zero(self) -> None:
-        assert stored_max_retries({'timeout_ms': None}) == Ok(0)
-
-    def test_a_null_policy_stores_zero(self) -> None:
-        assert stored_max_retries({'retry_policy': None}) == Ok(0)
-
-    def test_options_that_are_not_an_object_store_zero(self) -> None:
-        assert stored_max_retries([]) == Ok(0)
-
-    @pytest.mark.parametrize(
-        'policy',
-        [
-            RetryPolicy.fixed([1, 2], auto_retry_for=['TRANSIENT']),
-            RetryPolicy.exponential(
-                base_seconds=1,
-                max_retries=1,
-                auto_retry_for=['TRANSIENT'],
-            ),
-            RetryPolicy.exponential(
-                base_seconds=1,
-                max_retries=MAX_RETRY_ATTEMPTS,
-                auto_retry_for=['TASK_EXCEPTION'],
-                jitter=False,
-                max_delay_seconds=60,
-            ),
-        ],
-        ids=['fixed', 'exponential_lower_bound', 'exponential_upper_bound'],
-    )
-    def test_a_serialized_policy_stores_its_limit(self, policy: RetryPolicy) -> None:
-        stored = json.loads(policy.model_dump_json(exclude_none=True))
-        assert stored_max_retries({'retry_policy': stored}) == Ok(policy.max_retries)
-
-    @pytest.mark.parametrize(('options', 'detail'), REFUSED)
-    def test_a_malformed_policy_is_refused(self, options: Json, detail: str) -> None:
-        outcome = stored_max_retries(options)
-        assert isinstance(outcome, Err)
-        assert isinstance(outcome.err_value, InvalidRetryPolicy)
-        assert detail in outcome.err_value.detail
-
     def test_the_retry_policy_bound_is_the_stored_bound(self) -> None:
         policy = RetryPolicy.exponential(
             base_seconds=1,
