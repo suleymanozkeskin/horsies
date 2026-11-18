@@ -102,14 +102,16 @@ def read_stored_timeout(task_options: object) -> StoredTimeout:
     """Read the timeout of a claimed row from its stored `task_options`.
 
     `task_options` is the column value as the claim returns it: text, or None
-    when the row has no options. An empty text means no options, as the
-    core's worker read of the options (`read_stored_options`) treats it. A
-    stored int with more than 4300 digits makes the whole text fail to
-    parse, so it reads as `OptionsUnreadable`, not as `TimeoutValueInvalid`;
-    the task fails the same way. Does no I/O and logs nothing.
+    when the row has no options. No writer stores an empty text (the send
+    and the workflow node promotion refuse it), so `loads_json` refuses it
+    and it reads as `OptionsUnreadable`, as the core's worker read of the
+    options (`read_stored_options`) reads it. A stored int with more than
+    4300 digits makes the whole text fail to parse, so it reads as
+    `OptionsUnreadable`, not as `TimeoutValueInvalid`; the task fails the
+    same way. Does no I/O and logs nothing.
     """
     match task_options:
-        case None | '':
+        case None:
             return NoTimeout()
         case str():
             pass

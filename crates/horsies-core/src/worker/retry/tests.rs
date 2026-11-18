@@ -32,17 +32,36 @@ fn retry_of(options: &str) -> StoredRetry {
 // --- stored options -------------------------------------------------------
 
 #[test]
-fn no_options_and_empty_text_read_as_no_timeout_and_no_policy() {
-    for text in [None, Some("")] {
-        assert_eq!(
-            read_stored_options(text),
-            StoredOptions::Readable {
-                timeout: StoredTimeout::NoTimeout,
-                cancel_grace: StoredCancelGrace::NotStored,
-                retry: StoredRetry::NoPolicy,
-            }
-        );
-    }
+fn no_options_read_as_no_timeout_and_no_policy() {
+    assert_eq!(
+        read_stored_options(None),
+        StoredOptions::Readable {
+            timeout: StoredTimeout::NoTimeout,
+            cancel_grace: StoredCancelGrace::NotStored,
+            retry: StoredRetry::NoPolicy,
+        }
+    );
+}
+
+/// No writer stores an empty options text, so a stored one is corrupt data,
+/// not "no options". Python `read_stored_timeout` and
+/// `read_stored_retry_policy` refuse it with this reason (`loads_json`
+/// refuses an empty text).
+#[test]
+fn an_empty_text_is_unreadable_and_refuses_the_run_with_python_s_reason() {
+    let reason = "stored task_options do not parse: JSON parse failed: the text is empty";
+
+    let options = read_stored_options(Some(""));
+
+    assert_eq!(
+        options,
+        StoredOptions::Unreadable {
+            reason: reason.to_owned()
+        }
+    );
+    assert_eq!(options.run_permit(), RunPermit::Refuse(reason.to_owned()));
+    assert_eq!(options.retry(), &StoredRetry::NoPolicy);
+    assert_eq!(options.cancel_grace(), StoredCancelGrace::NotStored);
 }
 
 #[test]

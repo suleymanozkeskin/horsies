@@ -30,7 +30,7 @@ def _options(timeout_ms: object) -> str:
 
 
 class TestNoTimeout:
-    @pytest.mark.parametrize('stored', [None, '', json.dumps({'retry_policy': None})])
+    @pytest.mark.parametrize('stored', [None, json.dumps({'retry_policy': None})])
     def test_no_options_or_no_key(self, stored: str | None) -> None:
         assert read_stored_timeout(stored) == NoTimeout()
 
@@ -68,6 +68,16 @@ class TestOptionsUnreadable:
 
         assert isinstance(result, OptionsUnreadable)
         assert result.reason.startswith(reason_start)
+
+    def test_an_empty_text_does_not_parse(self) -> None:
+        """No writer stores an empty text: it is corrupt data, not "no
+        options". The core's ``read_stored_options`` gives the same reason."""
+        refused = OptionsUnreadable(
+            reason='stored task_options do not parse: JSON parse failed: the text is empty',
+        )
+
+        assert read_stored_timeout('') == refused
+        assert read_claimed_options('') == refused
 
 
 class TestTimeoutValueInvalid:

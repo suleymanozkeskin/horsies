@@ -5,7 +5,7 @@ use super::*;
 
 /// Each text with the result of `loads_json`: the type of the value, or the
 /// text of the refusal after `JSON parse failed: `.
-const VECTORS: [(&str, Result<PythonType, &str>); 69] = [
+const VECTORS: [(&str, Result<PythonType, &str>); 70] = [
     (
         "{",
         Err("Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
@@ -36,6 +36,7 @@ const VECTORS: [(&str, Result<PythonType, &str>); 69] = [
         "[1 ,  ]",
         Err("Illegal trailing comma before end of array: line 1 column 4 (char 3)"),
     ),
+    ("", Err("the text is empty")),
     (" ", Err("Expecting value: line 1 column 2 (char 1)")),
     ("x", Err("Expecting value: line 1 column 1 (char 0)")),
     (

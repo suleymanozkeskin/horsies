@@ -27,7 +27,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring.history_window import MonitoringWindow
-from horsies.core.types.result import is_err
+from horsies.core.types.result import is_err, is_ok
 from horsies.monitoring.errors import (
     MonitoringQueryDbOperationFailed,
     MonitoringQueryError,
@@ -174,6 +174,33 @@ class TestHistoryContractViolation:
             f'workflow node history read failed: history row {TASK_ID} has status '
             f"'{CAUSE_MARKER}', which is not a task status"
         )
+
+    @pytest.mark.asyncio
+    async def test_an_empty_stored_node_result_returns_the_variant_naming_the_node(
+        self,
+    ) -> None:
+        """No writer stores an empty result text: it is corrupt data, not "no
+        result", as the core's ``node_error_from_result`` reads it. NULL is
+        no result."""
+        broker, _ = function_broker([node_row(3, None, node_result='')])
+
+        result = await get_workflow_node(broker, WORKFLOW_ID, 3)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.message == (
+            'workflow node history read failed: workflow node 3: the stored result '
+            'is not JSON: JSON parse failed: the text is empty'
+        )
+
+        null_broker, _ = function_broker([node_row(3, None, node_result=None)])
+        null_result = await get_workflow_node(null_broker, WORKFLOW_ID, 3)
+
+        assert is_ok(null_result)
+        assert null_result.ok_value is not None
+        assert null_result.ok_value.node_error is None
 
     @pytest.mark.asyncio
     async def test_the_task_list_estimate_returns_the_variant_with_the_cause(

@@ -46,14 +46,15 @@ type StoredRetryPolicy = (
 def read_stored_retry_policy(task_options_json: str | None) -> StoredRetryPolicy:
     """Read the retry policy of a stored ``task_options`` text. Pure.
 
-    None or an empty text is ``NoRetryPolicy``, as the core's worker read of
-    the options (``read_stored_options``) reads them.
-    A text that does not parse, or is not a JSON object, is
-    ``OptionsNotAnObject``. The ``retry_policy`` of an object is read by
+    None is ``NoRetryPolicy``. A text that does not parse, or is not a JSON
+    object, is ``OptionsNotAnObject``. An empty text does not parse: no
+    writer stores it, so ``loads_json`` refuses it as corrupt data. The core's
+    worker read of the options (``read_stored_options``) reads both the
+    same. The ``retry_policy`` of an object is read by
     ``stored_retry_policy``.
     """
     match task_options_json:
-        case None | '':
+        case None:
             return NoRetryPolicy()
         case str():
             pass
