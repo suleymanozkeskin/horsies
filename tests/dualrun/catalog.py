@@ -48,6 +48,8 @@ from tests.dualrun.rules import (
     JsonTime,
     Key,
     NormalisedId,
+    RunMeasure,
+    RunMeasuresInText,
     RunWindowReference,
     SnapshotCatalog,
     StoredJson,
@@ -209,6 +211,30 @@ RERUN_ENVELOPE: Final = StoredJson(
     ),
 )
 """Rerun envelope version 1: ``{"input": <input>, "options": <task options>}``."""
+
+BLOCKED_TIME: Final = RunMeasure(
+    name='blocked_ms',
+    pattern=r' for (\d+) ms, past the block limit',
+)
+"""The time that a task held the event loop of its shared async child, as the
+worker measured it, in the ``TASK_BLOCKED_LOOP`` and ``NEIGHBOUR_BLOCKED_LOOP``
+reports: ``... held the event loop of its shared async child for <n> ms, past
+the block limit, ...`` (``python/horsies/core/worker/shared_finalize.py``,
+``crates/horsies-core/src/worker/executor/slots/seat_runs.rs``)."""
+
+KILLED_CHILD_PID: Final = RunMeasure(
+    name='killed_child_pid',
+    pattern=r'the worker killed the child \(pid=(\d+), ',
+)
+"""The process id of the worker child that the worker killed, in the
+``the worker killed the child (pid=<n>, <exit>)`` part of a kill report. Each
+run starts its own processes; the whole-run catalog ignores the process id
+columns for the same reason (``tests/dualrun/worker_run.py``)."""
+
+KILL_REPORT_MEASURES: Final = RunMeasuresInText(measures=(BLOCKED_TIME, KILLED_CHILD_PID))
+"""The rule of a stored text that can hold a kill report: the measured block
+time and the killed child's process id become tokens; the rest of the text,
+the codes and the other fields compare exactly."""
 
 SLOTS_DOWN: Final = StoredJson(
     storage=JsonStorage.TEXT,

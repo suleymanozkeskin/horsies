@@ -623,6 +623,13 @@ class TestWorkflowPaths:
         options = json.dumps({'execution': 'SHARED_THREAD', 'cancel_grace_ms': None})
         assert root_execution(options, 'root') is Execution.SHARED_THREAD
 
+    def test_a_fast_path_root_with_empty_options_text_raises(self) -> None:
+        from horsies.core.workflows.lifecycle import root_execution
+
+        # The decorator stores None for no options; an empty text is not JSON.
+        with pytest.raises(SerializationError, match='Corrupt task_options for root node root'):
+            root_execution('', 'root')
+
     def test_a_fast_path_root_with_an_invalid_class_raises(self) -> None:
         from horsies.core.workflows.lifecycle import root_execution
 

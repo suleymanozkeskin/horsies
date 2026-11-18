@@ -9,7 +9,9 @@ use chrono::Utc;
 
 use super::board::{DownState, PoolBoard, PoolFailure, ReadyChild, SlotPhase};
 use crate::worker::executor::placement::{place_process, ChildCpus};
-use crate::worker::executor::protocol::{ChildFrame, InitFrame, ParentFrame, RssReading};
+use crate::worker::executor::protocol::{
+    ChildFrame, ChildKind, InitFrame, ParentFrame, RssReading,
+};
 use crate::worker::executor::supervisor::{
     boot_end_of, wait_for_exit, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause,
     BootReply, ChildChannel, ChildCommand, ChildLost, ChildSource, FrameWait, LastRecord,
@@ -27,7 +29,8 @@ pub(super) struct BootSlot<'a> {
     /// The spawner of every child: its kills.
     pub spawner: &'a SpawnerHandle,
     pub command: &'a ChildCommand,
-    /// The first frame of the slot's children; its kind is the slot's.
+    /// The first frame of the slot's children; its kind is the slot's. The
+    /// slot sends it with the process name of the slot ([`init_for_slot`]).
     pub init: &'a InitFrame,
     pub mailbox: MailboxBound,
     /// The CPUs of the slot's children, set before the init frame.
@@ -286,6 +289,25 @@ pub(super) fn outside_kill_line(index: usize, kills_in_a_row: u32) -> String {
     format!("Replacement child on slot {index} was killed during boot, {kills_in_a_row} in a row")
 }
 
+/// The init frame of a child of slot `index` (its board index): `template`
+/// with the process name of the slot, `<name>-<index>` for an isolated
+/// child, `<name>-shared-<index>` for a shared async child and
+/// `<name>-thread-<index>` for a shared thread child (Python `_Slot.init_for`,
+/// `_SharedSlot.init_for`). A Python child sets
+/// `multiprocessing.current_process().name` to it. Pure.
+pub(super) fn init_for_slot(template: &InitFrame, index: usize) -> InitFrame {
+    let name = &template.process_name;
+    let process_name = match template.child_kind {
+        ChildKind::Isolated(_) => format!("{name}-{index}"),
+        ChildKind::SharedAsync(_) => format!("{name}-shared-{index}"),
+        ChildKind::SharedThread(_) => format!("{name}-thread-{index}"),
+    };
+    InitFrame {
+        process_name,
+        ..template.clone()
+    }
+}
+
 fn spawn_failure(error: &SpawnError) -> Option<BootFailure> {
     match error {
         SpawnError::ResourceShortage { errno, detail } => Some(BootFailure::new(
@@ -330,7 +352,8 @@ async fn boot_attempt(slot: &BootSlot<'_>) -> BootAttempt {
             )));
         }
     };
-    if let Err(failure) = channel.send(&ParentFrame::Init(slot.init.clone())).await {
+    let init = init_for_slot(slot.init, slot.index);
+    if let Err(failure) = channel.send(&ParentFrame::Init(init)).await {
         tracing::warn!(pid = channel.pid().get(), failure = %failure, "the init frame could not be sent");
         let lost = lost_after_kill(&mut channel).await;
         let _ = channel.dispose().await;
