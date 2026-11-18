@@ -59,9 +59,10 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
 
 /// `test_subworkflow_load_failure_does_not_overwrite_terminal_task`: the
 /// load-failure mark of a sub-workflow node changes nothing on a node that
-/// is already COMPLETED, FAILED or SKIPPED. The core writes the mark through
-/// the `FAILURE` child start (`horsies_workflow_child_start`), which answers
-/// `STALE` for a terminal node and keeps its result.
+/// is already COMPLETED, FAILED or SKIPPED, and the workflow stores no error.
+/// The core writes the mark through the `FAILURE` child start
+/// (`horsies_workflow_child_start`), which answers `STALE` for a terminal node
+/// and keeps its result.
 #[tokio::test]
 #[serial]
 async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
@@ -100,6 +101,7 @@ async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
         let row = node(&pool, workflow_id, 0).await;
         assert_eq!(row.status, terminal);
         assert_eq!(row.result, Some(stored));
+        assert_eq!(workflow(&pool, workflow_id).await.error, None, "{terminal}");
         super::support::end_workflows(&pool, &[workflow_id]).await;
     }
 }
@@ -281,6 +283,13 @@ async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
         &conflicted.result.expect("the node stores its failure"),
     );
     assert_eq!(code(&error).as_deref(), Some("WORKFLOW_ENQUEUE_FAILED"));
+    assert!(
+        error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("args_from key")),
+        "{error:?}"
+    );
     db.drop().await;
 }
 
@@ -330,6 +339,13 @@ async fn a_child_builder_failure_at_promotion_fails_the_node() {
     let error =
         super::support::stored_result_error(&failed.result.expect("the node stores its failure"));
     assert_eq!(code(&error).as_deref(), Some("WORKFLOW_ENQUEUE_FAILED"));
+    assert!(
+        error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("Subworkflow build failed")),
+        "{error:?}"
+    );
     db.drop().await;
 }
 
@@ -709,4 +725,400 @@ async fn a_failure_in_the_middle_of_a_start_leaves_no_row() {
             .expect("count the workflow rows");
     assert_eq!(rows, 0);
     db.drop().await;
+}
+
+/// The build-failure mark of task node 0 of workflow `$1` under
+/// `on_error = fail` (`horsies_workflow_fail_unbuildable`, Python
+/// `_fail_enqueued_task`): the indexes that it wrote FAILED.
+const FAIL_UNBUILDABLE_SQL: &str = "SELECT horsies_workflow_fail_unbuildable($1, ARRAY[0], 'fail')";
+
+/// `TestOnErrorFail.test_late_enqueue_failure_does_not_overwrite_terminal_task`:
+/// the build-failure mark of a task node writes only an ENQUEUED node. A node
+/// that is already COMPLETED, FAILED or SKIPPED keeps its status and result,
+/// the mark names no failed node, and the workflow stores no error. The node
+/// stores task options that the promotion refuses, so the same mark fails it
+/// when it is ENQUEUED (the last case). Python also logs a warning for the
+/// skipped mark; the SQL function writes no log.
+#[tokio::test]
+#[serial]
+async fn a_build_failure_mark_does_not_overwrite_a_terminal_task_node() {
+    let pool = shared_pool().await;
+    for terminal in ["COMPLETED", "FAILED", "SKIPPED"] {
+        let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
+        let stored = format!("pre-existing-{}-payload", terminal.to_lowercase());
+        seed_node(
+            &pool,
+            &NodeSeed::task(workflow_id, 0, terminal)
+                .options(POISON_TASK_OPTIONS)
+                .result(stored.clone()),
+        )
+        .await;
+
+        let failed: Vec<i32> = sqlx::query_scalar(FAIL_UNBUILDABLE_SQL)
+            .bind(workflow_id)
+            .fetch_one(&pool)
+            .await
+            .expect("the failure mark");
+
+        assert!(failed.is_empty(), "{terminal}: {failed:?}");
+        let row = node(&pool, workflow_id, 0).await;
+        assert_eq!(row.status, terminal);
+        assert_eq!(row.result, Some(stored));
+        assert_eq!(workflow(&pool, workflow_id).await.error, None, "{terminal}");
+        super::support::end_workflows(&pool, &[workflow_id]).await;
+    }
+
+    let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
+    seed_node(
+        &pool,
+        &NodeSeed::task(workflow_id, 0, "ENQUEUED").options(POISON_TASK_OPTIONS),
+    )
+    .await;
+    let failed: Vec<i32> = sqlx::query_scalar(FAIL_UNBUILDABLE_SQL)
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the failure mark of an ENQUEUED node");
+    assert_eq!(failed, vec![0]);
+    assert_eq!(node_status(&pool, workflow_id, 0).await, "FAILED");
+    super::support::end_workflows(&pool, &[workflow_id]).await;
+}
+
+/// `TestOnErrorFail.test_fail_all_succeed_completes`: under `on_error = fail`,
+/// a chain whose nodes all succeed completes, and the workflow stores no
+/// error.
+#[tokio::test]
+#[serial]
+async fn a_chain_that_succeeds_under_on_error_fail_completes_with_no_error() {
+    let pool = shared_pool().await;
+    let workflow_id = start(
+        &pool,
+        &spec(
+            "fail_happy",
+            vec![
+                after(0, "fail_happy_a", &[]),
+                after(1, "fail_happy_b", &[0]),
+            ],
+        ),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+
+    succeed(&pool, workflow_id, 0, serde_json::json!(2)).await;
+    succeed(&pool, workflow_id, 1, serde_json::json!(4)).await;
+
+    let row = workflow(&pool, workflow_id).await;
+    assert_eq!(row.status, "COMPLETED");
+    assert_eq!(row.error, None);
+}
+
+/// `TestOnErrorFail.test_fail_stores_error_keeps_running`: a failed node whose
+/// dependent has `allow_failed_deps` stores its error on the workflow; the
+/// workflow stays RUNNING, and the dependent is ENQUEUED.
+#[tokio::test]
+#[serial]
+async fn a_failure_with_a_dependent_that_still_runs_stores_the_error_and_keeps_running() {
+    let pool = shared_pool().await;
+    let workflow_id = start(
+        &pool,
+        &spec(
+            "fail_keeps_running",
+            vec![
+                after(0, "fail_error_a", &[]),
+                recovery(1, "fail_error_b", 0),
+            ],
+        ),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");
+    assert_eq!(
+        workflow_error_code(&pool, workflow_id).await.as_deref(),
+        Some("TEST_FAIL")
+    );
+    assert_eq!(node_status(&pool, workflow_id, 1).await, "ENQUEUED");
+    super::support::end_workflows(&pool, &[workflow_id]).await;
+}
+
+/// `TestOnErrorFail.test_fail_allow_failed_deps_false_skipped` and
+/// `.test_fail_final_status_failed`: a dependent without `allow_failed_deps`
+/// is SKIPPED when its dependency fails, and the resolved workflow ends
+/// FAILED.
+#[tokio::test]
+#[serial]
+async fn a_dependent_of_a_failed_node_is_skipped_and_the_workflow_fails() {
+    let pool = shared_pool().await;
+    let workflow_id = start(
+        &pool,
+        &spec(
+            "afd_false",
+            vec![after(0, "afd_false_a", &[]), after(1, "afd_false_b", &[0])],
+        ),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+
+    assert_eq!(node_status(&pool, workflow_id, 1).await, "SKIPPED");
+    assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
+}
+
+/// `TestOnErrorFail.test_fail_multiple_failures_keep_first_error`: two
+/// independent roots fail in index order; the workflow ends FAILED with the
+/// error of the first.
+#[tokio::test]
+#[serial]
+async fn two_failed_roots_end_the_workflow_failed_with_the_first_error() {
+    let pool = shared_pool().await;
+    let workflow_id = start(
+        &pool,
+        &spec(
+            "multi_fail",
+            vec![after(0, "multi_fail_a", &[]), after(1, "multi_fail_b", &[])],
+        ),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+
+    fail(&pool, workflow_id, 0, "FIRST_ERROR").await;
+    fail(&pool, workflow_id, 1, "SECOND_ERROR").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
+    assert_eq!(
+        workflow_error_code(&pool, workflow_id).await.as_deref(),
+        Some("FIRST_ERROR")
+    );
+}
+
+/// `TestOnErrorPause.test_pause_stops_propagation`: under `on_error = pause`,
+/// the dependent of the failed node stays PENDING, though it has
+/// `allow_failed_deps` and would run under `on_error = fail`.
+#[tokio::test]
+#[serial]
+async fn a_pause_on_error_leaves_an_allow_failed_deps_dependent_pending() {
+    let pool = shared_pool().await;
+    let mut dependent = after(1, "pause_stop_b", &[0]);
+    dependent.allow_failed_deps = true;
+    let mut workflow_spec = spec(
+        "pause_stops",
+        vec![after(0, "pause_stop_a", &[]), dependent],
+    );
+    workflow_spec.on_error = OnError::Pause;
+    let workflow_id = start(&pool, &workflow_spec, &TestChildSpecs::empty()).await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
+    assert_eq!(node_status(&pool, workflow_id, 1).await, "PENDING");
+    super::support::end_workflows(&pool, &[workflow_id]).await;
+}
+
+/// `TestOnErrorPause.test_pause_pending_stays_pending`: under
+/// `on_error = pause`, the PENDING nodes of a chain after the failed node stay
+/// PENDING.
+#[tokio::test]
+#[serial]
+async fn a_pause_on_error_leaves_the_pending_chain_pending() {
+    let pool = shared_pool().await;
+    let mut workflow_spec = spec(
+        "pause_pending",
+        vec![
+            after(0, "pause_pending_a", &[]),
+            after(1, "pause_pending_b", &[0]),
+            after(2, "pause_pending_c", &[1]),
+        ],
+    );
+    workflow_spec.on_error = OnError::Pause;
+    let workflow_id = start(&pool, &workflow_spec, &TestChildSpecs::empty()).await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+
+    assert_eq!(node_status(&pool, workflow_id, 1).await, "PENDING");
+    assert_eq!(node_status(&pool, workflow_id, 2).await, "PENDING");
+    super::support::end_workflows(&pool, &[workflow_id]).await;
+}
+
+/// `TestResume.test_resume_unblocks_pending_tasks`: a node whose dependency
+/// finished while the workflow was PAUSED stays PENDING; the resume makes the
+/// workflow RUNNING again and enqueues the node.
+#[tokio::test]
+#[serial]
+async fn a_resume_enqueues_a_node_whose_dependency_finished_while_paused() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let mut workflow_spec = spec(
+        "resume_pending",
+        vec![
+            after(0, "resume_pending_a", &[]),
+            after(1, "resume_pending_b", &[]),
+            after(2, "resume_pending_c", &[1]),
+        ],
+    );
+    workflow_spec.on_error = OnError::Pause;
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+    assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
+    succeed(&pool, workflow_id, 1, serde_json::json!(100)).await;
+    assert_eq!(node_status(&pool, workflow_id, 2).await, "PENDING");
+
+    let resumed = handle(&pool, workflow_id)
+        .resume(&child_specs)
+        .await
+        .expect("resume()");
+
+    assert!(resumed);
+    assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");
+    assert_eq!(node_status(&pool, workflow_id, 2).await, "ENQUEUED");
+    super::support::end_workflows(&pool, &[workflow_id]).await;
+}
+
+/// `TestEnqueuedFailureConversion.test_resume_all_tasks_terminal_completes`:
+/// the resume of a workflow paused by its only root's failure skips the
+/// dependent, and the workflow ends FAILED.
+#[tokio::test]
+#[serial]
+async fn a_resume_that_leaves_no_node_to_run_skips_the_dependent_and_fails_the_workflow() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let mut workflow_spec = spec(
+        "resume_terminal",
+        vec![
+            after(0, "resume_terminal_a", &[]),
+            after(1, "resume_terminal_b", &[0]),
+        ],
+    );
+    workflow_spec.on_error = OnError::Pause;
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+    assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
+
+    let resumed = handle(&pool, workflow_id)
+        .resume(&child_specs)
+        .await
+        .expect("resume()");
+
+    assert!(resumed);
+    assert_eq!(node_status(&pool, workflow_id, 1).await, "SKIPPED");
+    assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
+}
+
+/// `TestEnqueuedFailureConversion.test_resume_then_complete_remains_failed`:
+/// a root that failed under `on_error = pause` keeps the workflow FAILED
+/// after the resume, though the other root completed; the workflow keeps the
+/// error of the failed root.
+#[tokio::test]
+#[serial]
+async fn a_workflow_resumed_after_a_failure_ends_failed_with_that_error() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let mut workflow_spec = spec(
+        "resume_complete",
+        vec![
+            after(0, "resume_complete_a", &[]),
+            after(1, "resume_complete_b", &[]),
+        ],
+    );
+    workflow_spec.on_error = OnError::Pause;
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+    assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
+    succeed(&pool, workflow_id, 1, serde_json::json!(42)).await;
+
+    let resumed = handle(&pool, workflow_id)
+        .resume(&child_specs)
+        .await
+        .expect("resume()");
+
+    assert!(resumed);
+    assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
+    assert_eq!(
+        workflow_error_code(&pool, workflow_id).await.as_deref(),
+        Some("TEST_FAIL")
+    );
+}
+
+/// Starts two independent roots `<name>_a` (0) and `<name>_b` (1), and a third
+/// root `<name>_c` (2) when `three` is set, with `policy`.
+async fn start_roots(
+    pool: &PgPool,
+    name: &str,
+    three: bool,
+    policy: Option<crate::core::workflow::policy::SuccessPolicy>,
+) -> Uuid {
+    let mut tasks = vec![
+        after(0, &format!("{name}_a"), &[]),
+        after(1, &format!("{name}_b"), &[]),
+    ];
+    if three {
+        tasks.push(after(2, &format!("{name}_c"), &[]));
+    }
+    let mut workflow_spec = spec(name, tasks);
+    workflow_spec.success_policy = policy;
+    start(pool, &workflow_spec, &TestChildSpecs::empty()).await
+}
+
+/// `TestSuccessPolicy.test_default_behavior_any_failure_fails`: with no
+/// success policy, one failed node fails the workflow.
+#[tokio::test]
+#[serial]
+async fn with_no_policy_one_failed_node_fails_the_workflow() {
+    let pool = shared_pool().await;
+    let workflow_id = start_roots(&pool, "sp_default", false, None).await;
+
+    succeed(&pool, workflow_id, 0, serde_json::json!(2)).await;
+    fail(&pool, workflow_id, 1, "TEST_FAIL").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
+}
+
+/// `TestSuccessPolicy.test_success_case_satisfied_completes`: a met success
+/// case completes the workflow though another node failed.
+#[tokio::test]
+#[serial]
+async fn a_met_success_case_completes_the_workflow_despite_a_failure() {
+    let pool = shared_pool().await;
+    let workflow_id = start_roots(&pool, "sp_satisfied", false, Some(required(&[&[0]]))).await;
+
+    succeed(&pool, workflow_id, 0, serde_json::json!(2)).await;
+    fail(&pool, workflow_id, 1, "TEST_FAIL").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestSuccessPolicy.test_optional_fails_but_case_satisfied_completes`: an
+/// optional node fails, the case of node 0 is met, and the workflow completes.
+#[tokio::test]
+#[serial]
+async fn a_failed_optional_node_does_not_fail_a_workflow_whose_case_is_met() {
+    let pool = shared_pool().await;
+    let mut policy = required(&[&[0]]);
+    policy.optional_indices = Some(vec![1]);
+    let workflow_id = start_roots(&pool, "sp_optional", true, Some(policy)).await;
+
+    succeed(&pool, workflow_id, 0, serde_json::json!(2)).await;
+    fail(&pool, workflow_id, 1, "TEST_FAIL").await;
+    succeed(&pool, workflow_id, 2, serde_json::json!(4)).await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
+}
+
+/// `TestSuccessPolicy.test_multiple_success_cases_any_satisfied`: of two
+/// cases, the one of the completed node is met, and the workflow completes.
+#[tokio::test]
+#[serial]
+async fn one_met_case_of_several_completes_the_workflow() {
+    let pool = shared_pool().await;
+    let workflow_id = start_roots(&pool, "sp_multi", false, Some(required(&[&[0], &[1]]))).await;
+
+    fail(&pool, workflow_id, 0, "TEST_FAIL").await;
+    succeed(&pool, workflow_id, 1, serde_json::json!(2)).await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
