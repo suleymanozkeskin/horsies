@@ -113,6 +113,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 - `AsyncContext` is the error of a blocking send on a thread that runs a runtime. The async sends do not return it. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread).
 - `PayloadMismatch`: the task id exists with another command or idempotency key; nothing was written.
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key with another command; nothing was written.
+- A send, a schedule or a retry, async or blocking, panics in a process that was forked without `exec` after the core's process runtime started in its parent. A fork is a state of the process, never a send result: Python's sends raise `ForkedAfterCoreStart` (see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals)). Nothing was sent. Start child processes with `exec` (`std::process::Command`), or fork before the parent's first call that runs on the core.
 
 The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
 
