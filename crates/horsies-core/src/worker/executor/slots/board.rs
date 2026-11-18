@@ -485,7 +485,7 @@ impl PoolBoard {
                 Condition::Serving => {
                     tracing::error!(
                         failure = ?failure,
-                        "the worker's child pool failed: no replacement child can start",
+                        "Worker cannot start a child: {failure}",
                     );
                     slots.condition = Condition::Failed(failure);
                 }
