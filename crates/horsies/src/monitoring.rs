@@ -203,7 +203,7 @@ pub async fn pause_workflow_action(app: &Horsies, workflow_id: Uuid) -> ActionOu
 pub async fn resume_workflow_action(app: &Horsies, workflow_id: Uuid) -> ActionOutcome {
     let children = resume_children(app);
     action(app, "Workflow resume", |broker| async move {
-        core_monitoring::resume_workflow_action(&broker, workflow_id, &children).await
+        core_monitoring::resume_workflow_action(&broker, workflow_id, children.as_ref()).await
     })
     .await
 }
