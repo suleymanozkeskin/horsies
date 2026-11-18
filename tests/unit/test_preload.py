@@ -27,6 +27,7 @@ import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.reference.worker_parent.worker import preload, preload_main, slots
+from horsies.core.worker import preload_main as kept_preload_main
 from horsies.core.models.worker_profile import ResolvedPool
 from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     IsolatedChild,
@@ -49,7 +50,7 @@ from tests.dualrun.reference.worker_parent.worker.preload import (
     preload_support,
     reap_landed_orphans,
 )
-from tests.dualrun.reference.worker_parent.worker.preload_main import REPARENT_FAILED_EXIT_CODE, parse_arguments
+from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE, parse_arguments
 from horsies.core.models.boot_failure import SpawnFailed
 from tests.dualrun.reference.worker_parent.worker.slots import (
     PRELOAD_ENTRY,
@@ -889,13 +890,13 @@ class TestChildSteps:
             steps.append('serve')
             raise SystemExit(0)
 
-        monkeypatch.setattr(preload_main.os, 'setsid', record('setsid'))
-        monkeypatch.setattr(preload_main, '_wait_for_reparent', record('reparent'))
-        monkeypatch.setattr(preload_main, 'serve', serve_then_exit)
-        monkeypatch.setattr(preload_main.socket, 'socket', MagicMock())
+        monkeypatch.setattr(kept_preload_main.os, 'setsid', record('setsid'))
+        monkeypatch.setattr(kept_preload_main, '_wait_for_reparent', record('reparent'))
+        monkeypatch.setattr(kept_preload_main, 'serve', serve_then_exit)
+        monkeypatch.setattr(kept_preload_main.socket, 'socket', MagicMock())
 
         with pytest.raises(SystemExit) as stopped:
-            preload_main._run_child(5, 42, MagicMock(), MagicMock())
+            kept_preload_main._run_child(5, 42, MagicMock(), MagicMock())
 
         assert stopped.value.code == 0
         assert steps == ['setsid', 'reparent', 'serve']
@@ -948,7 +949,7 @@ class TestChildExitCodes:
 class TestReparentWait:
     def test_a_child_that_never_reparents_exits(self) -> None:
         code = (
-            'from tests.dualrun.reference.worker_parent.worker import preload_main as main\n'
+            'from horsies.core.worker import preload_main as main\n'
             'main.REPARENT_TIMEOUT_S = 0.05\n'
             'main._wait_for_reparent(1 << 30)\n'
         )
@@ -998,7 +999,7 @@ class TestProcessState:
     def _refusal(setup: str) -> str:
         code = f"""
 import socket, threading, time
-from tests.dualrun.reference.worker_parent.worker.preload_main import fork_refusal
+from horsies.core.worker.preload_main import fork_refusal
 {setup}
 print(fork_refusal(-1))
 """
@@ -1036,7 +1037,7 @@ print(fork_refusal(-1))
 
     def test_a_core_that_started_in_this_process_is_refused(self) -> None:
         setup = (
-            'import tests.dualrun.reference.worker_parent.worker.preload_main as preload_main\n'
+            'import horsies.core.worker.preload_main as preload_main\n'
             "preload_main.core_state = lambda: 'running'"
         )
         assert self._refusal(setup) == 'the core of horsies._core is running in this process'
