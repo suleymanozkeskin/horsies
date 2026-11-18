@@ -654,7 +654,9 @@ async def test_a_bad_row_rolls_back_its_batch_and_each_row_is_written_alone_once
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """No history partition covers the bad row's class: its move raises, so
-    the statement writes nothing. Each row is then written alone, once."""
+    the statement writes nothing. Each row is then written alone, once. The
+    move of a row whose class or day has no leaf raises 55H01, which both
+    retry rules read as retryable: a later coverage pass creates the leaf."""
     (good_a, good_a_at), (bad, bad_at), (good_b, good_b_at) = await _running_tasks(
         session, 3
     )
@@ -676,8 +678,12 @@ async def test_a_bad_row_rolls_back_its_batch_and_each_row_is_written_alone_once
     assert isinstance(recorded.results[0], Err)
     assert results[0] == Ok(None) and results[2] == Ok(None)
     error = _phase1_error(results[1])
-    assert error.retryable is False
+    assert error.retryable is True
     assert error.data is not None and error.data['batch_write'] == 'ROLLED_BACK'
+    assert error.data['exception_type'] == 'CoreServerError'
+    assert str(error.data['exception']).startswith(
+        f'complete_successes: no task-history leaf of class {UNREGISTERED_CLASS} covers ['
+    ), error.data['exception']
     assert error.data['outcome']['result_json_str'] == ok_result_json()
     assert recorded.outcomes() == {good_a: [Applied], good_b: [Applied]}
     assert await _live_statuses(session, [good_a, bad, good_b]) == {bad: 'RUNNING'}
