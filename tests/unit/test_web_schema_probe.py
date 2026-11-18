@@ -10,14 +10,16 @@ that the broker flag genuinely suppresses the DDL seam.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
 import pytest
 from pydantic import SecretStr
 
+from horsies._core import SchemaStatusRecord, TooManyPendingCalls
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
@@ -180,6 +182,103 @@ class TestProbeFailureHandling:
         await probe.status()
 
         assert probe.reads == 3
+
+
+class TestProbeRead:
+    """The read is one core call (``CoreHandle.schema_status_async``); its
+    record decides the observation, and no resource set is built."""
+
+    pytestmark = [asyncio_tests]
+
+    @staticmethod
+    def _probe(answer: object) -> tuple[SchemaProbe, PostgresBroker, MagicMock]:
+        """A probe, its broker, and the broker's core handle, which answers
+        ``answer``: a record, or an exception that the call raises."""
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True,
+        )
+        handle = MagicMock()
+        match answer:
+            case BaseException():
+                handle.schema_status_async = AsyncMock(side_effect=answer)
+            case _:
+                handle.schema_status_async = AsyncMock(return_value=answer)
+        broker._core_handle = handle
+        return SchemaProbe(broker), broker, handle
+
+    @staticmethod
+    def _record(state: str, version: int | None, expected_version: int) -> MagicMock:
+        return MagicMock(
+            spec=SchemaStatusRecord,
+            state=state,
+            version=version,
+            expected_version=expected_version,
+        )
+
+    @pytest.mark.parametrize(
+        ('state', 'version'),
+        [
+            (SchemaState.MATCH, EXPECTED_SCHEMA_VERSION),
+            (SchemaState.MISMATCH, EXPECTED_SCHEMA_VERSION + 1),
+            (SchemaState.ABSENT, None),
+            (SchemaState.ZERO_X, 65),
+            (SchemaState.ZERO_X, None),
+        ],
+    )
+    async def test_an_observed_state_is_the_observation_of_the_record(
+        self, state: SchemaState, version: int | None,
+    ) -> None:
+        """The state, the version and the expected version come from the core."""
+        expected_version = EXPECTED_SCHEMA_VERSION + 7
+        probe, broker, handle = self._probe(
+            self._record(state.value, version, expected_version),
+        )
+
+        observed = await probe._read()
+
+        assert observed == SchemaStatus(
+            state=state, version=version, expected_version=expected_version,
+        )
+        handle.schema_status_async.assert_awaited_once_with()
+        assert broker._loop_sets == ()
+
+    async def test_unknown_is_a_failed_read_not_a_verdict(self) -> None:
+        """The core's UNKNOWN is a read that failed: None, and status() keeps
+        its rule for a failed read."""
+        probe, broker, _ = self._probe(
+            self._record(SchemaState.UNKNOWN.value, None, EXPECTED_SCHEMA_VERSION),
+        )
+
+        assert await probe._read() is None
+        assert (await probe.status()).state is SchemaState.UNKNOWN
+        assert broker._loop_sets == ()
+
+    async def test_a_core_that_cannot_run_the_read_is_a_failed_read(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A core boundary error is a failed read, logged with its type."""
+        refused = TooManyPendingCalls('CoreHandle.schema_status_async', 65_536)
+        probe, broker, _ = self._probe(refused)
+
+        with caplog.at_level(logging.WARNING):
+            observed = await probe._read()
+
+        assert observed is None
+        assert any(
+            'Schema version probe failed: TooManyPendingCalls' in record.getMessage()
+            for record in caplog.records
+        )
+        assert broker._loop_sets == ()
+
+    async def test_a_defect_of_the_call_propagates(self) -> None:
+        """An exception that is not a CoreError is not a failed read."""
+        defect = TypeError('stub defect')
+        probe, _, _ = self._probe(defect)
+
+        with pytest.raises(TypeError) as raised:
+            await probe._read()
+
+        assert raised.value is defect
 
 
 class TestSchemaGuard:
