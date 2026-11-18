@@ -641,6 +641,30 @@ before you upgrade a 0.7 deployment.
 - **Syce, the terminal monitoring tool, is removed; the web UI is the
   monitoring tool.**
 
+- **The Python implementation of the core is removed.** The internal
+  modules that the core replaced had no caller and are deleted: the worker
+  parent (`horsies.core.worker.worker`, `slots`, `dispatch`, `claiming`,
+  `finalize`, `reaper` and the modules they used), the state and calculator
+  of the scheduler, the workflow engine (`horsies.core.workflows.functions`,
+  `node_finish`, `phase2_recovery`, `recovery`, `recovery_limit`, `steps`,
+  `stored_success_policy`), the history maintenance
+  (`horsies.core.history.commands`, `outcomes`, `heartbeats`, `phase2`,
+  `identity.uuid7`, `identity.reservations`, `maintenance.coverage`,
+  `maintenance.pruning`, `partitions.catalog`, `health`, `locks`,
+  `manager`, `retirement`), the terminal writes
+  (`horsies.core.lifecycle.classify`, `commands`, `fences`, `persistence`,
+  `horsies.core.history.terminalization`, `horsies.core.brokers.stale_running`,
+  `horsies.core.utils.retry`), `horsies.monitoring.execution_classes`, the
+  ORM models of `horsies.core.models.task_pg` (`TaskModel`,
+  `TaskAttemptModel`, `TaskHeartbeatModel`, `WorkerStateModel`,
+  `ScheduleStateModel`) and the statement helpers of
+  `horsies.core.utils.db`. The re-exports `recover_stuck_workflow_tree` and
+  `recover_stuck_workflows_global` of `horsies.core.workflows` go with
+  them. Removed methods: `PostgresListener.listen_payload`,
+  `unsubscribe_payload`, `listen_many`, `unlisten` and `unsubscribe`;
+  `PostgresBroker.validate_worker_database_paths` and `send_route`;
+  `PartitionMaintenanceDatabase.coverage_gate_enabled`.
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the

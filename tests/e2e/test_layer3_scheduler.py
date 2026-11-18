@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.errors import ConfigurationError
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.task_pg import ScheduleStateModel
 from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
@@ -30,6 +31,41 @@ SCHEDULER_INSTANCE = 'tests.e2e.tasks.instance_scheduler:app'
 CORRUPTED_CONFIG_HASH = bytes(32)
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleState:
+    """The stored state row of one schedule (``horsies_schedule_state``)."""
+
+    schedule_name: str
+    last_run_at: datetime | None
+    next_run_at: datetime
+    run_count: int
+    config_hash: bytes
+
+
+async def _schedule_state(session: AsyncSession, schedule_name: str) -> ScheduleState | None:
+    """The state row of ``schedule_name``, or ``None`` when it has none."""
+    row = (
+        await session.execute(
+            text(
+                'SELECT schedule_name, last_run_at, next_run_at, run_count, config_hash '
+                'FROM horsies_schedule_state WHERE schedule_name = :name'
+            ),
+            {'name': schedule_name},
+        )
+    ).one_or_none()
+    match row:
+        case None:
+            return None
+        case _:
+            return ScheduleState(
+                schedule_name=row.schedule_name,
+                last_run_at=row.last_run_at,
+                next_run_at=row.next_run_at,
+                run_count=row.run_count,
+                config_hash=bytes(row.config_hash),
+            )
+
+
 # =============================================================================
 # T3.1 Schedule Persistence
 # =============================================================================
@@ -43,12 +79,10 @@ async def test_schedule_persistence(scheduler_broker: PostgresBroker) -> None:
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         # Poll for scheduler initialization instead of relying on a fixed delay.
         deadline = time.time() + 5.0
-        state: ScheduleStateModel | None = None
+        state: ScheduleState | None = None
         while time.time() < deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                state = await session.get(
-                    ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                )
+                state = await _schedule_state(session, 'e2e_scheduled_simple_interval')
             if state is not None:
                 break
             await asyncio.sleep(0.1)
@@ -133,9 +167,7 @@ async def test_schedule_does_not_execute_early(
         scheduler_ready = False
         while time.time() < init_deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                state = await session.get(
-                    ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                )
+                state = await _schedule_state(session, 'e2e_scheduled_simple_interval')
             if state is not None:
                 scheduler_ready = True
                 break
@@ -177,12 +209,10 @@ async def test_repeating_schedule(scheduler_broker: PostgresBroker) -> None:
             # Step 1: Wait for the scheduler to fire at least 2 runs.
             # This decouples the assertion from subprocess startup time.
             deadline = time.time() + 15.0
-            state: ScheduleStateModel | None = None
+            state: ScheduleState | None = None
             while time.time() < deadline:
                 async with current_resources(scheduler_broker).session_factory() as session:
-                    state = await session.get(
-                        ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                    )
+                    state = await _schedule_state(session, 'e2e_scheduled_simple_interval')
                 if state is not None and state.run_count >= 2:
                     break
                 await asyncio.sleep(0.3)
@@ -317,9 +347,7 @@ async def test_disabled_schedule_does_not_fire(
         scheduler_ready = False
         while time.time() < deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                state = await session.get(
-                    ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                )
+                state = await _schedule_state(session, 'e2e_scheduled_simple_interval')
             if state is not None:
                 scheduler_ready = True
                 break
@@ -329,9 +357,7 @@ async def test_disabled_schedule_does_not_fire(
 
         # Disabled schedule should have no state row
         async with current_resources(scheduler_broker).session_factory() as session:
-            disabled_state = await session.get(
-                ScheduleStateModel, 'e2e_disabled_schedule'
-            )
+            disabled_state = await _schedule_state(session, 'e2e_disabled_schedule')
 
         assert disabled_state is None, (
             'Disabled schedule should not have a state row in the DB'
@@ -352,13 +378,11 @@ async def test_schedule_with_args_passes_arguments(
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         with run_worker(SCHEDULER_INSTANCE, profile='isolated-1', timeout=10.0):
             # Step 1: Wait for the scheduler to process the schedule.
-            state: ScheduleStateModel | None = None
+            state: ScheduleState | None = None
             deadline = time.time() + 15.0
             while time.time() < deadline:
                 async with current_resources(scheduler_broker).session_factory() as session:
-                    state = await session.get(
-                        ScheduleStateModel, 'e2e_schedule_with_args'
-                    )
+                    state = await _schedule_state(session, 'e2e_schedule_with_args')
                 if state is not None and state.run_count >= 1:
                     break
                 await asyncio.sleep(0.3)
@@ -411,12 +435,10 @@ async def test_config_hash_change_recalculates_next_run(
     # Phase 1: Start scheduler, record state
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         deadline = time.time() + 5.0
-        original_state: ScheduleStateModel | None = None
+        original_state: ScheduleState | None = None
         while time.time() < deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                original_state = await session.get(
-                    ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                )
+                original_state = await _schedule_state(session, 'e2e_scheduled_simple_interval')
             if original_state is not None:
                 break
             await asyncio.sleep(0.1)
@@ -444,9 +466,7 @@ async def test_config_hash_change_recalculates_next_run(
         corrected = False
         while time.time() < deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                state = await session.get(
-                    ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                )
+                state = await _schedule_state(session, 'e2e_scheduled_simple_interval')
             if state is not None and state.config_hash != CORRUPTED_CONFIG_HASH:
                 corrected = True
                 assert state.config_hash == original_hash, (
@@ -471,14 +491,12 @@ async def test_catch_up_missed_enqueues_missed_runs(
 ) -> None:
     """T3.10: catch_up_missed=True enqueues multiple tasks for missed intervals."""
     # Phase 1: Start scheduler to initialize the catch-up schedule state
-    state: ScheduleStateModel | None = None
+    state: ScheduleState | None = None
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         deadline = time.time() + 5.0
         while time.time() < deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                state = await session.get(
-                    ScheduleStateModel, 'e2e_schedule_catch_up'
-                )
+                state = await _schedule_state(session, 'e2e_schedule_catch_up')
             if state is not None:
                 break
             await asyncio.sleep(0.1)
@@ -524,9 +542,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
             scheduler_processed = False
             while time.time() < deadline:
                 async with current_resources(scheduler_broker).session_factory() as session:
-                    state = await session.get(
-                        ScheduleStateModel, 'e2e_schedule_catch_up'
-                    )
+                    state = await _schedule_state(session, 'e2e_schedule_catch_up')
                 if state is not None and state.next_run_at > past_time:
                     scheduler_processed = True
                     break
@@ -567,15 +583,13 @@ async def test_scheduler_restart_reuses_existing_state(
 ) -> None:
     """T3.11: Restarted scheduler preserves run_count and config_hash."""
     # Phase 1: Start scheduler + worker, let it run at least once
-    state: ScheduleStateModel | None = None
+    state: ScheduleState | None = None
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         with run_worker(SCHEDULER_INSTANCE, profile='isolated-1', timeout=10.0):
             deadline = time.time() + 8.0
             while time.time() < deadline:
                 async with current_resources(scheduler_broker).session_factory() as session:
-                    state = await session.get(
-                        ScheduleStateModel, 'e2e_scheduled_simple_interval'
-                    )
+                    state = await _schedule_state(session, 'e2e_scheduled_simple_interval')
                 if state is not None and state.run_count >= 1:
                     break
                 await asyncio.sleep(0.3)
@@ -593,9 +607,7 @@ async def test_scheduler_restart_reuses_existing_state(
         await asyncio.sleep(1.0)
 
         async with current_resources(scheduler_broker).session_factory() as session:
-            state_after = await session.get(
-                ScheduleStateModel, 'e2e_scheduled_simple_interval'
-            )
+            state_after = await _schedule_state(session, 'e2e_scheduled_simple_interval')
 
         assert state_after is not None
         assert state_after.run_count >= run_count_before, (
@@ -629,10 +641,10 @@ async def test_cron_schedule_fires_on_due_minute(
     # Phase 1: Start scheduler and wait for the cron state row to initialize.
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         deadline = time.time() + 5.0
-        state: ScheduleStateModel | None = None
+        state: ScheduleState | None = None
         while time.time() < deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                state = await session.get(ScheduleStateModel, cron_name)
+                state = await _schedule_state(session, cron_name)
             if state is not None:
                 break
             await asyncio.sleep(0.1)
@@ -662,7 +674,7 @@ async def test_cron_schedule_fires_on_due_minute(
         state = None
         while time.time() < deadline:
             async with current_resources(scheduler_broker).session_factory() as session:
-                state = await session.get(ScheduleStateModel, cron_name)
+                state = await _schedule_state(session, cron_name)
             if (
                 state is not None
                 and state.run_count >= 1
