@@ -569,8 +569,7 @@ impl BrokerOperationError {
                 retryable: false,
                 cause: BrokerCheckCause::Check,
             },
-            BrokerError::Database(_)
-            | BrokerError::InvalidWorkflowNodeStatus
+            BrokerError::InvalidWorkflowNodeStatus
             | BrokerError::IncompleteTaskHistoryCutover
             | BrokerError::InvalidStatus(_)
             | BrokerError::InvalidExecutionClass(_)

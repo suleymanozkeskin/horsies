@@ -2078,14 +2078,16 @@ mod tests {
         let cases = [
             (refused(), FailureCause::Connection, true),
             (
-                BrokerError::Database(sqlx::Error::Database(Box::new(ServerError {
-                    code: "57014",
-                    message: "canceling statement due to statement timeout",
-                }))),
-                FailureCause::Server(crate::ServerErrorFacts::of_code(
-                    "57014",
-                    "canceling statement due to statement timeout".to_owned(),
-                )),
+                BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                    statement: "enqueue_task",
+                    cause: crate::db::NotSentCause::Checkout(
+                        crate::db::CheckoutFailure::TimedOut {
+                            role: crate::db::PoolRole::Main,
+                            waited: std::time::Duration::from_secs(30),
+                        },
+                    ),
+                }),
+                FailureCause::Connection,
                 true,
             ),
             (
