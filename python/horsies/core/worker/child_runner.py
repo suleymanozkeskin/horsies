@@ -22,7 +22,7 @@ from psycopg import Connection
 
 
 import horsies._core as core
-from horsies._core import CoreChildHandle, CoreError
+from horsies._core import CoreChildHandle, CoreError, CoreFailure
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_value import StrictJsonError
@@ -100,7 +100,6 @@ from horsies.core.lifecycle.outcomes import (
     TerminalizationOutcome,
 )
 from horsies.core.task_decorator import TaskBodyKind, await_task_call_in_worker
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok, is_err
 
 
@@ -720,9 +719,6 @@ type StopRecord = (
 )
 """The records of ``CoreChildHandle.stop_workflow_task_before_start``."""
 
-_EXPIRE_BEFORE_START_SUBJECT: Final = 'CoreChildHandle.expire_owned_claim'
-"""The subject of a failed expiry of the miss path."""
-
 # The finalizing marker: one statement in autocommit. The function locks the
 # row by id alone (FOR NO KEY UPDATE) and writes the marker only when the row
 # is RUNNING under this worker at this claim generation.
@@ -975,7 +971,7 @@ def _confirm_ownership_and_set_running(
                 return _start_unconfirmed(task_id, message)
             case _ as unreachable:
                 assert_never(unreachable)
-    except (CoreError, CoreOperationFailed) as exc:
+    except (CoreError, CoreFailure) as exc:
         return _start_unconfirmed(task_id, exc)
 
 
@@ -1008,8 +1004,8 @@ def _after_missed_start(
 
     Raises:
         CoreError: the core of this process cannot run the call.
-        CoreOperationFailed: the expiry failed: it wrote nothing, or it
-            committed and its reply was lost.
+        CoreFailure: the expiry failed (the core's class of the cause): it
+            wrote nothing, or it committed and its reply was lost.
         OutcomeDecodeError: a record outside the Python catalogs.
 
         ``_confirm_ownership_and_set_running`` folds the first two into
@@ -1040,7 +1036,6 @@ def _after_missed_start(
                         worker_id=worker_id,
                         attempt_elapsed_ms=attempt_elapsed_ms(attempt_began),
                     ),
-                    _EXPIRE_BEFORE_START_SUBJECT,
                 ),
             )
         case 'NOT_HELD' | 'LEASE_EXPIRED':

@@ -2114,6 +2114,9 @@ class TestExpireClaimedBeforeStart:
                     task_id=uuid.UUID(TASK_ID),
                     message='connection lost',
                     retryable=True,
+                    exception=core.CoreConnectionError(
+                        'expire_owned_claim', 'connection lost', True,
+                    ),
                 ),
             ],
         )
