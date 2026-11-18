@@ -1414,7 +1414,7 @@ impl CountedBroker {
         (self.proxy.round_trips(), output)
     }
 
-    /// Closes the sqlx pool that the broker was built from.
+    /// Closes the test pool that the broker was built from.
     pub(super) async fn close(self) {
         self.proxied.close().await;
     }

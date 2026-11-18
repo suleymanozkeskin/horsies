@@ -452,7 +452,7 @@ static FAIL_TREE_ORPHAN: TypedStatement = TypedStatement::new(
 // ---------------------------------------------------------------------------
 
 /// A case 0 candidate.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct StuckPendingRow {
     workflow_id: Uuid,
     task_index: i32,
@@ -474,7 +474,7 @@ struct StaleSubworkflowRow {
 }
 
 /// A completion candidate of the tree pass.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct StuckWorkflowRow {
     workflow_id: Uuid,
 }
@@ -487,7 +487,7 @@ struct OrphanedWorkflowRow {
 }
 
 /// A `PAGE` row of the audit.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct GlobalWorkflowAuditRow {
     scanned_count: i64,
     completion_ids: Vec<Uuid>,

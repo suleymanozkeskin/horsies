@@ -149,24 +149,6 @@ impl IsolatedTerminalizationTestDatabase {
     }
 }
 
-/// The database of the running test, covered as
-/// [`crate::test_support::migrated_pool`] covers it, as a sqlx pool for the
-/// test modules that still hold one. Every call in one test gets the same
-/// database; it is dropped when the test's runtime shuts down.
-pub(crate) async fn sqlx_migrated_pool() -> sqlx::PgPool {
-    let database = crate::test_support::database_of_this_test().await;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(database.url())
-        .await
-        .expect("connect the database of this test");
-    let _covered = database
-        .setup()
-        .get_or_init(|| cover_partitions(database.url()))
-        .await;
-    pool
-}
-
 struct Seed {
     status: &'static str,
     worker: Option<String>,

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::broker::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::BrokerError;
 use crate::core::history::errors::HistoryError;
 
 /// Failure category for a monitoring read.
@@ -27,19 +27,15 @@ pub enum MonitoringQueryErrorCode {
 #[derive(Debug, thiserror::Error)]
 pub enum MonitoringQueryErrorSource {
     #[error(transparent)]
-    Database(#[from] sqlx::Error),
-    #[error(transparent)]
     History(#[from] HistoryError),
     #[error(transparent)]
     Broker(#[from] BrokerError),
 }
 
 impl MonitoringQueryErrorSource {
-    /// Whether the error may clear: the driver's rule for a database
-    /// error, the error's own rule otherwise. Pure.
+    /// Whether the error may clear: the error's own rule. Pure.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Database(error) => is_retryable_sqlx_error(error),
             Self::History(error) => error.is_retryable(),
             Self::Broker(error) => error.is_retryable(),
         }
@@ -160,22 +156,16 @@ impl MonitoringQueryError {
         }
     }
 
-    /// A history read failure: a database error keeps its driver
-    /// classification; every other history error is stored data that does
-    /// not decode.
+    /// A history read failure: a failed statement keeps its transience;
+    /// every other history error is stored data that does not decode.
     pub(crate) fn history(operation: &str, error: HistoryError) -> Self {
         let failure = match &error {
-            HistoryError::Database(database) => ReadFailure::Database {
-                retryable: is_retryable_sqlx_error(database),
-            },
             HistoryError::Statement(_) | HistoryError::RowDecode(_) => ReadFailure::Database {
                 retryable: error.is_retryable(),
             },
             HistoryError::ArchiveDecode(_)
             | HistoryError::Contract(_)
-            | HistoryError::LeafLockNotHeld
-            | HistoryError::LeafLockBusy { .. }
-            | HistoryError::HistoryParentAbsent(_) => ReadFailure::Contract,
+            | HistoryError::LeafLockNotHeld => ReadFailure::Contract,
         };
         failure.into_error(
             format!("{operation} failed: {error}"),
@@ -237,10 +227,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_history_database_error_keeps_the_driver_classification() {
+    fn a_history_statement_failure_keeps_its_transience() {
         let error = MonitoringQueryError::history(
             "read",
-            HistoryError::Database(sqlx::Error::PoolTimedOut),
+            HistoryError::Statement(crate::db::StatementFailure::NotSent {
+                statement: "history_task_detail",
+                cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: std::time::Duration::from_secs(30),
+                }),
+            }),
         );
 
         assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);

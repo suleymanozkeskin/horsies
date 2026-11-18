@@ -26,9 +26,6 @@
 //! The listener ([`Listener`]) holds one dedicated connection on the session
 //! URL for every LISTEN of the process. A lock session ([`LockSession`])
 //! holds one dedicated connection with a session advisory lock.
-//!
-//! The module stands next to the sqlx broker; call sites move to it module by
-//! module.
 
 mod connect;
 mod ddl;

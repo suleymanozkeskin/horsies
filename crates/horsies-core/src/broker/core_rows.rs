@@ -1,7 +1,7 @@
 //! Running core statements (`crate::db`) and reading their rows: the
 //! statement log, checkout and run helpers, the row helpers and the readers
 //! of the broker's row types. Each reader takes the columns by name, with
-//! the Rust type the sqlx `FromRow` of the same type reads.
+//! the Rust type of the field.
 
 use crate::broker::error::BrokerError;
 use crate::broker::health::{ListedWorkerStateRow, StoredWorkerState};
@@ -74,7 +74,7 @@ pub(crate) async fn checkout_batch(
 }
 
 /// Runs one statement on a checked-out connection and reads every row,
-/// bounded by the connection's own timeouts as the sqlx path was.
+/// bounded by the connection's own timeouts.
 pub(crate) async fn query_on(
     connection: &mut PooledConnection,
     log: StatementLog,
@@ -176,8 +176,7 @@ pub(crate) fn column<'row, T: FromSql<'row>>(
 const FIRST_COLUMN: &str = "(first column)";
 
 /// Decodes the first column of a row of `statement`: the one value of a
-/// statement such as `SELECT to_regprocedure($1) IS NOT NULL`, as sqlx's
-/// `query_scalar`.
+/// statement such as `SELECT to_regprocedure($1) IS NOT NULL`.
 pub(crate) fn scalar<'row, T: FromSql<'row>>(
     row: &'row Row,
     statement: &TypedStatement,
@@ -191,12 +190,12 @@ pub(crate) fn scalar<'row, T: FromSql<'row>>(
 }
 
 /// The first row, when the reader takes zero or one row (the rest is not
-/// read, as sqlx's `fetch_optional`).
+/// read).
 pub(crate) fn first_row(rows: Vec<Row>) -> Option<Row> {
     rows.into_iter().next()
 }
 
-/// The first row, when the reader requires one (as sqlx's `fetch_one`).
+/// The first row, when the reader requires one.
 ///
 /// Errors: [`RowDecodeError::NoRow`] when the statement returned no row.
 pub(crate) fn one_row(rows: Vec<Row>, statement: &TypedStatement) -> Result<Row, RowDecodeError> {

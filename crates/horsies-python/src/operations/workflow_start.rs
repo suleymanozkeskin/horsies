@@ -161,7 +161,6 @@ fn start_outcome(
         failed @ (ClientStartError::SchemaInstall(_)
         | ClientStartError::Start(
             WorkflowError::Broker(_)
-            | WorkflowError::Database(_)
             | WorkflowError::ChildSpecSource(ChildSpecUnavailable::NotRun { .. }),
         )) => WorkflowStartOutcome::Refused(WorkflowStartError::start_failed(
             workflow_name,

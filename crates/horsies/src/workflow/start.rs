@@ -188,8 +188,7 @@ fn start_error(
         },
         failed @ (ClientStartError::SchemaInstall(_)
         | ClientStartError::Start(
-            WorkflowError::Database(_)
-            | WorkflowError::Broker(_)
+            WorkflowError::Broker(_)
             | WorkflowError::StepContract(_)
             | WorkflowError::ChildSpecSource(_),
         )) => WorkflowStartError::start_failed(workflow_name, workflow_id, failed),

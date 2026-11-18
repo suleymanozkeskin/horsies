@@ -522,7 +522,15 @@ mod tests {
     use crate::monitoring::MonitoringQueryErrorSource;
 
     fn read_source() -> MonitoringQueryErrorSource {
-        MonitoringQueryErrorSource::Database(sqlx::Error::PoolTimedOut)
+        MonitoringQueryErrorSource::Broker(crate::broker::BrokerError::Statement(
+            crate::db::StatementFailure::NotSent {
+                statement: "monitoring_task_list",
+                cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: std::time::Duration::from_secs(30),
+                }),
+            },
+        ))
     }
 
     #[test]

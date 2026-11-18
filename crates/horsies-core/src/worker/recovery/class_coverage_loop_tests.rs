@@ -155,10 +155,12 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
     let captured = CapturedLines::default();
     let capture = tracing::subscriber::set_default(captured.clone());
     let cancel = CancellationToken::new();
-    // The reaper's broker has no sqlx connection: the fleet check runs on the
-    // core pools, and a failed check would log a warning, not this error.
+    // A failed fleet check would log a warning, not this error.
     let reaper = spawn_reaper(
-        Arc::new(crate::test_support::broker_with_closed_sqlx_pools_on(database.pool.url()).await),
+        Arc::new(crate::broker::PostgresBroker::from_test_url(
+            database.pool.url(),
+            crate::ClientFamily::Rust,
+        )),
         crate::test_support::child_specs::no_child_specs(),
         RecoveryConfig {
             check_interval_ms: CHECK_INTERVAL_MS,
