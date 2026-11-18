@@ -223,6 +223,28 @@ PAIR_RULES: Final[tuple[PairRule, ...]] = (
             'and the number of beats follow the run time'
         ),
     ),
+    PairRule(
+        node_id=(
+            'tests/integration/test_enqueue_idempotency_key.py::'
+            'test_concurrent_sends_with_two_commands_classify_against_the_winner'
+        ),
+        fact=PairFact.ONE_KEYED_SEND_WINNER,
+        reason=(
+            'the sends of one key, with two commands, run at once; the send that '
+            'commits first wins, in any order in any run'
+        ),
+    ),
+    PairRule(
+        node_id=(
+            'tests/integration/test_task_lock_order.py::'
+            'test_a_free_race_of_finalize_and_stale_recovery_never_deadlocks'
+        ),
+        fact=PairFact.ONE_MOVER_PER_ROUND,
+        reason=(
+            'each round runs the finalize and the stale recovery at once on one '
+            'task; either can take the row first in any run'
+        ),
+    ),
 )
 """The tests whose pairs compare the fact of their rule (``PairRule``)."""
 

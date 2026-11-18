@@ -19,12 +19,28 @@ and column stays as captured and compares by its column rule.
   (``task_id``, ``role``, ``sender_id``, ``hostname``, ``pid``), paired by
   (``task_id``, ``role``). The send time, its leaf (``tableoid``) and the
   number of rows of one sender are not compared.
+- ``ONE_KEYED_SEND_WINNER``: in ``horsies_tasks``, the ``input`` of a row
+  with an ``idempotency_key_digest`` becomes ``WINNING_COMMAND`` when it is a
+  JSON document. A NULL input and a text that is not JSON stay as captured.
+- ``ONE_MOVER_PER_ROUND``: in ``horsies_task_history``, the columns of a
+  row that the move writes and that differ by the mover
+  (``ROUND_MOVE_COLUMNS``) become ``MOVED_IN_THE_ROUND`` when its
+  ``terminalization_kind`` is one of the finalize (``FAIL_RUNNING``,
+  ``COMPLETE_LOCKED``) or of the stale recovery (``FAIL_STALE``); so does
+  the ``terminalization_kind`` of its ``horsies_workflow_phase2_pending``
+  row. Another kind stays as captured. For each ``FAIL_RUNNING`` row of a
+  plain task, one capacity wake of its queue leaves the ``notifications``
+  table; a wake that is owed and not there becomes a row
+  ``CAPACITY_WAKE_MISSING`` on that channel.
 
-Neither reduction hides which rows exist or who owns them. A history row,
-or a task and role of a heartbeat, on one side only is still a row on one
-side only. A sender that differs, and claim facts that agree with neither
-winner against facts that agree, are still column differences. A claim
-first without its status notification still leaves one notification less.
+No reduction hides which rows exist or who owns them. A history row, or a
+task and role of a heartbeat, on one side only is still a row on one side
+only. A sender that differs, claim facts that agree with neither winner
+against facts that agree, a move that neither racer writes, and an input
+that is not a document against one that is, are still column differences.
+A claim first without its status notification still leaves one
+notification less, and a finalize of a failure without its capacity wake
+still leaves a missing wake.
 """
 
 from __future__ import annotations
@@ -36,7 +52,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from tests.dualrun.catalog import NOTIFICATIONS
+from tests.dualrun.catalog import NOTIFICATIONS, QUEUE_CHANNEL_PREFIX
 from tests.dualrun.normalize import NormalizedRow, NormalizedSnapshot, NormalizedTable
 from tests.dualrun.operations.table import (
     PairCompare,
@@ -49,6 +65,7 @@ from tests.dualrun.values import (
     DuringRun,
     ExactValue,
     IdLabel,
+    JsonDocument,
     NormalizedValue,
     NullValue,
     render_value,
@@ -74,6 +91,40 @@ SENDER_COLUMNS: Final = ('task_id', 'role', 'sender_id', 'hostname', 'pid')
 
 SENDER_IDENTITY: Final = ('task_id', 'role')
 """The columns that pair a reduced heartbeat row of the reference with one of the candidate."""
+
+
+TASKS_TABLE: Final = 'horsies_tasks'
+PHASE2_PENDING_TABLE: Final = 'horsies_workflow_phase2_pending'
+
+WINNING_COMMAND: Final = ExactValue(text='the command of the send that won')
+"""The input of a task that a keyed send of the two-command race committed."""
+
+ROUND_MOVE_COLUMNS: Final = (
+    'status',
+    'terminalization_kind',
+    'error_code',
+    'final_failed_reason',
+    'result_payload',
+    'attempt_snapshot',
+)
+"""The columns of a history row that the move of a round writes and that
+differ between the finalize and the stale recovery. The digest columns stay:
+each one still checks its own payload."""
+
+MOVED_IN_THE_ROUND: Final = ExactValue(text='written by the mover of the round')
+"""A value that the finalize or the stale recovery wrote, whichever moved the row."""
+
+FINALIZE_KINDS: Final = ('FAIL_RUNNING', 'COMPLETE_LOCKED')
+"""The terminalization kinds of the finalize in the round race: the failure
+of a plain task and the success of a workflow task."""
+
+STALE_RECOVERY_KIND: Final = 'FAIL_STALE'
+CAPACITY_PAYLOAD: Final = ExactValue(text='capacity')
+CAPACITY_WAKE_MISSING: Final = ExactValue(
+    text='the capacity wake of a finalize of a failure, missing'
+)
+"""The payload of a row that takes the place of a capacity wake that a
+``FAIL_RUNNING`` row of a plain task owes and the run did not send."""
 
 
 class RaceWinner(Enum):
@@ -192,6 +243,128 @@ def _heartbeat_senders(heartbeats: NormalizedTable) -> NormalizedTable:
     )
 
 
+def _keyed_inputs_as_winning_command(tasks: NormalizedTable) -> NormalizedTable:
+    """``tasks`` with the input of each row that holds an idempotency key
+    digest as ``WINNING_COMMAND``, when it is a JSON document."""
+    rules = tasks.rules
+    input_at = rules.position('input')
+    digest_at = rules.position('idempotency_key_digest')
+    message = f'{rules.name}: the input orders or pairs the rows'
+    assert 'input' not in rules.identity, message
+    rows: list[NormalizedRow] = []
+    for row in tasks.rows:
+        match row[digest_at], row[input_at]:
+            case NullValue(), _:
+                rows.append(row)
+            case _, JsonDocument():
+                rows.append((*row[:input_at], WINNING_COMMAND, *row[input_at + 1 :]))
+            case _:
+                rows.append(row)
+    return NormalizedTable(rules=rules, rows=tuple(rows))
+
+
+class RoundMover(Enum):
+    """The side of the round race that moved the task to history."""
+
+    FINALIZE = 'the finalize moved the row'
+    STALE_RECOVERY = 'the stale recovery moved the row'
+
+
+@dataclass(frozen=True, slots=True)
+class NeitherMover:
+    """A terminalization kind that neither side of the round race writes."""
+
+    kind: NormalizedValue
+
+
+def round_mover(kind: NormalizedValue) -> RoundMover | NeitherMover:
+    """The side of the round race that wrote the terminalization kind ``kind``."""
+    match kind:
+        case ExactValue(text=text) if text in FINALIZE_KINDS:
+            return RoundMover.FINALIZE
+        case ExactValue(text=text) if text == STALE_RECOVERY_KIND:
+            return RoundMover.STALE_RECOVERY
+        case _:
+            return NeitherMover(kind=kind)
+
+
+def _replaced(
+    row: NormalizedRow, positions: tuple[int, ...], value: NormalizedValue
+) -> NormalizedRow:
+    """``row`` with the value at each of ``positions`` replaced by ``value``."""
+    return tuple(value if index in positions else cell for index, cell in enumerate(row))
+
+
+def _moves_of_the_round(table: NormalizedTable, columns: tuple[str, ...]) -> NormalizedTable:
+    """``table`` with ``columns`` as ``MOVED_IN_THE_ROUND`` in each row whose
+    ``terminalization_kind`` one side of the round race writes."""
+    rules = table.rules
+    kind_at = rules.position('terminalization_kind')
+    positions = tuple(rules.position(column) for column in columns)
+    keys = {*rules.order_by, *rules.identity}
+    message = f'{rules.name}: a column of the move orders or pairs the rows'
+    assert keys.isdisjoint(columns), message
+    rows: list[NormalizedRow] = []
+    for row in table.rows:
+        match round_mover(row[kind_at]):
+            case RoundMover.FINALIZE | RoundMover.STALE_RECOVERY:
+                rows.append(_replaced(row, positions, MOVED_IN_THE_ROUND))
+            case NeitherMover():
+                rows.append(row)
+    return NormalizedTable(rules=rules, rows=tuple(rows))
+
+
+def _owed_capacity_wakes(history: NormalizedTable) -> Counter[NormalizedValue]:
+    """Per wake channel, the capacity wakes that the ``FAIL_RUNNING`` rows of
+    plain tasks in ``history`` owe: one per row, on ``task_queue_<queue>``."""
+    rules = history.rules
+    kind_at = rules.position('terminalization_kind')
+    queue_at = rules.position('queue_name')
+    workflow_task_at = rules.position('is_workflow_task')
+    owed: Counter[NormalizedValue] = Counter()
+    for row in history.rows:
+        match row[kind_at], row[workflow_task_at], row[queue_at]:
+            case ExactValue(text='FAIL_RUNNING'), ExactValue(text='false'), ExactValue(
+                text=queue
+            ):
+                owed[ExactValue(text=f'{QUEUE_CHANNEL_PREFIX}{queue}')] += 1
+            case _:
+                pass
+    return owed
+
+
+def _without_owed_wakes(
+    notifications: NormalizedTable, owed: Counter[NormalizedValue]
+) -> NormalizedTable:
+    """``notifications`` less one capacity wake for each wake in ``owed``, and
+    one ``CAPACITY_WAKE_MISSING`` row for each owed wake that is not there."""
+    rules = notifications.rules
+    channel_at = rules.position('channel')
+    payload_at = rules.position('payload')
+    left = Counter(owed)
+    kept: list[NormalizedRow] = []
+    for row in notifications.rows:
+        channel = row[channel_at]
+        match row[payload_at] == CAPACITY_PAYLOAD and left[channel] > 0:
+            case True:
+                left[channel] -= 1
+            case False:
+                kept.append(row)
+    missing = [
+        _missing_wake(rules, channel) for channel in sorted(left.elements(), key=sort_token)
+    ]
+    return NormalizedTable(rules=rules, rows=(*kept, *missing))
+
+
+def _missing_wake(rules: TableRules, channel: NormalizedValue) -> NormalizedRow:
+    """A notification row on ``channel`` with the payload ``CAPACITY_WAKE_MISSING``."""
+    values: dict[str, NormalizedValue] = {
+        'channel': channel,
+        'payload': CAPACITY_WAKE_MISSING,
+    }
+    return tuple(values.get(spec.name, NullValue()) for spec in rules.columns)
+
+
 def _with_tables(
     snapshot: NormalizedSnapshot, replaced: Mapping[str, NormalizedTable]
 ) -> NormalizedSnapshot:
@@ -217,6 +390,24 @@ def _reduced(snapshot: NormalizedSnapshot, fact: PairFact) -> NormalizedSnapshot
         case PairFact.HEARTBEAT_SENDERS:
             senders = _heartbeat_senders(snapshot.table(HEARTBEATS_TABLE))
             return _with_tables(snapshot, {HEARTBEATS_TABLE: senders})
+        case PairFact.ONE_KEYED_SEND_WINNER:
+            tasks = _keyed_inputs_as_winning_command(snapshot.table(TASKS_TABLE))
+            return _with_tables(snapshot, {TASKS_TABLE: tasks})
+        case PairFact.ONE_MOVER_PER_ROUND:
+            history = snapshot.table(HISTORY_TABLE)
+            notifications = _without_owed_wakes(
+                snapshot.table(NOTIFICATIONS.name), _owed_capacity_wakes(history)
+            )
+            return _with_tables(
+                snapshot,
+                {
+                    HISTORY_TABLE: _moves_of_the_round(history, ROUND_MOVE_COLUMNS),
+                    PHASE2_PENDING_TABLE: _moves_of_the_round(
+                        snapshot.table(PHASE2_PENDING_TABLE), ('terminalization_kind',)
+                    ),
+                    NOTIFICATIONS.name: notifications,
+                },
+            )
 
 
 def project(snapshot: NormalizedSnapshot, compare: PairCompare) -> NormalizedSnapshot:
