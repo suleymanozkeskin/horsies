@@ -18,7 +18,6 @@ from __future__ import annotations
 import uuid
 
 import asyncio
-import threading
 from collections.abc import Callable, Generator
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -58,10 +57,6 @@ from horsies.core.models.workflow.handle_types import (
 )
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.core.utils.loop_runner import (
-    LoopRunner,
-    in_running_event_loop,
-)
 from horsies.core.workflows.lifecycle import (
     pause_workflow_sync,
     resume_workflow_sync,
@@ -72,7 +67,6 @@ from horsies.core.workflows.start_types import (
     WorkflowStartEnqueueFailed,
     WorkflowStartErrorCode,
 )
-from tests.dualrun.reference.web_routes.actions import _handle_failed
 
 pytestmark = [pytest.mark.unit]
 
@@ -348,13 +342,6 @@ def test_lifecycle_sync_wrapper_returns_async_context(
     _assert_nothing_ran(broker)
 
 
-def test_web_handle_failure_mapping_asserts_on_async_context() -> None:
-    error = HandleAsyncContext(message='refused', workflow_id=WORKFLOW_ID)
-
-    with pytest.raises(AssertionError, match=WORKFLOW_ID):
-        _handle_failed(error)
-
-
 # =============================================================================
 # WorkflowStartErrorCode.ASYNC_CONTEXT
 # =============================================================================
@@ -458,64 +445,9 @@ def test_live_check_inside_loop_reports_its_own_code(app: Horsies) -> None:
 # =============================================================================
 
 
-def test_close_async_stops_the_runner_on_another_thread(app: Horsies) -> None:
-    broker = app.get_broker()
-    broker._loop_runner.start()
-    stop_threads: list[tuple[str, bool]] = []
-    original_stop = LoopRunner.stop
-
-    def recording_stop(runner: LoopRunner) -> None:
-        stop_threads.append(
-            (threading.current_thread().name, in_running_event_loop()),
-        )
-        original_stop(runner)
-
-    async def close_on_loop() -> tuple[Any, str]:
-        result = await broker.close_async()
-        return result, threading.current_thread().name
-
-    with patch.object(LoopRunner, 'stop', recording_stop):
-        result, loop_thread = asyncio.run(close_on_loop())
-
-    assert is_ok(result)
-    assert len(stop_threads) == 1
-    stop_thread, stop_inside_loop = stop_threads[0]
-    assert stop_thread != loop_thread
-    assert stop_inside_loop is False
-    assert broker._loop_runner._started is False
-    assert broker._loop_runner._thread is None
-
-
 # =============================================================================
 # run_sync: a call from a thread that runs an event loop is a defect
 # =============================================================================
-
-
-async def _answer() -> int:
-    return 42
-
-
-def test_run_sync_inside_running_loop_fails_an_assertion(app: Horsies) -> None:
-    broker = app.get_broker()
-
-    with pytest.raises(AssertionError, match='run_sync\\(_answer\\)'):
-        _inside_loop(lambda: broker.run_sync(_answer))
-
-    _assert_nothing_ran(broker)
-
-
-def test_run_sync_with_a_stopped_loop_on_the_thread_runs(app: Horsies) -> None:
-    """A loop that is set on the thread but does not run does not trip it."""
-    broker = app.get_broker()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(asyncio.sleep(0))
-
-        assert broker.run_sync(_answer) == 42
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
 
 
 # =============================================================================

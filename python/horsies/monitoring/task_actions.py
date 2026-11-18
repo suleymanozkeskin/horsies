@@ -34,7 +34,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, assert_never
 
-from sqlalchemy import text
 
 from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
 from horsies._catalog.monitoring_errors import (
@@ -83,14 +82,6 @@ class TaskCancelled:
     task_id: uuid.UUID
     was_status: TaskStatus
 
-
-# One statement in autocommit. The function takes the task advisory lock,
-# then the row lock, and either moves the row or classifies the refusal; the
-# statement commits when it returns. The core sends it; the lock-order tests
-# and the Python reference of the dual-run send this text.
-CANCEL_TASK_SQL = text("""
-    SELECT * FROM horsies_cancel_task(CAST(:task_id AS uuid), :include_running)
-""")
 
 def _db_err(
     task_id: uuid.UUID,
