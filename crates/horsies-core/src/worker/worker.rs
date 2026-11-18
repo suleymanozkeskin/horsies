@@ -336,7 +336,7 @@ impl ClaimWakes {
             .collect();
         std::future::poll_fn(|context| {
             for wait in waits.iter_mut() {
-                if let Poll::Ready(event) = &mut *wait.poll(context) {
+                if let Poll::Ready(event) = wait.as_mut().poll(context) {
                     return Poll::Ready(event);
                 }
             }

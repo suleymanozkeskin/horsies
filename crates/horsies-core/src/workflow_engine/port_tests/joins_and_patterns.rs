@@ -6,7 +6,6 @@
 //! task left on the shared database stays where it is.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -18,6 +17,7 @@ use super::support::{
 use crate::core::workflow::node::JoinType;
 use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 
 /// A task node at `index` that waits for `dependencies`.
 fn after(index: usize, dependencies: &[usize]) -> AnyNode {
@@ -39,12 +39,12 @@ fn joined(
     node
 }
 
-async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
+async fn run(pool: &TestPool, workflow_spec: &WorkflowSpec) -> Uuid {
     start(pool, workflow_spec, &TestChildSpecs::empty()).await
 }
 
 /// Finishes node `index` with success.
-async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32) {
+async fn succeed(pool: &TestPool, workflow_id: Uuid, index: i32) {
     let _task = finish_node(
         pool,
         workflow_id,
@@ -56,7 +56,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32) {
 }
 
 /// Finishes node `index` with the failure `error_code`.
-async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
+async fn fail(pool: &TestPool, workflow_id: Uuid, index: i32, error_code: &str) {
     let _task = finish_node(
         pool,
         workflow_id,
@@ -67,7 +67,7 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
     .await;
 }
 
-async fn assert_status(pool: &PgPool, workflow_id: Uuid, index: i32, expected: &str) {
+async fn assert_status(pool: &TestPool, workflow_id: Uuid, index: i32, expected: &str) {
     assert_eq!(
         node_status(pool, workflow_id, index).await,
         expected,
@@ -1080,12 +1080,12 @@ const WIDE_FAN_IN_ROOTS: usize = 50;
 /// Every task row (live or history) of the task names `task_names`, with the
 /// index of the node of `workflow_id` that links it, if any.
 async fn task_rows_and_links(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_names: &[&str],
 ) -> Vec<(String, Option<i32>)> {
     let names: Vec<String> = task_names.iter().map(|name| (*name).to_owned()).collect();
-    sqlx::query_as(
+    sql::query_as(
         "SELECT r.task_name, n.task_index
          FROM (
              SELECT id AS task_id, task_name::text AS task_name

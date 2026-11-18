@@ -11,7 +11,6 @@
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -22,16 +21,15 @@ use super::support::{
 use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
 use crate::broker::claims::{StartMiss, StartOutcome};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, WireProxy,
-};
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOutcome};
 use crate::core::task::Execution;
 use crate::core::TaskResult;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::{
     finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
     PhaseTwoForm,
@@ -73,7 +71,7 @@ impl RunningNode {
 
 /// Starts a workflow A -> B: A is enqueued, B waits for it (Python's
 /// `_start_chain`).
-async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
+async fn start_chain(pool: &TestPool, name: &str) -> Uuid {
     let mut dependent = task_node(1, &format!("{name}_task"));
     dependent.dependencies = vec![0];
     start(
@@ -86,12 +84,12 @@ async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
 
 /// Node A and its task RUNNING under [`WORKER`], as a claim and the start
 /// write leave them (Python's `_run_node_a`).
-async fn run_node_a(pool: &PgPool, workflow_id: Uuid) -> RunningNode {
+async fn run_node_a(pool: &TestPool, workflow_id: Uuid) -> RunningNode {
     let task_id = node(pool, workflow_id, 0)
         .await
         .task_id
         .expect("node A has a task");
-    let held = sqlx::query(
+    let held = sql::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = $3,
@@ -123,7 +121,7 @@ async fn run_node_a(pool: &PgPool, workflow_id: Uuid) -> RunningNode {
         i32,
         i32,
         Option<String>,
-    ) = sqlx::query_as(
+    ) = sql::query_as(
         "SELECT task_name, queue_name, claimed_at, execution, retry_count, max_retries,
                 task_options
          FROM horsies_tasks WHERE id = $1",
@@ -164,12 +162,12 @@ fn ok_json() -> String {
 /// `claimed_at`, on a broker of `pool` (Python's `_finalize`). Returns the
 /// outcome of phase 1, or the error of the phase that failed.
 async fn finalize(
-    pool: &PgPool,
+    pool: &TestPool,
     node_a: &RunningNode,
     claimed_at: DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     finalize_on(
-        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         node_a,
         claimed_at,
     )
@@ -240,8 +238,8 @@ fn is_a_finalized_success(result: &Result<FinalizeOutcome, FinalizeError>) -> bo
 }
 
 /// (task_index, status, linked to a task) of each node (Python's `_nodes`).
-async fn nodes(pool: &PgPool, workflow_id: Uuid) -> Vec<(i32, String, bool)> {
-    sqlx::query_as(
+async fn nodes(pool: &TestPool, workflow_id: Uuid) -> Vec<(i32, String, bool)> {
+    sql::query_as(
         "SELECT task_index, status, task_id IS NOT NULL
          FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
     )
@@ -259,8 +257,8 @@ fn completed_then_enqueued() -> Vec<(i32, String, bool)> {
 }
 
 /// The phase-2 records of a task.
-async fn pending_rows(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+async fn pending_rows(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -284,7 +282,7 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
     let pool = shared_pool().await;
     let node_a = run_node_a(&pool, start_chain(&pool, "finalize_replay").await).await;
     let committed = finish_workflow_success(
-        &core_pool_for_test_pool(&pool),
+        &core_pool_for_test_url(pool.url()),
         StatementLog::Off,
         &FinishWorkflowSuccess {
             task_id: node_a.task_id(),
@@ -341,11 +339,11 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
 #[serial]
 async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
     let pool = shared_pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
     let node_a = run_node_a(&pool, start_chain(&pool, "finalize_lost_reply").await).await;
-    let proxied_broker = PostgresBroker::from_pool(proxied.clone(), crate::ClientFamily::Rust);
+    let proxied_broker = PostgresBroker::from_test_url(proxied.url(), crate::ClientFamily::Rust);
     let warm_up = {
         let (open, _write) = proxied_broker
             .core_pools_for_write()
@@ -483,7 +481,7 @@ async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
 
 /// A RUNNING workflow whose COMPLETED node links a task that [`WORKER`]
 /// claimed. Returns the workflow, the task and its claim generation.
-async fn seed_claimed_task_of_a_completed_node(pool: &PgPool) -> (Uuid, Uuid, DateTime<Utc>) {
+async fn seed_claimed_task_of_a_completed_node(pool: &TestPool) -> (Uuid, Uuid, DateTime<Utc>) {
     let workflow_id = seed_workflow(pool, &WorkflowSeed::running()).await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_node_task(pool, task_id, LiveStatus::Claimed)
@@ -500,8 +498,8 @@ async fn seed_claimed_task_of_a_completed_node(pool: &PgPool) -> (Uuid, Uuid, Da
 }
 
 /// The runner beats of a task (Python's `_beat_count`).
-async fn runner_beats(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn runner_beats(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar(
         "SELECT count(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
     )
     .bind(task_id)
@@ -511,8 +509,8 @@ async fn runner_beats(pool: &PgPool, task_id: Uuid) -> i64 {
 }
 
 /// The status of a task's live row, or `None` when it has none.
-async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
@@ -552,7 +550,7 @@ async fn a_failed_workflow_check_keeps_the_claim_and_writes_no_runner_beat() {
 /// has a task that finished phase 1 with a success: phase 2 is owed. Returns
 /// the workflow and the task.
 async fn seed_owed_phase_two(
-    pool: &PgPool,
+    pool: &TestPool,
     success_policy: Option<serde_json::Value>,
 ) -> (Uuid, Uuid) {
     let seed = match success_policy {
@@ -575,12 +573,12 @@ async fn seed_owed_phase_two(
 /// The phase-1 outcome is not at hand, so the step reads the dependents in a
 /// transaction (`PhaseTwoForm::NotKnown`).
 async fn phase_two(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     finalize_workflow_phase(
         &broker,
         &TestChildSpecs::empty(),
@@ -748,8 +746,8 @@ async fn a_phase_two_that_fails_sends_no_wake() {
 }
 
 /// Every column of node `task_index` of `workflow_id`, as JSON.
-async fn node_image(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> serde_json::Value {
-    sqlx::query_scalar(
+async fn node_image(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> serde_json::Value {
+    sql::query_scalar(
         "SELECT to_jsonb(n) FROM horsies_workflow_tasks n
          WHERE n.workflow_id = $1 AND n.task_index = $2",
     )
@@ -783,12 +781,10 @@ async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_no
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;
     let before = node_image(&db.pool, workflow_id, 0).await;
-    let upstream = database_options(&db.pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied_broker = PostgresBroker::from_pool(
-        unpinged_single_connection_pool(proxy.options(&upstream)).await,
-        crate::ClientFamily::Rust,
-    );
+    let upstream = db.pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied_broker =
+        PostgresBroker::from_test_url(&proxy.url(upstream), crate::ClientFamily::Rust);
     let mut listener = Notifications::listen(&db.pool, &[SEEDED_NODE_CHANNEL]).await;
 
     proxy.drop_reply_to_request_carrying(task_id.as_bytes());

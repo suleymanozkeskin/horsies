@@ -7,7 +7,6 @@
 //! the Python tests that it ports.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -18,6 +17,7 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::JoinType;
 use crate::core::WorkflowSpec;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::recovery::recover_workflow_tree;
 
 /// The child of the sub-workflow node: one task node.
@@ -32,7 +32,7 @@ fn child() -> WorkflowSpec {
 /// PENDING: a task node, or a sub-workflow node of [`child`]. `change` sets
 /// the stored data of node 1. Returns the workflow id.
 async fn seed_completed_root_and_dependent(
-    pool: &PgPool,
+    pool: &TestPool,
     sub_workflow: bool,
     change: impl FnOnce(NodeSeed) -> NodeSeed,
 ) -> Uuid {
@@ -61,15 +61,15 @@ async fn seed_completed_root_and_dependent(
 }
 
 /// The tree recovery pass of `workflow_id`: case 0 promotes node 1.
-async fn recover(pool: &PgPool, workflow_id: Uuid, child_specs: &TestChildSpecs) {
+async fn recover(pool: &TestPool, workflow_id: Uuid, child_specs: &TestChildSpecs) {
     let _report = recover_workflow_tree(&broker(pool), child_specs, workflow_id)
         .await
         .expect("the tree recovery pass");
 }
 
 /// Child workflows of `workflow_id`.
-async fn child_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
+async fn child_count(pool: &TestPool, workflow_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
         .bind(workflow_id)
         .fetch_one(pool)
         .await
@@ -79,7 +79,7 @@ async fn child_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
 /// Node 1 is FAILED with `WORKER_SERIALIZATION_ERROR`, Python's `message`,
 /// and the workflow id and the node in `data` (Python `_fail_enqueued_task`,
 /// `node_error`); it has no task row, and no child workflow was written.
-async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str, message: &str) {
+async fn assert_node_1_failed_alone(pool: &TestPool, workflow_id: Uuid, case: &str, message: &str) {
     let row = node(pool, workflow_id, 1).await;
     assert_eq!(row.status, "FAILED", "{case}");
     assert_eq!(row.task_id, None, "{case}");

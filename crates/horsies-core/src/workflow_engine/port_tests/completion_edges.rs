@@ -8,7 +8,6 @@
 //! `tests/integration/test_workflow_sql_equivalence.py`.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -18,15 +17,16 @@ use super::support::{
 };
 use crate::core::{SubWorkflowSummary, TaskError, TaskResult, WorkflowStatus};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestListener, TestPool};
 use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
 use crate::workflow_engine::steps::ParentAdvance;
 
-async fn complete(pool: &PgPool, workflow_id: Uuid) {
+async fn complete(pool: &TestPool, workflow_id: Uuid) {
     complete_workflow(pool, workflow_id, &TestChildSpecs::empty()).await;
 }
 
 /// The summary stored on node 0 of `parent_id`.
-async fn parent_summary(pool: &PgPool, parent_id: Uuid) -> SubWorkflowSummary {
+async fn parent_summary(pool: &TestPool, parent_id: Uuid) -> SubWorkflowSummary {
     let text = node(pool, parent_id, 0)
         .await
         .sub_workflow_summary
@@ -35,7 +35,7 @@ async fn parent_summary(pool: &PgPool, parent_id: Uuid) -> SubWorkflowSummary {
 }
 
 /// A RUNNING parent with node 0 linked to `child`, and its child row.
-async fn seed_parent_and_child(pool: &PgPool, child: WorkflowSeed) -> (Uuid, Uuid) {
+async fn seed_parent_and_child(pool: &TestPool, child: WorkflowSeed) -> (Uuid, Uuid) {
     let parent_id = seed_workflow(pool, &WorkflowSeed::running()).await;
     let mut child = child;
     child.parent = Some(ParentLink::of_root(parent_id, 0));
@@ -310,7 +310,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
             .result(serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the output")),
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NOW() WHERE id = $1",
     )
     .bind(parent_id)
@@ -325,7 +325,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
     assert!(written.completed_at.is_some());
     assert_eq!(workflow(&pool, parent_id).await.status, "CANCELLED");
 
-    sqlx::query("UPDATE horsies_workflows SET result = $2 WHERE id = $1")
+    sql::query("UPDATE horsies_workflows SET result = $2 WHERE id = $1")
         .bind(child_id)
         .bind(serde_json::to_string(&ok(serde_json::json!(2))).expect("encode the output"))
         .execute(&pool)
@@ -429,7 +429,7 @@ async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() 
 #[serial]
 async fn finalization_preserves_explicit_and_default_outputs() {
     let pool = shared_pool().await;
-    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+    let mut listener = TestListener::connect_with(&pool)
         .await
         .expect("connect the listener");
     listener
@@ -642,7 +642,7 @@ async fn a_completion_check_does_not_resurrect_a_cancelled_workflow() {
             .result(serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the output")),
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NULL WHERE id = $1",
     )
     .bind(workflow_id)
@@ -693,7 +693,7 @@ async fn a_child_end_under_a_paused_parent_writes_the_node_and_promotes_nothing(
     )
     .await;
     seed_node(&pool, &NodeSeed::task(parent_id, 1, "PENDING").deps(&[0])).await;
-    sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+    sql::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
         .bind(parent_id)
         .execute(&pool)
         .await
@@ -787,7 +787,7 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
         &NodeSeed::task(workflow_id, 2, "COMPLETED").result(two.clone()),
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_tasks SET node_id = NULL WHERE workflow_id = $1 AND task_index = 0",
     )
     .bind(workflow_id)
@@ -879,7 +879,7 @@ async fn a_parent_advance_of_a_workflow_with_no_parent_is_not_a_child() {
     )
     .await;
 
-    let disposition: String = sqlx::query_scalar(
+    let disposition: String = sql::query_scalar(
         "SELECT disposition FROM horsies_workflow_child_finish($1) WHERE row_kind = 'OUTCOME'",
     )
     .bind(root)

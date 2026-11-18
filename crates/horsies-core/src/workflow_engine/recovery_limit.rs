@@ -620,16 +620,16 @@ impl<F: Future> Future for CatchPanic<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use serial_test::serial;
-    use sqlx::PgPool;
 
     /// A broker on the database of `pool`: the failure writes run on its core pools.
-    fn broker_of(pool: &PgPool) -> PostgresBroker {
-        PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
+    fn broker_of(pool: &TestPool) -> PostgresBroker {
+        PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
     }
 
-    fn lazy_pool() -> PgPool {
-        sqlx::postgres::PgPoolOptions::new()
+    fn lazy_pool() -> TestPool {
+        TestPoolOptions::new()
             .connect_lazy("postgresql://postgres@localhost/postgres")
             .unwrap()
     }
@@ -638,8 +638,8 @@ mod tests {
         CandidateFailure::Error(WorkflowError::Validation(text.to_owned()))
     }
 
-    async fn seed_workflow(pool: &PgPool, workflow_id: Uuid, status: &str, error: Option<&str>) {
-        sqlx::query(
+    async fn seed_workflow(pool: &TestPool, workflow_id: Uuid, status: &str, error: Option<&str>) {
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, definition_key, status, on_error, error, depth,
                  root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -655,12 +655,12 @@ mod tests {
         .unwrap();
     }
 
-    async fn seed_node(pool: &PgPool, workflow_id: Uuid, task_index: i32, status: &str) {
+    async fn seed_node(pool: &TestPool, workflow_id: Uuid, task_index: i32, status: &str) {
         let task_id = match status {
             "ENQUEUED" | "RUNNING" => Some(Uuid::new_v4()),
             _ => None,
         };
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                  downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
@@ -681,8 +681,8 @@ mod tests {
         .unwrap();
     }
 
-    async fn failed_passes(pool: &PgPool, workflow_id: Uuid) -> Option<i32> {
-        sqlx::query_scalar(
+    async fn failed_passes(pool: &TestPool, workflow_id: Uuid) -> Option<i32> {
+        sql::query_scalar(
             "SELECT failed_passes FROM horsies_workflow_recovery_failures WHERE workflow_id = $1",
         )
         .bind(workflow_id)
@@ -692,10 +692,10 @@ mod tests {
     }
 
     async fn workflow_status_and_error(
-        pool: &PgPool,
+        pool: &TestPool,
         workflow_id: Uuid,
     ) -> (String, Option<String>) {
-        sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
+        sql::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .fetch_one(pool)
             .await
@@ -703,11 +703,11 @@ mod tests {
     }
 
     async fn node_state(
-        pool: &PgPool,
+        pool: &TestPool,
         workflow_id: Uuid,
         task_index: i32,
     ) -> (String, Option<String>, bool) {
-        sqlx::query_as(
+        sql::query_as(
             "SELECT status, result, completed_at IS NOT NULL
              FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
         )
@@ -959,7 +959,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_workflow_counts_once_per_pass() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_node(&pool, workflow_id, 0, "PENDING").await;
@@ -992,7 +992,7 @@ mod tests {
         assert_eq!(record, FailureRecord::Counted);
         assert_eq!(failed_passes(&pool, workflow_id).await, Some(2));
         let (last_case, last_task_index, last_error_type): (String, Option<i32>, String) =
-            sqlx::query_as(
+            sql::query_as(
                 "SELECT last_case, last_task_index, last_error_type
                  FROM horsies_workflow_recovery_failures WHERE workflow_id = $1",
             )
@@ -1013,7 +1013,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_limit_fails_a_workflow_with_no_live_node() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_node(&pool, workflow_id, 0, "READY").await;
@@ -1078,7 +1078,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_limit_keeps_a_stored_first_error_and_leaves_a_live_node_to_finish() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let first_error =
             serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
@@ -1124,7 +1124,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_workflow_that_is_not_running_refuses_the_limit_and_keeps_the_count() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "PAUSED", None).await;
         seed_node(&pool, workflow_id, 0, "PENDING").await;
@@ -1155,7 +1155,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_panicking_candidate_counts_toward_the_bound() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_node(&pool, workflow_id, 0, "PENDING").await;
@@ -1172,7 +1172,7 @@ mod tests {
             outcome,
             CandidateOutcome::Failed(FailureRecord::Counted)
         ));
-        let last_error_type: String = sqlx::query_scalar(
+        let last_error_type: String = sql::query_scalar(
             "SELECT last_error_type FROM horsies_workflow_recovery_failures WHERE workflow_id = $1",
         )
         .bind(workflow_id)
@@ -1185,7 +1185,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_over_limit_count_takes_running_workflows_only() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let before = count_over_failure_limit(&broker_of(&pool), 1_000)
             .await
             .unwrap();
@@ -1194,7 +1194,7 @@ mod tests {
         seed_workflow(&pool, running, "RUNNING", None).await;
         seed_workflow(&pool, paused, "PAUSED", None).await;
         for workflow_id in [running, paused] {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_workflow_recovery_failures (
                      workflow_id, failed_passes, last_pass_id, first_failed_at,
                      last_failed_at, last_case, last_task_index, last_error_type
