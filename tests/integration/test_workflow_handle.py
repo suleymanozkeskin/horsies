@@ -1406,22 +1406,25 @@ class TestUnknownStoredWorkflowStatus:
 def _assert_failed_connect(
     error: object, label: str, subject: str, workflow_id: str,
 ) -> None:
-    """A failed connect of a handle operation, as the core builds it:
+    """A handle operation whose server refuses the connection, as the core
+    builds it. The core pool opens its connection at the first statement, so
+    the statement fails and its workflow error wraps the broker error:
     ``HandleDbOperationFailed`` with Python's message (the operation's label,
-    the workflow id and the cause's text), retryable, and the core's class of
-    the cause with the operation as its subject and the cause's own text."""
+    the workflow id and the workflow error's text, ``broker error: ...``),
+    retryable, and the core's class of the cause with the operation as its
+    subject and the broker error's own text."""
     assert type(error) is HandleDbOperationFailed
     assert error.workflow_id == workflow_id
     assert error.retryable is True
     prefix = f'{label} failed for workflow {workflow_id}: '
     assert error.message.startswith(prefix)
     cause_text = error.message.removeprefix(prefix)
-    assert cause_text != ''
     assert type(error.exception) is CoreConnectionError
     assert error.exception.subject == subject
-    assert error.exception.message == cause_text
+    assert error.exception.message != ''
+    assert cause_text == f'broker error: {error.exception.message}'
     assert error.exception.retryable is True
-    assert str(error.exception) == f'{subject}: {cause_text}'
+    assert str(error.exception) == f'{subject}: {error.exception.message}'
 
 
 @pytest.mark.integration
@@ -1438,7 +1441,8 @@ class TestWorkflowHandleInfraErrors:
     ) -> WorkflowHandle[Any]:
         """A workflow started on ``broker``, and a handle of it on a broker
         whose core cannot reach the database. The handle's reads and writes
-        run in the core; each fails at the connect."""
+        run in the core; each fails at its first statement, where the core
+        pool opens its connection."""
         task_a = make_simple_task(app, f'{name}_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a])
