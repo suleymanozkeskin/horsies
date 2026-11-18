@@ -519,8 +519,8 @@ The process-wide starts have the blocking functions
   `ReadError::AsyncContext`, a `BrokerOperationError` with
   `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
   `WorkflowStartErrorCode::AsyncContext` (with the `workflow_id` of the
-  start; `retry_start` refuses it, so call `start_with_id` with that id
-  from async code), `HandleErrorCode::AsyncContext`, or
+  start; `retry_start(&error).await` completes the same start from async
+  code), `HandleErrorCode::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
   task, so a blocking send or workflow start works there. A result wait in

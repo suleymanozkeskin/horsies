@@ -12,9 +12,8 @@ class WorkflowStartErrorCode(str, Enum):
     """Categorized workflow start failure codes.
 
     The members are Python's, in Python's order
-    (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
-    `EVENT_LOOP_LIMIT` and `ASYNC_CONTEXT` are produced by the Python client
-    only.
+    (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`
+    and `EVENT_LOOP_LIMIT` are produced by the Python client only.
     """
 
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
@@ -41,6 +40,6 @@ class WorkflowStartErrorCode(str, Enum):
     """
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    """A sync start was called on a thread that runs an event loop; its wait would stall that loop, so
-    nothing was written. Python client only.
+    """A sync or blocking start was called on a thread that runs an event loop or a tokio
+    runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
     """

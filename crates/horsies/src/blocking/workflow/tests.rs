@@ -156,6 +156,21 @@ async fn a_blocking_retry_checks_its_error_before_the_thread() {
     assert_eq!(retried.workflow_id, Some(workflow_id));
 }
 
+/// Python's `_validate_start_retry` takes an `ASYNC_CONTEXT` error: the
+/// retry passes the error check and, on a runtime thread, answers
+/// `ASYNC_CONTEXT` with the id of the error, not `VALIDATION_FAILED`.
+#[tokio::test]
+async fn a_blocking_retry_takes_an_async_context_error_of_its_workflow() {
+    let mut app = app();
+    let function = app.register_workflow_definition::<Nightly>().unwrap();
+    let workflow_id = Uuid::from_u128(12);
+    let earlier = function.blocking().start_with_id(workflow_id).unwrap_err();
+    assert_async_context(&earlier, "blocking_nightly");
+    let retried = function.blocking().retry_start(&earlier).unwrap_err();
+    assert_async_context(&retried, "blocking_nightly");
+    assert_eq!(retried.workflow_id, Some(workflow_id));
+}
+
 #[tokio::test]
 async fn a_blocking_template_start_on_a_runtime_thread_runs_no_build() {
     let mut app = app();

@@ -161,8 +161,9 @@ impl WorkflowStarter {
     /// `retry_start`).
     ///
     /// Errors: `VALIDATION_FAILED` for an error that is not
-    /// `ENQUEUE_FAILED`, an error of another workflow name, and an error
-    /// without a workflow id; else the errors of [`Self::start`].
+    /// `ENQUEUE_FAILED` or `ASYNC_CONTEXT`, an error of another workflow
+    /// name, and an error without a workflow id; else the errors of
+    /// [`Self::start`].
     pub(crate) async fn retry_start<T: 'static>(
         &self,
         spec: &WorkflowSpec,
