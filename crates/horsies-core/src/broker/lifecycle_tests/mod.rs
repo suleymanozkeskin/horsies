@@ -7,12 +7,15 @@
 
 mod autocommit_outcomes;
 mod claim_per_class;
+mod claim_plans;
 mod claim_start_release;
 mod failed_attempt_finish;
 mod failed_attempt_round_trips;
+mod finalize_batch_rows;
 mod finalize_status_guard;
 mod fresh_schema_rules;
 mod lifecycle_regressions;
+mod one_statement_writes;
 mod soft_cap_start_check;
 mod stale_recovery_functions;
 mod status_events;
