@@ -1003,6 +1003,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "bytes",
  "chrono",
  "chrono-tz",
  "deadpool",
@@ -1012,6 +1013,7 @@ dependencies = [
  "futures-core",
  "gethostname",
  "horsies-macros",
+ "http",
  "http-body-util",
  "include_dir",
  "libc",
@@ -1076,6 +1078,7 @@ dependencies = [
  "horsies",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

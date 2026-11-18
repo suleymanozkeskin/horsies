@@ -210,6 +210,56 @@ mod tests {
     use horsies_core::{BrokerError, ChildSpecUnavailable};
 
     use super::*;
+    use crate::workflow::node::tests::task_node;
+    use crate::workflow::{
+        SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    };
+    use crate::{AppConfig, HorsiesError};
+
+    /// The child of the starter test, registered after the starter is made.
+    struct LateChild;
+
+    impl WorkflowDefinition for LateChild {
+        type Output = u32;
+        type Params = ();
+
+        fn name() -> &'static str {
+            "late_child"
+        }
+
+        fn definition_key() -> &'static str {
+            "tests.start.late_child.v1"
+        }
+
+        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+            let tick = builder.task(task_node::<u32, ()>("tick"));
+            Ok(WorkflowDefConfig::new().output(tick))
+        }
+    }
+
+    /// A starter, and each clone of it, reads the registry of its app as the
+    /// registry grows: a spec whose child registers after the starter was
+    /// made passes the check of the start. No I/O.
+    #[test]
+    fn a_starter_made_before_a_registration_checks_against_it() {
+        let mut app = Horsies::new(AppConfig::for_database_url(
+            "postgresql://localhost/horsies",
+        ))
+        .unwrap();
+        let starter = WorkflowStarter::of(&app);
+        let clone = starter.clone();
+        let mut builder = WorkflowSpecBuilder::new("late_parent");
+        builder.definition_key("tests.start.late_parent.v1");
+        builder.sub_workflow(LateChild::node(SubWorkflowParams::NotGiven).unwrap());
+        let spec = builder.build().unwrap();
+        assert!(
+            starter.workflows.prepare(&spec).is_err(),
+            "the child is not registered yet"
+        );
+        let _child = app.register_workflow_definition::<LateChild>().unwrap();
+        assert!(starter.workflows.prepare(&spec).is_ok());
+        assert!(clone.workflows.prepare(&spec).is_ok());
+    }
 
     /// A failed start takes the code of its class: a spec that the core
     /// refuses, or a value of it that does not encode, is

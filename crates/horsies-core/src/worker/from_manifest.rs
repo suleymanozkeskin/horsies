@@ -1,4 +1,4 @@
-//! A worker from a worker manifest: the inputs of [`Worker::new`] resolved
+//! A worker from a worker manifest: the inputs of [`Worker::of_child_specs`] resolved
 //! from one [`WorkerManifest`] (Python `cli.py`, `worker_command` and
 //! `run_worker`: `WorkerConfig`, the app's config sections, the profile, the
 //! child program).
@@ -41,7 +41,7 @@ use crate::worker_manifest::{
 };
 use crate::workflow_engine::child_spec::ChildSpecs;
 
-/// Everything [`Worker::new`] takes but the broker and where the child
+/// Everything [`Worker::of_child_specs`] takes but the broker and where the child
 /// specs come from, resolved from a worker manifest.
 #[derive(Clone)]
 pub struct WorkerPlan {
@@ -106,14 +106,13 @@ impl Worker {
     /// of the start records `family` in a new database, and the family step
     /// refuses a database of the other family. The workflow steps of the
     /// worker (the parent advances of phase 2, workflow recovery, phase-2
-    /// recovery) build each sub-workflow child with `child_specs`: the
-    /// registered definitions of the Rust client (an
-    /// `Arc<WorkflowSpecRegistry>`), or the child spec source of a client that
-    /// builds each child in its own language (the `build_with` of the Python
+    /// recovery) build each sub-workflow child with `child_specs`: the child
+    /// spec source of the client, which builds each child in its own
+    /// language (the `build_with` of the Python client, the registry of the Rust
     /// client).
     ///
     /// Errors: [`WorkerError::Broker`] when the broker config or the core
-    /// handle is refused; [`WorkerError::Config`] as [`Worker::new`].
+    /// handle is refused; [`WorkerError::Config`] as [`Worker::of_child_specs`].
     pub async fn from_plan(
         plan: WorkerPlan,
         child_specs: impl Into<ChildSpecs>,

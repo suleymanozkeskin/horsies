@@ -44,6 +44,7 @@ from horsies.core.models.boot_failure import (
 from tests.dualrun.reference.worker_parent.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
     BOOT_FAILED_EXIT_CODE,
+    PARENT_GONE_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 )
 from horsies.core.worker.config import ChildPreload
@@ -2441,7 +2442,17 @@ class TestKillAndWait:
     ) -> None:
         """The slot gives up its bounded wait before the exit, as for a child
         stuck in the kernel. The handle still sees the exit later, so a
-        worker with stale RUNNING recovery off can write the row then."""
+        worker with stale RUNNING recovery off can write the row then.
+
+        The kill sends no signal here, as for a child that the kernel holds
+        in a system call: its SIGKILL waits. The child then ends in one way
+        only: the dispose closes its socket, and its control thread exits
+        with ``PARENT_GONE_EXIT_CODE``. That end follows the dispose, so no
+        scheduling order decides the result. With a real SIGKILL, a dispose
+        right after the kill gives either end: on macOS a SIGKILL ends the
+        process through one of its threads, and the control thread can reach
+        ``os._exit`` first when the CPUs are busy.
+        ``test_the_exit_of_the_killed_child_is_seen`` covers the SIGKILL end."""
         pool = await pool_factory()
         handle = pool.submit(_frame('hang'))
         await asyncio.wait_for(handle.assigned, 5)
@@ -2449,12 +2460,18 @@ class TestKillAndWait:
         assert child is not None
         monkeypatch.setattr(slots, 'CHILD_KILL_WAIT_S', 0.0)
 
+        def send_no_signal() -> None:
+            return None
+
+        monkeypatch.setattr(child, 'kill_group', send_no_signal)
+
         ended = await handle.kill_and_wait(0.0)
-        await child.dispose()
 
         assert ended == ChildEndUnknown(pid=child.pid)
+        assert child.killed_by_parent
+        await child.dispose()
         late = await asyncio.wait_for(handle.wait_child_exit(), OUTCOME_TIMEOUT_S)
-        assert late == KilledBySignal(signal.SIGKILL)
+        assert late == ExitedWith(PARENT_GONE_EXIT_CODE)
 
     async def test_a_finished_task_reports_the_slot_answer(
         self,

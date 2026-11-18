@@ -89,7 +89,7 @@ split:
 Producer/Worker SQL  --> database_url          --> PgBouncer transaction pool
 Worker LISTEN        --> session_database_url  --> direct/session Postgres
 Result wait LISTEN   --> session_database_url  --> direct/session Postgres
-Syce LISTEN          --> session_database_url  --> direct/session Postgres
+Web UI LISTEN        --> session_database_url  --> direct/session Postgres
 Schema setup         --> session_database_url  --> direct/session Postgres
 Partition maintenance --> session_database_url --> direct/session Postgres
 ```

@@ -260,7 +260,10 @@ impl<T> WorkflowHandle<T> {
             .await?
         {
             NodesRead::WorkflowAbsent => Err(self.not_found()),
-            NodesRead::Nodes(nodes) => nodes.into_iter().map(|node| self.node_info(node)).collect(),
+            NodesRead::Nodes(nodes) => nodes
+                .into_iter()
+                .map(|node| node_info(self.workflow_id, node))
+                .collect(),
         }
     }
 
@@ -337,48 +340,60 @@ impl<T> WorkflowHandle<T> {
             cause: horsies_core::FailureCause::PreconditionFailed,
         }
     }
+}
 
-    fn stored_data_invalid(&self, message: String) -> HandleOperationError {
-        HandleOperationError {
-            code: HandleErrorCode::StoredDataInvalid,
-            message,
-            retryable: false,
-            workflow_id: self.workflow_id,
-            cause: horsies_core::FailureCause::ContractViolation,
-        }
+/// `STORED_DATA_INVALID` of `workflow_id`, not retryable.
+fn stored_data_invalid(workflow_id: Uuid, message: String) -> HandleOperationError {
+    HandleOperationError {
+        code: HandleErrorCode::StoredDataInvalid,
+        message,
+        retryable: false,
+        workflow_id,
+        cause: horsies_core::FailureCause::ContractViolation,
     }
+}
 
-    fn node_info(&self, node: StoredNode) -> HandleResult<WorkflowNodeInfo> {
-        let status = serde_json::from_value::<WorkflowTaskStatus>(serde_json::Value::String(
-            node.status.clone(),
-        ))
-        .map_err(|_| {
-            self.stored_data_invalid(format!(
+/// One stored node of `workflow_id`, read (Python `tasks`). Pure.
+///
+/// Errors: `STORED_DATA_INVALID` for a stored status outside the node
+/// statuses, and for a stored sub-workflow summary that does not read. An
+/// empty summary text does not read: a node without a summary stores NULL.
+fn node_info(workflow_id: Uuid, node: StoredNode) -> HandleResult<WorkflowNodeInfo> {
+    let status = serde_json::from_value::<WorkflowTaskStatus>(serde_json::Value::String(
+        node.status.clone(),
+    ))
+    .map_err(|_| {
+        stored_data_invalid(
+            workflow_id,
+            format!(
                 "node {} has the stored status {:?}, which is not a node status",
                 node.task_index, node.status
-            ))
-        })?;
-        let sub_workflow_summary = match node.sub_workflow_summary.as_deref() {
-            None => None,
-            Some(text) => Some(stored_summary(text).map_err(|cause| {
-                self.stored_data_invalid(format!(
+            ),
+        )
+    })?;
+    let sub_workflow_summary = match node.sub_workflow_summary.as_deref() {
+        None => None,
+        Some(text) => Some(stored_summary(text).map_err(|cause| {
+            stored_data_invalid(
+                workflow_id,
+                format!(
                     "node {} has a stored sub-workflow summary that does not read: {cause}",
                     node.task_index
-                ))
-            })?),
-        };
-        Ok(WorkflowNodeInfo {
-            node_id: node.node_id,
-            index: node.task_index,
-            name: node.task_name,
-            status,
-            result: node.result.as_deref().map(node_result),
-            started_at: node.started_at,
-            completed_at: node.completed_at,
-            sub_workflow_id: node.sub_workflow_id,
-            sub_workflow_summary,
-        })
-    }
+                ),
+            )
+        })?),
+    };
+    Ok(WorkflowNodeInfo {
+        node_id: node.node_id,
+        index: node.task_index,
+        name: node.task_name,
+        status,
+        result: node.result.as_deref().map(node_result),
+        started_at: node.started_at,
+        completed_at: node.completed_at,
+        sub_workflow_id: node.sub_workflow_id,
+        sub_workflow_summary,
+    })
 }
 
 impl<T> WorkflowHandle<T>
@@ -519,10 +534,12 @@ where
 }
 
 /// The outcome of the outputless envelope of a COMPLETED workflow: its
-/// error, or the outcome of each node in its `results_by_id`. A node entry
-/// that is `null` or does not read is a `RESULT_DESERIALIZATION_ERROR`
-/// outcome naming the node; the other entries stay readable (Python's
-/// handle). Pure.
+/// error, or the outcome of each node in its `results_by_id` (Python's
+/// handle). `results_by_id`, `task_name_by_id` and `definition_key_by_id`
+/// are objects when present; a missing one is empty. A node entry that is
+/// `null`, has no task name, or does not read is a
+/// `RESULT_DESERIALIZATION_ERROR` outcome with the node in its message and
+/// in `data.node_id`; the other entries stay readable. Pure.
 fn outputless_outcome<T>(
     workflow_id: Uuid,
     value: serde_json::Value,
@@ -550,15 +567,30 @@ where
             "Outputless workflow envelope ok slot malformed".to_owned(),
         ));
     };
-    let Some(serde_json::Value::Object(entries)) = ok.remove("results_by_id") else {
-        return Err(unreadable(
-            "Outputless workflow envelope missing or malformed results_by_id".to_owned(),
-        ));
+    let maps = (
+        ok.remove("results_by_id"),
+        ok.remove("task_name_by_id"),
+        ok.remove("definition_key_by_id"),
+    );
+    let (entries, task_names) = match maps {
+        (
+            None | Some(serde_json::Value::Object(_)),
+            None | Some(serde_json::Value::Object(_)),
+            None | Some(serde_json::Value::Object(_)),
+        ) => (object_or_empty(maps.0), object_or_empty(maps.1)),
+        _ => {
+            return Err(unreadable(
+                "Outputless workflow envelope missing or malformed results_by_id / \
+                 task_name_by_id / definition_key_by_id"
+                    .to_owned(),
+            ))
+        }
     };
     let by_node_id = entries
         .into_iter()
         .map(|(node_id, entry)| {
-            let outcome = outputless_entry(workflow_id, &node_id, entry);
+            let named = matches!(task_names.get(&node_id), Some(serde_json::Value::String(_)));
+            let outcome = outputless_entry(workflow_id, &node_id, entry, named);
             (node_id, outcome)
         })
         .collect();
@@ -569,24 +601,39 @@ where
     }
 }
 
-/// The outcome of one entry of an outputless result. Pure.
+/// The outcome of one entry of an outputless result; `named` tells whether
+/// `task_name_by_id` names its task. Pure.
 fn outputless_entry(
     workflow_id: Uuid,
     node_id: &str,
     entry: serde_json::Value,
+    named: bool,
 ) -> TaskOutcome<serde_json::Value, UserCode> {
     let missing = |cause: String| {
-        TaskOutcome::Failed(TaskError::library(
-            OperationalErrorCode::ResultDeserializationError,
-            format!("Outputless workflow {workflow_id} node {node_id:?} {cause}"),
-        ))
+        TaskOutcome::Failed(
+            TaskError::library(
+                OperationalErrorCode::ResultDeserializationError,
+                format!("Outputless workflow {workflow_id} node {node_id:?} {cause}"),
+            )
+            .with_data(serde_json::json!({ "node_id": node_id })),
+        )
     };
-    match entry {
-        serde_json::Value::Null => missing("missing payload".to_owned()),
-        entry => serde_json::from_value::<TaskOutcome<serde_json::Value, UserCode>>(entry)
+    match (entry, named) {
+        (serde_json::Value::Null, _) | (_, false) => {
+            missing("missing payload or task name".to_owned())
+        }
+        (entry, true) => serde_json::from_value::<TaskOutcome<serde_json::Value, UserCode>>(entry)
             .unwrap_or_else(|error| {
                 missing(format!("does not read: {}", value_free_decode_text(&error)))
             }),
+    }
+}
+
+/// The members of an object value; a missing value has none. Pure.
+fn object_or_empty(value: Option<serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        Some(serde_json::Value::Object(members)) => members,
+        Some(_) | None => serde_json::Map::new(),
     }
 }
 

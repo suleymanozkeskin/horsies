@@ -634,11 +634,17 @@ class TestChildOutputParse:
     def test_outputless_envelope(self) -> None:
         assert _parse_child_output(OUTPUTLESS_RESULT_TEXT) == _ChildOutputless()
 
-    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
-    def test_no_text(self, stored: str | None) -> None:
-        parsed = _parse_child_output(stored)
+    def test_no_text(self) -> None:
+        parsed = _parse_child_output(None)
 
-        assert parsed == _ChildOutputUnreadable(cause='the result is NULL or empty')
+        assert parsed == _ChildOutputUnreadable(cause='the result is NULL')
+
+    def test_an_empty_text_is_a_text_that_does_not_parse(self) -> None:
+        parsed = _parse_child_output('')
+
+        assert parsed == _ChildOutputUnreadable(
+            cause='not JSON: JSON parse failed: the text is empty',
+        )
 
     @pytest.mark.parametrize(
         'stored', UNREADABLE_TEXTS.values(), ids=UNREADABLE_TEXTS.keys(),

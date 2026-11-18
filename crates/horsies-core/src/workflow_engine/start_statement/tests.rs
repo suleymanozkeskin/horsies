@@ -35,7 +35,6 @@ fn task_node(index: usize, dependencies: Vec<usize>) -> AnyNode {
         dependencies,
         args_from: HashMap::new(),
         workflow_ctx_from: None,
-        workflow_ctx_from_refs: None,
         queue: Some("default".to_owned()),
         priority: Some(100),
         allow_failed_deps: false,
@@ -85,11 +84,14 @@ fn children_with_child() -> TestChildSpecs {
 }
 
 /// A sub-workflow root at `index` whose child is the one under
-/// [`CHILD_KEY`], with the input `null` and no params.
+/// [`CHILD_KEY`], with no params: its stored input is `{}`, as Python and
+/// the Rust client store a node that gives no params. Python refuses a
+/// stored `null` (`Corrupt kwargs JSON for subworkflow task <index>`,
+/// [`merged_child_input`]).
 fn subworkflow_root(index: usize) -> AnyNode {
     AnyNode {
         task_name: "start_statement_child".to_owned(),
-        input_json: "null".to_owned(),
+        input_json: "{}".to_owned(),
         queue: None,
         priority: None,
         node_id: None,
@@ -252,6 +254,26 @@ fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
     assert_eq!(
         error.data,
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 0}))
+    );
+}
+
+/// Params that the client's params type does not decode as a whole:
+/// `WORKFLOW_ENQUEUE_FAILED` with Python's prefix and suffix around the
+/// decode's text, cut at 200 characters, with no exception class; the
+/// workflow id and the node in `data`.
+#[test]
+fn a_params_decode_failure_keeps_the_decode_text_without_a_class() {
+    let workflow_id = Uuid::new_v4();
+    let decode_text = format!(".: missing field `n` {}", "x".repeat(300));
+    let error = params_decode_failed_error(workflow_id, "parent", 2, &decode_text);
+    let kept: String = decode_text.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
+    let expected = format!("Subworkflow build failed: {kept} (workflow parent:2)");
+
+    assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
+    assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 2}))
     );
 }
 

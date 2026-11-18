@@ -842,7 +842,8 @@ impl<'a> CheckedSend<'a> {
     /// both `enqueued_at` and `enqueue_delay_seconds`; a `sent_at` in the
     /// future of a send that starts now; an input that the rules of a user
     /// value refuse (`check_sent_input`); options that do not read by the
-    /// strict rule, or whose retry limit does not fit; a `sent_at` with no
+    /// strict rule, that hold an integer outside `i64::MIN` to `u64::MAX`,
+    /// or whose retry limit does not fit; a `sent_at` with no
     /// whole-microsecond form; and the facts of the row
     /// (`prepare_enqueue_facts`): the strict JSON rule, the execution
     /// class, the command fingerprint and the scope of the idempotency key.
@@ -3109,7 +3110,7 @@ fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i3
 // Result wait
 // ---------------------------------------------------------------------------
 
-/// Re-poll interval of the workflow result wait (`get_workflow_result`),
+/// Re-poll interval of the workflow result wait (`wait_workflow_end`),
 /// bounding each `subscription.recv()` so a NOTIFY lost during a listener
 /// reconnect is recovered by a fresh terminal-status poll instead of hanging
 /// the caller forever.

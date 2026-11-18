@@ -254,9 +254,8 @@ impl OwedChildStarts {
 /// builds it. Does no I/O; it runs the child's builder.
 ///
 /// Errors: [`WorkflowError::Serialization`] for a value that does not
-/// encode; [`WorkflowError::Validation`] for a stored input with a number
-/// that the `args_from` merge would round, and for a child
-/// spec that the tree arguments refuse (as [`child_tree_arguments`]);
+/// encode; [`WorkflowError::Validation`] for a child spec that the tree
+/// arguments refuse (as [`child_tree_arguments`]);
 /// [`WorkflowError::ChildSpecSource`] when the client's source gave no
 /// answer.
 pub(crate) async fn child_start_kind(

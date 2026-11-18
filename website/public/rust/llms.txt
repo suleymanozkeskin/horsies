@@ -52,7 +52,6 @@ The Python client and the Rust client run on one core (horsies-core). Behaviour 
 - Worker & Database Health -> /horsies/monitoring/worker-health/
 - Web UI Overview -> /horsies/monitoring/web-ui-overview/
 - Action Semantics -> /horsies/monitoring/action-semantics/
-- Syce Overview -> /horsies/monitoring/syce-overview/
 - Database Schema -> /horsies/internals/database-schema/
 - Operational Indexes -> /horsies/internals/operational-indexes/
 - Performance -> /horsies/internals/performance/

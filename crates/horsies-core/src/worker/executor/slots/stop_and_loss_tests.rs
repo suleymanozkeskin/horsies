@@ -16,18 +16,17 @@ use uuid::Uuid;
 
 use super::scripted::{
     answer_of, boot, ended, exit_at_stop, input, isolated_config, isolated_init, reported,
-    result_frame, run_frame, send, serving, shell, start_isolated, submit_isolated, take, task,
-    until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT, WORKER_ID,
+    result_frame, run_frame, send, serving, shell, start_isolated, submit_isolated, take,
+    take_init, task, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT, WORKER_ID,
 };
 use super::seat_runs::{LossSight, RunStopReport, RunWork, SeatRun, SeatRuns};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::worker::executor::protocol::{
-    CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ParentFrame, ProcessId, RssReading,
-    RunRef, SeatEnd, SharedResultFrame, TaskTimeoutMs,
+    CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ProcessId, RssReading, RunRef,
+    SeatEnd, SharedResultFrame, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause, PartialFrame, Spawner};
 
@@ -132,7 +131,6 @@ fn unreachable_writer() -> OutcomeWriter {
         crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }
@@ -237,7 +235,6 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
         crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     );
     let claimed = ClaimedTask {
@@ -285,7 +282,7 @@ async fn a_failed_start_hook_of_a_replacement_fails_the_pool_with_no_restart_loo
         take_run = take(&run_frame(&first)),
         result = send(&[result_frame(&first, 1)]),
         stop = exit_at_stop(),
-        take_init = take(&ParentFrame::Init(init.clone())),
+        take_init = take_init(),
     );
     let spawner = Spawner::start().unwrap();
     let config = IsolatedPoolConfig {

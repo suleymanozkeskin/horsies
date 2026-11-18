@@ -1,10 +1,5 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-// Test modules derive `WorkflowInput` from horsies-macros, a dev-dependency.
-// The derive output names `horsies::InputField` and `horsies::__private`.
-#[cfg(test)]
-extern crate self as horsies;
-
 // `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
 // and `#[derive(horsies_macros::ManifestSchema)]` names
 // `::horsies_core::manifest_schema`; this crate reaches both through its own
@@ -12,9 +7,8 @@ extern crate self as horsies;
 extern crate self as horsies_core;
 
 // Internal modules (merged from formerly separate crates).
-// `core` is `pub` (rather than `pub(crate)`) because `#[macro_export]` macros
-// in `core::task::macros` use `$crate::core::…` paths that must be
-// resolvable when the macro is expanded in downstream crates.
+// `core` is `pub` (rather than `pub(crate)`) because the clients name some of
+// its items by module path (`horsies_core::core::…`).
 pub(crate) mod broker;
 pub mod catalog;
 #[doc(hidden)]
@@ -29,6 +23,8 @@ pub mod monitoring;
 pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
+mod sql_tests;
+#[cfg(test)]
 mod stored_form_vectors;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -42,34 +38,26 @@ pub(crate) mod workflow_engine;
 // Public re-exports
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-pub(crate) use horsies_macros::WorkflowInput;
-
 // core re-exports
-pub use crate::core::BuilderHookName;
 pub use crate::core::RegisteredTask;
-pub use crate::core::SpecBuildError;
 pub use crate::core::{
-    mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
-    BuiltInTaskCode, CancelGraceMs, CancelGraceOutOfRange, ContractCode, CronEnumTerm,
-    CronNumericTerm, CronOrdinal, CronSchedule, CustomQueueConfig, CustomQueueConfigError,
-    DailySchedule, DaySelector, EnqueueRetention, ErrorCategory, ErrorCode, Execution,
-    ExecutionClass, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule,
-    InputField, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
-    OperationalErrorCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
+    mask_database_url, AnyNode, AppConfigError, BackoffStrategy, BuiltInTaskCode, CancelGraceMs,
+    CancelGraceOutOfRange, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
+    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
+    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperationError,
+    HandleResult, HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey,
+    OnError, OperationalErrorCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
     PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
-    RetentionChoice, RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
-    RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn,
-    SubWorkflowFailure, SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
+    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
+    SchedulePattern, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
     SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
-    TaskInfo, TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
-    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
-    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
-    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode, UserCodeRefused,
+    ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
+    WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
+    WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
+    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
@@ -169,8 +157,8 @@ pub use crate::worker::{
     cli::LogLevel,
     config::WorkerConfig,
     scheduler::service::{
-        spawn_scheduler, ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted,
-        SchedulerStop, SchedulerTickError,
+        ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted, SchedulerStop,
+        SchedulerTickError,
     },
     worker::{OnStarted, Worker, WorkerStop},
     WorkerError,
@@ -219,7 +207,6 @@ pub use crate::core::history::rerun::{
     decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRefusal,
     RerunRowError, RerunWrite, RerunWriteOutcome,
 };
-pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 // The child spec source of a client that keeps its workflow DSL in its own
 // language, and the spec data it sends.
 pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
@@ -235,8 +222,8 @@ pub use crate::workflow_engine::child_spec::{
 pub use crate::workflow_engine::args_merge::ChildBuildInput;
 pub use crate::workflow_engine::start::ChildSpecError;
 pub use crate::workflow_engine::start_statement::{
-    build_failed_error, merged_child_input, node_failure_result, params_refused_error,
-    subworkflow_load_failed_error, NodeInput, RefusedMember,
+    build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
+    params_refused_error, subworkflow_load_failed_error, NodeInput, RefusedMember,
 };
 
 pub use crate::workflow_engine::engine::{
@@ -245,12 +232,11 @@ pub use crate::workflow_engine::engine::{
 pub use crate::workflow_engine::error::WorkflowError;
 // the cause of a failed operation, which a client names to its user
 pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
-pub use crate::workflow_engine::info::WorkflowTaskInfo;
-pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
+pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
-    get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
-    TerminalErrorStatus, WorkflowEnd, WorkflowWait,
+    NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus, WorkflowEnd,
+    WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 pub use crate::workflow_engine::recovery::{
@@ -259,12 +245,3 @@ pub use crate::workflow_engine::recovery::{
 pub use crate::workflow_engine::spec_data::{
     parse_workflow_spec_data, SpecDataRefused, WorkflowSpecData, WORKFLOW_SPEC_DATA_VERSION,
 };
-pub use crate::workflow_engine::start::{retry_start, start_workflow, start_workflow_with_retry};
-
-#[cfg(test)]
-#[doc(hidden)]
-pub(crate) mod __private {
-    pub const fn input_field<I, F>(name: &'static str) -> crate::InputField<I, F> {
-        crate::InputField::raw(name)
-    }
-}

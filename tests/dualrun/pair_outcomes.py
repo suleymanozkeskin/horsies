@@ -26,11 +26,11 @@ from tests.dualrun.values import RunWindow
 
 @dataclass(frozen=True, slots=True)
 class PairKey:
-    """A pair: the test's node id without parameters, and the index of each
-    parameter other than ``implementation``."""
+    """A pair: the node id of its cases without the id of ``implementation``,
+    for example ``tests/integration/test_x.py::test_y[same command]`` for
+    ``test_y[python-same command]`` and ``test_y[core-same command]``."""
 
-    base_node_id: str
-    parameter_indices: tuple[tuple[str, int], ...]
+    case_name: str
 
 
 @dataclass(frozen=True, slots=True)

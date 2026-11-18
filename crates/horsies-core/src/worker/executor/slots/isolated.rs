@@ -172,9 +172,7 @@ impl TaskAnswer {
         let answer = self.answer.take()?;
         let seen_end = match &self.returned {
             IsolatedReturn::Seen(returned) => returned.clone(),
-            IsolatedReturn::NotSeen => AttemptEnd::Crashed {
-                reason: FailureDetail::cut(&lost.to_string()),
-            },
+            IsolatedReturn::NotSeen => AttemptEnd::of_lost_child(lost),
         };
         Some((answer, seen_end))
     }
@@ -547,9 +545,7 @@ async fn end_after_kill(
 
 /// A lost child: the crash path once its exit is seen.
 async fn end_of_loss(shared: &PoolShared, channel: &ChildChannel, lost: ChildLost) -> AttemptEnd {
-    let crashed = AttemptEnd::Crashed {
-        reason: FailureDetail::cut(&lost.to_string()),
-    };
+    let crashed = AttemptEnd::of_lost_child(&lost);
     end_once_seen(shared, channel, lost, crashed).await
 }
 

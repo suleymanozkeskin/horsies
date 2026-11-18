@@ -11,9 +11,10 @@ cannot be cancelled: at ``timeout_ms`` the child reports the deadline with
 ``DeadlineFiredFrame``, and the run goes on. The parent then places no new
 run on the child, and kills it when no run in it has time left. The end of a
 run is fixed when its task returns: ``SeatTimedOut`` after a deadline that
-fired, whatever the task returned, else ``SeatFinished``. A run whose task
-returned has no deadline left. A ``SeatRefusal`` runs no task code and has no
-deadline.
+fired, whatever the task returned, else ``SeatFinished``: a task that
+returns at or past its deadline before the deadline thread fired it keeps
+what it returned. A run whose task returned has no deadline left. A
+``SeatRefusal`` runs no task code and has no deadline.
 
 A seat thread does not start the task of a run whose deadline passed:
 right before the RUNNING update it asks the table (``start_check``) for the
@@ -356,11 +357,20 @@ class ThreadRunTable:
         its seat writes the finalizing marker (``_marker_at_return``).
         Called once per run, by its seat thread.
 
-        Fires every deadline that is due first: a start that the core refused
-        at the deadline (``DeadlineBeforeStart``) can return before the
-        deadline thread reached that deadline."""
+        A task that returned (``SetRunning``, ``StoppedBeforeRunning``)
+        fires no deadline: a return at or past a deadline that the deadline
+        thread has not fired keeps what the task returned, with no marker.
+        A start that the core refused at the deadline (``DeadlineBeforeStart``)
+        fires every deadline that is due first: the core can refuse it before
+        the deadline thread reached that deadline."""
         with self._lock:
-            _ = self._fire_due()
+            match returned:
+                case DeadlineBeforeStart():
+                    _ = self._fire_due()
+                case SetRunning() | StoppedBeforeRunning():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
             run = self._runs[dispatch]
             end = _end_at_return(run, returned)
             run.state = _Returned(end)

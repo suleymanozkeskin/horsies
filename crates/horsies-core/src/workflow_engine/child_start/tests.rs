@@ -77,7 +77,6 @@ fn child_spec() -> WorkflowSpec {
             dependencies: Vec::new(),
             args_from: HashMap::new(),
             workflow_ctx_from: None,
-            workflow_ctx_from_refs: None,
             queue: Some("default".to_owned()),
             priority: Some(100),
             allow_failed_deps: false,
@@ -106,7 +105,6 @@ fn sub_workflow_node(index: usize, name: &str, definition_key: &str) -> AnyNode 
         dependencies: Vec::new(),
         args_from: HashMap::new(),
         workflow_ctx_from: None,
-        workflow_ctx_from_refs: None,
         queue: None,
         priority: None,
         allow_failed_deps: false,
@@ -700,15 +698,17 @@ fn merge_input(owed: &OwedChildStart) -> String {
     }
 }
 
-/// A stored input that the strict read refuses, or `null`, fails the node
-/// with `WORKER_SERIALIZATION_ERROR`, `Corrupt kwargs JSON for subworkflow
-/// task <index>` (Python `_input_kwargs`, `core/workflows/child_build.py`),
-/// with the workflow id and the node in `data`; with `args_from` too, the
-/// input is refused first.
+/// A stored input that is empty, that the strict read refuses, or `null`,
+/// fails the node with `WORKER_SERIALIZATION_ERROR`, `Corrupt kwargs JSON for
+/// subworkflow task <index>` (Python `_input_kwargs`,
+/// `core/workflows/child_build.py`), with the workflow id and the node in
+/// `data`; with `args_from` too, the input is refused first. A node without
+/// params stores `{}`; no writer stores an empty input.
 #[test]
 fn a_stored_input_that_does_not_read_fails_the_node() {
     let workflow_id = Uuid::new_v4();
     for (input, args_from) in [
+        ("", None),
         ("broken{json", None),
         ("null", None),
         (r#"{"a": 1, "a": 2}"#, None),
@@ -740,9 +740,12 @@ fn a_stored_input_that_does_not_read_fails_the_node() {
 
 /// An `args_from` member value that is not a JSON integer fails the node
 /// with `WORKER_SERIALIZATION_ERROR`, `args_from has non-int values for
-/// subworkflow task <index>` (Python `_args_from_map`); `null` as the whole
-/// text fails it with `Corrupt args_from JSON for subworkflow task <index>`.
-/// `true` is refused as a non-integer, where Python's `isinstance` takes it.
+/// subworkflow task <index>` (Python `_args_from_map`); `null` or an empty
+/// text as the whole text fails it with `Corrupt args_from JSON for
+/// subworkflow task <index>`. A node without `args_from` stores NULL; no
+/// writer stores an empty text.
+/// `true` is refused as a non-integer, as Python's `_args_from_map` refuses a
+/// `bool`.
 #[test]
 fn an_args_from_value_that_is_not_an_index_fails_the_node() {
     let workflow_id = Uuid::new_v4();
@@ -772,6 +775,7 @@ fn an_args_from_value_that_is_not_an_index_fails_the_node() {
             "args_from has non-int values for subworkflow task 1",
         ),
         ("null", "Corrupt args_from JSON for subworkflow task 1"),
+        ("", "Corrupt args_from JSON for subworkflow task 1"),
     ] {
         let mut refused = owed(workflow_id, 0, CHILD_KEY);
         refused.args_from = Some(args_from.to_owned());
@@ -792,11 +796,10 @@ fn an_args_from_value_that_is_not_an_index_fails_the_node() {
     }
 }
 
-/// Stored data that Python reads with no refusal: an empty input and an
-/// input that is not an object give no static members (the builder input is
-/// `{}`); an `args_from` that is empty or not an object gives no members; an
-/// index outside the `integer` range names no node, so its member is left
-/// out.
+/// Stored data that Python reads with no refusal: an input that is not an
+/// object gives no static members (the builder input is `{}`); no `args_from`
+/// (NULL) and an `args_from` that is not an object give no members; an index
+/// outside the `integer` range names no node, so its member is left out.
 #[test]
 fn stored_data_that_python_reads_as_no_members_builds_the_input() {
     let source = ChildStartSource {
@@ -808,12 +811,10 @@ fn stored_data_that_python_reads_as_no_members_builds_the_input() {
         result: Some(r#"{"__h_task_result__":true,"ok":7,"err":null}"#.to_owned()),
     };
     for (input, args_from) in [
-        ("", None),
         ("[1, 2]", None),
         (" \"text\" ", None),
         ("7", Some("[]")),
         ("{}", Some("false")),
-        ("{}", Some("")),
         ("{}", Some(r#"{"x": 99999999999999999999999}"#)),
         ("{}", Some(r#"{"x": 4294967296}"#)),
     ] {

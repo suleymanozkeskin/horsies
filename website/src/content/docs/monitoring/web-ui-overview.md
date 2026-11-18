@@ -2,7 +2,7 @@
 title: Web UI Overview
 section: shared
 summary: Browser dashboard for tasks, workflows, and workers, served by the monitoring app of each client.
-related: [web-ui-deployment, web-ui-mount, action-semantics, syce-overview, worker-health]
+related: [web-ui-deployment, web-ui-mount, action-semantics, worker-health]
 tags: [monitoring, web, dashboard, ui, sse]
 ---
 

@@ -7,9 +7,11 @@
 //! The stored `task_options` text is read once, when the task is dispatched,
 //! into [`StoredOptions`]. A value that does not fit the rule that wrote it is
 //! not replaced by a default: the task fails before user code runs, with
-//! `WORKER_SERIALIZATION_ERROR` (see [`StoredOptions::run_permit`]). The
-//! `retry_policy` is read by Python's `RetryPolicy` rule, with Python's
-//! refusal text (`stored_policy`).
+//! `WORKER_SERIALIZATION_ERROR` (see [`StoredOptions::run_permit`]). The text
+//! is read by Python's `loads_json` rule (`core::codec::python_loads`): an
+//! int of up to 4300 digits reads, and an object that repeats a key does not.
+//! The `retry_policy` is read by Python's `RetryPolicy` rule
+//! (`stored_policy`). Each refusal has Python's text.
 //!
 //! Layout of the stored options (Python's): a JSON object whose
 //! `retry_policy` key holds the policy, with `auto_retry_for` inside it, and
@@ -21,10 +23,12 @@
 use std::time::Duration;
 
 use rand::Rng;
+use serde_json::value::RawValue;
 
 mod stored_policy;
 
-use stored_policy::PolicyRead;
+use crate::core::codec::python_loads::{check_python_loads, PythonType};
+use stored_policy::{python_value, JsonInt, PolicyRead, PythonValue, RawMembers};
 
 /// The smallest stored `timeout_ms` (Python `MIN_TASK_TIMEOUT_MS`).
 pub const MIN_TASK_TIMEOUT_MS: u64 = 1_000;
@@ -75,10 +79,13 @@ pub enum StoredTimeout {
     Invalid(TimeoutRefusal),
 }
 
-/// Why a stored `timeout_ms` cannot be used.
+/// Why a stored `timeout_ms` cannot be used (Python `_timeout_value`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutRefusal {
-    NotAnInteger,
+    /// The value is of this Python type, not an int.
+    NotAnInteger {
+        found: NotAnInt,
+    },
     BelowMinimum,
     AboveMaximum,
 }
@@ -100,12 +107,36 @@ pub enum StoredCancelGrace {
 /// `shared_async_grace_error`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraceRefusal {
-    /// The value is a JSON value of this Python type, not an int.
+    /// The value is of this Python type, not an int.
     NotAnInteger {
-        found: &'static str,
+        found: NotAnInt,
     },
     BelowMinimum,
     AboveMaximum,
+}
+
+/// The Python type of a stored value that is neither `None` nor an int, as
+/// `type(value).__name__` writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotAnInt {
+    Bool,
+    Float,
+    Str,
+    List,
+    Dict,
+}
+
+impl NotAnInt {
+    /// The name that `type(value).__name__` gives.
+    pub fn python_name(self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Float => "float",
+            Self::Str => "str",
+            Self::List => "list",
+            Self::Dict => "dict",
+        }
+    }
 }
 
 /// The retry policy a readable row stores.
@@ -174,8 +205,9 @@ pub enum RunPermit {
 
 /// Read the stored `task_options` of a claimed row.
 ///
-/// `None` and an empty text mean the row has no options, as the enqueue
-/// reader treats them.
+/// `None` and an empty text mean the row has no options, as the Python
+/// worker read (`read_stored_timeout`, `read_stored_retry_policy`) treats
+/// them.
 pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
     let text = match task_options {
         None | Some("") => {
@@ -187,113 +219,121 @@ pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
         }
         Some(text) => text,
     };
-    match options_object(text) {
+    match options_members(text) {
         Err(reason) => StoredOptions::Unreadable { reason },
         Ok(options) => StoredOptions::Readable {
             timeout: read_timeout(options.get("timeout_ms")),
             cancel_grace: read_cancel_grace(options.get("cancel_grace_ms")),
-            // The text is a JSON object: the precondition of the read.
+            // The text reads as a JSON object: the precondition of the read.
             retry: stored_retry(stored_policy::read_retry_policy(text)),
         },
     }
 }
 
-/// A non-empty stored options text as a JSON object, or the reason that it
-/// is unreadable: it does not parse, or it is another JSON value.
-fn options_object(text: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    match serde_json::from_str::<serde_json::Value>(text) {
-        Err(error) => Err(format!("stored task_options do not parse: {error}")),
-        Ok(serde_json::Value::Object(options)) => Ok(options),
-        Ok(other) => Err(format!(
+/// The members of a non-empty stored options text, each value kept raw, or
+/// the reason that the text is unreadable, with Python's text
+/// (`read_stored_timeout`): the text does not read by Python's `loads_json`
+/// rule, or it holds another JSON value than an object.
+fn options_members(text: &str) -> Result<RawMembers<'_>, String> {
+    match check_python_loads(text) {
+        Err(refusal) => Err(format!(
+            "stored task_options do not parse: JSON parse failed: {refusal}"
+        )),
+        Ok(PythonType::Dict) => Ok(serde_json::from_str(text)
+            .expect("a text that reads as a JSON object parses with its members kept raw")),
+        Ok(
+            other @ (PythonType::NoneType
+            | PythonType::Bool
+            | PythonType::Int
+            | PythonType::Float
+            | PythonType::Str
+            | PythonType::List),
+        ) => Err(format!(
             "stored task_options are a JSON {}, not an object",
-            json_kind(&other)
+            other.python_name()
         )),
     }
 }
 
-fn json_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
+/// A stored member that the rule wants as an int, as Python's `json.loads`
+/// gives it.
+enum StoredInt {
+    /// No key, or `null`.
+    Absent,
+    /// An int of any size.
+    Int(JsonInt),
+    /// A value of another Python type.
+    NotAnInt(NotAnInt),
+}
+
+fn stored_int(raw: Option<&RawValue>) -> StoredInt {
+    let Some(raw) = raw else {
+        return StoredInt::Absent;
+    };
+    match python_value(raw) {
+        PythonValue::None => StoredInt::Absent,
+        PythonValue::Int(int) => StoredInt::Int(int),
+        PythonValue::Bool(_) => StoredInt::NotAnInt(NotAnInt::Bool),
+        PythonValue::Float => StoredInt::NotAnInt(NotAnInt::Float),
+        PythonValue::Str(_) => StoredInt::NotAnInt(NotAnInt::Str),
+        PythonValue::List(_) => StoredInt::NotAnInt(NotAnInt::List),
+        PythonValue::Dict => StoredInt::NotAnInt(NotAnInt::Dict),
     }
 }
 
 /// Check the stored `timeout_ms` against the rule that wrote it (Python
-/// `_timeout_value`). A float, a string, a bool or a negative number is
-/// not an int.
-fn read_timeout(raw: Option<&serde_json::Value>) -> StoredTimeout {
-    let number = match raw {
-        None | Some(serde_json::Value::Null) => return StoredTimeout::NoTimeout,
-        Some(serde_json::Value::Number(number)) => number,
-        Some(_) => return StoredTimeout::Invalid(TimeoutRefusal::NotAnInteger),
-    };
-    match (number.as_u64(), number.as_i64()) {
-        (Some(ms), _) if ms < MIN_TASK_TIMEOUT_MS => {
+/// `_timeout_value`). An int of any size is compared with the bounds.
+fn read_timeout(raw: Option<&RawValue>) -> StoredTimeout {
+    match stored_int(raw) {
+        StoredInt::Absent => StoredTimeout::NoTimeout,
+        StoredInt::NotAnInt(found) => {
+            StoredTimeout::Invalid(TimeoutRefusal::NotAnInteger { found })
+        }
+        StoredInt::Int(JsonInt::Negative) => StoredTimeout::Invalid(TimeoutRefusal::BelowMinimum),
+        StoredInt::Int(JsonInt::Natural(ms)) if ms < MIN_TASK_TIMEOUT_MS => {
             StoredTimeout::Invalid(TimeoutRefusal::BelowMinimum)
         }
-        (Some(ms), _) if ms > MAX_TASK_TIMEOUT_MS => {
+        StoredInt::Int(JsonInt::Natural(ms)) if ms > MAX_TASK_TIMEOUT_MS => {
             StoredTimeout::Invalid(TimeoutRefusal::AboveMaximum)
         }
-        (Some(ms), _) => StoredTimeout::Limit(Duration::from_millis(ms)),
-        (None, Some(_)) => StoredTimeout::Invalid(TimeoutRefusal::BelowMinimum),
-        (None, None) => StoredTimeout::Invalid(TimeoutRefusal::NotAnInteger),
+        StoredInt::Int(JsonInt::Natural(ms)) => StoredTimeout::Limit(Duration::from_millis(ms)),
+        StoredInt::Int(JsonInt::AboveU64) => StoredTimeout::Invalid(TimeoutRefusal::AboveMaximum),
     }
 }
 
 /// Check the stored `cancel_grace_ms` against the enqueue rule of a
-/// `SHARED_ASYNC` row (Python `shared_async_grace_error`). A bool, a float,
-/// a string, a list or an object is not an int.
-fn read_cancel_grace(raw: Option<&serde_json::Value>) -> StoredCancelGrace {
-    let number = match raw {
-        None | Some(serde_json::Value::Null) => return StoredCancelGrace::NotStored,
-        Some(serde_json::Value::Number(number)) => number,
-        Some(other) => {
-            return StoredCancelGrace::Invalid(GraceRefusal::NotAnInteger {
-                found: python_type_name(other),
-            })
+/// `SHARED_ASYNC` row (Python `shared_async_grace_error`). An int of any
+/// size is compared with the bounds.
+fn read_cancel_grace(raw: Option<&RawValue>) -> StoredCancelGrace {
+    match stored_int(raw) {
+        StoredInt::Absent => StoredCancelGrace::NotStored,
+        StoredInt::NotAnInt(found) => {
+            StoredCancelGrace::Invalid(GraceRefusal::NotAnInteger { found })
         }
-    };
-    match (number.as_u64(), number.as_i64()) {
-        (Some(ms), _) if ms < MIN_CANCEL_GRACE_MS => {
+        StoredInt::Int(JsonInt::Negative) => StoredCancelGrace::Invalid(GraceRefusal::BelowMinimum),
+        StoredInt::Int(JsonInt::Natural(ms)) if ms < MIN_CANCEL_GRACE_MS => {
             StoredCancelGrace::Invalid(GraceRefusal::BelowMinimum)
         }
-        (Some(ms), _) if ms > MAX_CANCEL_GRACE_MS => {
+        StoredInt::Int(JsonInt::Natural(ms)) if ms > MAX_CANCEL_GRACE_MS => {
             StoredCancelGrace::Invalid(GraceRefusal::AboveMaximum)
         }
-        (Some(ms), _) => StoredCancelGrace::Grace(Duration::from_millis(ms)),
-        (None, Some(_)) => StoredCancelGrace::Invalid(GraceRefusal::BelowMinimum),
-        (None, None) => StoredCancelGrace::Invalid(GraceRefusal::NotAnInteger { found: "float" }),
-    }
-}
-
-/// The Python type name of a parsed JSON value, for refusal texts.
-fn python_type_name(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "NoneType",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(number) => match number.is_f64() {
-            true => "float",
-            false => "int",
-        },
-        serde_json::Value::String(_) => "str",
-        serde_json::Value::Array(_) => "list",
-        serde_json::Value::Object(_) => "dict",
+        StoredInt::Int(JsonInt::Natural(ms)) => StoredCancelGrace::Grace(Duration::from_millis(ms)),
+        StoredInt::Int(JsonInt::AboveU64) => StoredCancelGrace::Invalid(GraceRefusal::AboveMaximum),
     }
 }
 
 /// The text of a cancel grace refusal, as Python words it.
 pub fn grace_refusal_message(refusal: GraceRefusal) -> String {
     match refusal {
-        GraceRefusal::NotAnInteger { found: "bool" } => {
-            "stored cancel_grace_ms is a bool, not an int".to_owned()
-        }
-        GraceRefusal::NotAnInteger { found } => {
-            format!("stored cancel_grace_ms is a JSON {found}, not an int")
-        }
+        GraceRefusal::NotAnInteger {
+            found: NotAnInt::Bool,
+        } => "stored cancel_grace_ms is a bool, not an int".to_owned(),
+        GraceRefusal::NotAnInteger {
+            found: found @ (NotAnInt::Float | NotAnInt::Str | NotAnInt::List | NotAnInt::Dict),
+        } => format!(
+            "stored cancel_grace_ms is a JSON {}, not an int",
+            found.python_name()
+        ),
         GraceRefusal::BelowMinimum => {
             format!("stored cancel_grace_ms is below {MIN_CANCEL_GRACE_MS} ms")
         }
@@ -347,9 +387,9 @@ pub fn stored_max_retries(task_options: Option<&str>) -> Result<i32, RetryLimitR
         None | Some("") => return Ok(0),
         Some(text) => text,
     };
-    let _object =
-        options_object(text).map_err(|reason| RetryLimitRefused::UnreadableOptions { reason })?;
-    // The text is a JSON object: the precondition of the read.
+    let _members =
+        options_members(text).map_err(|reason| RetryLimitRefused::UnreadableOptions { reason })?;
+    // The text reads as a JSON object: the precondition of the read.
     match stored_policy::read_retry_policy(text) {
         PolicyRead::Absent => Ok(0),
         PolicyRead::Refused { detail } => Err(RetryLimitRefused::InvalidPolicy { detail }),
@@ -373,7 +413,7 @@ impl StoredOptions {
             Self::Readable {
                 timeout: StoredTimeout::Invalid(refusal),
                 ..
-            } => RunPermit::Refuse(timeout_refusal_message(*refusal).to_owned()),
+            } => RunPermit::Refuse(timeout_refusal_message(*refusal)),
             Self::Readable {
                 timeout: StoredTimeout::NoTimeout,
                 ..
@@ -403,14 +443,18 @@ impl StoredOptions {
     }
 }
 
-/// The text of a timeout refusal, as Python words it.
-pub fn timeout_refusal_message(refusal: TimeoutRefusal) -> &'static str {
+/// The text of a timeout refusal, as Python words it (`_timeout_value`).
+pub fn timeout_refusal_message(refusal: TimeoutRefusal) -> String {
     match refusal {
-        TimeoutRefusal::NotAnInteger => "stored timeout_ms is not an int",
-        TimeoutRefusal::BelowMinimum => "stored timeout_ms is below 1000 ms",
-        TimeoutRefusal::AboveMaximum => {
-            "stored timeout_ms is above the limit of 4294967295 ms (about 49.7 days)"
+        TimeoutRefusal::NotAnInteger { found } => {
+            format!("stored timeout_ms is a {}, not an int", found.python_name())
         }
+        TimeoutRefusal::BelowMinimum => {
+            format!("stored timeout_ms is below {MIN_TASK_TIMEOUT_MS} ms")
+        }
+        TimeoutRefusal::AboveMaximum => format!(
+            "stored timeout_ms is above the limit of {MAX_TASK_TIMEOUT_MS} ms (about 49.7 days)"
+        ),
     }
 }
 

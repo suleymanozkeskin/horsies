@@ -386,8 +386,8 @@ $$;
 -- 3. "__h_workflow_meta__": workflow_id, task_index, task_name.
 -- Python: _build_enqueued_task_params (core/workflows/engine.py:711-984) and _build_workflow_context_data
 -- (core/workflows/engine.py:1629-1721), which decode and encode each value again; here the stored text is copied.
--- The static members are those of an object input. An empty input, and an input that reads as a value that is not
--- an object, give none (Python reads them as {}).
+-- The static members are those of an object input. An input that reads as a value that is not an object gives none
+-- (Python reads it as {}); horsies_workflow_task_node_refusal refuses an empty input.
 -- Precondition: horsies_workflow_task_node_refusal gives no error for the node (horsies_workflow_promote failed every
 -- node that it refuses), so the input reads under loads_json, the args_from values are integers, and no args_from key
 -- is a static member. An input text that starts with '{' and does not end with '}' raises data_corrupted.
@@ -1123,7 +1123,7 @@ $$;
 --   (horsies_workflow_options_json), in text order; none when the text holds another value or does not read
 --   (horsies_workflow_task_node_refusal refuses a text that does not read);
 -- - NULL, null, a boolean, a number, an array, "": none (Python reads no args_from from a value that is empty or
---   false, and none from a value that is not an object).
+--   false, and none from a value that is not an object). horsies_workflow_task_node_refusal refuses "" before.
 -- entry_value is the member value as json, so its literal tells an int from a float.
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_args_from_entries(p_args_from jsonb)
@@ -1163,18 +1163,20 @@ $$;
 -- sub-workflow node, whose child build checks its own data). The checks run in Python's order; the first refusal is
 -- the error:
 -- 1. the stored task options (horsies_workflow_task_options_refusal): WORKER_SERIALIZATION_ERROR;
--- 2. an input other than '' that does not read under loads_json (horsies_workflow_options_json), or that reads as
---    null: WORKER_SERIALIZATION_ERROR, 'Corrupt kwargs JSON for task <index>';
--- 3. an args_from string other than "" whose text does not read, or reads as null: WORKER_SERIALIZATION_ERROR,
---    'Corrupt args_from JSON for task <index>';
--- 4. an args_from member (horsies_workflow_args_from_entries) whose value is not a JSON integer:
---    WORKER_SERIALIZATION_ERROR, 'args_from has non-int values for task <index>'. Python's isinstance(value, int)
---    also takes true and false; this check refuses them;
+-- 2. an input that is empty, that does not read under loads_json (horsies_workflow_options_json), or that reads as
+--    null: WORKER_SERIALIZATION_ERROR, 'Corrupt kwargs JSON for task <index>'. A node without params stores '{}';
+--    no writer stores an empty input;
+-- 3. an args_from string whose text is empty, does not read, or reads as null: WORKER_SERIALIZATION_ERROR,
+--    'Corrupt args_from JSON for task <index>'. A node without args_from stores NULL; no writer stores an empty
+--    string;
+-- 4. an args_from member (horsies_workflow_args_from_entries) whose value is not a JSON integer literal:
+--    WORKER_SERIALIZATION_ERROR, 'args_from has non-int values for task <index>'. true and false are refused, as
+--    Python's _validate_args_from_map (core/workflows/engine.py) refuses a bool;
 -- 5. the first args_from member, in the order of 4, whose key is also a member of an object input:
 --    WORKFLOW_ENQUEUE_FAILED, 'args_from key '<key>' conflicts with static kwarg (task <index>)' (the spec refuses
 --    the overlap when it is built; this check guards stored rows).
--- An empty input, and an input that reads as a value that is not an object, give no static members (Python reads
--- them as {}), so they conflict with no key.
+-- An input that reads as a value that is not an object gives no static members (Python reads it as {}), so it
+-- conflicts with no key.
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_task_node_refusal(
     p_node horsies_workflow_tasks, OUT error_code text, OUT message text
@@ -1196,16 +1198,19 @@ BEGIN
         error_code := 'WORKER_SERIALIZATION_ERROR';
         RETURN;
     END IF;
+    -- horsies_workflow_options_json takes no empty text: an empty input stays NULL here and is refused.
     IF p_node.input <> '' THEN
         v_input := horsies_workflow_options_json(p_node.input);
-        IF coalesce(json_typeof(v_input), 'null') = 'null' THEN
-            error_code := 'WORKER_SERIALIZATION_ERROR';
-            message := 'Corrupt kwargs JSON for ' || v_node;
-            RETURN;
-        END IF;
     END IF;
-    IF jsonb_typeof(p_node.args_from) = 'string' AND (p_node.args_from #>> '{}') <> '' THEN
-        v_args_from := horsies_workflow_options_json(p_node.args_from #>> '{}');
+    IF coalesce(json_typeof(v_input), 'null') = 'null' THEN
+        error_code := 'WORKER_SERIALIZATION_ERROR';
+        message := 'Corrupt kwargs JSON for ' || v_node;
+        RETURN;
+    END IF;
+    IF jsonb_typeof(p_node.args_from) = 'string' THEN
+        IF (p_node.args_from #>> '{}') <> '' THEN
+            v_args_from := horsies_workflow_options_json(p_node.args_from #>> '{}');
+        END IF;
         IF coalesce(json_typeof(v_args_from), 'null') = 'null' THEN
             error_code := 'WORKER_SERIALIZATION_ERROR';
             message := 'Corrupt args_from JSON for ' || v_node;

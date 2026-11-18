@@ -145,6 +145,7 @@ impl WorkflowDefConfig {
 mod tests {
     use super::*;
     use crate::workflow::node::tests::{task_node, ChargeInput};
+    use crate::workflow::spec::{SpecOutput, SpecSuccessPolicy, SuccessCase};
     use crate::workflow::OutputlessResults;
     use crate::ErrorCode;
 
@@ -237,6 +238,47 @@ mod tests {
     #[test]
     fn a_definition_without_define_is_refused() {
         assert!(NoDefine::build().unwrap_err().message.contains("no_define"));
+    }
+
+    /// Two nodes of one task, the second the output, with a success policy
+    /// that needs the second and takes the first as optional.
+    struct WithPolicy;
+
+    impl WorkflowDefinition for WithPolicy {
+        type Output = f64;
+        type Params = ();
+
+        fn name() -> &'static str {
+            "with_policy"
+        }
+
+        fn definition_key() -> &'static str {
+            "tests.with_policy.v1"
+        }
+
+        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+            let first = builder.task(charge_node().node_id("first"));
+            let second = builder.task(charge_node().waits_for(first).node_id("second"));
+            let policy = SuccessPolicy::new(vec![SuccessCase::new([second])]).optional([first]);
+            Ok(WorkflowDefConfig::new()
+                .output(second)
+                .success_policy(policy))
+        }
+    }
+
+    #[test]
+    fn the_config_of_define_sets_the_output_and_the_success_policy() {
+        let spec = WithPolicy::build().unwrap();
+        assert_eq!(spec.node_ids().collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(spec.nodes[1].dependencies, vec![0]);
+        assert!(matches!(spec.output, SpecOutput::Node { index: 1, .. }));
+        assert_eq!(
+            spec.success_policy,
+            Some(SpecSuccessPolicy {
+                cases: vec![vec![1]],
+                optional: vec![0],
+            })
+        );
     }
 
     #[test]

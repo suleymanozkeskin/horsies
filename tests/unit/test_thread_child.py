@@ -344,6 +344,44 @@ class TestRunTable:
         table.finish(1, RssMb(5.0))
         assert writer.results()[0].end == OK_END
 
+    @pytest.mark.parametrize('past_deadline_s', [0.0, 0.5])
+    @pytest.mark.parametrize(
+        ('returned', 'end'),
+        [
+            (
+                SetRunning(OK_WIRE),
+                SeatFinished(ok=True, result_json='"value"', failed_reason=None),
+            ),
+            (
+                StoppedBeforeRunning((False, '', 'CLAIM_LOST')),
+                SeatFinished(ok=False, result_json='', failed_reason='CLAIM_LOST'),
+            ),
+        ],
+    )
+    def test_a_return_at_or_past_its_deadline_not_yet_fired_keeps_its_end(
+        self,
+        past_deadline_s: float,
+        returned: ThreadSeatReturn,
+        end: SeatFinished,
+    ) -> None:
+        """Only a deadline that fired before the return makes the run a
+        timeout. A return at or past a deadline that the deadline thread has
+        not fired keeps what the task returned: the return fires no deadline,
+        so no deadline report goes out, before or after it."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 1.0 + past_deadline_s
+
+        assert table.returned(1, returned) == NoMarker()
+        assert writer.frames == []
+        table._fire_due()
+        table.finish(1, RssMb(5.0))
+
+        assert writer.frames == [
+            SharedResultFrame(dispatch=1, task_id='task-1', end=end, rss=RssMb(5.0)),
+        ]
+
     def test_a_run_that_stopped_before_running_writes_no_marker(self) -> None:
         table, _writer, _clock = self._table()
         frame = _frame(1)

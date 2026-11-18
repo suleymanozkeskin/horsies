@@ -402,6 +402,40 @@ mod tests {
         assert!(refusal_texts("echo", &shared).is_empty());
     }
 
+    /// Python `check(live=True)` runs the static check first: its refusal
+    /// returns before any connect, so an address with no server gives the
+    /// refusal of the static check, not the connectivity refusal.
+    #[tokio::test]
+    async fn the_live_check_refuses_with_the_static_check_before_any_connect() {
+        let mut app = Horsies::new(AppConfig::for_database_url(
+            "postgresql://postgres@127.0.0.1:1/horsies",
+        ))
+        .unwrap();
+        let policy_only = TaskOptions {
+            retry_policy: Some(RetryPolicy::fixed(vec![1], false).unwrap()),
+            ..options("bad_retry")
+        };
+        app.register("bad_retry", task(policy_only)).unwrap();
+        let report = app.check_live().await.unwrap_err();
+        assert_eq!(report.phase(), CHECK);
+        let messages: Vec<&str> = report
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        assert!(
+            messages.contains(&"retry_policy requires auto_retry_for"),
+            "{messages:?}"
+        );
+        assert!(
+            report
+                .errors()
+                .iter()
+                .all(|error| error.code != Some(ErrorCode::BrokerInvalidUrl)),
+            "{report}"
+        );
+    }
+
     #[test]
     fn a_task_name_that_differs_from_the_registration_is_refused() {
         let texts = refusal_texts("echo", &options("other"));

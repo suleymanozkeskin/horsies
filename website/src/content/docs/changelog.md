@@ -351,6 +351,9 @@ written in Rust, on a new baseline schema.
   `horsies.web.schema.schema_guard` are removed: the core's handler serves
   every route. The exports of `horsies.web` are unchanged.
 
+- **Syce, the terminal monitoring tool, is removed; the web UI is the
+  monitoring tool.**
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
@@ -552,7 +555,11 @@ unless it starts with "Added".
   failures of the stored data, as Python; a timeout, an absent task and a
   database failure are read again. The value decodes from its stored text,
   here and in `WorkflowHandle::get` and `result_for`, so an integer outside
-  the `i64` and `u64` range reads as `u128` or `i128`, as in Python.
+  the `i64` and `u64` range reads as `u128` or `i128`, as in Python. A
+  dependency result (a `TaskOutcome<S, E>` input field) and
+  `WorkflowContext::result_for` decode the value from its stored text too.
+  The worker's child and the sub-workflow child build pass each input member
+  and each dependency result to the task or the builder as stored.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
   sends no statement, as in Python.
 - **Reads by task id are on the app:** `get_result::<T, E>`,

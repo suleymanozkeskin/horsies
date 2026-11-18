@@ -14,8 +14,6 @@ updates:
           - minor
           - patch
 
-  # The root Cargo workspace and Cargo.lock. syce/ is outside the workspace
-  # and keeps its own lock file.
   - package-ecosystem: cargo
     directory: "/"
     schedule:

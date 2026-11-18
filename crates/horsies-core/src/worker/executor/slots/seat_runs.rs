@@ -611,9 +611,7 @@ impl SeenLoss {
     }
 
     fn crashed(self) -> AttemptEnd {
-        AttemptEnd::Crashed {
-            reason: FailureDetail::cut(&self.0.to_string()),
-        }
+        AttemptEnd::of_lost_child(&self.0)
     }
 
     fn killed_by(self) -> String {

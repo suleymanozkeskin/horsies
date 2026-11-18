@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 use super::scripted::{
     act_on_runs, answer_of, answer_runs, boot, ended, idle_child, input, isolated_config,
     isolated_init, printf_bytes, process_ended, read_frame, reported, result_frame, send, serving,
-    shell, start_isolated, submit_isolated, take, task, ticket, tickets, timeout_ms, until,
+    shell, start_isolated, submit_isolated, take_init, task, ticket, tickets, timeout_ms, until,
     TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
-use crate::worker::executor::protocol::{IsolatedWork, ParentFrame, ProcessId};
+use crate::worker::executor::protocol::{IsolatedWork, ProcessId};
 use crate::worker::executor::supervisor::{
     BootFailure, BootFailureCause, ChildCommand, ChildExit, LossCause, ReapedExit, Spawner,
     CHILD_BOOT_ATTEMPTS,
@@ -24,10 +24,6 @@ use crate::worker::executor::supervisor::{
 async fn stop_pool(pool: IsolatedPool, spawner: Spawner) {
     let _ = pool.stop(Duration::from_secs(5)).await;
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
-}
-
-fn take_init() -> String {
-    take(&ParentFrame::Init(isolated_init()))
 }
 
 fn crash_reason(end: AttemptEnd) -> String {

@@ -848,7 +848,8 @@ const MAX_STEP_INDEX_NAME_BYTES: usize = crate::db::MAX_IDENTIFIER_BYTES - BUILD
 const _: () = assert!(BUILD_SUFFIX.len() == CLAIM_SUFFIX.len());
 
 /// One index that a migration gives its declared form outside a transaction
-/// (Python 0.7.0 `RecoveryIndex`, `horsies/core/schemas/recovery.py`). Built
+/// (Python 0.7.0 `RecoveryIndex`, in `core/schemas/recovery.py` of that
+/// release's package). Built
 /// by [`exact_index!`], which writes every statement text at compile time
 /// from the name, the table and the definition, so no text is built at run
 /// time. Each name is an unquoted identifier of at most

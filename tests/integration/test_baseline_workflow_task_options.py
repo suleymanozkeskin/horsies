@@ -3,8 +3,9 @@
 Each case stores a task options text on the dependent node of a two-node
 workflow, completes the root through the phase-2 step of the baseline
 (``horsies_workflow_node_finish``, through the ``wft_finish`` fixture of
-baseline_workflow_fixtures.sql), and compares the outcome with Python's
-``_build_enqueued_task_params`` for the same text:
+crates/horsies-core/src/sql_tests/cases/baseline_workflow_fixtures.sql), and
+compares the outcome with Python's ``_build_enqueued_task_params`` for the
+same text:
 
 - Python refuses the options: the node is FAILED with no task, and its stored
   result is the error that ``_fail_enqueued_task`` stores (compared as JSON).
@@ -47,7 +48,15 @@ from tests.integration.isolated_database import isolated_test_database
 
 pytestmark = [pytest.mark.integration]
 
-_FIXTURES_SQL: Final = Path(__file__).with_name('baseline_workflow_fixtures.sql')
+_FIXTURES_SQL: Final = (
+    Path(__file__).parent.parent.parent
+    / 'crates'
+    / 'horsies-core'
+    / 'src'
+    / 'sql_tests'
+    / 'cases'
+    / 'baseline_workflow_fixtures.sql'
+)
 
 _WORKFLOW_ID: Final = '00000000-0000-7000-8000-00000000f001'
 _DEPENDENT_INDEX: Final = 1

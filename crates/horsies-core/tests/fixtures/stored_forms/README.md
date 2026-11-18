@@ -138,7 +138,9 @@ Decoders:
   `decode_kwargs` (`python/horsies/core/codec/kwargs.py:496`), in the child at
   `python/horsies/core/worker/child_runner.py:1300-1329`.
 - Core: the child host passes an input without engine members byte for byte
-  (`crates/horsies-core/src/worker/execution.rs:186`, `build_task_input`).
+  (`crates/horsies-core/src/worker/execution.rs:192`, `build_task_input`).
+  It writes an input with engine members from its text: each other member
+  and each result envelope keeps its stored text.
 - Rust client: `decode_input` (`crates/horsies/src/task/body.rs:48`);
   `decode_unit_input` for a task with no parameters.
 
@@ -185,10 +187,20 @@ Decoders:
   `read_task_result_text` (`:158`), `TaskError::from_stored_value`
   (`crates/horsies-core/src/core/task/error.rs:665`). A result read keeps the
   stored text (`StoredEnvelopeText::parse`,
-  `crates/horsies-core/src/broker/result_types.rs:146`).
-- Rust client: `outcome_of_record` (`crates/horsies/src/handle.rs:327`) and
-  `stored_result` (`crates/horsies/src/reads/by_task_id.rs:114`), on the
-  core's typed read.
+  `crates/horsies-core/src/broker/result_types.rs:146`). The child host
+  (`build_task_input`, an `args_from` member and a result of the workflow
+  context) and the sub-workflow child build (`merged_child_input`,
+  `crates/horsies-core/src/workflow_engine/start_statement.rs:458`) give a
+  dependent each envelope as its stored text; the core test passes each
+  vector through both.
+- Rust client: `outcome_of_record` (`crates/horsies/src/handle.rs:360`) and
+  `stored_result` (`crates/horsies/src/reads/by_task_id.rs:115`), on the
+  core's typed read. A dependency result (`TaskOutcome`'s `Deserialize`,
+  `crates/horsies/src/workflow/dependency.rs`) and
+  `WorkflowContext::result_for` (`crates/horsies/src/workflow/context.rs`)
+  read the envelope's text with `read_stored_result`
+  (`crates/horsies/src/handle.rs:422`), as `outcome_of_record` does; the
+  Rust test reads each `ok` vector through all three.
 
 The Rust client builds an error from a code, a message and `data`. The
 exception record and the sub-workflow failure are written by the library, and

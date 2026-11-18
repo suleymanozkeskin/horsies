@@ -36,7 +36,6 @@ use crate::broker::claims::{
 };
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationOutcome};
 use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
@@ -218,7 +217,9 @@ pub fn worker_failure_write(
 /// The failed attempt of a child the worker killed or lost: the code of
 /// the end, the retry the policy admits for it, at `placement`, with
 /// Python's error `data`: `task_id` and `worker_id` (Python
-/// `_recover_worker_future_failure`). Pure.
+/// `_recover_worker_future_failure`). The attempt records `message` as its
+/// message and its failed reason; the task's failed reason is not written
+/// (Python `_write_ended_attempt`). Pure.
 pub fn killed_child_write(
     task: &ClaimedTask,
     worker_id: &str,
@@ -241,15 +242,17 @@ pub fn killed_child_write(
         failed_reason: None,
         attempt: AttemptFailure {
             kind: AttemptFailureKind::Failed,
-            error_message: Some(message),
-            failed_reason: None,
+            error_message: Some(message.clone()),
+            failed_reason: Some(message),
         },
     }
 }
 
 /// The `TASK_TIMEOUT` write of an attempt that reached `timeout`, with
 /// Python's error `data`: `task_id`, `timeout_ms`, and, for a shared async
-/// run, `cancel_end` (Python `_settle_timed_out_row`). Pure.
+/// run, `cancel_end` (Python `_settle_timed_out_row`). The attempt records
+/// the timeout text as its message and its failed reason; the task's
+/// failed reason is not written (Python `_write_ended_attempt`). Pure.
 pub fn timeout_write(
     task: &ClaimedTask,
     worker_id: &str,
@@ -271,8 +274,8 @@ pub fn timeout_write(
         failed_reason: None,
         attempt: AttemptFailure {
             kind: AttemptFailureKind::Failed,
-            error_message: Some(message),
-            failed_reason: None,
+            error_message: Some(message.clone()),
+            failed_reason: Some(message),
         },
     }
 }
@@ -403,7 +406,6 @@ pub struct OutcomeWriter {
     child_specs: ChildSpecs,
     worker_id: String,
     payload_policy: PayloadPolicy,
-    retention: RetentionConfig,
     successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
 }
 
@@ -413,7 +415,6 @@ impl OutcomeWriter {
         child_specs: ChildSpecs,
         worker_id: String,
         payload_policy: PayloadPolicy,
-        retention: RetentionConfig,
         successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
     ) -> Self {
         Self {
@@ -421,7 +422,6 @@ impl OutcomeWriter {
             child_specs,
             worker_id,
             payload_policy,
-            retention,
             successes,
         }
     }
@@ -770,7 +770,7 @@ impl OutcomeWriter {
     ) {
         Box::pin(run_phase2(
             &self.broker,
-            self.child_specs.build(&self.retention),
+            self.child_specs.build(),
             Phase2Work {
                 task_id: task.task_id,
                 queue_name: task.queue_name.clone(),

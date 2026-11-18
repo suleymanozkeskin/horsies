@@ -1281,7 +1281,14 @@ def _node_error(task_index: int, stored: str | None) -> str | None:
         HistoryContractError: the stored result is not a task result
             envelope, or its error does not decode.
     """
-    match loads_json(stored):
+    match stored:
+        case None | '':
+            # The read before the switch: loads_json then read NULL and an
+            # empty text as None. The core's read keeps that.
+            return None
+        case text:
+            pass
+    match loads_json(text):
         case Err(cause):
             raise HistoryContractError(
                 f'workflow node {task_index}: the stored result is not JSON: {cause}'

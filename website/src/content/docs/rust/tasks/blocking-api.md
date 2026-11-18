@@ -40,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 With `DailyReport` and `register_daily_report` of [Workflow API](/horsies/rust/concepts/workflows/workflow-api/#define-and-start-a-workflow):
 
+<!-- rust-check: skip partial -- register_daily_report is defined on the Workflow API page -->
 ```rust
 use horsies::{AppConfig, Horsies, TaskOutcome, WaitLimit};
 

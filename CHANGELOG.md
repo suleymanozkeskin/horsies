@@ -111,6 +111,26 @@ written in Rust, on a new baseline schema.
   `loads_json_bytes` refuse it at any depth; at enqueue it is
   `INVALID_INPUT` and nothing is written. 0.7 kept the last value.
 
+- **Breaking: `loads_json` refuses an empty text and takes no `None`.** An
+  empty text is not JSON: `loads_json('')` and `loads_json_bytes(b'')` are
+  `Err(EmptyJsonTextError)`, a `SerializationError` with the text
+  `JSON parse failed: the text is empty`. 0.7 read `''` and `None` as the
+  JSON value `null`. A caller with a nullable value checks `None` before the
+  call. A send whose kwargs text or task options text is empty gets
+  `VALIDATION_FAILED` (`INVALID_INPUT` and `INVALID_TASK_OPTIONS` from
+  `PostgresBroker.enqueue`). The handle reads of an empty stored result,
+  error or summary keep their outcome, and the message now holds the text
+  of `EmptyJsonTextError`.
+
+- **A send refuses task options that hold an integer outside
+  -9223372036854775808 to 18446744073709551615.** The send returns
+  `VALIDATION_FAILED` (`PostgresBroker.enqueue` returns
+  `INVALID_TASK_OPTIONS`) with the text `task_options JSON holds an integer
+  outside -9223372036854775808 to 18446744073709551615`, and nothing is
+  written. `RetryPolicy` still takes a `max_delay_seconds` of any size, so a
+  task whose policy has `max_delay_seconds` of `2**64` or more is refused at
+  each send; 0.7 sent it. A stored policy with such a cap still reads.
+
 - **The web task routes answer a task id that is not a UUID with 400
   `INVALID_INPUT`.** `GET /api/tasks/{task_id}` and `POST
   /api/tasks/{task_id}/cancel` answer `{"code": "INVALID_INPUT", "detail":
@@ -346,6 +366,9 @@ written in Rust, on a new baseline schema.
   `horsies.web.schema.schema_guard` are removed: the core's handler serves
   every route. The exports of `horsies.web` are unchanged.
 
+- **Syce, the terminal monitoring tool, is removed; the web UI is the
+  monitoring tool.**
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
@@ -547,7 +570,11 @@ unless it starts with "Added".
   failures of the stored data, as Python; a timeout, an absent task and a
   database failure are read again. The value decodes from its stored text,
   here and in `WorkflowHandle::get` and `result_for`, so an integer outside
-  the `i64` and `u64` range reads as `u128` or `i128`, as in Python.
+  the `i64` and `u64` range reads as `u128` or `i128`, as in Python. A
+  dependency result (a `TaskOutcome<S, E>` input field) and
+  `WorkflowContext::result_for` decode the value from its stored text too.
+  The worker's child and the sub-workflow child build pass each input member
+  and each dependency result to the task or the builder as stored.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
   sends no statement, as in Python.
 - **Reads by task id are on the app:** `get_result::<T, E>`,
