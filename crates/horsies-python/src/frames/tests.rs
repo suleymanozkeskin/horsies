@@ -8,8 +8,9 @@ use std::ffi::CStr;
 use horsies_core::frame_protocol::{
     decode_preload_frame, BodyEnd, ChildFrame, ChildFrameRefusal, LeftWorkEnd, LoopCulprit,
     NoLeftWork, PreloadFrame, ReportedBootCause, RssReading, RunEnd, SeatEnd, ShortageErrno,
-    StopReason, BOOT_FAILED_EXIT_CODE, HEADER_BYTES, MAX_BODY_BYTES, MAX_BOOT_ERROR_NAME_CHARS,
-    MAX_LEFTOVER_TASK_NAMES, PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION, SPAWN_REQUEST_BYTE,
+    StopReason, BOOT_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, HEADER_BYTES, MAX_BODY_BYTES,
+    MAX_BOOT_ERROR_NAME_CHARS, MAX_LEFTOVER_TASK_NAMES, PROTOCOL_MISMATCH_EXIT_CODE,
+    PROTOCOL_VERSION, SPAWN_REQUEST_BYTE,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyModule};
@@ -464,6 +465,10 @@ fn the_protocol_numbers_are_the_core_constants() {
         assert_eq!(
             read("protocol_mismatch_exit_code")?,
             i64::from(PROTOCOL_MISMATCH_EXIT_CODE)
+        );
+        assert_eq!(
+            read("core_stopped_exit_code")?,
+            i64::from(CORE_STOPPED_EXIT_CODE)
         );
         assert_eq!(read("spawn_request_byte")?, i64::from(SPAWN_REQUEST_BYTE));
         assert_eq!(

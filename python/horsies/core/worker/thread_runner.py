@@ -21,7 +21,7 @@ from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, ResultEnvelope
 from horsies.core.worker.shared_child import (
     SetRunning,
     StoppedBeforeRunning,
@@ -110,8 +110,9 @@ def run_thread_seat_task(
     deadline of the run; the core checks it again once the pool gave a
     connection. A deadline that passed first returns ``DeadlineBeforeStart``,
     and the task does not start; its row stays CLAIMED. A stop before the
-    RUNNING update commits returns ``StoppedBeforeRunning``; every other end
-    returns ``SetRunning``. Refused stored options
+    RUNNING update commits returns ``StoppedBeforeRunning``, or
+    ``CoreStoppedBeforeStart`` when the core of the child stopped; every
+    other end returns ``SetRunning``. Refused stored options
     (``core.StoredOptionsRefused``) return ``WORKER_SERIALIZATION_ERROR``
     after the RUNNING transition, before the task is resolved. An ``async def`` task cannot run on a thread seat:
     ``WORKER_RESOLUTION_ERROR``. An exception of the body becomes
@@ -130,7 +131,7 @@ def run_thread_seat_task(
     match ownership_result:
         case None:
             return SetRunning(_run_after_running(frame, work))
-        case StoppedBeforeRunning():
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
         case DeadlineBeforeStart():
             logger.info(
@@ -174,6 +175,7 @@ def mark_thread_seat_finalizing(frame: core.SharedRunFrame) -> None:
     """Write the finalizing marker of a run whose task returned, through the
     core handle of the child, on the calling seat thread
     (``child_runner.mark_run_finalizing``): within the bound of the core.
-    A failed or skipped write is logged only.
+    A failed or skipped write is logged only; a core that stopped ends the
+    child at once (``mark_run_finalizing``).
     """
     mark_run_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)

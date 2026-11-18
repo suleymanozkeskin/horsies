@@ -5,12 +5,18 @@ of a shared async child, and a seat of a shared thread child. The end of a
 run writes the finalizing marker only after a ``SetRunning`` run, and only
 when the run has ended, through the core handle of the child
 (``child_runner.mark_run_finalizing``). This module is pure.
+
+A run whose start the stopped core of the child refused returns
+``CoreStoppedBeforeStart``; the child reports it as ``OWNERSHIP_UNCONFIRMED``
+and then ends itself.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
+
+from horsies._core import CoreStopped
 
 type StopReason = Literal[
     'CLAIM_LOST',
@@ -59,5 +65,20 @@ class StoppedBeforeRunning:
     reason: StopReason
 
 
-type RunReturn = SetRunning | StoppedBeforeRunning
+@dataclass(frozen=True, slots=True)
+class CoreStoppedBeforeStart:
+    """The core of this child stopped before the run set its row RUNNING:
+    the start raised ``CoreStopped``, the error of a panic in a core
+    background task. No task code ran, and no marker follows.
+
+    The frame reports the stop as ``OWNERSHIP_UNCONFIRMED``, so the worker
+    releases the claim with no attempt charged. Once that frame is written,
+    the child ends itself with ``CORE_STOPPED_EXIT_CODE``
+    (``child_runner.end_child_after_core_refusal``), and the worker starts a
+    new child."""
+
+    stopped: CoreStopped
+
+
+type RunReturn = SetRunning | StoppedBeforeRunning | CoreStoppedBeforeStart
 """What the run of one task returned."""

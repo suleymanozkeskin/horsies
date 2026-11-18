@@ -51,7 +51,7 @@ from horsies.core.worker.shared_child import (
     StartedSeats,
     StoppedBeforeRunning,
 )
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, ResultEnvelope
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -218,7 +218,7 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
     match ownership_result:
         case None:
             return SetRunning(await _run_after_running(frame))
-        case StoppedBeforeRunning():
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
         case _ as unreachable:
             assert_never(unreachable)

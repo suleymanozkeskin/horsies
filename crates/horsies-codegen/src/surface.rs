@@ -3389,7 +3389,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "ProtocolNumbers",
         doc: "The protocol version, the exit codes of a child, the spawn request byte, and the bounds\nthat a child applies before it builds a frame: the names of a report of left work, and the\nbytes of a body.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
+        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("core_stopped_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
         methods: &[],
     },
     StubClass {

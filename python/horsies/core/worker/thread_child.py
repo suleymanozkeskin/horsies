@@ -76,7 +76,7 @@ from horsies.core.worker.child_frames import (
     ThreadSeatWork,
     boot_failed_frame,
 )
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, ResultEnvelope
 from horsies.core.worker.shared_child import (
     CHILD_DEFECT_EXIT_CODE,
     FRAMES_PER_SEAT,
@@ -114,10 +114,14 @@ class FrameSink(Protocol):
     def send_result(self, task_name: str, frame: SharedResultFrame) -> None: ...
 
 
-type ThreadSeatReturn = SetRunning | StoppedBeforeRunning | DeadlineBeforeStart
+type ThreadSeatReturn = (
+    SetRunning | StoppedBeforeRunning | DeadlineBeforeStart | CoreStoppedBeforeStart
+)
 """What the run of one task on a seat thread returns. ``DeadlineBeforeStart``:
 the deadline of the run fired while it waited for a pooled connection, and
-the run did not start."""
+the run did not start. ``CoreStoppedBeforeStart``: the core of the child
+stopped before the start; the run reports ``OWNERSHIP_UNCONFIRMED``, and the
+child ends itself once that frame is written (``FrameWriter``)."""
 
 
 class ThreadSeatProgram(Protocol):
@@ -221,7 +225,7 @@ def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
             )
         case _Deadline.PENDING, SetRunning(result=result):
             return result
-        case _Deadline.PENDING, StoppedBeforeRunning() as stopped:
+        case _Deadline.PENDING, StoppedBeforeRunning() | CoreStoppedBeforeStart() as stopped:
             return stopped
         case _Returned(), _:
             raise AssertionError(f'run {run.frame.dispatch} returned twice')
@@ -248,20 +252,28 @@ def _marker_at_return(
         case SeatTimedOut(), _, _:
             return NoMarker()
         case (
-            ResultEnvelope() | StoppedBeforeRunning(),
-            StoppedBeforeRunning() | DeadlineBeforeStart(),
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
+            StoppedBeforeRunning() | DeadlineBeforeStart() | CoreStoppedBeforeStart(),
             _,
         ):
             return NoMarker()
-        case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _NoDeadline():
+        case (
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
+            SetRunning(),
+            _NoDeadline(),
+        ):
             return MarkerDue()
         case (
-            ResultEnvelope() | StoppedBeforeRunning(),
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
             SetRunning(),
             _DeadlineAt(seconds=at),
         ) if at > now:
             return MarkerDue()
-        case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _DeadlineAt():
+        case (
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
+            SetRunning(),
+            _DeadlineAt(),
+        ):
             return NoMarker()
         case _ as unreachable:
             assert_never(unreachable)
@@ -367,7 +379,7 @@ class ThreadRunTable:
             match returned:
                 case DeadlineBeforeStart():
                     _ = self._fire_due()
-                case SetRunning() | StoppedBeforeRunning():
+                case SetRunning() | StoppedBeforeRunning() | CoreStoppedBeforeStart():
                     pass
                 case _ as unreachable:
                     assert_never(unreachable)

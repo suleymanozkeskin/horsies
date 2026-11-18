@@ -87,6 +87,7 @@ from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
     bounded_end,
     bounded_envelope,
+    end_child_after_refused_start,
     _read_rss,
     _send_child_frame,
     exit_after_stop,
@@ -112,6 +113,7 @@ from horsies.core.worker.child_frames import (
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_return import (
+    CoreStoppedBeforeStart,
     ResultEnvelope,
     SetRunning as SetRunning,
     StoppedBeforeRunning as StoppedBeforeRunning,
@@ -155,8 +157,11 @@ CHILD_DEFECT_EXIT_CODE: Final = 1
 """A defect inside the child, as when a task escapes the task runner."""
 
 
-type SeatReturn = SetRunning | StoppedBeforeRunning
-"""What the coroutine of one run returns."""
+type SeatReturn = SetRunning | StoppedBeforeRunning | CoreStoppedBeforeStart
+"""What the coroutine of one run returns. ``CoreStoppedBeforeStart``: the
+core of the child stopped before the start; the run reports
+``OWNERSHIP_UNCONFIRMED``, and the child ends itself once that frame is
+written (``FrameWriter``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +262,7 @@ def _bounded_shared_result(
     task_name: str, frame: SharedResultFrame
 ) -> SharedResultFrame:
     match frame.end:
-        case ResultEnvelope() | StoppedBeforeRunning() as finished:
+        case ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart() as finished:
             return SharedResultFrame(
                 dispatch=frame.dispatch,
                 task_id=frame.task_id,
@@ -278,6 +283,9 @@ class FrameWriter:
     and writes each frame with ``write``, so no encode of a large result runs
     on the loop. A full queue is a defect of the caller: the process ends at
     once. A failed write ends the process in ``write`` (the parent is gone).
+    Once a result frame of a start that the stopped core of the child
+    refused is written, the thread ends the process
+    (``end_child_after_refused_start``): the worker has the release first.
     """
 
     def __init__(self, write: Callable[[ChildFrame], None], capacity: int) -> None:
@@ -333,8 +341,21 @@ class FrameWriter:
                     return
                 case _ResultToWrite(task_name=task_name, frame=frame):
                     self._write(bounded_result_frame(task_name, frame))
+                    _end_after_written(frame)
                 case _:
                     self._write(item)
+
+
+def _end_after_written(frame: FrameWithResult) -> None:
+    """After the write of ``frame``: end the child when it reported a start
+    that the stopped core of the child refused. Every other frame returns."""
+    match frame:
+        case SharedResultFrame(task_id=task_id, end=end):
+            end_child_after_refused_start(end, task_id)
+        case LeftoverCancelFrame() | LeftoverStuckFrame():
+            return
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 class _Stop(Enum):
@@ -882,7 +903,10 @@ class SeatLoop:
         match end, _marker_at_end(seat, self._loop.time()):
             case _, NoMarker():
                 self._send_end(dispatch, seat, end)
-            case ResultEnvelope() | StoppedBeforeRunning() as finished, MarkerDue():
+            case (
+                ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart() as finished,
+                MarkerDue(),
+            ):
                 seat.stop = _Finalizing(finished)
                 self._start_marker(dispatch, seat)
             case SeatTimedOut(), MarkerDue():
@@ -1031,7 +1055,7 @@ def _returned_end(seat: _Seat) -> RunEnd:
     match _seat_return(seat):
         case SetRunning(result=result):
             return result
-        case StoppedBeforeRunning() as stopped:
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart() as stopped:
             return stopped
         case _ as unreachable:
             assert_never(unreachable)
@@ -1048,6 +1072,11 @@ def _returned_result(seat: _Seat) -> ResultEnvelope:
             raise AssertionError(
                 f'run {seat.frame.dispatch} stopped before running ({stopped.reason}) '
                 'and left work',
+            )
+        case CoreStoppedBeforeStart():
+            raise AssertionError(
+                f'run {seat.frame.dispatch} stopped before running (its core '
+                'stopped) and left work',
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -1088,7 +1117,7 @@ def _marker_at_end(seat: _Seat, now: float) -> MarkerDue | NoMarker:
         case _ as unreachable:
             assert_never(unreachable)
     match _seat_return(seat), seat.deadline:
-        case StoppedBeforeRunning(), _:
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart(), _:
             return NoMarker()
         case SetRunning(), _NoDeadline():
             return MarkerDue()

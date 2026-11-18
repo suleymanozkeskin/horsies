@@ -354,6 +354,8 @@ These two core errors (`horsies._core`) are states of the process, not of one ca
 | `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task | Start child processes that call horsies with the `spawn` or `forkserver` start method, or start the core after the fork: fork before the parent's first call |
 | `CoreStopped` | A background task of the core panicked: a defect in horsies, not a failure of the database or of your code. `args` are the `(subject, cause)` of the first panic | Restart the process: the core does not start again in it. Report the panic's subject and cause as a defect |
 
+A worker child ends itself at its next core call (exit code 80; its last log line names the cause), and the worker replaces it. At the start of a task, before task code ran, the claim is released with no attempt charged. After the body, the task takes the crashed-child path (`WORKER_CRASHED`) and its retry policy.
+
 ## CLI
 
 ```bash

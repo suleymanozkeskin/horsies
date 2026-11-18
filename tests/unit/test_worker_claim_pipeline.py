@@ -32,7 +32,7 @@ from horsies.core.worker.child_runner import (
     StartWithin,
     _confirm_ownership_and_set_running,
 )
-from horsies.core.worker.run_return import StoppedBeforeRunning
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, StoppedBeforeRunning
 from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
@@ -310,11 +310,24 @@ class TestOwnershipGateBehavioral:
     def test_exception_returns_ownership_unconfirmed(self) -> None:
         """When the core cannot run the call, returns OWNERSHIP_UNCONFIRMED."""
         handle = MagicMock()
-        handle.start_attempt.side_effect = core.CoreStopped('subject', 'cause')
+        handle.start_attempt.side_effect = core.CoreCallTimedOut(
+            'start_attempt', 40.0, 'outcome_unknown'
+        )
 
         result = _start(handle)
 
         assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
+
+    def test_a_stopped_core_is_a_core_stop_before_start(self) -> None:
+        """A stopped core does not clear in the process: the child reports
+        the release, then ends itself (``test_child_core_refusals``)."""
+        stopped = core.CoreStopped('subject', 'cause')
+        handle = MagicMock()
+        handle.start_attempt.side_effect = stopped
+
+        result = _start(handle)
+
+        assert result == CoreStoppedBeforeStart(stopped)
 
     def test_a_deadline_before_start_runs_no_statement(self) -> None:
         """The start check runs right before the start. A deadline that fired

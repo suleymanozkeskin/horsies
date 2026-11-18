@@ -36,6 +36,7 @@ import socket
 import sys
 import threading
 import traceback
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -74,11 +75,14 @@ from horsies.core.worker.child_frames import (
     RssReading,
     RssUnreadable,
     RunEnd,
+    SeatEnd,
+    SeatTimedOut,
     boot_failed_frame,
     encode_child_frame,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.run_return import (
+    CoreStoppedBeforeStart,
     ResultEnvelope,
     RunReturn,
     SetRunning,
@@ -115,6 +119,9 @@ BOOT_FAILED_EXIT_CODE: Final = PROTOCOL_NUMBERS.boot_failed_exit_code
 # The init frame names another protocol version: the child and the worker
 # come from different builds.
 PROTOCOL_MISMATCH_EXIT_CODE: Final = PROTOCOL_NUMBERS.protocol_mismatch_exit_code
+# The core of the child stopped, or this process is a fork of the child: the
+# child ends itself at its next core call (``end_child_after_core_refusal``).
+CORE_STOPPED_EXIT_CODE: Final = PROTOCOL_NUMBERS.core_stopped_exit_code
 CHILD_DEFECT_EXIT_CODE: Final = 1
 """A defect inside the child, as when a task escapes the task runner."""
 INIT_FRAME_TIMEOUT_S: Final = 30.0
@@ -165,6 +172,51 @@ def _exit_protocol_mismatch(mismatch: core.ParentProtocolMismatch) -> NoReturn:
     )
     flush_output()
     os._exit(PROTOCOL_MISMATCH_EXIT_CODE)
+
+
+type CoreRefusal = core.CoreStopped | core.ForkedAfterCoreStart
+"""A refusal of the core of this process that no later call clears: the
+core stopped after a panic in one of its background tasks, or this process
+is a fork of the process where it started."""
+
+
+def core_refusal_text(refusal: CoreRefusal) -> str:
+    """The cause of ``refusal``, for the last log line of the child. Pure."""
+    detail = '; '.join(str(argument) for argument in refusal.args)
+    match refusal:
+        case core.CoreStopped():
+            return (
+                'the core of this child stopped after a panic in a core '
+                f'background task ({detail})'
+            )
+        case core.ForkedAfterCoreStart():
+            return (
+                'this process is a fork of a child whose core had started '
+                f'({detail})'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def end_child_after_core_refusal(refusal: CoreRefusal, moment: str) -> NoReturn:
+    """End this child after its core refused a call: log the cause as the
+    last line of the child, flush the log handlers and the output, and leave
+    with ``os._exit(CORE_STOPPED_EXIT_CODE)``. ``moment`` names where the
+    refusal came, for example the start of a task.
+
+    The worker reads the code: a child that holds no task is replaced; a
+    child that holds a task takes the crashed-child path, and the retry
+    policy of the task applies. ``atexit`` handlers do not run.
+    """
+    logger.error(
+        '%s: %s; the child ends itself with exit code %s',
+        moment,
+        core_refusal_text(refusal),
+        CORE_STOPPED_EXIT_CODE,
+    )
+    logging.shutdown()
+    flush_output()
+    os._exit(CORE_STOPPED_EXIT_CODE)
 
 
 class ParentFrameReader:
@@ -365,8 +417,23 @@ def bounded_end(task_name: str, end: RunEnd) -> RunEnd:
     match end:
         case ResultEnvelope():
             return bounded_envelope(task_name, end)
-        case StoppedBeforeRunning():
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return end
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def end_child_after_refused_start(end: SeatEnd, task_id: uuid.UUID) -> None:
+    """Call after the frame that reports ``end`` is written. A start that the
+    stopped core of the child refused (``CoreStoppedBeforeStart``) went out
+    as ``OWNERSHIP_UNCONFIRMED``, so the worker releases its claim with no
+    attempt charged; the child then ends itself
+    (``end_child_after_core_refusal``). Every other end returns."""
+    match end:
+        case CoreStoppedBeforeStart(stopped=stopped):
+            end_child_after_core_refusal(stopped, f'At the start of task {task_id}')
+        case ResultEnvelope() | StoppedBeforeRunning() | SeatTimedOut():
+            return
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -484,12 +551,14 @@ def _report_run(
     A run that stopped before its RUNNING update (``StoppedBeforeRunning``)
     writes no marker and ran no task code, so it left no work. The result
     envelope is bounded here (``bounded_envelope``). A parent that is gone
-    ends the process (``_send_child_frame``).
+    ends the process (``_send_child_frame``). A start that the stopped core
+    of the child refused (``CoreStoppedBeforeStart``) ends the process once
+    its frame is written (``end_child_after_refused_start``).
     """
     match returned:
         case SetRunning(result=result):
             end: RunEnd = bounded_envelope(frame.task_name, result)
-        case StoppedBeforeRunning():
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             end = returned
         case _ as unreachable:
             assert_never(unreachable)
@@ -505,10 +574,11 @@ def _report_run(
                     task_loop=nothing_left,
                 ),
             )
+            end_child_after_refused_start(end, frame.task_id)
             return _AfterRun.SERVES
         case LoopHoldsTasks() as left, ResultEnvelope() as body_result:
             pass
-        case LoopHoldsTasks(), StoppedBeforeRunning():
+        case LoopHoldsTasks(), StoppedBeforeRunning() | CoreStoppedBeforeStart():
             raise AssertionError(
                 f'task {frame.task_id} stopped before running and left work on '
                 'the task loop',
@@ -546,7 +616,7 @@ def _mark_when_set_running(
     match returned:
         case SetRunning():
             mark_finalizing(frame)
-        case StoppedBeforeRunning():
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return
         case _ as unreachable:
             assert_never(unreachable)

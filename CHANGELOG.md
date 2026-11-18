@@ -78,6 +78,17 @@ before you upgrade a 0.7 deployment.
   runs on the core. `CoreStopped` means that a background task of the core
   panicked, a defect in horsies: restart the process.
 
+- **A worker child whose core stopped ends itself.** It never serves on
+  with a stopped core (`CoreStopped`) or as a fork of a child
+  (`ForkedAfterCoreStart`). At the start of a task, before task code ran,
+  the worker releases the claim with no attempt charged, the child exits
+  with code 80, and the worker starts a new child, which runs the task. A
+  fork exits at once and writes nothing to the worker. After the body of a
+  task, the child exits with code 80 and reports nothing: the task takes
+  the crashed-child path (`WORKER_CRASHED`) and its retry policy. The last
+  log line of the child names the cause; the worker logs the replacement
+  of a child that held no task at error level.
+
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of
   `BrokerIdempotencyKeyConflict`; the `task_id` of `Horsies.get_result`,
