@@ -178,13 +178,11 @@ fn ping_target(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<String>, Brok
             let type_name = value.get_type().name()?.to_string();
             Ok(Err(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError {
-                    code: BrokerErrorCode::InvalidInput,
+                BrokerOperationError::InvalidInput {
                     message: format!(
                         "ping_workers request refused: target_worker_id must be a str or None, \
                      not {type_name}"
                     ),
-                    retryable: false,
                     cause: FailureCause::PreconditionFailed,
                 },
             )))

@@ -76,20 +76,177 @@ impl std::fmt::Display for BrokerErrorCode {
     }
 }
 
-/// Error payload for broker operations.
+/// The codes of the broker operations whose failure is one variant,
+/// [`BrokerOperationError::OperationFailed`], that keeps the code (Python
+/// `BrokerOperationFailedCode`, a `Literal` subset of `BrokerErrorCode`).
+/// The members are Python's, in Python's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BrokerOperationFailedCode {
+    SchemaInitFailed,
+    TaskInfoQueryFailed,
+    MonitoringQueryFailed,
+    DbPingFailed,
+    WorkerPingFailed,
+    CleanupFailed,
+    CloseFailed,
+    ListenerStartFailed,
+    ListenerSubscribeFailed,
+}
+
+impl BrokerOperationFailedCode {
+    /// The member of the whole catalog. Pure.
+    pub const fn broker_code(self) -> BrokerErrorCode {
+        match self {
+            Self::SchemaInitFailed => BrokerErrorCode::SchemaInitFailed,
+            Self::TaskInfoQueryFailed => BrokerErrorCode::TaskInfoQueryFailed,
+            Self::MonitoringQueryFailed => BrokerErrorCode::MonitoringQueryFailed,
+            Self::DbPingFailed => BrokerErrorCode::DbPingFailed,
+            Self::WorkerPingFailed => BrokerErrorCode::WorkerPingFailed,
+            Self::CleanupFailed => BrokerErrorCode::CleanupFailed,
+            Self::CloseFailed => BrokerErrorCode::CloseFailed,
+            Self::ListenerStartFailed => BrokerErrorCode::ListenerStartFailed,
+            Self::ListenerSubscribeFailed => BrokerErrorCode::ListenerSubscribeFailed,
+        }
+    }
+}
+
+/// The failure of a broker operation: one variant per Python class of
+/// `python/horsies/core/brokers/result_types.py`, each with the facts of its
+/// state only. Carried inside `Err(...)` of a [`BrokerResult`].
 ///
-/// Carried inside `Err(...)` of a `BrokerResult<T>`.
+/// The classes that only the Python client produces are not variants:
+/// `BrokerNotAttached`, `BrokerNoTypeAvailable`, `BrokerEventLoopLimit` and
+/// `BrokerLoopRunnerFailed`.
+///
+/// `cause` is what the operation met: the server's error, no answer, a
+/// broken read contract, or a failed precondition (a refused argument
+/// included). A variant without `cause` has the cause of its state
+/// ([`Self::failure_cause`]). A variant without `retryable` never clears.
 #[derive(Debug, Clone)]
-pub struct BrokerOperationError {
-    /// Which operation category failed.
-    pub code: BrokerErrorCode,
-    /// Human-readable description.
-    pub message: String,
-    /// Whether the caller can retry this operation.
-    pub retryable: bool,
-    /// What the operation met: the server's error, no answer, a broken read
-    /// contract, or a failed precondition (a refused argument included).
-    pub cause: FailureCause,
+pub enum BrokerOperationError {
+    /// Python `BrokerOperationFailed`: the operation `code` failed with a
+    /// database, driver or connection error. A read changed nothing.
+    OperationFailed {
+        code: BrokerOperationFailedCode,
+        message: String,
+        retryable: bool,
+        cause: FailureCause,
+    },
+    /// Python `BrokerEnqueueFailed`: the enqueue write failed or could not
+    /// be confirmed. The row may or may not exist.
+    EnqueueFailed {
+        message: String,
+        retryable: bool,
+        cause: FailureCause,
+    },
+    /// Python `BrokerPayloadMismatch`: the task id holds another command or
+    /// `sent_at`, or its live row another idempotency key. Nothing was
+    /// written.
+    PayloadMismatch { message: String },
+    /// Python `BrokerIdempotencyKeyConflict`: the key is reserved by the
+    /// task `owner_task_id`, with another command. Nothing was written.
+    IdempotencyKeyConflict {
+        message: String,
+        owner_task_id: Uuid,
+    },
+    /// Python `BrokerInvalidJsonPayload`: stored or wire JSON failed strict
+    /// validation. The stored data is unchanged.
+    InvalidJsonPayload {
+        message: String,
+        cause: FailureCause,
+    },
+    /// Python `BrokerInvalidTaskOptions`: the task options were refused
+    /// before the write. Nothing was written.
+    InvalidTaskOptions {
+        message: String,
+        cause: FailureCause,
+    },
+    /// Python `BrokerInvalidInput`: an argument was refused before anything
+    /// ran. Nothing was written.
+    InvalidInput {
+        message: String,
+        cause: FailureCause,
+    },
+    /// Python `BrokerAsyncContext`: a sync or blocking call on a thread that
+    /// runs an event loop or a tokio runtime. Its wait would stall that
+    /// loop, so nothing ran.
+    AsyncContext { message: String },
+    /// Python `BrokerListenerDisabled`: the broker has no listener, so the
+    /// operation cannot run. Nothing ran.
+    ListenerDisabled { message: String },
+    /// Python `BrokerWaitInsideTask`: a result wait in a process that runs
+    /// task bodies. Nothing ran.
+    WaitInsideTask { message: String },
+}
+
+impl BrokerOperationError {
+    /// The catalog code of the variant. Pure.
+    pub fn code(&self) -> BrokerErrorCode {
+        match self {
+            Self::OperationFailed { code, .. } => code.broker_code(),
+            Self::EnqueueFailed { .. } => BrokerErrorCode::EnqueueFailed,
+            Self::PayloadMismatch { .. } => BrokerErrorCode::PayloadMismatch,
+            Self::IdempotencyKeyConflict { .. } => BrokerErrorCode::IdempotencyKeyConflict,
+            Self::InvalidJsonPayload { .. } => BrokerErrorCode::InvalidJsonPayload,
+            Self::InvalidTaskOptions { .. } => BrokerErrorCode::InvalidTaskOptions,
+            Self::InvalidInput { .. } => BrokerErrorCode::InvalidInput,
+            Self::AsyncContext { .. } => BrokerErrorCode::AsyncContext,
+            Self::ListenerDisabled { .. } => BrokerErrorCode::ListenerDisabled,
+            Self::WaitInsideTask { .. } => BrokerErrorCode::WaitInsideTask,
+        }
+    }
+
+    /// What failed and why. Pure.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::OperationFailed { message, .. }
+            | Self::EnqueueFailed { message, .. }
+            | Self::PayloadMismatch { message }
+            | Self::IdempotencyKeyConflict { message, .. }
+            | Self::InvalidJsonPayload { message, .. }
+            | Self::InvalidTaskOptions { message, .. }
+            | Self::InvalidInput { message, .. }
+            | Self::AsyncContext { message }
+            | Self::ListenerDisabled { message }
+            | Self::WaitInsideTask { message } => message,
+        }
+    }
+
+    /// Whether a repeat of the same call can succeed: the classification of
+    /// the cause where the variant has one, else `false`. Pure.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::OperationFailed { retryable, .. } | Self::EnqueueFailed { retryable, .. } => {
+                *retryable
+            }
+            Self::PayloadMismatch { .. }
+            | Self::IdempotencyKeyConflict { .. }
+            | Self::InvalidJsonPayload { .. }
+            | Self::InvalidTaskOptions { .. }
+            | Self::InvalidInput { .. }
+            | Self::AsyncContext { .. }
+            | Self::ListenerDisabled { .. }
+            | Self::WaitInsideTask { .. } => false,
+        }
+    }
+
+    /// The cause of the failure: the variant's `cause`, else the cause of
+    /// its state. A refused key, a refused thread, a missing listener and a
+    /// wait in a task process are failed preconditions. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::OperationFailed { cause, .. }
+            | Self::EnqueueFailed { cause, .. }
+            | Self::InvalidJsonPayload { cause, .. }
+            | Self::InvalidTaskOptions { cause, .. }
+            | Self::InvalidInput { cause, .. } => cause.clone(),
+            Self::PayloadMismatch { .. }
+            | Self::IdempotencyKeyConflict { .. }
+            | Self::AsyncContext { .. }
+            | Self::ListenerDisabled { .. }
+            | Self::WaitInsideTask { .. } => FailureCause::PreconditionFailed,
+        }
+    }
 }
 
 impl std::fmt::Display for BrokerOperationError {
@@ -97,7 +254,9 @@ impl std::fmt::Display for BrokerOperationError {
         write!(
             f,
             "[{}] {} (retryable={})",
-            self.code, self.message, self.retryable,
+            self.code(),
+            self.message(),
+            self.retryable(),
         )
     }
 }
@@ -232,8 +391,8 @@ mod tests {
 
     #[test]
     fn broker_operation_error_display() {
-        let err = BrokerOperationError {
-            code: BrokerErrorCode::SchemaInitFailed,
+        let err = BrokerOperationError::OperationFailed {
+            code: BrokerOperationFailedCode::SchemaInitFailed,
             message: "connection refused".to_owned(),
             retryable: true,
             cause: FailureCause::Connection,
@@ -242,6 +401,140 @@ mod tests {
         assert!(s.contains("SCHEMA_INIT_FAILED"));
         assert!(s.contains("connection refused"));
         assert!(s.contains("retryable=true"));
+    }
+
+    /// Each variant has the code of its Python class; the operation codes
+    /// keep theirs.
+    #[test]
+    fn each_variant_has_the_code_of_its_python_class() {
+        let cause = FailureCause::PreconditionFailed;
+        let message = || "m".to_owned();
+        let cases = [
+            (
+                BrokerOperationError::OperationFailed {
+                    code: BrokerOperationFailedCode::WorkerPingFailed,
+                    message: message(),
+                    retryable: true,
+                    cause: cause.clone(),
+                },
+                BrokerErrorCode::WorkerPingFailed,
+            ),
+            (
+                BrokerOperationError::EnqueueFailed {
+                    message: message(),
+                    retryable: true,
+                    cause: cause.clone(),
+                },
+                BrokerErrorCode::EnqueueFailed,
+            ),
+            (
+                BrokerOperationError::PayloadMismatch { message: message() },
+                BrokerErrorCode::PayloadMismatch,
+            ),
+            (
+                BrokerOperationError::IdempotencyKeyConflict {
+                    message: message(),
+                    owner_task_id: Uuid::from_u128(7),
+                },
+                BrokerErrorCode::IdempotencyKeyConflict,
+            ),
+            (
+                BrokerOperationError::InvalidJsonPayload {
+                    message: message(),
+                    cause: cause.clone(),
+                },
+                BrokerErrorCode::InvalidJsonPayload,
+            ),
+            (
+                BrokerOperationError::InvalidTaskOptions {
+                    message: message(),
+                    cause: cause.clone(),
+                },
+                BrokerErrorCode::InvalidTaskOptions,
+            ),
+            (
+                BrokerOperationError::InvalidInput {
+                    message: message(),
+                    cause: cause.clone(),
+                },
+                BrokerErrorCode::InvalidInput,
+            ),
+            (
+                BrokerOperationError::AsyncContext { message: message() },
+                BrokerErrorCode::AsyncContext,
+            ),
+            (
+                BrokerOperationError::ListenerDisabled { message: message() },
+                BrokerErrorCode::ListenerDisabled,
+            ),
+            (
+                BrokerOperationError::WaitInsideTask { message: message() },
+                BrokerErrorCode::WaitInsideTask,
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), "m");
+        }
+    }
+
+    /// Only the two variants whose cause can clear carry `retryable`; every
+    /// other variant never clears.
+    #[test]
+    fn only_a_failed_operation_or_enqueue_can_be_retryable() {
+        let failed = BrokerOperationError::OperationFailed {
+            code: BrokerOperationFailedCode::DbPingFailed,
+            message: "lost".to_owned(),
+            retryable: true,
+            cause: FailureCause::Connection,
+        };
+        let refused = BrokerOperationError::InvalidInput {
+            message: "bad".to_owned(),
+            cause: FailureCause::PreconditionFailed,
+        };
+        let async_context = BrokerOperationError::AsyncContext {
+            message: "loop".to_owned(),
+        };
+        assert!(failed.retryable());
+        assert!(!refused.retryable());
+        assert!(!async_context.retryable());
+        assert_eq!(failed.failure_cause(), FailureCause::Connection);
+        assert_eq!(
+            async_context.failure_cause(),
+            FailureCause::PreconditionFailed
+        );
+    }
+
+    /// The operation codes are Python's `BrokerOperationFailedCode`, in its
+    /// order.
+    #[test]
+    fn the_operation_codes_are_the_nine_of_python() {
+        let codes = [
+            BrokerOperationFailedCode::SchemaInitFailed,
+            BrokerOperationFailedCode::TaskInfoQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::DbPingFailed,
+            BrokerOperationFailedCode::WorkerPingFailed,
+            BrokerOperationFailedCode::CleanupFailed,
+            BrokerOperationFailedCode::CloseFailed,
+            BrokerOperationFailedCode::ListenerStartFailed,
+            BrokerOperationFailedCode::ListenerSubscribeFailed,
+        ]
+        .map(|code| code.broker_code().to_string());
+        assert_eq!(
+            codes,
+            [
+                "SCHEMA_INIT_FAILED",
+                "TASK_INFO_QUERY_FAILED",
+                "MONITORING_QUERY_FAILED",
+                "DB_PING_FAILED",
+                "WORKER_PING_FAILED",
+                "CLEANUP_FAILED",
+                "CLOSE_FAILED",
+                "LISTENER_START_FAILED",
+                "LISTENER_SUBSCRIBE_FAILED",
+            ]
+        );
     }
 
     #[test]

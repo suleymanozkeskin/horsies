@@ -33,6 +33,10 @@ and column stays as captured and compares by its column rule.
   table; a wake that is owed and not there becomes a row
   ``CAPACITY_WAKE_MISSING`` on that channel.
 
+- ``CONCURRENT_STARTS_IN_ANY_ORDER``: in ``horsies_tasks``, the
+  ``enqueued_at`` of a row becomes ``ENQUEUED_IN_THE_RACE`` when it is a
+  time rank (``ORDER``). A NULL stays as captured.
+
 A decided difference (``tests.dualrun.operations.table.DecidedDifference``)
 reduces nothing: its pair compares the whole snapshot.
 ``decided_difference_explains`` tells whether every entry of the
@@ -46,7 +50,8 @@ difference is one that its fact explains.
   There is one RUNNING row of the reference per committed row, and one
   event of each channel per committed row.
 
-No reduction hides which rows exist or who owns them. A history row, or a
+No reduction hides which rows exist or who owns them. A task that one of the
+concurrent starts did not commit is still a row on one side only. A history row, or a
 task and role of a heartbeat, on one side only is still a row on one side
 only. A sender that differs, claim facts that agree with neither winner
 against facts that agree, a move that neither racer writes, and an input
@@ -85,6 +90,7 @@ from tests.dualrun.values import (
     JsonDocument,
     NormalizedValue,
     NullValue,
+    TimeRank,
     render_value,
     sort_token,
 )
@@ -127,6 +133,11 @@ ROUND_MOVE_COLUMNS: Final = (
 """The columns of a history row that the move of a round writes and that
 differ between the finalize and the stale recovery. The digest columns stay:
 each one still checks its own payload."""
+
+ENQUEUED_IN_THE_RACE: Final = ExactValue(text='enqueued by one of the concurrent starts')
+"""The enqueue time of a task of the concurrent starts, in place of its rank."""
+
+ENQUEUE_TIME: Final = 'enqueued_at'
 
 MOVED_IN_THE_ROUND: Final = ExactValue(text='written by the mover of the round')
 """A value that the finalize or the stale recovery wrote, whichever moved the row."""
@@ -280,6 +291,25 @@ def _keyed_inputs_as_winning_command(tasks: NormalizedTable) -> NormalizedTable:
     return NormalizedTable(rules=rules, rows=tuple(rows))
 
 
+def _enqueue_times_of_the_race(tasks: NormalizedTable) -> NormalizedTable:
+    """``tasks`` with each ``enqueued_at`` that is a time rank as
+    ``ENQUEUED_IN_THE_RACE``. A NULL stays as captured."""
+    rules = tasks.rules
+    enqueued_at = rules.position(ENQUEUE_TIME)
+    message = f'{rules.name}: {ENQUEUE_TIME} orders or pairs the rows'
+    assert ENQUEUE_TIME not in rules.identity, message
+    rows: list[NormalizedRow] = []
+    for row in tasks.rows:
+        match row[enqueued_at]:
+            case TimeRank():
+                rows.append(
+                    (*row[:enqueued_at], ENQUEUED_IN_THE_RACE, *row[enqueued_at + 1 :])
+                )
+            case _:
+                rows.append(row)
+    return NormalizedTable(rules=rules, rows=tuple(rows))
+
+
 class RoundMover(Enum):
     """The side of the round race that moved the task to history."""
 
@@ -409,6 +439,9 @@ def _reduced(snapshot: NormalizedSnapshot, fact: PairFact) -> NormalizedSnapshot
             return _with_tables(snapshot, {HEARTBEATS_TABLE: senders})
         case PairFact.ONE_KEYED_SEND_WINNER:
             tasks = _keyed_inputs_as_winning_command(snapshot.table(TASKS_TABLE))
+            return _with_tables(snapshot, {TASKS_TABLE: tasks})
+        case PairFact.CONCURRENT_STARTS_IN_ANY_ORDER:
+            tasks = _enqueue_times_of_the_race(snapshot.table(TASKS_TABLE))
             return _with_tables(snapshot, {TASKS_TABLE: tasks})
         case PairFact.ONE_MOVER_PER_ROUND:
             history = snapshot.table(HISTORY_TABLE)

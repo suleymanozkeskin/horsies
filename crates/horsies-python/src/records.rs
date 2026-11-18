@@ -43,12 +43,11 @@ impl BrokerFailure {
     /// The failure of the operation `subject` that a broker call answered
     /// with `error`.
     pub fn of_operation_error(subject: &'static str, error: BrokerOperationError) -> Self {
-        let exception = FailureException::of_operation_error(subject, &error);
         Self {
-            code: error.code.to_string(),
-            message: error.message,
-            retryable: error.retryable,
-            exception,
+            code: error.code().to_string(),
+            message: error.message().to_owned(),
+            retryable: error.retryable(),
+            exception: FailureException::of_operation_error(subject, &error),
         }
     }
 }

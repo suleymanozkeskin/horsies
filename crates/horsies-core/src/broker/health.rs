@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use sqlx::FromRow;
 
 use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
-use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
+use crate::broker::result_types::{BrokerOperationError, BrokerOperationFailedCode, BrokerResult};
 use crate::broker::slot_health::{parse_slot_health, SlotHealth};
 use crate::failure_cause::FailureCause;
 
@@ -271,13 +271,10 @@ fn json_object(value: &Value) -> Result<Map<String, Value>, String> {
 /// schema mode): `LISTENER_DISABLED`, not retryable, with Python's text
 /// (`ping_workers_async`). Nothing ran.
 pub fn ping_listener_disabled() -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::ListenerDisabled,
+    BrokerOperationError::ListenerDisabled {
         message: "ping_workers listener unavailable: this broker was built with \
                   assume_initialized=True and has no listener"
             .to_owned(),
-        retryable: false,
-        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -286,10 +283,8 @@ pub fn ping_listener_disabled() -> BrokerOperationError {
 /// (`ping_workers_async`). `timeout_seconds` is the given value as the
 /// caller wrote it. Nothing ran.
 pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::InvalidInput,
+    BrokerOperationError::InvalidInput {
         message: format!("timeout_seconds must be positive, got {timeout_seconds}"),
-        retryable: false,
         cause: FailureCause::PreconditionFailed,
     }
 }
@@ -298,10 +293,8 @@ pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> BrokerOp
 /// not retryable, with Python's text (`ping_workers_async`).
 /// `min_responses` is the given value as the caller wrote it. Nothing ran.
 pub fn ping_min_responses_refused(min_responses: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::InvalidInput,
+    BrokerOperationError::InvalidInput {
         message: format!("min_responses must be >= 1 when set, got {min_responses}"),
-        retryable: false,
         cause: FailureCause::PreconditionFailed,
     }
 }
@@ -322,10 +315,8 @@ pub fn checked_history_limit(limit: Option<i64>) -> BrokerResult<Option<i64>> {
 /// (`get_worker_state_history_async`). `limit` is the given value as the
 /// caller wrote it. Nothing ran.
 pub fn worker_history_limit_refused(limit: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::InvalidInput,
+    BrokerOperationError::InvalidInput {
         message: format!("limit must be positive when set, got {limit}"),
-        retryable: false,
         cause: FailureCause::PreconditionFailed,
     }
 }
@@ -351,8 +342,8 @@ pub(crate) fn read_worker_snapshot(
     row: StoredWorkerState,
 ) -> BrokerResult<WorkerStateSnapshot> {
     row.into_snapshot()
-        .map_err(|unreadable| BrokerOperationError {
-            code: BrokerErrorCode::MonitoringQueryFailed,
+        .map_err(|unreadable| BrokerOperationError::OperationFailed {
+            code: BrokerOperationFailedCode::MonitoringQueryFailed,
             message: format!("{operation} failed: {unreadable}"),
             retryable: false,
             cause: FailureCause::ContractViolation,
@@ -424,6 +415,7 @@ pub(crate) fn stored_value_text(value: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::result_types::BrokerErrorCode;
 
     #[test]
     fn database_ping_holds_latency() {
@@ -566,10 +558,10 @@ mod tests {
         let failed = read_worker_snapshots("list_worker_states", vec![stored_row(), row])
             .expect_err("the second row is unreadable");
 
-        assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
-        assert!(!failed.retryable);
+        assert_eq!(failed.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!failed.retryable());
         assert!(failed
-            .message
+            .message()
             .starts_with("list_worker_states failed: worker w1 snapshot at "));
     }
 
@@ -603,27 +595,27 @@ mod tests {
         )
         .expect_err("an unreadable row");
 
-        assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
-        assert!(!failed.retryable);
+        assert_eq!(failed.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!failed.retryable());
     }
 
     #[test]
     fn the_ping_refusals_carry_python_text() {
         let timeout = ping_timeout_refused(&"-1.5");
-        assert_eq!(timeout.code, BrokerErrorCode::InvalidInput);
+        assert_eq!(timeout.code(), BrokerErrorCode::InvalidInput);
         assert_eq!(
-            timeout.message,
+            timeout.message(),
             "timeout_seconds must be positive, got -1.5"
         );
-        assert!(!timeout.retryable);
+        assert!(!timeout.retryable());
 
         let minimum = ping_min_responses_refused(&0);
-        assert_eq!(minimum.code, BrokerErrorCode::InvalidInput);
+        assert_eq!(minimum.code(), BrokerErrorCode::InvalidInput);
         assert_eq!(
-            minimum.message,
+            minimum.message(),
             "min_responses must be >= 1 when set, got 0"
         );
-        assert!(!minimum.retryable);
+        assert!(!minimum.retryable());
     }
 
     #[test]
@@ -632,9 +624,9 @@ mod tests {
         assert_eq!(checked_history_limit(Some(1)).ok(), Some(Some(1)));
         for refused in [0, -1, i64::MIN] {
             let error = checked_history_limit(Some(refused)).expect_err("0 or less is refused");
-            assert_eq!(error.code, BrokerErrorCode::InvalidInput);
+            assert_eq!(error.code(), BrokerErrorCode::InvalidInput);
             assert_eq!(
-                error.message,
+                error.message(),
                 format!("limit must be positive when set, got {refused}")
             );
         }
@@ -644,11 +636,11 @@ mod tests {
     fn a_history_limit_of_zero_or_less_is_refused_with_python_text() {
         let refused = worker_history_limit_refused(&-(1_i128 << 70));
 
-        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
+        assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
         assert_eq!(
-            refused.message,
+            refused.message(),
             format!("limit must be positive when set, got {}", -(1_i128 << 70))
         );
-        assert!(!refused.retryable);
+        assert!(!refused.retryable());
     }
 }
