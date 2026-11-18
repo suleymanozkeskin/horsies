@@ -1984,18 +1984,6 @@ class TestStartAttempt:
 
 
 # ===================================================================
-# N. Workflow ctx task_result_from_json error path
-# ===================================================================
-
-
-# (TestWorkflowCtxTaskResultFromJsonError removed: the legacy
-# JSON-string-shape protection has been replaced by the strict-serde
-# per-node decode fold — see the comment above
-# test_workflow_ctx_summaries_by_id_bad_json. Per-node decode failures
-# are exercised at the model layer in test_workflow_handle_decode.py.)
-
-
-# ===================================================================
 # O. Happy-path lines for workflow injection + taskresult serde
 # ===================================================================
 
@@ -2527,4 +2515,3 @@ class TestRunTaskEntryCoroutineCall:
         assert _ok_value(payload, int) == 5
         assert isinstance(loop_state, LoopOpen)
         assert seen == [loop_state.loop]
-

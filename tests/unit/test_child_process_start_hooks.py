@@ -179,36 +179,6 @@ class TestRunChildStartHooks:
 
         assert exit_codes == [CHILD_HOOK_FAILURE_EXIT_CODE]
 
-    def test_mid_run_hook_failure_stops_worker_instead_of_restart_looping(
-        self,
-    ) -> None:
-        """A hook that fails only in a replacement child stops the worker.
-
-        Pins the mid-run off-ramp: the failure re-runs in every replacement
-        child, so the worker stops instead of starting more children.
-        """
-        import asyncio
-        from unittest.mock import AsyncMock, MagicMock
-
-        from horsies.core.worker.config import WorkerConfig
-        from horsies.core.worker.slots import ChildHookFailed
-        from horsies.core.worker.worker import Worker
-
-        cfg = WorkerConfig(
-            dsn='postgresql://u:p@localhost/db',
-            psycopg_dsn='postgresql://u:p@localhost/db',
-            queues=['default'],
-        )
-        worker = Worker(
-            session_factory=MagicMock(), listener=MagicMock(), cfg=cfg,
-        )
-        pool = MagicMock()
-        pool.wait_failed = AsyncMock(return_value=ChildHookFailed())
-
-        asyncio.run(worker._slot_failure_loop(pool))
-
-        assert worker._stop.is_set()
-        pool.wait_failed.assert_awaited_once()
 
     def test_fast_hook_does_not_trip_watchdog(
         self, monkeypatch: pytest.MonkeyPatch

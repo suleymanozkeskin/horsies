@@ -142,29 +142,6 @@ FINALIZING_MARKER_TIMEOUT_S: Final = 10.0
 ``FINALIZING_MARKER_BOUND``): the wait for a connection and the statement.
 A marker that the core cancels at the bound is not written later."""
 
-CORE_CANCEL_REQUEST_BOUND_S: Final = 5.0
-"""The longest time of the cancel request that the core sends for a
-statement past its bound: the connection that carries the request and the
-request itself (the core's ``CANCEL_REQUEST_BOUND``)."""
-
-CORE_CANCEL_GRACE_S: Final = 5.0
-"""The time that the core waits for the reply of a cancelled statement after
-its cancel request; past it the connection is discarded and the outcome is
-unknown (the core's ``CANCEL_GRACE``)."""
-
-CANCELLED_WRITE_END_S: Final = CORE_CANCEL_REQUEST_BOUND_S + CORE_CANCEL_GRACE_S
-"""The longest time that a statement which a bound cancelled takes to end:
-the cancel request and the wait for its reply (the core's
-``CANCELLED_WRITE_END``)."""
-
-LEFT_WORK_MARKER_BOUND_S: Final = FINALIZING_MARKER_TIMEOUT_S + CANCELLED_WRITE_END_S
-"""The longest time that the finalizing marker of an isolated run takes,
-also after the work that its task left on the task loop: the bound of the
-core and the end of a statement cancelled at it (the core's
-``FINALIZING_MARKER_END``). The backstop of the parent after the return of
-such a run covers it: the core's ``ISOLATED_LEFTOVER_BACKSTOP``, and
-``slots.ISOLATED_LEFTOVER_BACKSTOP_S`` of the Python parent, which adds it."""
-
 
 def start_always_allowed() -> StartCheck:
     """The start check of a run with no deadline in its child, as in an
@@ -503,29 +480,6 @@ def log_level_of(
 ) -> int:
     """The ``logging`` level of the log level of an init frame. Pure."""
     return _LOG_LEVELS[level]
-
-
-def _child_initializer(init: core.InitFrame, program: core.PythonProgram) -> Horsies:
-    """Child-process bootstrap from the init frame: locate the app, import
-    its tasks, then run the per-child start steps of the kind of the child
-    (``finish_child_start``). Returns the app.
-
-    Raises:
-        Exception: any bootstrap failure propagates out of the initializer,
-            which ends this child before it reports ready; the parent counts
-            that as a failed boot. A failing on_child_process_start hook does
-            not raise — _run_child_start_hooks exits the child with
-            CHILD_HOOK_FAILURE_EXIT_CODE (fail-closed).
-    """
-    app = import_app_for_child(
-        program.app_locator,
-        program.imports,
-        program.sys_path_roots,
-        log_level_of(init.log_level),
-        init.child_kind.task_send_pool,
-    )
-    finish_child_start(app, init)
-    return app
 
 
 def import_app_for_child(
@@ -1491,7 +1445,7 @@ def _encode_task_outcome(
     return ResultEnvelope(ser.ok_value)
 
 
-def _run_task_entry(
+def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     task_name: str,
     input_json: str,
     task_id: str,
@@ -1611,4 +1565,3 @@ def _run_isolated_after_running(
         return _task_exception_response(task_name, e)
 
 
-_CHILD_RUNNER_ENTRYPOINTS = (_child_initializer, _run_task_entry)
