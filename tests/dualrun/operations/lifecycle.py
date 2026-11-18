@@ -173,7 +173,7 @@ LIFECYCLE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
         node_id=(
             'tests/integration/test_monitoring_task_actions.py::TestDatabaseFailure::test_cancel_reports_a_retryable_db_failure'
         ),
-        reason='expects the core exception class CoreOperationFailed in the error',
+        reason='expects the core exception class CoreConnectionError in the error',
     ),
     CoreOnlyTest(
         node_id=(

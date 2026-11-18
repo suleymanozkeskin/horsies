@@ -31,7 +31,6 @@ import horsies._core as core
 
 from ..history.terminalization.move import TASK_LOCK_SEED
 from ..logging import get_logger
-from ..types.core_failure import CoreOperationFailed
 from ..types.result import Err, Ok, Result
 from ..utils.db import (
     AutocommitFailure,
@@ -481,33 +480,38 @@ class FusedCompletionBatch:
 
 
 COMPLETE_SUCCESSES_SUBJECT: Final = 'CoreHandle.complete_successes_async'
-"""The subject of a failure of the plain-success batch in the core."""
+"""The core call of the plain-success batch, named in a contract break of
+its rows."""
 
 
 @dataclass(frozen=True, slots=True)
 class CoreNotSent:
     """The core did not send the batch statement: its pools, its client
     family check or its checkout failed (the record ``BatchNotSent``).
-    ``error`` carries the core's message and retry classification."""
+    ``error`` is the record's exception: the core's class of the cause,
+    with its message and retry classification."""
 
-    error: CoreOperationFailed
+    error: core.CoreFailure
 
 
 @dataclass(frozen=True, slots=True)
 class CoreStatementRefused:
     """The server refused the batch statement that the core sent (the
-    record ``BatchRefused``); one row can be the cause. ``error`` carries the
-    core's message and retry classification."""
+    record ``BatchRefused``); one row can be the cause. ``error`` is the
+    record's exception: the server's error, with its SQLSTATE and retry
+    classification."""
 
-    error: CoreOperationFailed
+    error: core.CoreFailure
 
 
 @dataclass(frozen=True, slots=True)
 class CoreOutcomeUnknown:
     """The reply of the batch statement that the core sent was lost (the
-    record ``BatchCommitUnknown``). ``error`` carries the core's message."""
+    record ``BatchCommitUnknown``). ``error`` is the record's exception:
+    no answer from the server, or the server's error that ended the
+    session."""
 
-    error: CoreOperationFailed
+    error: core.CoreFailure
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,30 +678,12 @@ async def complete_fused_batch_in_core(
     match record:
         case core.SuccessesWritten():
             pass
-        case core.BatchNotSent(message=message, retryable=retryable):
-            return Err(
-                BatchRolledBack(
-                    cause=CoreNotSent(
-                        error=CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable),
-                    ),
-                ),
-            )
-        case core.BatchRefused(message=message, retryable=retryable):
-            return Err(
-                BatchRolledBack(
-                    cause=CoreStatementRefused(
-                        error=CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable),
-                    ),
-                ),
-            )
-        case core.BatchCommitUnknown(message=message):
-            return Err(
-                BatchCommitUnknown(
-                    cause=CoreOutcomeUnknown(
-                        error=CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, True),
-                    ),
-                ),
-            )
+        case core.BatchNotSent(exception=exception):
+            return Err(BatchRolledBack(cause=CoreNotSent(error=exception)))
+        case core.BatchRefused(exception=exception):
+            return Err(BatchRolledBack(cause=CoreStatementRefused(error=exception)))
+        case core.BatchCommitUnknown(exception=exception):
+            return Err(BatchCommitUnknown(cause=CoreOutcomeUnknown(error=exception)))
         case _ as unreachable:
             assert_never(unreachable)
     rows = record.rows

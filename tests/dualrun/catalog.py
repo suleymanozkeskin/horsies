@@ -13,13 +13,16 @@ Clock columns use one of three rules:
   claim order), or a value derived from a time the row does not carry
   (expiry from a terminal time, a deadline a test computes from its own
   clock). Only the rank compares.
-- ``anchored(column)``: a value computed from another clock column of the
-  row plus a duration (lease end, retry time). The offset compares within
-  ``ANCHOR_TOLERANCE``.
+- ``anchored(column, when_anchor_null)``: a value computed from another
+  clock column of the row plus a duration (lease end, retry time). The
+  offset compares within ``ANCHOR_TOLERANCE``. A value whose anchor is NULL
+  fails the capture, or, for a lease that a test seeds on a row it never
+  claimed, is ranked among such values (``AnchorNull``).
 
 Stored JSON (inputs, options, results, errors, the attempt archive, the
 rerun envelope) is parsed and compared as JSON; the ids and clock values
-inside it have path rules. A digest column is checked against its source
+inside it have path rules. A stored text that is not JSON compares as its
+text (``UnparsedDocument``). A digest column is checked against its source
 column. Partition leaf names compare with their date or hour as an offset
 from the run start.
 """
@@ -31,6 +34,7 @@ from enum import Enum
 from typing import Final
 
 from tests.dualrun.rules import (
+    AnchorNull,
     AnchorReference,
     ColumnRule,
     ColumnSpec,
@@ -323,9 +327,12 @@ SLOTS_DOWN: Final = StoredJson(
 """Down slots of a worker; ``down_since`` is a run clock value."""
 
 
-def anchored(column: str) -> TimeWithin:
+def anchored(column: str, when_anchor_null: AnchorNull) -> TimeWithin:
     """An offset from ``column`` of the same row, within ``ANCHOR_TOLERANCE``."""
-    return TimeWithin(reference=AnchorReference(column=column), bound=ANCHOR_TOLERANCE)
+    return TimeWithin(
+        reference=AnchorReference(column=column, when_anchor_null=when_anchor_null),
+        bound=ANCHOR_TOLERANCE,
+    )
 
 
 def _columns(*pairs: tuple[str, ColumnRule]) -> tuple[ColumnSpec, ...]:
@@ -444,9 +451,12 @@ _WORKFLOWS: Final = TableRules(
         'name',
         'definition_key',
         'sent_at',
+        'status',
     ),
     identity=('id',),
 )
+"""``status`` orders the workflows that a test seeds with one name and one
+send time and that differ only in their status."""
 
 _WORKFLOW_TASKS: Final = TableRules(
     name='horsies_workflow_tasks',
@@ -509,7 +519,7 @@ _TASKS: Final = TableRules(
         ('enqueued_at', ORDER),
         ('claimed_at', RUN_CLOCK),
         ('claimed_by_worker_id', WORKER_ID),
-        ('claim_expires_at', anchored('claimed_at')),
+        ('claim_expires_at', anchored('claimed_at', AnchorNull.RANKED)),
         ('started_at', RUN_CLOCK),
         ('finalizing_at', RUN_CLOCK),
         ('finalizing_by_worker_id', WORKER_ID),
@@ -518,7 +528,7 @@ _TASKS: Final = TableRules(
         ('worker_process_name', EXACT),
         ('retry_count', EXACT),
         ('max_retries', EXACT),
-        ('next_retry_at', anchored('updated_at')),
+        ('next_retry_at', anchored('updated_at', AnchorNull.REFUSED)),
         ('good_until', ORDER),
         ('is_workflow_task', EXACT),
         ('updated_at', RUN_CLOCK),
@@ -534,9 +544,15 @@ _TASKS: Final = TableRules(
         'input',
         'sent_at',
         'enqueued_at',
+        'execution',
+        'status',
     ),
     identity=('id',),
 )
+"""``execution`` and ``status`` order the tasks that a test seeds with one
+name, queue, priority, input and send time and that differ only in their
+execution class or their status (a claim test's rows of three classes, the
+rows that a claim took and the rows it left)."""
 
 _TASK_HISTORY: Final = TableRules(
     name='horsies_task_history',
@@ -733,7 +749,7 @@ _SCAN_CURSORS: Final = TableRules(
         ('cycle_upper_created_at', RUN_CLOCK),
         ('cycle_upper_id', SCAN_POSITION),
         ('claim_token', NormalisedId(family=IdFamily.RECOVERY_CLAIM)),
-        ('claim_expires_at', anchored('last_scan_at')),
+        ('claim_expires_at', anchored('last_scan_at', AnchorNull.REFUSED)),
         ('completed_cycles', EXACT),
         ('last_scan_rows', EXACT),
         ('last_candidate_rows', EXACT),

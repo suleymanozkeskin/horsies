@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Final, assert_never
+from typing import TYPE_CHECKING, ClassVar, assert_never
 
 from sqlalchemy import text
 
@@ -45,7 +45,7 @@ from horsies._core import (
 )
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
-from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+from horsies.core.types.core_failure import core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 
@@ -106,8 +106,8 @@ class TaskActionDbOperationFailed:
 
     ``retryable`` is the core's classification of the cause: ``True`` when
     the condition may clear, for example a lost connection. ``exception``
-    is a ``CoreOperationFailed`` with the core's message, or the
-    ``CoreError`` of the core boundary. The statement wrote nothing, or it
+    is the core's class of the cause (a ``CoreFailure`` leaf class, with the
+    subject ``cancel_task``), or the ``CoreError`` of the core boundary. The statement wrote nothing, or it
     committed and its reply was lost: a repeated cancel tells which,
     because a committed cancel answers ``TaskActionNotCancellable`` with
     ``CANCELLED``.
@@ -178,9 +178,6 @@ class TaskCancelled:
 CANCEL_TASK_SQL = text("""
     SELECT * FROM horsies_cancel_task(CAST(:task_id AS uuid), :include_running)
 """)
-
-CANCEL_SUBJECT: Final = 'cancel_task'
-"""The subject of a ``CoreOperationFailed`` of the cancel."""
 
 def _not_found(task_id: uuid.UUID) -> Err[TaskActionNotFound]:
     """The row does not exist — retention may have removed it."""
@@ -265,13 +262,8 @@ def _cancel_answer(
             return _not_cancellable(task_id, TaskStatus(status))
         case CancelTaskAbsent():
             return _not_found(task_id)
-        case CancelFailed(message=message, retryable=retryable):
-            return _db_err(
-                task_id,
-                message,
-                retryable,
-                CoreOperationFailed(CANCEL_SUBJECT, message, retryable),
-            )
+        case CancelFailed(message=message, retryable=retryable, exception=exception):
+            return _db_err(task_id, message, retryable, exception)
         case CancelStoredDataInvalid(message=message):
             return Err(
                 TaskActionStoredDataInvalid(

@@ -9,9 +9,15 @@ pair's key; the core case reads it:
 - ``ReferenceNotInformative``: the body passed and called no operation; the
   core case does not compare (both runs ran the same code).
 - ``ReferenceSkipped``: the body skipped; the core case does not compare.
-- ``ReferenceFailed``: the body or its capture failed; the core case fails
-  with ``ReferenceRunMissing``. So does a core case that finds no record
-  (the Python case ran in another process, or not before it).
+- ``ReferenceCaptureFailed``: the body passed and its capture failed; the
+  core case fails with ``DualRunCaptureFailed`` and that capture error.
+- ``ReferenceFailed``: the body failed; the core case fails with
+  ``ReferenceRunMissing``. So does a core case that finds no record (the
+  Python case ran in another process, or not before it).
+
+A capture that fails is an error of the harness or of the stored state, with
+its subject and cause (``capture.render_capture_failure``). It is never an
+outcome of the pair: no snapshot exists, so nothing compares equal.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from tests.dualrun.capture import CaptureFailure
 from tests.dualrun.compare import SnapshotDiff, compare_snapshots
 from tests.dualrun.normalize import NormalizedSnapshot
 from tests.dualrun.values import RunWindow
@@ -52,8 +59,15 @@ class ReferenceSkipped:
 
 
 @dataclass(frozen=True, slots=True)
+class ReferenceCaptureFailed:
+    """The Python case passed in its body, and its capture failed with ``error``."""
+
+    error: CaptureFailure
+
+
+@dataclass(frozen=True, slots=True)
 class ReferenceFailed:
-    """The Python case failed in its body or in its capture."""
+    """The Python case failed in its body."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +76,11 @@ class NoReference:
 
 
 ReferenceRecord = (
-    ReferenceCaptured | ReferenceNotInformative | ReferenceSkipped | ReferenceFailed
+    ReferenceCaptured
+    | ReferenceNotInformative
+    | ReferenceSkipped
+    | ReferenceCaptureFailed
+    | ReferenceFailed
 )
 
 
@@ -85,7 +103,14 @@ class ReferenceRunMissing:
     found: ReferenceFailed | NoReference
 
 
-CoreStep = CompareSnapshots | NoCompare | ReferenceRunMissing
+@dataclass(frozen=True, slots=True)
+class ReferenceNotCaptured:
+    """The core case has nothing to compare with: the capture of its Python case failed."""
+
+    error: CaptureFailure
+
+
+CoreStep = CompareSnapshots | NoCompare | ReferenceNotCaptured | ReferenceRunMissing
 
 
 def core_step(record: ReferenceRecord | NoReference) -> CoreStep:
@@ -95,6 +120,8 @@ def core_step(record: ReferenceRecord | NoReference) -> CoreStep:
             return CompareSnapshots(reference=record)
         case ReferenceNotInformative() | ReferenceSkipped():
             return NoCompare()
+        case ReferenceCaptureFailed(error=error):
+            return ReferenceNotCaptured(error=error)
         case ReferenceFailed() | NoReference():
             return ReferenceRunMissing(found=record)
 

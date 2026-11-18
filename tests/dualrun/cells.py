@@ -18,6 +18,7 @@ from typing import Final, cast
 
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.rules import (
+    AnchorNull,
     AnchorReference,
     DigestOf,
     EachItem,
@@ -70,6 +71,7 @@ from tests.dualrun.values import (
     RunWindow,
     TimeRank,
     TimeValue,
+    UnparsedDocument,
     json_leaves,
     map_json,
     parse_time_text,
@@ -150,7 +152,10 @@ class UnanchoredTime:
 
 @dataclass(frozen=True, slots=True)
 class UnreadableJson:
-    """A stored JSON document that does not parse, or a path value of the wrong kind."""
+    """A stored JSON cell that is not its storage form (a bytea cell whose
+    bytes are not UTF-8), a path value of the wrong kind, or a document
+    nested deeper than ``JSON_DEPTH_LIMIT``. A text that is not JSON is not
+    an error: it compares as its stored text (``UnparsedDocument``)."""
 
     table: str
     column: str
@@ -390,10 +395,28 @@ def _offset(
             return OffsetFromAnchor(offset=at - anchor_at)
 
 
+def _ranked_without_anchor(
+    values: list[TimeValue | None], anchors: list[TimeValue | None]
+) -> dict[int, StableCell]:
+    """``AnchorNull.RANKED``: the rank of each set value whose anchor is NULL,
+    among those values, by row position."""
+    positions = [
+        position
+        for position, (value, anchor) in enumerate(zip(values, anchors, strict=True))
+        if value is not None and anchor is None
+    ]
+    ranked = _ranked([values[position] for position in positions])
+    return dict(zip(positions, ranked, strict=True))
+
+
 def _anchored(
-    table: TableRules, index: int, anchor: str, rows: tuple[RawRow, ...]
+    table: TableRules,
+    index: int,
+    reference: AnchorReference,
+    rows: tuple[RawRow, ...],
 ) -> Result[list[StableCell], NormalizeError]:
     column = table.columns[index].name
+    anchor = reference.column
     anchor_index = table.position(anchor)
     match _parse_times(table.name, column, [row[index] for row in rows]):
         case Err(error):
@@ -405,17 +428,24 @@ def _anchored(
             return Err(error)
         case Ok(anchors):
             pass
+    match reference.when_anchor_null:
+        case AnchorNull.RANKED:
+            without_anchor = _ranked_without_anchor(values, anchors)
+        case AnchorNull.REFUSED:
+            without_anchor = {}
     cells: list[StableCell] = []
-    for value, anchor_value in zip(values, anchors, strict=True):
-        match _offset(value, anchor_value):
-            case UnanchoredReason() as reason:
+    for position, (value, anchor_value) in enumerate(zip(values, anchors, strict=True)):
+        match without_anchor.get(position), _offset(value, anchor_value):
+            case (None, UnanchoredReason() as reason):
                 return Err(
                     UnanchoredTime(
                         table=table.name, column=column, anchor=anchor, reason=reason
                     )
                 )
-            case normalized:
+            case (None, normalized):
                 cells.append(normalized)
+            case (ranked, _):
+                cells.append(ranked)
     return Ok(cells)
 
 
@@ -645,7 +675,11 @@ def _document_text(text: str, storage: JsonStorage) -> str | None:
 
 def _parse_document(
     text: str, rule: StoredJson, window: RunWindow
-) -> Result[JsonNode[_Building], str]:
+) -> Result[JsonNode[_Building] | UnparsedDocument, str]:
+    """The document of a cell, or ``UnparsedDocument`` when its text is not
+    JSON (``json.loads`` refuses it; ``NaN`` and ``Infinity`` are refused).
+    A cell that is not the storage form, a path value of the wrong kind and a
+    nesting deeper than ``JSON_DEPTH_LIMIT`` are errors."""
     match _document_text(text, rule.storage):
         case None:
             return Err(f'the cell is not {rule.storage.value}')
@@ -653,7 +687,9 @@ def _parse_document(
             pass
     try:
         parsed: object = json.loads(document, parse_constant=_reject_constant)
-    except (ValueError, RecursionError) as exc:
+    except ValueError:
+        return Ok(UnparsedDocument(text=document))
+    except RecursionError as exc:
         return Err(f'{type(exc).__name__}: {exc}')
     root: _Alive = tuple((index, 0) for index in range(len(rule.paths)))
     return _node(parsed, root, rule, window, 0)
@@ -677,13 +713,20 @@ def _format_error(
             )
 
 
-def _ranked_documents(documents: list[JsonNode[_Building] | None]) -> list[StableCell]:
+_StoredDocument = JsonNode[_Building] | UnparsedDocument | NullValue
+"""A stored JSON cell after its parse: a document, a text that is not JSON, or SQL NULL."""
+
+
+def _ranked_documents(documents: list[_StoredDocument]) -> list[StableCell]:
     by_path: dict[int, list[TimeValue]] = {}
     for document in documents:
-        if document is not None:
-            for leaf in json_leaves(document):
-                if isinstance(leaf, _ToRank):
-                    by_path.setdefault(leaf.path, []).append(leaf.time)
+        match document:
+            case UnparsedDocument() | NullValue():
+                pass
+            case _:
+                for leaf in json_leaves(document):
+                    if isinstance(leaf, _ToRank):
+                        by_path.setdefault(leaf.path, []).append(leaf.time)
     ranks = {path: _rank_map(times) for path, times in by_path.items()}
 
     def settle(leaf: _Building) -> PendingLeaf:
@@ -693,12 +736,14 @@ def _ranked_documents(documents: list[JsonNode[_Building] | None]) -> list[Stabl
             case _:
                 return leaf
 
-    return [
-        NullValue()
-        if document is None
-        else PendingDocument(root=map_json(document, settle))
-        for document in documents
-    ]
+    def settled(document: _StoredDocument) -> StableCell:
+        match document:
+            case UnparsedDocument() | NullValue():
+                return document
+            case _:
+                return PendingDocument(root=map_json(document, settle))
+
+    return [settled(document) for document in documents]
 
 
 def _json_cells(
@@ -709,11 +754,11 @@ def _json_cells(
     window: RunWindow,
 ) -> Result[list[StableCell], NormalizeError]:
     column = table.columns[index].name
-    documents: list[JsonNode[_Building] | None] = []
+    documents: list[_StoredDocument] = []
     for row in rows:
         match row[index]:
             case None:
-                documents.append(None)
+                documents.append(NullValue())
                 continue
             case text:
                 pass
@@ -779,8 +824,8 @@ def _column_cells(
                     return Ok(_ranked_before_run(times, window))
         case TimeWithin(reference=reference, bound=bound):
             match reference:
-                case AnchorReference(column=anchor):
-                    return _anchored(table, index, anchor, rows)
+                case AnchorReference() as anchored:
+                    return _anchored(table, index, anchored, rows)
                 case RunWindowReference():
                     match _parse_times(table.name, spec.name, texts):
                         case Err(error):

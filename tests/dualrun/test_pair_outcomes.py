@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Final
 
+import psycopg
 import pytest
 
 from horsies.core.types.result import Err, Ok
@@ -16,7 +17,30 @@ from tests.dualrun.catalog import (
     notification_payload,
     notification_row,
 )
-from tests.dualrun.cells import RawRow, RawSnapshot, RawTable
+from tests.dualrun.capture import (
+    CaptureBlocked,
+    CaptureFailure,
+    CaptureStatementFailed,
+    CatalogCoverageGap,
+    ClockReadFailed,
+    NotificationLimitExceeded,
+    NotificationMarkerMissing,
+    NotificationReadFailed,
+    SchemaColumnLimitExceeded,
+    TableRowLimitExceeded,
+    render_capture_failure,
+)
+from tests.dualrun.cells import (
+    RawRow,
+    RawSnapshot,
+    RawTable,
+    UnanchoredReason,
+    UnanchoredTime,
+    UnreadableBytes,
+    UnreadableJson,
+    UnreadableTime,
+    UnsupportedStoredFormat,
+)
 from tests.dualrun.compare import ExtraRow, compare_snapshots
 from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
 from tests.dualrun.pair_outcomes import (
@@ -27,7 +51,9 @@ from tests.dualrun.pair_outcomes import (
     NoReference,
     PairEqual,
     ReferenceCaptured,
+    ReferenceCaptureFailed,
     ReferenceFailed,
+    ReferenceNotCaptured,
     ReferenceNotInformative,
     ReferenceRunMissing,
     ReferenceSkipped,
@@ -36,7 +62,7 @@ from tests.dualrun.pair_outcomes import (
     judge_pair,
 )
 from tests.dualrun.rules import ColumnSpec, Exact, SnapshotCatalog, TableRules
-from tests.dualrun.values import RunWindow
+from tests.dualrun.values import RunWindow, RunWindowFault, RunWindowInvalid
 
 pytestmark = [pytest.mark.unit]
 
@@ -199,6 +225,115 @@ def test_the_core_case_compares_only_with_a_captured_reference() -> None:
     assert core_step(ReferenceSkipped()) == NoCompare()
     assert core_step(ReferenceFailed()) == ReferenceRunMissing(found=ReferenceFailed())
     assert core_step(NoReference()) == ReferenceRunMissing(found=NoReference())
+
+
+def test_a_failed_capture_of_the_python_case_is_no_reference_and_carries_its_error() -> None:
+    error = TableRowLimitExceeded(table='horsies_tasks', limit=10)
+
+    assert core_step(ReferenceCaptureFailed(error=error)) == ReferenceNotCaptured(error=error)
+
+
+_CLOCK: Final = datetime(2026, 11, 17, 10, 5, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ('error', 'text'),
+    [
+        pytest.param(
+            ClockReadFailed(cause=psycopg.OperationalError('server closed')),
+            'the run end clock read raised OperationalError: server closed',
+            id='clock',
+        ),
+        pytest.param(
+            RunWindowInvalid(
+                start=_CLOCK, end=_CLOCK - timedelta(seconds=1), fault=RunWindowFault.END_BEFORE_START
+            ),
+            'the run window from 2026-11-17T10:05:00+00:00 to 2026-11-17T10:04:59+00:00: '
+            'the end reading is before the start reading',
+            id='window',
+        ),
+        pytest.param(
+            NotificationReadFailed(cause=psycopg.OperationalError('gone')),
+            'the notification read raised OperationalError: gone',
+            id='notification-read',
+        ),
+        pytest.param(
+            NotificationMarkerMissing(wait=timedelta(seconds=10)),
+            'the notification marker did not arrive within 0:00:10',
+            id='marker',
+        ),
+        pytest.param(
+            NotificationLimitExceeded(limit=5),
+            'the run sent more than 5 notifications',
+            id='notification-limit',
+        ),
+        pytest.param(
+            CaptureStatementFailed(cause=psycopg.errors.UndefinedTable('no table')),
+            'a capture statement raised UndefinedTable: no table',
+            id='statement',
+        ),
+        pytest.param(
+            CaptureBlocked(lock_timeout=timedelta(seconds=5)),
+            'a table lock was held longer than 0:00:05',
+            id='blocked',
+        ),
+        pytest.param(
+            SchemaColumnLimitExceeded(limit=2),
+            'the schema has more than 2 horsies_ columns',
+            id='schema-columns',
+        ),
+        pytest.param(
+            CatalogCoverageGap(gaps=()),
+            'the live schema and the snapshot catalog differ',
+            id='coverage',
+        ),
+        pytest.param(
+            TableRowLimitExceeded(table='horsies_tasks', limit=10),
+            'horsies_tasks: more than 10 rows',
+            id='rows',
+        ),
+        pytest.param(
+            UnreadableTime(table='horsies_tasks', column='sent_at', text='soon', cause='bad'),
+            "horsies_tasks.sent_at: the clock text 'soon' does not parse: bad",
+            id='time',
+        ),
+        pytest.param(
+            UnanchoredTime(
+                table='horsies_tasks',
+                column='next_retry_at',
+                anchor='updated_at',
+                reason=UnanchoredReason.ANCHOR_NULL,
+            ),
+            'horsies_tasks.next_retry_at: no offset from updated_at: '
+            'the anchor column is NULL while the value is set',
+            id='anchor',
+        ),
+        pytest.param(
+            UnreadableJson(table='horsies_workflows', column='error', cause='text path'),
+            'horsies_workflows.error: text path',
+            id='json',
+        ),
+        pytest.param(
+            UnsupportedStoredFormat(
+                table='horsies_task_history',
+                column='attempt_snapshot',
+                version_column='attempt_archive_version',
+                found='2',
+            ),
+            'horsies_task_history.attempt_snapshot: attempt_archive_version is 2',
+            id='format',
+        ),
+        pytest.param(
+            UnreadableBytes(table='horsies_task_history', column='result_digest'),
+            'horsies_task_history.result_digest: the cell is not the hex text',
+            id='bytes',
+        ),
+    ],
+)
+def test_a_capture_failure_names_its_subject_and_cause(
+    error: CaptureFailure, text: str
+) -> None:
+    assert text in render_capture_failure(error)
 
 
 def test_a_window_crosses_an_hour_when_its_end_is_in_a_later_utc_hour() -> None:

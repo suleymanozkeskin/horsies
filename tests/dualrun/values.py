@@ -356,6 +356,16 @@ class JsonDocument:
     root: JsonNode[NormalizedValue]
 
 
+@dataclass(frozen=True, slots=True)
+class UnparsedDocument:
+    """A cell of a stored JSON column whose text is not JSON, compared as
+    that text (a bytea cell: its bytes as UTF-8 text). A test writes such
+    text on purpose to check how a reader refuses it. Ids inside it stay raw,
+    so a text that names a run's id differs between runs."""
+
+    text: str
+
+
 NormalizedValue = (
     NullValue
     | ExactValue
@@ -371,6 +381,7 @@ NormalizedValue = (
     | LabelledText
     | MeasuredText
     | JsonDocument
+    | UnparsedDocument
 )
 
 
@@ -429,6 +440,8 @@ def sort_token(value: OrderKeyValue) -> tuple[int, str]:
             return (13, render_text(parts, lambda label: sort_token(label)[1]))
         case MeasuredText(parts=parts):
             return (14, render_text(parts, render_measure))
+        case UnparsedDocument(text=text):
+            return (15, text)
 
 
 def render_value(value: OrderKeyValue) -> str:
@@ -466,6 +479,8 @@ def render_value(value: OrderKeyValue) -> str:
             return render_text(parts, render_value)
         case MeasuredText(parts=parts):
             return render_text(parts, render_measure)
+        case UnparsedDocument(text=text):
+            return f'<not json {text!r}>'
 
 
 @dataclass(frozen=True, slots=True)
