@@ -25,9 +25,11 @@ from horsies._core import (
     CoreStartFailed,
     DatabasePingRecord,
     Enqueued,
+    EnqueueRequest,
     HandleClosed,
     StartAfterDelay as CoreStartAfterDelay,
     StartAt as CoreStartAt,
+    StartNow as CoreStartNow,
     SchemaInstalled,
     SchemaInstallNotRun,
     RawResultAbsent,
@@ -340,6 +342,29 @@ class TestEnqueueAsync:
 SEND_TASK_ID = UUID('0198c0de-0000-7000-8000-000000000017')
 
 
+def _core_request(**values: Any) -> EnqueueRequest:
+    """A request of the core with the values of a plain send of ``my_task``
+    and ``values`` over them. The request is built directly, so the core
+    sees a value that the facade's own checks refuse first."""
+    request: dict[str, Any] = {
+        'task_id': SEND_TASK_ID,
+        'task_name': 'my_task',
+        'queue_name': 'default',
+        'priority': 100,
+        'input_json': '{}',
+        'sent_at': datetime.now(timezone.utc),
+        'start': CoreStartNow(),
+        'good_until': None,
+        'task_options_json': None,
+        'idempotency_key': None,
+        'retention_class_key': 'standard_30d',
+        'rerun_input': 'APP_DEFAULT',
+        'send_kind': 'FIRST',
+        **values,
+    }
+    return EnqueueRequest(**request)
+
+
 @pytest.mark.unit
 class TestEnqueueThroughCore:
     """enqueue_async and enqueue build the core's request with the client
@@ -457,6 +482,94 @@ class TestEnqueueThroughCore:
         assert isinstance(result.err_value, BrokerInvalidInput)
         assert message in result.err_value.message
         broker._core_handle.enqueue_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('values', 'code', 'error_class', 'cause_class'),
+        [
+            pytest.param(
+                {'input_json': '{bad'},
+                BrokerErrorCode.INVALID_INPUT,
+                BrokerInvalidInput,
+                SerializationError,
+                id='INVALID_INPUT-unreadable-json',
+            ),
+            pytest.param(
+                {'sent_at': datetime.now(timezone.utc) + timedelta(minutes=10)},
+                BrokerErrorCode.INVALID_INPUT,
+                BrokerInvalidInput,
+                NoCause,
+                id='INVALID_INPUT-by-rule',
+            ),
+            pytest.param(
+                {'priority': 0},
+                BrokerErrorCode.INVALID_INPUT,
+                BrokerInvalidInput,
+                ValueError,
+                id='INVALID_INPUT-by-value-rule',
+            ),
+            pytest.param(
+                {'task_options_json': '{bad'},
+                BrokerErrorCode.INVALID_TASK_OPTIONS,
+                BrokerInvalidTaskOptions,
+                SerializationError,
+                id='INVALID_TASK_OPTIONS-unreadable-json',
+            ),
+            pytest.param(
+                {'task_options_json': '{"retry_policy": "not_a_dict"}'},
+                BrokerErrorCode.INVALID_TASK_OPTIONS,
+                BrokerInvalidTaskOptions,
+                NoCause,
+                id='INVALID_TASK_OPTIONS-by-rule',
+            ),
+        ],
+    )
+    async def test_a_core_refusal_keeps_its_code_and_cause(
+        self,
+        values: dict[str, Any],
+        code: BrokerErrorCode,
+        error_class: type,
+        cause_class: type,
+    ) -> None:
+        """The class that the real core builds for a refused part and cause,
+        returned by the facade as it is: the class and the code of the part,
+        not retryable, and the cause of Python's broker of 0.7.0 with its
+        text. The request is built directly, so the core also sees an input
+        that the facade's own JSON check refuses first.
+
+        No core refusal of the task options carries a rule's ``ValueError``:
+        the version-1 command and the scoped key are rules of the input. The
+        core test ``an_enqueue_refusal_has_the_code_of_its_part_and_python_s_cause``
+        pins that combination of the constructor."""
+        core_handle = _refusing_broker()._core_handle
+        outcome = await core_handle.enqueue_async(_core_request(**values))
+        broker = self._broker_answering(outcome)
+
+        result = await self._send(broker)
+
+        assert is_err(result)
+        refused = result.err_value
+        assert refused is outcome
+        assert isinstance(refused, error_class)
+        assert type(refused) is error_class
+        assert refused.code is code
+        assert refused.retryable is False
+        assert isinstance(refused.exception, cause_class)
+        assert type(refused.exception) is cause_class
+        match refused.exception:
+            case SerializationError() as unreadable:
+                reader_error = str(unreadable)
+                assert reader_error != ''
+                assert refused.message.endswith(f': {reader_error}')
+            case NoCause() as no_cause:
+                assert no_cause == NoCause()
+            case ValueError() as rule:
+                assert str(rule) == 'priority must be between 1 and 100'
+                assert refused.message == (
+                    'enqueue input refused for my_task: priority must be between 1 and 100'
+                )
+            case other:
+                raise AssertionError(f'unexpected cause {other!r}')
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

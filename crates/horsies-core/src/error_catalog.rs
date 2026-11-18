@@ -1867,9 +1867,17 @@ mod tests {
             class: ClientExceptionClass::ValueError,
             text: text.to_owned(),
         };
-        for (part, class) in [
-            (SendPart::Input, "BrokerInvalidInput"),
-            (SendPart::TaskOptions, "BrokerInvalidTaskOptions"),
+        for (part, class, code) in [
+            (
+                SendPart::Input,
+                "BrokerInvalidInput",
+                crate::BrokerErrorCode::InvalidInput,
+            ),
+            (
+                SendPart::TaskOptions,
+                "BrokerInvalidTaskOptions",
+                crate::BrokerErrorCode::InvalidTaskOptions,
+            ),
         ] {
             let cases = [
                 (
@@ -1912,6 +1920,7 @@ mod tests {
                     (class, message, exception),
                     "{refusal:?}"
                 );
+                assert_eq!(refused.code(), code, "{refusal:?}");
                 assert!(!refused.retryable(), "{refusal:?}");
                 assert_eq!(refused.failure_cause(), FailureCause::PreconditionFailed);
                 assert!(std::error::Error::source(&refused).is_none());
