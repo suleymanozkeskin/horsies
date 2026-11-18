@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -21,6 +20,7 @@ use super::{
     LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
 };
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 
 const WORKER_ID: &str = "beat-spec-worker-1";
@@ -90,12 +90,12 @@ struct RowSeed<'a> {
     marker: SeedMarker,
 }
 
-async fn migrated_pool_with_heartbeat_leaves() -> PgPool {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+async fn migrated_pool_with_heartbeat_leaves() -> TestPool {
+    let pool = crate::test_support::migrated_pool().await;
     // The heartbeat table has no default partition: the current hour needs
     // its leaf, as at worker start.
     ensure_startup_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &crate::broker::pools::core_pool_for_test_url(pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         COVERAGE_HORIZON,
         COVERAGE_HORIZON,
@@ -107,17 +107,17 @@ async fn migrated_pool_with_heartbeat_leaves() -> PgPool {
 }
 
 /// The database clock, at millisecond precision, minus `minutes`.
-async fn claim_time_minutes_ago(pool: &PgPool, minutes: i32) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT date_trunc('milliseconds', now()) - make_interval(mins => $1)")
+async fn claim_time_minutes_ago(pool: &TestPool, minutes: i32) -> DateTime<Utc> {
+    sql::query_scalar("SELECT date_trunc('milliseconds', now()) - make_interval(mins => $1)")
         .bind(minutes)
         .fetch_one(pool)
         .await
         .expect("database clock")
 }
 
-async fn seed_task(pool: &PgPool, task_id: Uuid, seed: &RowSeed<'_>) {
+async fn seed_task(pool: &TestPool, task_id: Uuid, seed: &RowSeed<'_>) {
     let finalizing = matches!(seed.marker, SeedMarker::Finalizing);
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -159,8 +159,8 @@ fn sender() -> BeatSender {
 }
 
 /// The runner beats of one task: sender, role and pid.
-async fn beats(pool: &PgPool, task_id: Uuid) -> Vec<(String, String, i32)> {
-    sqlx::query_as(
+async fn beats(pool: &TestPool, task_id: Uuid) -> Vec<(String, String, i32)> {
+    sql::query_as(
         "SELECT sender_id, role, pid FROM horsies_heartbeats
          WHERE task_id = $1 ORDER BY sent_at",
     )
@@ -171,8 +171,8 @@ async fn beats(pool: &PgPool, task_id: Uuid) -> Vec<(String, String, i32)> {
 }
 
 /// The live status of a task, or the status of its history record.
-async fn task_status(pool: &PgPool, task_id: Uuid) -> String {
-    sqlx::query_scalar(
+async fn task_status(pool: &TestPool, task_id: Uuid) -> String {
+    sql::query_scalar(
         "SELECT status FROM horsies_tasks WHERE id = $1
          UNION ALL
          SELECT status::text FROM horsies_task_history WHERE task_id = $1",
@@ -183,14 +183,14 @@ async fn task_status(pool: &PgPool, task_id: Uuid) -> String {
     .expect("task status")
 }
 
-async fn cleanup(pool: &PgPool, task_ids: &[Uuid]) {
+async fn cleanup(pool: &TestPool, task_ids: &[Uuid]) {
     for statement in [
         "DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)",
         "DELETE FROM horsies_task_attempts WHERE task_id = ANY($1)",
         "DELETE FROM horsies_tasks WHERE id = ANY($1)",
         "DELETE FROM horsies_task_history WHERE task_id = ANY($1)",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_ids)
             .execute(pool)
             .await
@@ -219,7 +219,7 @@ async fn a_running_row_of_this_claim_gets_a_beat() {
     .await;
 
     let rows = write_beats(
-        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &crate::broker::pools::core_pool_for_test_url(pool.url()),
         &sender(),
         &[task_id],
         &[claimed_at],
@@ -298,7 +298,7 @@ async fn a_row_outside_the_fence_gets_no_beat() {
         seed_task(&pool, task_id, seed).await;
 
         let rows = write_beats(
-            &crate::broker::pools::core_pool_for_test_pool(&pool),
+            &crate::broker::pools::core_pool_for_test_url(pool.url()),
             &sender(),
             &[task_id],
             &[dispatch_generation],
@@ -338,7 +338,7 @@ async fn a_null_generation_gets_no_beat() {
     }
     let no_generations: Vec<Option<DateTime<Utc>>> = vec![None, None];
 
-    let written = sqlx::query(INSERT_RUNNER_HEARTBEATS_SQL)
+    let written = sql::query(INSERT_RUNNER_HEARTBEATS_SQL)
         .bind(WORKER_ID)
         .bind("beat-host")
         .bind(BEAT_PID)
@@ -381,7 +381,7 @@ async fn one_statement_beats_every_fenced_row() {
     }
 
     let rows = write_beats(
-        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &crate::broker::pools::core_pool_for_test_url(pool.url()),
         &sender(),
         &task_ids,
         &generations,
@@ -421,7 +421,7 @@ async fn the_reaper_leaves_a_beaten_row_and_fails_an_unbeaten_one() {
         .await;
     }
     let rows = write_beats(
-        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &crate::broker::pools::core_pool_for_test_url(pool.url()),
         &sender(),
         &[beaten],
         &[beaten_claim],
@@ -478,7 +478,7 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
         .expect("an open registry holds the dispatch");
     let cancel = CancellationToken::new();
     let (watch, writer) = launch_runner_beats(
-        test_beat_pool(&crate::broker::pools::test_url_of(&pool.connect_options())),
+        test_beat_pool(pool.url()),
         sender(),
         LOOP_BEAT_INTERVAL,
         StaleRunningRecovery::Off,

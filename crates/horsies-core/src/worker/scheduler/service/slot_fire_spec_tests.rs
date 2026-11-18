@@ -11,7 +11,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::state::test_rows::{delete_state, seed_state, state_row};
@@ -19,6 +18,7 @@ use super::{fire_due_schedule, manifest_plan, ActivePlan, DueSchedule, StartPlan
 use crate::broker::core_rows::StatementLog;
 use crate::core::{OperationalErrorCode, RetryPolicy, TaskErrorCode, TaskOptions};
 use crate::scheduler_manifest::parse_scheduler_manifest;
+use crate::test_support::sql::{self, TestPool};
 
 const SCHEDULE_INTERVAL_SECONDS: u32 = 60;
 
@@ -35,8 +35,13 @@ const EARLIER_FINGERPRINT_BYTE: u8 = 0xEE;
 
 /// The row an earlier version wrote for the slot: the same task, queue and
 /// sent_at, another fingerprint, no stored options.
-async fn seed_earlier_slot_row(pool: &PgPool, task_id: Uuid, task_name: &str, slot: DateTime<Utc>) {
-    sqlx::query(
+async fn seed_earlier_slot_row(
+    pool: &TestPool,
+    task_id: Uuid,
+    task_name: &str,
+    slot: DateTime<Utc>,
+) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -127,18 +132,18 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
 #[tokio::test]
 #[serial]
 async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let suffix = Uuid::new_v4().simple().to_string();
     let task_name = format!("scheduled_options_task_{}", &suffix[..12]);
     let schedule_name = format!("scheduled_options_{}", &suffix[..12]);
     let check_time: DateTime<Utc> =
-        sqlx::query_scalar("SELECT date_trunc('second', statement_timestamp())")
+        sql::query_scalar("SELECT date_trunc('second', statement_timestamp())")
             .fetch_one(&pool)
             .await
             .expect("read the database time");
     let first_due = check_time - chrono::Duration::seconds(1);
     let next_run = first_due + chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS));
-    let slot_task_id: Uuid = sqlx::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
+    let slot_task_id: Uuid = sql::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
         .bind(&schedule_name)
         .bind(first_due)
         .fetch_one(&pool)
@@ -155,7 +160,7 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
         .schedules
         .pop()
         .expect("the plan holds the enabled schedule");
-    let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
 
     fire_due_schedule(
         &core,
@@ -172,7 +177,7 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
     .expect("the fire");
     core.close();
 
-    let rows: Vec<(Uuid, Option<String>, Vec<u8>)> = sqlx::query_as(
+    let rows: Vec<(Uuid, Option<String>, Vec<u8>)> = sql::query_as(
         "SELECT id, task_options, command_fingerprint FROM horsies_tasks WHERE task_name = $1",
     )
     .bind(&task_name)
@@ -191,7 +196,7 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
     assert_eq!(recorded.next_run_at, next_run);
     assert_eq!(recorded.run_count, 1);
 
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(slot_task_id)
         .execute(&pool)
         .await

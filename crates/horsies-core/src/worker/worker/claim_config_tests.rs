@@ -15,7 +15,6 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
@@ -23,9 +22,10 @@ use super::{
 };
 use crate::broker::claims::{claim_pass, ClaimClasses, ClaimPass, ClaimPassRequest};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::core::task::Execution;
 use crate::db::CorePool;
+use crate::test_support::sql::{self, TestPool, TestTransaction};
 
 /// The passes of each concurrent claimer, and the pause between them
 /// (Python's `for _ in range(20)` and `asyncio.sleep(0.005)`).
@@ -130,9 +130,9 @@ async fn pass(core_pool: &CorePool, request: &ClaimPassRequest) -> ClaimPass {
 
 /// One PENDING ISOLATED row of `queue` with `priority`, enqueued
 /// `age_secs` ago. Returns its id.
-async fn seed(pool: &PgPool, queue: &str, priority: i32, age_secs: f64) -> Uuid {
+async fn seed(pool: &TestPool, queue: &str, priority: i32, age_secs: f64) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, enqueued_at,
             is_workflow_task, created_at, updated_at, retry_count, max_retries,
@@ -155,8 +155,8 @@ async fn seed(pool: &PgPool, queue: &str, priority: i32, age_secs: f64) -> Uuid 
 }
 
 /// `count` PENDING ISOLATED rows of `queue` with `priority`.
-async fn seed_n(pool: &PgPool, queue: &str, priority: i32, count: i32) {
-    sqlx::query(
+async fn seed_n(pool: &TestPool, queue: &str, priority: i32, count: i32) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, enqueued_at,
             is_workflow_task, created_at, updated_at, retry_count, max_retries,
@@ -177,8 +177,8 @@ async fn seed_n(pool: &PgPool, queue: &str, priority: i32, count: i32) {
 }
 
 /// CLAIMED rows per queue.
-async fn claimed_per_queue(pool: &PgPool) -> HashMap<String, i64> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
+async fn claimed_per_queue(pool: &TestPool) -> HashMap<String, i64> {
+    let rows: Vec<(String, i64)> = sql::query_as(
         "SELECT queue_name, count(*) FROM horsies_tasks
          WHERE status = 'CLAIMED' GROUP BY queue_name",
     )
@@ -190,9 +190,14 @@ async fn claimed_per_queue(pool: &PgPool) -> HashMap<String, i64> {
 
 /// `CONCURRENT_CLAIMERS` claimers of `config`, each with a core pool of
 /// its own, each running `CONCURRENT_PASSES` passes.
-async fn claim_concurrently(pool: &PgPool, config: &ClaimerConfig) {
+async fn claim_concurrently(pool: &TestPool, config: &ClaimerConfig) {
     let claimers: Vec<(CorePool, ClaimPassRequest)> = (0..CONCURRENT_CLAIMERS)
-        .map(|_| (core_pool_for_test_pool(pool), request(config, &worker_id())))
+        .map(|_| {
+            (
+                core_pool_for_test_url(pool.url()),
+                request(config, &worker_id()),
+            )
+        })
         .collect();
     let loops = claimers.iter().map(|(core_pool, request)| async move {
         for _ in 0..CONCURRENT_PASSES {
@@ -211,7 +216,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn equal_queue_priority_fifo() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let older = seed(&pool, "q2", 100, 30.0).await;
         seed(&pool, "q1", 100, 5.0).await;
         let config = ClaimerConfig {
@@ -222,7 +227,7 @@ mod claim_function {
         };
 
         let claimed = pass(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             &request(&config, &worker_id()),
         )
         .await;
@@ -237,7 +242,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn distinct_queue_priority_wins() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let high = seed(&pool, "q_hi", 1, 0.0).await;
         seed(&pool, "q_lo", 10, 10.0).await;
         let config = ClaimerConfig {
@@ -248,7 +253,7 @@ mod claim_function {
         };
 
         let claimed = pass(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             &request(&config, &worker_id()),
         )
         .await;
@@ -267,7 +272,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn equal_queue_priority_explicit_task_priority_wins() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         seed(&pool, "q1", 100, 30.0).await;
         let urgent = seed(&pool, "q2", 1, 5.0).await;
         let config = ClaimerConfig {
@@ -278,7 +283,7 @@ mod claim_function {
         };
 
         let claimed = pass(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             &request(&config, &worker_id()),
         )
         .await;
@@ -294,12 +299,12 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn claim_returns_rows_in_dispatch_order() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let low_queue = seed(&pool, "bounds_low", 1, 50.0).await;
         let late = seed(&pool, "bounds_high", 50, 1.0).await;
         let early = seed(&pool, "bounds_high", 50, 30.0).await;
         let expired_urgent = seed(&pool, "bounds_high", 10, 5.0).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET status = 'CLAIMED', claimed_at = now() - interval '10 minutes',
                  claimed_by_worker_id = 'dead-worker',
@@ -318,7 +323,7 @@ mod claim_function {
         };
 
         let claimed = pass(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             &request(&config, &worker_id()),
         )
         .await;
@@ -332,7 +337,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn per_queue_cap_never_over_claims() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
         seed_n(&pool, "b", 50, 300).await;
         let config = ClaimerConfig {
@@ -355,7 +360,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn cluster_cap_never_over_claims() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
         seed_n(&pool, "b", 50, 300).await;
         let config = ClaimerConfig {
@@ -378,7 +383,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn cap_only_queue_is_serviced_and_capped() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "capped", 50, 20).await;
         let config = ClaimerConfig {
             queues: names(&["capped"]),
@@ -386,7 +391,7 @@ mod claim_function {
             queue_max_concurrency: caps(&[("capped", 4)]),
             ..ClaimerConfig::default()
         };
-        let core_pool = core_pool_for_test_pool(&pool);
+        let core_pool = core_pool_for_test_url(pool.url());
         let request = request(&config, &worker_id());
 
         for _ in 0..5 {
@@ -403,7 +408,7 @@ mod claim_function {
     #[tokio::test]
     #[serial]
     async fn cap_without_priorities_never_over_claims() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
         seed_n(&pool, "b", 50, 300).await;
         let config = ClaimerConfig {
@@ -426,9 +431,9 @@ mod claim_lock_scoping {
 
     /// A transaction on `pool` that holds the advisory lock `key` until it
     /// ends.
-    async fn hold(pool: &PgPool, key: i64) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    async fn hold(pool: &TestPool, key: i64) -> TestTransaction<'static> {
         let mut holder = pool.begin().await.expect("begin the holder");
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        sql::query("SELECT pg_advisory_xact_lock($1)")
             .bind(key)
             .execute(&mut *holder)
             .await
@@ -441,7 +446,7 @@ mod claim_lock_scoping {
     #[tokio::test]
     #[serial]
     async fn disjoint_capped_queue_does_not_block() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let passer = ClaimerConfig {
             queues: names(&["lock_qb"]),
             processes: 1,
@@ -449,7 +454,7 @@ mod claim_lock_scoping {
             ..ClaimerConfig::default()
         };
         let holder = hold(&pool, advisory_key_queue("lock_qa")).await;
-        let core_pool = core_pool_for_test_pool(&pool);
+        let core_pool = core_pool_for_test_url(pool.url());
 
         let ended = tokio::time::timeout(
             PASS_TIMEOUT,
@@ -473,7 +478,7 @@ mod claim_lock_scoping {
     #[tokio::test]
     #[serial]
     async fn same_capped_queue_blocks() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let passer = ClaimerConfig {
             queues: names(&["lock_qc"]),
             processes: 1,
@@ -481,7 +486,7 @@ mod claim_lock_scoping {
             ..ClaimerConfig::default()
         };
         let holder = hold(&pool, advisory_key_queue("lock_qc")).await;
-        let core_pool = core_pool_for_test_pool(&pool);
+        let core_pool = core_pool_for_test_url(pool.url());
         let pass_request = request(&passer, &worker_id());
         let blocked = claim_pass(&core_pool, StatementLog::Off, &pass_request);
         tokio::pin!(blocked);
@@ -500,7 +505,7 @@ mod claim_lock_scoping {
     #[tokio::test]
     #[serial]
     async fn global_cap_still_blocks_across_queues() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let passer = ClaimerConfig {
             queues: names(&["lock_qd"]),
             processes: 1,
@@ -508,7 +513,7 @@ mod claim_lock_scoping {
             ..ClaimerConfig::default()
         };
         let holder = hold(&pool, advisory_key_global()).await;
-        let core_pool = core_pool_for_test_pool(&pool);
+        let core_pool = core_pool_for_test_url(pool.url());
         let pass_request = request(&passer, &worker_id());
         let blocked = claim_pass(&core_pool, StatementLog::Off, &pass_request);
         tokio::pin!(blocked);
@@ -534,7 +539,7 @@ mod claim_cap_expired {
     #[tokio::test]
     #[serial]
     async fn an_expired_claim_is_not_counted_in_the_queue_hard_cap() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let expired_default = seed(&pool, "default", 100, 0.0).await;
         let active_default = seed(&pool, "default", 100, 0.0).await;
         let active_critical = seed(&pool, "critical", 100, 0.0).await;
@@ -551,7 +556,7 @@ mod claim_cap_expired {
                 "+ interval '5 minutes'",
             ),
         ] {
-            sqlx::query(&format!(
+            sql::query(&format!(
                 "UPDATE horsies_tasks
                  SET status = 'CLAIMED', claimed_at = now() - interval '10 minutes',
                      claimed_by_worker_id = $2, claim_expires_at = now() {lease},
@@ -565,7 +570,7 @@ mod claim_cap_expired {
             .expect("claim the seeded row");
         }
 
-        let counts: serde_json::Value = sqlx::query_scalar(
+        let counts: serde_json::Value = sql::query_scalar(
             "SELECT queue_counts FROM horsies_claim_in_flight(
                  'cap-test-worker', ARRAY['default', 'critical'], TRUE,
                  '{\"ISOLATED\": \"ISOLATED\"}'::jsonb
@@ -584,10 +589,10 @@ mod claim_cap_expired {
     #[tokio::test]
     #[serial]
     async fn a_pass_under_the_caps_claims_the_pending_row_beside_an_expired_claim() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let pending = seed(&pool, "default", 100, 30.0 * 60.0).await;
         let expired = seed(&pool, "default", 100, 20.0 * 60.0).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET status = 'CLAIMED', claimed_at = now() - interval '10 minutes',
                  claimed_by_worker_id = 'dead-worker',
@@ -608,14 +613,18 @@ mod claim_cap_expired {
         };
         let worker = worker_id();
 
-        let claimed = pass(&core_pool_for_test_pool(&pool), &request(&config, &worker)).await;
+        let claimed = pass(
+            &core_pool_for_test_url(pool.url()),
+            &request(&config, &worker),
+        )
+        .await;
 
         assert!(
             claimed.claimed.iter().any(|row| row.id == pending),
             "{claimed:?}"
         );
         let (status, owner): (String, Option<String>) =
-            sqlx::query_as("SELECT status, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
+            sql::query_as("SELECT status, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
                 .bind(pending)
                 .fetch_one(&pool)
                 .await
