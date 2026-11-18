@@ -18,6 +18,7 @@ from uuid import UUID
 
 import pytest
 
+from tests.union_members import union_members
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerLoopRunnerFailed,
@@ -132,7 +133,7 @@ def _broker_returning(app: MagicMock, error: BrokerOperationError) -> MagicMock:
 @pytest.mark.unit
 class TestVariantCatalog:
     def test_each_code_has_exactly_one_variant(self) -> None:
-        codes = [variant.code for variant in get_args(TaskSendError.__value__)]
+        codes = [variant.code for variant in union_members(TaskSendError)]
 
         assert len(codes) == len(set(codes))
         assert set(codes) == set(TaskSendErrorCode)
@@ -140,7 +141,7 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant()}
 
-        assert built == set(get_args(TaskSendError.__value__))
+        assert built == set(union_members(TaskSendError))
 
     def test_retryable_alias_lists_the_accepted_variants(self) -> None:
         assert set(get_args(TaskSendRetryable.__value__)) == {

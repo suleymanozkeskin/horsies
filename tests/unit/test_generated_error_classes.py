@@ -1,11 +1,12 @@
 """The error classes generated from horsies-core keep the public shape.
 
 `horsies-codegen` renders the classes of the broker, workflow handle,
-monitoring query and task action catalogs into `horsies._catalog` from the
-core's records (`horsies_core::error_catalog`). The old modules re-export
-them. This test pins, for each class, that the public name is the
-generated class, and that its fields (with their `repr` flags), its `code`
-class value and its `retryable` class value are the ones of the
+monitoring query, task action and task send catalogs into
+`horsies._catalog` from the core's records (`horsies_core::error_catalog`),
+with the payload record of a send and the retention class key. The old
+modules re-export them. This test pins, for each class, that the public
+name is the generated class, and that its fields (with their `repr` flags),
+its `code` class value and its `retryable` class value are the ones of the
 hand-written class that it replaced.
 """
 
@@ -16,9 +17,19 @@ from typing import Final, NamedTuple
 
 import pytest
 
-from horsies._catalog import broker_errors, monitoring_errors, workflow_handle_errors
+import horsies
+from horsies._catalog import (
+    broker_errors,
+    monitoring_errors,
+    retention_class,
+    task_send_errors,
+    workflow_handle_errors,
+)
 from horsies._catalog.error_detail import NoCause as GeneratedNoCause
 from horsies.core.brokers import result_types
+from horsies.core.history import periods
+from horsies.core.history.ddl import classes
+from horsies.core.models import task_send_types
 from horsies.core.models.workflow import handle_types
 from horsies.core.types import error_detail
 from horsies.monitoring import errors, task_actions
@@ -118,4 +129,106 @@ def test_each_public_union_is_the_generated_union_plus_the_client_only_classes()
     )
     assert task_actions.TaskActionError.__value__ == (
         monitoring_errors.TaskActionCoreError | task_actions.TaskActionEventLoopLimit
+    )
+
+
+class SendClassShape(NamedTuple):
+    public: type
+    generated: type
+    #: (field name, shown by repr), in order.
+    fields: tuple[tuple[str, bool], ...]
+    #: The member name of the `code` class value.
+    code_member: str
+
+
+SEND_SHAPES: Final[tuple[SendClassShape, ...]] = (
+    SendClassShape(task_send_types.TaskSendSuppressed, task_send_errors.TaskSendSuppressed, (('message', False),), 'SEND_SUPPRESSED'),
+    SendClassShape(task_send_types.TaskSendAsyncContext, task_send_errors.TaskSendAsyncContext, (('task_id', True), ('payload', False), ('message', False)), 'ASYNC_CONTEXT'),
+    SendClassShape(task_send_types.TaskSendValidationFailed, task_send_errors.TaskSendValidationFailed, (('message', False), ('exception', False)), 'VALIDATION_FAILED'),
+    SendClassShape(task_send_types.TaskSendEnqueueFailed, task_send_errors.TaskSendEnqueueFailed, (('task_id', True), ('payload', False), ('message', False), ('retryable', True), ('exception', False)), 'ENQUEUE_FAILED'),
+    SendClassShape(task_send_types.TaskSendPayloadMismatch, task_send_errors.TaskSendPayloadMismatch, (('task_id', True), ('payload', False), ('message', False)), 'PAYLOAD_MISMATCH'),
+    SendClassShape(task_send_types.TaskSendPayloadTooLarge, task_send_errors.TaskSendPayloadTooLarge, (('message', False), ('size_bytes', True), ('limit_bytes', True)), 'PAYLOAD_TOO_LARGE'),
+    SendClassShape(task_send_types.TaskSendIdempotencyKeyConflict, task_send_errors.TaskSendIdempotencyKeyConflict, (('task_id', True), ('payload', False), ('message', False), ('owner_task_id', True)), 'IDEMPOTENCY_KEY_CONFLICT'),
+)
+
+
+@pytest.mark.parametrize('shape', SEND_SHAPES, ids=lambda shape: shape.generated.__name__)
+class TestGeneratedSendClass:
+    """The send classes have no ``retryable`` class value: only
+    ``TaskSendEnqueueFailed`` has a ``retryable`` field."""
+
+    def test_the_public_names_are_the_generated_class(self, shape: SendClassShape) -> None:
+        assert shape.public is shape.generated
+        assert getattr(horsies, shape.generated.__name__) is shape.generated
+
+    def test_the_fields_and_their_repr_flags_are_the_old_ones(
+        self,
+        shape: SendClassShape,
+    ) -> None:
+        fields = tuple((item.name, item.repr) for item in dataclasses.fields(shape.generated))
+
+        assert fields == shape.fields
+
+    def test_the_code_is_the_old_one_and_no_retryable_class_value_exists(
+        self,
+        shape: SendClassShape,
+    ) -> None:
+        assert getattr(shape.generated, 'code').name == shape.code_member
+        match ('retryable', True) in shape.fields:
+            case True:
+                assert 'retryable' in {item.name for item in dataclasses.fields(shape.generated)}
+            case False:
+                assert not hasattr(shape.generated, 'retryable')
+
+    def test_the_class_is_a_frozen_dataclass_with_slots(self, shape: SendClassShape) -> None:
+        params = getattr(shape.generated, '__dataclass_params__')
+
+        assert params.frozen is True
+        assert '__slots__' in vars(shape.generated)
+
+
+def test_the_send_payload_is_the_generated_record_with_the_old_fields() -> None:
+    payload = task_send_errors.TaskSendPayload
+    assert task_send_types.TaskSendPayload is payload
+    assert horsies.TaskSendPayload is payload
+    assert getattr(payload, '__dataclass_params__').frozen is True
+    assert '__slots__' in vars(payload)
+    assert [(item.name, item.repr) for item in dataclasses.fields(payload)] == [
+        ('task_name', True),
+        ('queue_name', True),
+        ('priority', True),
+        ('input_json', True),
+        ('sent_at', True),
+        ('good_until', True),
+        ('enqueue_delay_seconds', True),
+        ('task_options', True),
+        ('idempotency_key', True),
+        ('retention_class_key', True),
+    ]
+    defaults = {
+        item.name: item.default
+        for item in dataclasses.fields(payload)
+        if item.default is not dataclasses.MISSING
+    }
+    assert defaults == {
+        'idempotency_key': None,
+        'retention_class_key': 'standard_30d',
+    }
+
+
+def test_the_retention_class_key_and_its_default_are_the_generated_ones() -> None:
+    assert periods.RetentionClassKey is retention_class.RetentionClassKey
+    assert classes.DEFAULT_RETENTION_CLASS_KEY is retention_class.DEFAULT_RETENTION_CLASS_KEY
+    assert retention_class.DEFAULT_RETENTION_CLASS_KEY == 'standard_30d'
+    assert (
+        periods.period_class_key(classes.DEFAULT_RETENTION_DAYS)
+        == retention_class.DEFAULT_RETENTION_CLASS_KEY
+    )
+
+
+def test_the_send_union_is_the_generated_union_plus_the_client_only_classes() -> None:
+    assert task_send_types.TaskSendError.__value__ == (
+        task_send_errors.TaskSendCoreError
+        | task_send_types.TaskSendEventLoopLimit
+        | task_send_types.TaskSendLoopRunnerFailed
     )
