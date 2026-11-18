@@ -377,7 +377,7 @@ def _command_fingerprint(
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            args_json=None,
+            positional_args_json=None,
             input_json=stored_input,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,

@@ -4311,7 +4311,7 @@ class TestEnqueueAcceptedInput:
             task_name='my_task',
             queue_name='default',
             priority=100,
-            args_json=None,
+            positional_args_json=None,
             input_json=expected_input,
             good_until=None,
             enqueue_delay_seconds=None,
