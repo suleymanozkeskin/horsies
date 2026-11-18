@@ -7,10 +7,16 @@ the ping of a core handle of its own (the case of
 ``tests/extension/programs/panics.py``). The child sets no panic rule, so
 its core stops and every later core call raises ``CoreStopped``.
 
-- ``stops_after_return``: the handler waits ``STOP_DELAY_S`` before the
-  panic, so the run ends first (its marker and its result frame) and the
-  core stops while the child holds no task. The next start in that child
-  meets the stopped core.
+The core logs the record of a statement before the statement runs, and a
+stop ends every core call in flight with ``CoreStopped``. So the handler
+panics only after that ping returned to the task: a panic on the record
+alone would stop the core while the ping runs, and the ping would raise
+``CoreStopped`` in the body of the task.
+
+- ``stops_after_return``: the handler waits ``STOP_DELAY_S`` after the
+  ping before the panic, so the run ends first (its marker and its result
+  frame) and the core stops while the child holds no task. The next start
+  in that child meets the stopped core.
 - ``stops_during_body``: the core stops while the body runs, and the body
   then finishes; the finalizing marker after the body meets the stopped
   core. Each run appends its process id to a file.
@@ -25,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Final
 
@@ -58,6 +65,10 @@ STOP_WAIT_S: Final = 10.0
 
 STOP_POLL_S: Final = 0.05
 
+PING_RETURN_WAIT_S: Final = 30.0
+"""The longest wait of the handler for the ping that it panics on to
+return to the task."""
+
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     broker=PostgresConfig(
@@ -75,16 +86,24 @@ broker.app = app
 
 
 class _PanicOnStatement(logging.Handler):
-    """On the first record of ``statement``: wait ``delay_s``, write the
-    process id to ``marker_path``, then raise ``PanicException``. The log
-    forwarder of the core runs the handler, so the forwarder panics and the
-    core of this process stops."""
+    """On the first record of ``statement``: wait until ``ping_returned`` is
+    set (at most ``PING_RETURN_WAIT_S``), then ``delay_s``, write the process
+    id to ``marker_path``, then raise ``PanicException``. The log forwarder
+    of the core runs the handler, so the forwarder panics and the core of
+    this process stops."""
 
-    def __init__(self, statement: str, delay_s: float, marker_path: str) -> None:
+    def __init__(
+        self,
+        statement: str,
+        delay_s: float,
+        marker_path: str,
+        ping_returned: threading.Event,
+    ) -> None:
         super().__init__(level=logging.NOTSET)
         self._statement = statement
         self._delay_s = delay_s
         self._marker_path = marker_path
+        self._ping_returned = ping_returned
         self._fired = False
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -92,6 +111,9 @@ class _PanicOnStatement(logging.Handler):
         if self._fired or statement != self._statement:
             return
         self._fired = True
+        # A ping that does not return within the wait still gets the panic:
+        # the test then fails on what the task returned.
+        _ = self._ping_returned.wait(PING_RETURN_WAIT_S)
         time.sleep(self._delay_s)
         with open(self._marker_path, 'w', encoding='ascii') as marker:
             marker.write(str(os.getpid()))
@@ -99,17 +121,22 @@ class _PanicOnStatement(logging.Handler):
 
 
 def _stop_the_core(delay_s: float, marker_path: str) -> None:
-    """Make the log forwarder of this process panic ``delay_s`` after the
-    record of a ping of a core handle of its own."""
+    """Make the log forwarder of this process panic ``delay_s`` after a ping
+    of a core handle of its own returned. The ping returns before the core
+    stops, so no core call of the task is in flight at the stop."""
+    ping_returned = threading.Event()
     sql_logger = logging.getLogger('horsies.sql')
     sql_logger.setLevel(logging.DEBUG)
-    sql_logger.addHandler(_PanicOnStatement(PANIC_STATEMENT, delay_s, marker_path))
+    sql_logger.addHandler(
+        _PanicOnStatement(PANIC_STATEMENT, delay_s, marker_path, ping_returned),
+    )
     core.refresh_log_levels()
     handle = core.CoreHandle(
         manifest_json(DB_URL, schema='ASSUME_INITIALIZED', echo=True),
         pool_profile='PRODUCER',
     )
     _ = handle.ping_database()
+    ping_returned.set()
 
 
 @app.task(task_name='e2e_core_stopped_healthcheck')
