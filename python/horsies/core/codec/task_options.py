@@ -9,16 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import assert_never
 
-from pydantic import ValidationError
-
 from horsies.core.codec.json_io import Json, SerdeResult, dumps_json
-from horsies.core.codec.validation_errors import validation_summary
 from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
     Execution,
-    RetryPolicy,
     TaskOptions,
 )
 from horsies.core.types.result import Err, Ok, Result
@@ -65,70 +61,6 @@ def _stored_cancel_grace_ms(task_options: TaskOptions) -> int | None:
                     return declared
         case Execution.ISOLATED | Execution.SHARED_THREAD:
             return None
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-@dataclass(frozen=True, slots=True)
-class InvalidRetryPolicy:
-    """A `retry_policy` that does not validate as `RetryPolicy`. `detail`
-    names each failing field and its cause."""
-
-    detail: str
-
-
-@dataclass(frozen=True, slots=True)
-class NoRetryPolicy:
-    """The options hold no `retry_policy`: the key is absent or null."""
-
-
-def stored_retry_policy(
-    options: dict[str, Json],
-) -> Result[RetryPolicy | NoRetryPolicy, InvalidRetryPolicy]:
-    """The `retry_policy` of decoded task options, read as enqueue reads it.
-
-    An absent or null `retry_policy` is `NoRetryPolicy`. Any other value must
-    validate as `RetryPolicy` in strict mode (no type coercion). Other option
-    fields are not checked. Does no I/O.
-    """
-    policy = options.get('retry_policy')
-    match policy:
-        case None:
-            return Ok(NoRetryPolicy())
-        case dict():
-            pass
-        case _:
-            return Err(
-                InvalidRetryPolicy(
-                    f'retry_policy is not an object: {type(policy).__name__}'
-                )
-            )
-    try:
-        return Ok(RetryPolicy.model_validate(policy, strict=True))
-    except ValidationError as error:
-        return Err(InvalidRetryPolicy(validation_summary(error)))
-
-
-def stored_max_retries(options: Json) -> Result[int, InvalidRetryPolicy]:
-    """The `max_retries` value that enqueue stores for decoded task options.
-
-    Options that are not an object, and a `retry_policy` that is absent or
-    null, store 0 retries. Any other `retry_policy` must validate as
-    `RetryPolicy` (`stored_retry_policy`); its `max_retries` is stored.
-    """
-    if not isinstance(options, dict):
-        return Ok(0)
-    match stored_retry_policy(options):
-        case Ok(ok_value=read):
-            match read:
-                case NoRetryPolicy():
-                    return Ok(0)
-                case RetryPolicy():
-                    return Ok(read.max_retries)
-                case _ as unreachable:
-                    assert_never(unreachable)
-        case Err() as refused:
-            return refused
         case _ as unreachable:
             assert_never(unreachable)
 
