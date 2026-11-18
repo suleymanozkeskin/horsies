@@ -34,7 +34,7 @@ from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring import cancel_task
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 from tests.baseline_sql import baseline_checksum
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database

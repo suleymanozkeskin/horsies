@@ -41,7 +41,7 @@ from horsies import (
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowHandle
 from horsies.core.types.result import Err, Ok
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 from tests.parity import app as parity
 from tests.parity.scenarios import (
     ActionKind,

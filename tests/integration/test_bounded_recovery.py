@@ -22,7 +22,7 @@ from horsies.core.models.broker import PostgresConfig
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 from tests.broker_resources_support import current_resources
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]

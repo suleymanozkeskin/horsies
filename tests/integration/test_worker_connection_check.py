@@ -38,7 +38,7 @@ from horsies.core.models.worker_profile import (
     SharedThreadChildren,
     WorkerProfile,
 )
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 pytestmark = [pytest.mark.integration]
 

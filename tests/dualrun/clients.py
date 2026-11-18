@@ -14,11 +14,6 @@ from horsies.core.types.result import Err, Ok
 from tests.dualrun.databases import DualRunDatabase
 
 
-def sqlalchemy_url(database: DualRunDatabase) -> str:
-    """The database URL with the psycopg driver of SQLAlchemy."""
-    return database.url.replace('postgresql://', 'postgresql+psycopg://', 1)
-
-
 @asynccontextmanager
 async def open_broker(database: DualRunDatabase) -> AsyncGenerator[PostgresBroker, None]:
     """A broker on ``database``, whose baseline is installed; closed at exit.

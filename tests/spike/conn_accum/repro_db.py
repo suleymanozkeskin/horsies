@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 
 from sqlalchemy import Engine, create_engine
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 APP_ENGINE_APPLICATION_NAME = 'repro_app_engine'
 

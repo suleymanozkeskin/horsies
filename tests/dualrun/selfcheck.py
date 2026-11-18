@@ -52,7 +52,7 @@ from tests.dualrun.values import (
     RunWindowInvalid,
     make_run_window,
 )
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 FUNCTION_CALLS_SQL: Final = (
     Path(__file__).parent.parent.parent

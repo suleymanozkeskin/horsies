@@ -320,7 +320,7 @@ config = PostgresConfig(
 | `retain_rerun_input_default` | `bool` | `False` | – | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
 | `pool_timeout` | `int` | `30` | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | `-1` (never) or 0 to 4,294,967,295 | Seconds before connections are recycled |
-| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the worker process's |
+| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every engine but the worker process's |
 | `worker_pool_pre_ping` | `bool` | `False` | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
 | `tcp_keepalives` | `bool` | `True` | – | Enable libpq TCP keepalives on broker and child-process connections |
 | `tcp_keepalives_idle` | `int` | `30` | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |

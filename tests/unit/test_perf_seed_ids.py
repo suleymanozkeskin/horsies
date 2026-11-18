@@ -15,6 +15,7 @@ import pytest
 from tests.perf.scenarios import (
     ID_BIRTH,
     MAX_SEEDED_INDEX,
+    SCENARIOS,
     Role,
     RowKind,
     SeedIds,
@@ -92,3 +93,22 @@ class TestSeedRows:
         assert rows.dependent_nodes == seed_ids(
             'seed-ids-workflow', Role.BALLAST, RowKind.DEPENDENT_NODE
         )
+
+
+class TestScenarioRanges:
+    """Each scenario seeds its ballast under its own name; ``run_scenario``
+    deletes the ballast range of its scenario before and after the run."""
+
+    def test_scenario_names_are_unique(self) -> None:
+        names = [scenario.name for scenario in SCENARIOS]
+        assert len(names) == len(set(names))
+
+    def test_the_ballast_ranges_of_the_scenarios_are_disjoint(self) -> None:
+        """The run of one scenario never deletes the ballast of another."""
+        ranges = sorted(
+            (seed_rows(scenario.name, Role.BALLAST).tasks for scenario in SCENARIOS),
+            key=lambda ids: uuid.UUID(ids.lower),
+        )
+        assert len({ids.prefix for ids in ranges}) == len(SCENARIOS)
+        for earlier, later in zip(ranges, ranges[1:]):
+            assert uuid.UUID(earlier.upper) < uuid.UUID(later.lower)

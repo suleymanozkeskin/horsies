@@ -32,7 +32,7 @@ import asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 from tests.integration.history_seeding import publish_history_readers
 
 
