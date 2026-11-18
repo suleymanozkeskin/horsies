@@ -887,7 +887,15 @@ NOTIFICATIONS: Final = TableRules(
 the column of its kind (``notification_row``). A retry wake puts the id of
 its task into ``task_id`` and keeps ``RETRY_WAKE_PREFIX`` as its payload.
 Rows with one identity compare as a multiset, so the section compares as a
-multiset per channel."""
+multiset per channel.
+
+The order key is the channel, the payload and the two ids. The rows of one
+channel whose id has no label yet (no table holds it, for example the
+status events of workflows that a test deleted) tie on it. ``normalize``
+orders them by the rows that hold their ids, and frees a tie whose rows
+split into equal blocks, one per id (``normalize._interchangeable``): the
+two status events of each workflow of a chain. No column of a notification
+can order such rows, because they differ only in their ids."""
 
 NOTIFIED_CATALOG: Final = SnapshotCatalog(
     tables=(*BASELINE_CATALOG.tables, NOTIFICATIONS),
