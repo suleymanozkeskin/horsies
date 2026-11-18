@@ -9,6 +9,11 @@ __all__ = ['MonitoringQueryErrorCode', 'TaskActionErrorCode']
 
 
 class MonitoringQueryErrorCode(str, Enum):
+    """Failure category for a monitoring read.
+
+    Each member names one variant of `MonitoringQueryError`.
+    """
+
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
     """The read failed with a database or driver error. `retryable` is the
     driver classification of the cause.
@@ -29,6 +34,11 @@ class MonitoringQueryErrorCode(str, Enum):
 
 
 class TaskActionErrorCode(str, Enum):
+    """Why a task action did not apply.
+
+    Each member names one variant of `TaskActionError`.
+    """
+
     TASK_NOT_FOUND = 'TASK_NOT_FOUND'
 
     TASK_NOT_CANCELLABLE = 'TASK_NOT_CANCELLABLE'
