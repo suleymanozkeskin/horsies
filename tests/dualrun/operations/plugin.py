@@ -22,7 +22,11 @@ case captures the committed state and its notifications
 and leaves a record (``tests/dualrun/pair_outcomes.py``). The core case
 captures the same way and compares; a difference fails it as
 ``DualRunMismatch`` or ``ClockBoundaryStraddle``, and a missing or failed
-Python case fails it as ``ReferenceRunMissing``. The first run of the session installs
+Python case fails it as ``ReferenceRunMissing``. A capture that fails fails
+its case, and the core case of its pair, as ``DualRunCaptureFailed`` with the
+subject and the cause; it never counts as an equal snapshot. A capture reads
+at most ``TABLE_ROW_LIMIT`` rows per table, and the pair of a test in
+``LARGE_SEED_TESTS`` at most ``LARGE_SEED_ROW_LIMIT``. The first run of the session installs
 the baseline, runs the seed sequence of the integration tests
 (``ensure_history_seedable``) and saves that state. ``--dual-run`` needs the
 session database: the PgBouncer lane (``HORSIES_PGBOUNCER_TEST=1``) has none
@@ -83,6 +87,7 @@ from tests.dualrun.operations.table import (
     CoreOnlyTest,
     DualRunOperation,
     Implementation,
+    LargeSeedTest,
     ReferenceOnlyTest,
     SwitchModule,
 )
@@ -90,7 +95,8 @@ from tests.dualrun.operations.table import (
 from tests.dualrun.catalog import QUEUE_CHANNEL_PREFIX, TASK_CHANNELS, WORKFLOW_CHANNELS
 
 if TYPE_CHECKING:
-    from tests.dualrun.capture import NotificationListener
+    from tests.dualrun.capture import CaptureFailure, NotificationListener
+    from horsies.core.types.result import Result
     from tests.dualrun.normalize import NormalizedSnapshot
     from tests.dualrun.pair_outcomes import PairKey, ReferenceRecord
     from tests.dualrun.seed_reset import SeedState
@@ -128,6 +134,64 @@ REFERENCE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[ReferenceOnlyTest, ...]]
     SwitchModule.SCHEDULER: (),
 }
 """The tests that run once, on the Python reference, in the dual-run of each module."""
+
+LARGE_SEED_ROW_LIMIT: Final = 25_000
+"""Most rows per table that a capture of a ``LARGE_SEED_TESTS`` pair reads.
+The largest seed is 20,000 rows of one table (``test_class_coverage.py``,
+``test_task_row_plans.py``)."""
+
+LARGE_SEED_TESTS: Final[tuple[LargeSeedTest, ...]] = (
+    LargeSeedTest(
+        node_id=(
+            'tests/integration/test_class_coverage.py::TestClassReadsUseTheClaimIndex::'
+            'test_the_stream_and_head_scans_probe_the_pending_class_index'
+        ),
+        reason='20,000 PENDING tasks, so that the planner picks the pending class index',
+    ),
+    LargeSeedTest(
+        node_id=(
+            'tests/integration/test_monitoring_queries.py::TestListBounds::'
+            'test_schedules_past_the_bound_are_cut_and_the_cut_is_logged'
+        ),
+        reason='LIST_ROW_BOUND + 1 schedule rows, one past the bound of the list',
+    ),
+    LargeSeedTest(
+        node_id=(
+            'tests/integration/test_monitoring_queries.py::TestListBounds::'
+            'test_workflow_names_past_the_bound_are_cut_and_the_cut_is_logged'
+        ),
+        reason='LIST_ROW_BOUND + 1 root workflows, one past the bound of the list',
+    ),
+    LargeSeedTest(
+        node_id=(
+            'tests/integration/test_monitoring_queries.py::TestListBounds::'
+            'test_the_fields_of_the_cut_warning_are_attributes_of_the_record'
+        ),
+        reason='LIST_ROW_BOUND + 1 schedule rows, one past the bound of the list',
+    ),
+    LargeSeedTest(
+        node_id=(
+            'tests/integration/test_task_list_bounds.py::'
+            'test_expired_list_stops_at_the_bound_in_deadline_then_id_order'
+        ),
+        reason='TASK_LIST_ROW_BOUND + 1 expired tasks, one past the bound of the list',
+    ),
+    LargeSeedTest(
+        node_id=(
+            'tests/integration/test_task_list_bounds.py::'
+            'test_stale_list_stops_at_the_bound_in_heartbeat_then_id_order'
+        ),
+        reason='TASK_LIST_ROW_BOUND + 1 stale tasks, one past the bound of the list',
+    ),
+    LargeSeedTest(
+        node_id=(
+            'tests/integration/test_task_row_plans.py::'
+            'test_the_finalizing_marker_reads_its_row_through_the_primary_key'
+        ),
+        reason='20,000 tasks, so that the planner reads the row through the primary key',
+    ),
+)
+"""The tests whose pairs capture up to ``LARGE_SEED_ROW_LIMIT`` rows per table."""
 
 _BASE_NOTIFICATION_CHANNELS: Final = (
     *TASK_CHANNELS,
@@ -196,6 +260,7 @@ class PairCase:
     url: str
     start: datetime
     listener: NotificationListener
+    row_limit: int
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -537,11 +602,26 @@ def _open_pair_case(
         url=url,
         start=start,
         listener=listener,
+        row_limit=_row_limit(_base_node_id(item.nodeid)),
     )
 
 
-def _capture(case: PairCase) -> tuple[NormalizedSnapshot, RunWindow]:
-    """The snapshot and the run window of a case after its body. Fails the test on a capture error."""
+def _row_limit(node_id: str) -> int:
+    """The most rows per table that the captures of the test ``node_id`` read."""
+    match any(test.node_id == node_id for test in LARGE_SEED_TESTS):
+        case True:
+            return LARGE_SEED_ROW_LIMIT
+        case False:
+            from tests.dualrun.capture import TABLE_ROW_LIMIT
+
+            return TABLE_ROW_LIMIT
+
+
+def _capture(
+    case: PairCase,
+) -> Result[tuple[NormalizedSnapshot, RunWindow], CaptureFailure]:
+    """The snapshot and the run window of a case after its body, or the
+    capture error. Fails the test when it cannot connect."""
     from horsies.core.types.result import Err, Ok
     from tests.dualrun.capture import (
         capture_with_notifications,
@@ -554,26 +634,38 @@ def _capture(case: PairCase) -> tuple[NormalizedSnapshot, RunWindow]:
     try:
         match read_database_clock(connection):
             case Err(failed):
-                pytest.fail(f'dual-run capture: reading the run end failed: {failed}')
+                return Err(failed)
             case Ok(end):
                 pass
         match make_run_window(case.start, end):
             case Err(invalid):
-                pytest.fail(f'dual-run capture: {invalid}')
+                return Err(invalid)
             case Ok(window):
                 pass
         match collect_notifications(case.listener, connection):
             case Err(failed):
-                pytest.fail(f'dual-run capture: reading the notifications failed: {failed}')
+                return Err(failed)
             case Ok(notifications):
                 pass
-        match capture_with_notifications(connection, notifications, window):
+        match capture_with_notifications(
+            connection, notifications, window, row_limit=case.row_limit
+        ):
             case Err(failed):
-                pytest.fail(f'dual-run capture: {failed}')
+                return Err(failed)
             case Ok(snapshot):
-                return snapshot, window
+                return Ok((snapshot, window))
     finally:
         connection.close()
+
+
+def _capture_failed(implementation: Implementation, error: CaptureFailure) -> str:
+    """The failure text of a capture error: a harness error, not a test outcome."""
+    from tests.dualrun.capture import render_capture_failure
+
+    return (
+        f'DualRunCaptureFailed: the capture after the {implementation.value} case '
+        f'failed: {render_capture_failure(error)}'
+    )
 
 
 def _references(config: pytest.Config) -> dict[PairKey, ReferenceRecord]:
@@ -581,19 +673,32 @@ def _references(config: pytest.Config) -> dict[PairKey, ReferenceRecord]:
 
 
 def _after_reference_body(config: pytest.Config, case: PairCase) -> None:
-    """Leave the record of a passing Python case."""
-    from tests.dualrun.pair_outcomes import ReferenceCaptured, ReferenceNotInformative
+    """Leave the record of a passing Python case. Fails the test when its capture fails."""
+    from horsies.core.types.result import Err, Ok
+    from tests.dualrun.pair_outcomes import (
+        ReferenceCaptured,
+        ReferenceCaptureFailed,
+        ReferenceNotInformative,
+    )
 
     match case.counts.total():
         case 0:
             _references(config)[case.key] = ReferenceNotInformative()
+            return
         case _:
-            snapshot, window = _capture(case)
+            pass
+    match _capture(case):
+        case Ok((snapshot, window)):
             _references(config)[case.key] = ReferenceCaptured(snapshot=snapshot, window=window)
+        case Err(error):
+            _references(config)[case.key] = ReferenceCaptureFailed(error=error)
+            pytest.fail(_capture_failed(case.implementation, error))
 
 
 def _after_core_body(config: pytest.Config, case: PairCase) -> None:
-    """Compare a passing core case with its Python case. Fails the test on a difference or a missing reference."""
+    """Compare a passing core case with its Python case. Fails the test on a
+    difference, a missing reference, or a capture error of either case."""
+    from horsies.core.types.result import Err, Ok
     from tests.dualrun.compare import render_diff
     from tests.dualrun.pair_outcomes import (
         ClockBoundaryStraddle,
@@ -602,6 +707,7 @@ def _after_core_body(config: pytest.Config, case: PairCase) -> None:
         NoCompare,
         NoReference,
         PairEqual,
+        ReferenceNotCaptured,
         ReferenceRunMissing,
         core_step,
         judge_pair,
@@ -612,9 +718,17 @@ def _after_core_body(config: pytest.Config, case: PairCase) -> None:
             return
         case ReferenceRunMissing(found=found):
             pytest.fail(f'ReferenceRunMissing: the Python case left {found}; nothing to compare')
+        case ReferenceNotCaptured(error=error):
+            pytest.fail(
+                f'{_capture_failed(Implementation.PYTHON_REFERENCE, error)}; nothing to compare'
+            )
         case CompareSnapshots(reference=reference):
             pass
-    snapshot, window = _capture(case)
+    match _capture(case):
+        case Err(error):
+            pytest.fail(_capture_failed(case.implementation, error))
+        case Ok((snapshot, window)):
+            pass
     match judge_pair(reference, snapshot, window):
         case PairEqual():
             return
