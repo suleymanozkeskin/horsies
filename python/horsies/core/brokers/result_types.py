@@ -54,10 +54,25 @@ Where Result stops and exceptions take over (the "stop line"):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Literal, assert_never
+from typing import TYPE_CHECKING, ClassVar, assert_never
 from uuid import UUID
 
 from horsies._catalog.broker import BrokerErrorCode as BrokerErrorCode
+from horsies._catalog.broker_errors import (
+    BrokerAsyncContext as BrokerAsyncContext,
+    BrokerCoreEnqueueError as BrokerCoreEnqueueError,
+    BrokerCoreError as BrokerCoreError,
+    BrokerEnqueueFailed as BrokerEnqueueFailed,
+    BrokerIdempotencyKeyConflict as BrokerIdempotencyKeyConflict,
+    BrokerInvalidInput as BrokerInvalidInput,
+    BrokerInvalidJsonPayload as BrokerInvalidJsonPayload,
+    BrokerInvalidTaskOptions as BrokerInvalidTaskOptions,
+    BrokerListenerDisabled as BrokerListenerDisabled,
+    BrokerOperationFailed as BrokerOperationFailed,
+    BrokerOperationFailedCode as BrokerOperationFailedCode,
+    BrokerPayloadMismatch as BrokerPayloadMismatch,
+    BrokerWaitInsideTask as BrokerWaitInsideTask,
+)
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
 
@@ -66,81 +81,6 @@ if TYPE_CHECKING:
     from horsies.core.brokers.resources import EventLoopLimit
     from horsies.core.codec.typed import Json
     from horsies.core.types.status import TaskStatus
-
-
-type BrokerOperationFailedCode = Literal[
-    BrokerErrorCode.SCHEMA_INIT_FAILED,
-    BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-    BrokerErrorCode.MONITORING_QUERY_FAILED,
-    BrokerErrorCode.DB_PING_FAILED,
-    BrokerErrorCode.WORKER_PING_FAILED,
-    BrokerErrorCode.CLEANUP_FAILED,
-    BrokerErrorCode.CLOSE_FAILED,
-    BrokerErrorCode.LISTENER_START_FAILED,
-    BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-]
-"""The operation codes of ``BrokerOperationFailed``."""
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerOperationFailed:
-    """A broker operation failed with a database, driver or connection error.
-
-    ``code`` names the operation. ``retryable`` is the driver classification
-    of the cause: ``True`` when the condition may clear, for example a lost
-    connection. A read changed nothing. A cleanup may have finished part of
-    its rows; no write of the library's own data is left half done.
-    """
-
-    code: BrokerOperationFailedCode
-    message: str = field(repr=False)
-    retryable: bool
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerEnqueueFailed:
-    """The enqueue write failed or could not be confirmed. The row may or may not exist.
-
-    ``retryable`` is the driver classification of the cause. An enqueue
-    again with the same task id and payload is safe: the broker returns the
-    existing task for a duplicate. ``exception`` is ``NoCause()`` when the
-    broker found the failure by a data check (the conflicting row was gone).
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.ENQUEUE_FAILED
-    message: str = field(repr=False)
-    retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerPayloadMismatch:
-    """The task id holds a different command or ``sent_at``, or its live row a
-    different idempotency key. Nothing was written. The same enqueue fails
-    again.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.PAYLOAD_MISMATCH
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerIdempotencyKeyConflict:
-    """The idempotency key is reserved by another task with a different command.
-
-    Nothing was written. ``owner_task_id`` names the task that holds the
-    key. While the owner task is live, the reservation stays. After the
-    owner task finishes, the reservation ends when the reservation window
-    has passed (24 h by default, at most 30 days); an enqueue with the same
-    key is then accepted.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    owner_task_id: UUID
 
 
 @dataclass(slots=True, frozen=True)
@@ -166,50 +106,6 @@ class BrokerNoTypeAvailable:
 
 
 @dataclass(slots=True, frozen=True)
-class BrokerInvalidJsonPayload:
-    """Stored JSON failed strict validation. The stored data is unchanged.
-
-    The same read fails again. ``exception`` is ``NoCause()`` when a shape
-    check found the failure without a Python exception.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.INVALID_JSON_PAYLOAD
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    exception: BaseException | NoCause = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerInvalidTaskOptions:
-    """The task options are not valid JSON or carry a retry limit that cannot be stored.
-
-    Nothing was written. The same options are refused again. ``exception``
-    is ``NoCause()`` when a check refused the options without a Python
-    exception.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.INVALID_TASK_OPTIONS
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    exception: BaseException | NoCause = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerInvalidInput:
-    """An argument of the call was refused before anything ran. Nothing was written.
-
-    The message names the argument and the rule. The same arguments are
-    refused again. ``exception`` is ``NoCause()`` when a check refused the
-    argument without a Python exception.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.INVALID_INPUT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    exception: BaseException | NoCause = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
 class BrokerEventLoopLimit:
     """The broker holds resource sets for its limit of open event loops. Nothing ran.
 
@@ -221,19 +117,6 @@ class BrokerEventLoopLimit:
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     loop_limit: EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerAsyncContext:
-    """A sync facade was called on a thread that runs an event loop. Nothing ran.
-
-    A sync call on that thread returns the same error; call the
-    ``*_async`` form.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.ASYNC_CONTEXT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -250,47 +133,12 @@ class BrokerLoopRunnerFailed:
     exception: BaseException = field(repr=False)
 
 
-@dataclass(slots=True, frozen=True)
-class BrokerListenerDisabled:
-    """The broker has no listener, so the operation cannot run. Nothing ran.
-
-    A broker built with ``assume_initialized=True`` has no listener. Every
-    call that needs one returns this error for that broker.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.LISTENER_DISABLED
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerWaitInsideTask:
-    """A result wait was called in a process that runs task bodies. Nothing ran.
-
-    Every result wait in that process returns this error. Compose the tasks
-    with a workflow, or send the other task and return.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.WAIT_INSIDE_TASK
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-
-
 type BrokerOperationError = (
-    BrokerOperationFailed
-    | BrokerEnqueueFailed
-    | BrokerPayloadMismatch
-    | BrokerIdempotencyKeyConflict
+    BrokerCoreError
     | BrokerNotAttached
     | BrokerNoTypeAvailable
-    | BrokerInvalidJsonPayload
-    | BrokerInvalidTaskOptions
-    | BrokerInvalidInput
     | BrokerEventLoopLimit
-    | BrokerAsyncContext
     | BrokerLoopRunnerFailed
-    | BrokerListenerDisabled
-    | BrokerWaitInsideTask
 )
 """Every failure of a broker operation: one variant per state."""
 
@@ -298,14 +146,7 @@ type BrokerOperationError = (
 type BrokerResult[T] = Result[T, BrokerOperationError]
 
 
-type BrokerEnqueueError = (
-    BrokerEnqueueFailed
-    | BrokerPayloadMismatch
-    | BrokerIdempotencyKeyConflict
-    | BrokerInvalidTaskOptions
-    | BrokerInvalidInput
-    | BrokerEventLoopLimit
-)
+type BrokerEnqueueError = BrokerCoreEnqueueError | BrokerEventLoopLimit
 """Every failure of ``PostgresBroker.enqueue_async``."""
 
 

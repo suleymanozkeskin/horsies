@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from typing import Any, get_args
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -44,6 +44,7 @@ from tests.dualrun.reference.web_routes.actions import (
     _handle_failed,
     build_router,
 )
+from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
 
@@ -97,7 +98,7 @@ def _db_error() -> OperationalError:
 
 class TestVariantCatalog:
     def test_each_code_names_exactly_one_variant(self) -> None:
-        codes = [variant.code for variant in get_args(HandleOperationError.__value__)]
+        codes = [variant.code for variant in union_members(HandleOperationError)]
 
         assert len(codes) == len(set(codes))
         assert set(codes) == set(HandleErrorCode)
@@ -105,7 +106,7 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
-        assert built == set(get_args(HandleOperationError.__value__))
+        assert built == set(union_members(HandleOperationError))
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError(CAUSE_MARKER)), ids=_variant_id,
@@ -543,7 +544,7 @@ class TestWebMapping:
     def test_every_variant_has_a_web_answer(self) -> None:
         answered = set(WEB_STATUS_CODES) | {HandleAsyncContext, HandleResumeRecoveryFailed}
 
-        assert answered == set(get_args(HandleOperationError.__value__))
+        assert answered == set(union_members(HandleOperationError))
 
     @pytest.mark.parametrize(
         'error',

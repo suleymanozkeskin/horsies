@@ -11,7 +11,7 @@ by the core with a panic; its own tests cover them.
 from __future__ import annotations
 
 import uuid
-from typing import Any, get_args
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -47,6 +47,7 @@ from tests.dualrun.reference.web_routes.actions import (
     _succeeded,  # pyright: ignore[reportPrivateUsage]
     _task_action_failed,  # pyright: ignore[reportPrivateUsage]
 )
+from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
 
@@ -87,7 +88,7 @@ def _variant_id(error: TaskActionError) -> str:
 
 class TestVariantCatalog:
     def test_each_code_names_exactly_one_variant(self) -> None:
-        codes = [variant.code for variant in get_args(TaskActionError.__value__)]
+        codes = [variant.code for variant in union_members(TaskActionError)]
 
         assert len(codes) == len(set(codes))
         assert set(codes) == set(TaskActionErrorCode)
@@ -95,7 +96,7 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
-        assert built == set(get_args(TaskActionError.__value__))
+        assert built == set(union_members(TaskActionError))
 
     def test_the_code_is_a_string(self) -> None:
         assert TaskActionErrorCode.TASK_NOT_FOUND == 'TASK_NOT_FOUND'
@@ -341,7 +342,7 @@ class TestWebMapping:
     def test_the_cases_cover_every_variant(self) -> None:
         covered = {type(error) for error, _, _ in _web_cases()}
 
-        assert covered == set(get_args(TaskActionError.__value__))
+        assert covered == set(union_members(TaskActionError))
 
     @pytest.mark.parametrize(
         'error,status_code,content',
