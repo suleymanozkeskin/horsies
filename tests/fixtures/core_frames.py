@@ -195,8 +195,10 @@ def init_meta(
     log_level: str = 'info',
     database_url: str = 'postgresql://user:secret@127.0.0.1:1/none',
     protocol: int = 2,
+    parent_sys_path: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """The metadata of an init frame of a Python child."""
+    """The metadata of an init frame of a Python child. A child replaces its
+    `sys.path` with `parent_sys_path`."""
     return {
         'kind': 'init',
         'protocol': protocol,
@@ -205,7 +207,7 @@ def init_meta(
             'app_locator': app_locator,
             'imports': list(imports),
             'sys_path_roots': [],
-            'parent_sys_path': [],
+            'parent_sys_path': list(parent_sys_path),
             'parent_argv': ['horsies', 'worker'],
         },
         'log_level': log_level,
