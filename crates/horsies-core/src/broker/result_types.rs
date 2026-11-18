@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::core::codec::{check_json_text, StrictJsonError};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::{TaskInfo, TaskStatus};
+use crate::error_catalog::ErrorEnum;
 use crate::failure_cause::FailureCause;
 
 /// Categorized broker operation failure codes.
@@ -94,6 +95,19 @@ pub enum BrokerOperationFailedCode {
 }
 
 impl BrokerOperationFailedCode {
+    /// Every member, in Python's order.
+    pub const ALL: [Self; 9] = [
+        Self::SchemaInitFailed,
+        Self::TaskInfoQueryFailed,
+        Self::MonitoringQueryFailed,
+        Self::DbPingFailed,
+        Self::WorkerPingFailed,
+        Self::CleanupFailed,
+        Self::CloseFailed,
+        Self::ListenerStartFailed,
+        Self::ListenerSubscribeFailed,
+    ];
+
     /// The member of the whole catalog. Pure.
     pub const fn broker_code(self) -> BrokerErrorCode {
         match self {
@@ -112,7 +126,8 @@ impl BrokerOperationFailedCode {
 
 /// The failure of a broker operation: one variant per Python class of
 /// `python/horsies/core/brokers/result_types.py`, each with the facts of its
-/// state only. Carried inside `Err(...)` of a [`BrokerResult`].
+/// state only. Carried inside `Err(...)` of a [`BrokerResult`]. Each
+/// variant's doc is its Python class doc (`ErrorCatalog`).
 ///
 /// The classes that only the Python client produces are not variants:
 /// `BrokerNotAttached`, `BrokerNoTypeAvailable`, `BrokerEventLoopLimit` and
@@ -122,78 +137,182 @@ impl BrokerOperationFailedCode {
 /// broken read contract, or a failed precondition (a refused argument
 /// included). A variant without `cause` has the cause of its state
 /// ([`Self::failure_cause`]). A variant without `retryable` never clears.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+#[error_catalog(
+    module = "broker_errors",
+    code = "BrokerErrorCode",
+    union = "BrokerCoreError",
+    union_doc = "Every failure of a broker operation that the core gives: one class per state."
+)]
 pub enum BrokerOperationError {
-    /// Python `BrokerOperationFailed`: the operation `code` failed with a
-    /// database, driver or connection error. A read changed nothing.
+    /// A broker operation failed with a database, driver or connection error.
+    ///
+    /// ``code`` names the operation. ``retryable`` is the driver classification
+    /// of the cause: ``True`` when the condition may clear, for example a lost
+    /// connection. A read changed nothing. A cleanup may have finished part of
+    /// its rows; no write of the library's own data is left half done.
+    #[error_class(
+        class = "BrokerOperationFailed",
+        code_field = "code",
+        code_subset = "BrokerOperationFailedCode",
+        exception = "BaseException"
+    )]
     OperationFailed {
         code: BrokerOperationFailedCode,
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `BrokerEnqueueFailed`: the enqueue write failed or could not
-    /// be confirmed. The row may or may not exist.
+    /// The enqueue write failed or could not be confirmed. The row may or may not exist.
+    ///
+    /// ``retryable`` is the driver classification of the cause. An enqueue
+    /// again with the same task id and payload is safe: the broker returns the
+    /// existing task for a duplicate. ``exception`` is ``NoCause()`` when the
+    /// broker found the failure by a data check (the conflicting row was gone).
+    #[error_class(
+        class = "BrokerEnqueueFailed",
+        code = "EnqueueFailed",
+        exception = "BaseException | NoCause"
+    )]
     EnqueueFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `BrokerPayloadMismatch`: the task id holds another command or
-    /// `sent_at`, or its live row another idempotency key. Nothing was
-    /// written.
-    PayloadMismatch { message: String },
-    /// Python `BrokerIdempotencyKeyConflict`: the key is reserved by the
-    /// task `owner_task_id`, with another command. Nothing was written.
-    IdempotencyKeyConflict {
+    /// The task id holds a different command or ``sent_at``, or its live row a
+    /// different idempotency key. Nothing was written. The same enqueue fails
+    /// again.
+    #[error_class(
+        class = "BrokerPayloadMismatch",
+        code = "PayloadMismatch",
+        never_retryable
+    )]
+    PayloadMismatch {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+    },
+    /// The idempotency key is reserved by another task with a different command.
+    ///
+    /// Nothing was written. ``owner_task_id`` names the task that holds the
+    /// key. While the owner task is live, the reservation stays. After the
+    /// owner task finishes, the reservation ends when the reservation window
+    /// has passed (24 h by default, at most 30 days); an enqueue with the same
+    /// key is then accepted.
+    #[error_class(
+        class = "BrokerIdempotencyKeyConflict",
+        code = "IdempotencyKeyConflict",
+        never_retryable
+    )]
+    IdempotencyKeyConflict {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "Uuid")]
         owner_task_id: Uuid,
     },
-    /// Python `BrokerInvalidJsonPayload`: stored or wire JSON failed strict
-    /// validation. The stored data is unchanged.
+    /// Stored JSON failed strict validation. The stored data is unchanged.
+    ///
+    /// The same read fails again. ``exception`` is ``NoCause()`` when a shape
+    /// check found the failure without a Python exception.
+    #[error_class(
+        class = "BrokerInvalidJsonPayload",
+        code = "InvalidJsonPayload",
+        never_retryable,
+        exception = "BaseException | NoCause"
+    )]
     InvalidJsonPayload {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `BrokerInvalidTaskOptions`: the task options were refused
-    /// before the write. Nothing was written.
+    /// The task options are not valid JSON or carry a retry limit that cannot be stored.
+    ///
+    /// Nothing was written. The same options are refused again. ``exception``
+    /// is ``NoCause()`` when a check refused the options without a Python
+    /// exception.
+    #[error_class(
+        class = "BrokerInvalidTaskOptions",
+        code = "InvalidTaskOptions",
+        never_retryable,
+        exception = "BaseException | NoCause"
+    )]
     InvalidTaskOptions {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `BrokerInvalidInput`: an argument was refused before anything
-    /// ran. Nothing was written.
+    /// An argument of the call was refused before anything ran. Nothing was written.
+    ///
+    /// The message names the argument and the rule. The same arguments are
+    /// refused again. ``exception`` is ``NoCause()`` when a check refused the
+    /// argument without a Python exception.
+    #[error_class(
+        class = "BrokerInvalidInput",
+        code = "InvalidInput",
+        never_retryable,
+        exception = "BaseException | NoCause"
+    )]
     InvalidInput {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `BrokerAsyncContext`: a sync or blocking call on a thread that
-    /// runs an event loop or a tokio runtime. Its wait would stall that
-    /// loop, so nothing ran.
-    AsyncContext { message: String },
-    /// Python `BrokerListenerDisabled`: the broker has no listener, so the
-    /// operation cannot run. Nothing ran.
-    ListenerDisabled { message: String },
-    /// Python `BrokerWaitInsideTask`: a result wait in a process that runs
-    /// task bodies. Nothing ran.
-    WaitInsideTask { message: String },
+    /// A sync facade was called on a thread that runs an event loop. Nothing ran.
+    ///
+    /// A sync call on that thread returns the same error; call the
+    /// ``*_async`` form.
+    #[error_class(class = "BrokerAsyncContext", code = "AsyncContext", never_retryable)]
+    AsyncContext {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+    },
+    /// The broker has no listener, so the operation cannot run. Nothing ran.
+    ///
+    /// A broker built with ``assume_initialized=True`` has no listener. Every
+    /// call that needs one returns this error for that broker.
+    #[error_class(
+        class = "BrokerListenerDisabled",
+        code = "ListenerDisabled",
+        never_retryable
+    )]
+    ListenerDisabled {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+    },
+    /// A result wait was called in a process that runs task bodies. Nothing ran.
+    ///
+    /// Every result wait in that process returns this error. Compose the tasks
+    /// with a workflow, or send the other task and return.
+    #[error_class(
+        class = "BrokerWaitInsideTask",
+        code = "WaitInsideTask",
+        never_retryable
+    )]
+    WaitInsideTask {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+    },
+}
+
+impl From<BrokerOperationFailedCode> for BrokerErrorCode {
+    fn from(code: BrokerOperationFailedCode) -> Self {
+        code.broker_code()
+    }
 }
 
 impl BrokerOperationError {
-    /// The catalog code of the variant. Pure.
+    /// The catalog code of the variant: the code of its Python class
+    /// (`ErrorCatalog`). Pure.
     pub fn code(&self) -> BrokerErrorCode {
-        match self {
-            Self::OperationFailed { code, .. } => code.broker_code(),
-            Self::EnqueueFailed { .. } => BrokerErrorCode::EnqueueFailed,
-            Self::PayloadMismatch { .. } => BrokerErrorCode::PayloadMismatch,
-            Self::IdempotencyKeyConflict { .. } => BrokerErrorCode::IdempotencyKeyConflict,
-            Self::InvalidJsonPayload { .. } => BrokerErrorCode::InvalidJsonPayload,
-            Self::InvalidTaskOptions { .. } => BrokerErrorCode::InvalidTaskOptions,
-            Self::InvalidInput { .. } => BrokerErrorCode::InvalidInput,
-            Self::AsyncContext { .. } => BrokerErrorCode::AsyncContext,
-            Self::ListenerDisabled { .. } => BrokerErrorCode::ListenerDisabled,
-            Self::WaitInsideTask { .. } => BrokerErrorCode::WaitInsideTask,
-        }
+        ErrorEnum::error_code(self)
     }
 
     /// What failed and why. Pure.

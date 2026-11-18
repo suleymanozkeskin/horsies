@@ -19,7 +19,7 @@ use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::task::Execution;
-use crate::monitoring::{cancel_task, TaskActionErrorCode};
+use crate::monitoring::{cancel_task, TaskActionError, TaskActionErrorCode};
 use crate::TaskStatus;
 
 const WORKER: &str = "cancel-spec-worker";
@@ -136,10 +136,14 @@ async fn an_unknown_stored_history_status_is_stored_data_invalid_and_nothing_cha
         .await
         .expect_err("stored data that does not parse is refused");
 
-    assert_eq!(refused.code, TaskActionErrorCode::StoredDataInvalid);
-    assert!(!refused.retryable);
-    assert_eq!(refused.task_id, task.id);
-    assert!(refused.message.contains("NOT_KNOWN"), "{}", refused.message);
+    assert_eq!(refused.code(), TaskActionErrorCode::StoredDataInvalid);
+    assert!(!refused.retryable());
+    assert_eq!(refused.task_id(), task.id);
+    assert!(
+        refused.message().contains("NOT_KNOWN"),
+        "{}",
+        refused.message()
+    );
     assert_eq!(
         history_status(&database.pool, task.id).await.as_deref(),
         Some("NOT_KNOWN")
@@ -253,12 +257,12 @@ async fn a_concurrent_claim_and_cancel_leave_one_consistent_outcome() {
             assert_eq!(live_status(&database.pool, task.id).await, None);
         }
         Err(refused) => {
-            assert_eq!(refused.code, TaskActionErrorCode::TaskNotCancellable);
+            assert_eq!(refused.code(), TaskActionErrorCode::TaskNotCancellable);
+            let TaskActionError::NotCancellable { current_status, .. } = &refused else {
+                panic!("expected TASK_NOT_CANCELLABLE, got {refused:?}");
+            };
             assert!(
-                !matches!(
-                    refused.current_status,
-                    Some(TaskStatus::Pending | TaskStatus::Claimed)
-                ),
+                !matches!(current_status, TaskStatus::Pending | TaskStatus::Claimed),
                 "{refused:?}"
             );
             assert_ne!(history.as_deref(), Some("CANCELLED"));

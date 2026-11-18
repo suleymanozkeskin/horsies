@@ -1556,11 +1556,11 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
         .await
         .expect_err("digest corruption must fail closed");
     assert_eq!(
-        error.code,
+        error.code(),
         MonitoringQueryErrorCode::HistoryContractViolation
     );
-    assert!(!error.retryable);
-    assert!(error.message.contains("digest"));
+    assert!(!error.retryable());
+    assert!(error.message().contains("digest"));
 
     let unknown = Uuid::new_v4();
     assert_eq!(
@@ -1742,9 +1742,9 @@ async fn database_failure_is_typed_and_retryable() {
     let error = list_tasks(&broker, &TaskListQuery::new(test_window()))
         .await
         .expect_err("unreachable monitoring database");
-    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
-    assert!(error.retryable, "{error:?}");
-    assert!(error.message.contains("task list query failed"));
+    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert!(error.retryable(), "{error:?}");
+    assert!(error.message().contains("task list query failed"));
 }
 
 /// A published reader dropped out of band fails the detail read with a
@@ -1775,13 +1775,13 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
     let error = get_task_detail(&broker, task.id)
         .await
         .expect_err("a dropped reader is an error, not an absence");
-    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
+    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
     assert!(
         error
-            .message
+            .message()
             .contains(crate::core::history::names::TASK_DETAIL_FUNCTION),
         "{}",
-        error.message
+        error.message()
     );
 
     let mut transaction = pool.begin().await.expect("publication transaction");

@@ -58,53 +58,117 @@ impl std::fmt::Display for HandleErrorCode {
 /// The failure of a workflow handle operation: one variant per Python class
 /// of `python/horsies/core/models/workflow/handle_types.py` that the core or
 /// a client of the core produces, each with the facts of its state only.
-/// Carried inside `Err(...)` of a [`HandleResult`].
+/// Carried inside `Err(...)` of a [`HandleResult`]. Each variant's doc is
+/// its Python class doc (`ErrorCatalog`).
 ///
 /// The classes that only the Python client produces are not variants:
 /// `HandleLoopRunnerFailed` and `HandleEventLoopLimit`. A variant without
 /// `cause` has the precondition cause of its state
 /// ([`Self::failure_cause`]); a variant without `retryable` never clears.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+#[error_catalog(
+    module = "workflow_handle_errors",
+    code = "HandleErrorCode",
+    union = "HandleCoreError",
+    union_doc = "Every failure of a workflow handle operation that the core gives: one class per state."
+)]
 pub enum HandleOperationError {
-    /// Python `HandleWorkflowNotFound`: no workflow has the id. Nothing
-    /// changed.
-    WorkflowNotFound { message: String, workflow_id: Uuid },
-    /// Python `HandleDbOperationFailed`: a query or a commit failed.
+    /// No workflow has this id. Nothing changed.
+    ///
+    /// The same call returns this error while no workflow has this id.
+    #[error_class(
+        class = "HandleWorkflowNotFound",
+        code = "WorkflowNotFound",
+        never_retryable
+    )]
+    WorkflowNotFound {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
+    },
+    /// The operation failed with a database or driver error.
+    ///
+    /// ``retryable`` is the driver classification of the cause: ``True`` when
+    /// the condition may clear, for example a lost connection. A read changed
+    /// nothing. A write (``cancel``, ``pause``, or ``resume`` before its commit)
+    /// rolled back, or its commit outcome is unknown.
+    #[error_class(
+        class = "HandleDbOperationFailed",
+        code = "DbOperationFailed",
+        exception = "BaseException"
+    )]
     DbOperationFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(python = "UuidText")]
         workflow_id: Uuid,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `HandleStoredDataInvalid`: a stored value of the workflow does
-    /// not parse. Nothing changed, and the same call fails again.
+    /// A stored value of the workflow does not parse. Nothing changed.
+    ///
+    /// The value is a workflow status that is not a ``WorkflowStatus``
+    /// (``status``), or a subworkflow summary that is not valid (``tasks``). ``exception`` is the parse error. The same call returns this
+    /// error until the stored value changes.
+    #[error_class(
+        class = "HandleStoredDataInvalid",
+        code = "StoredDataInvalid",
+        never_retryable,
+        exception = "BaseException"
+    )]
     StoredDataInvalid {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "UuidText")]
         workflow_id: Uuid,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `HandleResumeRecoveryFailed`: the resume committed, and the
-    /// recovery pass for its tree failed. The workflow is RUNNING.
+    /// ``resume`` committed, and the recovery pass for the workflow tree failed.
+    ///
+    /// The workflow is ``RUNNING`` and the resume enqueued its ready nodes. The
+    /// recovery pass runs after the commit, in a second transaction. It
+    /// completes the propagation for a task that finished while the resume
+    /// transaction ran, when the completion callback saw the workflow as
+    /// ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
+    /// ``exception`` is the database or driver error. The worker reaper runs
+    /// the same pass over all workflows. A repeated ``resume`` returns
+    /// ``Ok(False)``.
+    #[error_class(
+        class = "HandleResumeRecoveryFailed",
+        code = "ResumeRecoveryFailed",
+        never_retryable,
+        exception = "BaseException"
+    )]
     ResumeRecoveryFailed {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "UuidText")]
         workflow_id: Uuid,
+        #[error_slot(skip)]
         cause: FailureCause,
     },
-    /// Python `HandleAsyncContext`: a sync or blocking handle method on a
-    /// thread that runs an event loop or a tokio runtime. Nothing ran.
-    AsyncContext { message: String, workflow_id: Uuid },
+    /// A sync method was called on a thread that runs an event loop. Nothing ran.
+    ///
+    /// Its wait would stall that loop. Call the ``*_async`` form; a sync call on
+    /// that thread returns this error again.
+    #[error_class(class = "HandleAsyncContext", code = "AsyncContext", never_retryable)]
+    AsyncContext {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
+    },
 }
 
 impl HandleOperationError {
-    /// The catalog code of the variant. Pure.
+    /// The catalog code of the variant: the code of its Python class
+    /// (`ErrorCatalog`). Pure.
     pub fn code(&self) -> HandleErrorCode {
-        match self {
-            Self::WorkflowNotFound { .. } => HandleErrorCode::WorkflowNotFound,
-            Self::DbOperationFailed { .. } => HandleErrorCode::DbOperationFailed,
-            Self::StoredDataInvalid { .. } => HandleErrorCode::StoredDataInvalid,
-            Self::ResumeRecoveryFailed { .. } => HandleErrorCode::ResumeRecoveryFailed,
-            Self::AsyncContext { .. } => HandleErrorCode::AsyncContext,
-        }
+        crate::error_catalog::ErrorEnum::error_code(self)
     }
 
     /// What failed and why. Pure.
