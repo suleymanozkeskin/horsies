@@ -84,11 +84,14 @@ fn children_with_child() -> TestChildSpecs {
 }
 
 /// A sub-workflow root at `index` whose child is the one under
-/// [`CHILD_KEY`], with the input `null` and no params.
+/// [`CHILD_KEY`], with no params: its stored input is `{}`, as Python and
+/// the Rust client store a node that gives no params. Python refuses a
+/// stored `null` (`Corrupt kwargs JSON for subworkflow task <index>`,
+/// [`merged_child_input`]).
 fn subworkflow_root(index: usize) -> AnyNode {
     AnyNode {
         task_name: "start_statement_child".to_owned(),
-        input_json: "null".to_owned(),
+        input_json: "{}".to_owned(),
         queue: None,
         priority: None,
         node_id: None,

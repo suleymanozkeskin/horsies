@@ -3417,7 +3417,10 @@ mod tests {
         }
     }
 
-    /// The registered task of `body` (see [`TestTask`]).
+    /// The registered task of `body` (see [`TestTask`]), defined in this
+    /// module: the module that a client's task macro names
+    /// ([`TaskMeta::in_module`] with `module_path!()`), so the exception
+    /// record of a panic carries it.
     fn test_task<F, Fut>(body: F) -> RegisteredTask
     where
         F: Fn(()) -> Fut + Send + Sync + 'static,
@@ -3425,7 +3428,7 @@ mod tests {
     {
         RegisteredTask::Async {
             task: Arc::new(TestTask(body)),
-            meta: TaskMeta::for_input::<()>(),
+            meta: TaskMeta::for_input::<()>().in_module(module_path!()),
         }
     }
 
@@ -5093,6 +5096,13 @@ mod tests {
     /// SQLSTATE 40001 (`serialization_failure`, class 40: may clear); a
     /// sequence counts the claims, since `nextval` is not rolled back with
     /// the refused statement.
+    ///
+    /// A log table holds each claim that committed: its row is written by
+    /// an AFTER trigger in the transaction of the claim, so the refused
+    /// claim writes none. The claim after the backoff is read from the log
+    /// while the worker runs. The row's status cannot show it: an idle child
+    /// ends at its run frame, and the crash end returns the CLAIMED row to
+    /// the queue (`ClaimedRowRule::Release`), at the stop at the latest.
     #[tokio::test]
     #[serial]
     async fn a_claim_error_that_can_clear_backs_off_and_the_loop_claims_again() {
@@ -5111,7 +5121,17 @@ mod tests {
              $body$;
              CREATE TRIGGER test_refuse_first_claim BEFORE UPDATE ON horsies_tasks
                  FOR EACH ROW WHEN (OLD.status = 'PENDING' AND NEW.status = 'CLAIMED')
-                 EXECUTE FUNCTION test_refuse_first_claim();",
+                 EXECUTE FUNCTION test_refuse_first_claim();
+             CREATE TABLE test_committed_claims (task_id uuid NOT NULL);
+             CREATE FUNCTION test_log_committed_claim() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 INSERT INTO test_committed_claims VALUES (NEW.id);
+                 RETURN NULL;
+             END
+             $body$;
+             CREATE TRIGGER test_log_committed_claim AFTER UPDATE ON horsies_tasks
+                 FOR EACH ROW WHEN (OLD.status = 'PENDING' AND NEW.status = 'CLAIMED')
+                 EXECUTE FUNCTION test_log_committed_claim();",
         )
         .execute(&database.pool)
         .await
@@ -5144,17 +5164,30 @@ mod tests {
                 .expect("read the claim count")
             }
         };
-        let tries = tokio::time::timeout(Duration::from_secs(30), async {
+        let committed_claims = || {
+            let pool = database.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM test_committed_claims WHERE task_id = $1",
+                )
+                .bind(pending)
+                .fetch_one(&pool)
+                .await
+                .expect("read the committed claims")
+            }
+        };
+        let claimed = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let tries = claim_tries().await;
-                if tries >= 2 {
-                    break tries;
+                let claimed = committed_claims().await;
+                if claimed >= 1 {
+                    break claimed;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
         .expect("the loop claims again after the refused pass");
+        let tries = claim_tries().await;
         cancel.cancel();
         let _stopped = tokio::time::timeout(Duration::from_secs(30), run)
             .await
@@ -5174,16 +5207,9 @@ mod tests {
             .collect();
         assert_eq!(retry_lines.len(), 1, "{retry_lines:?}");
         assert!(tries >= 2, "the claim was tried again: {tries}");
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-                .bind(pending)
-                .fetch_optional(&database.pool)
-                .await
-                .expect("read the task");
-        assert_ne!(
-            status.as_deref(),
-            Some("PENDING"),
-            "the claim after the backoff took the task"
+        assert!(
+            claimed >= 1,
+            "the claim after the backoff took the task: {claimed}"
         );
         database.drop().await;
     }
