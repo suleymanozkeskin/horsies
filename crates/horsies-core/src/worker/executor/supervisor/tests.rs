@@ -165,6 +165,26 @@ fn a_child_lost_before_ready_names_its_loss_once() {
     );
 }
 
+/// Python `boot_failure_of` (`python/horsies/core/worker/slots.py:2356-2362`):
+/// a forked child that did not reach the worker is a spawn failure, and the
+/// detail names the reparent failure before the loss and the exit. The line
+/// of a failed attempt and the error of a pool whose attempts ran out carry
+/// this text.
+#[test]
+fn a_forked_child_that_did_not_reach_the_worker_names_the_reparent_failure() {
+    let failure = match boot_end_of(BootReply::Lost(lost(LossCause::ChildDied, exited(76)))) {
+        BootEnd::Failed(failure) => failure,
+        BootEnd::ChildHookFailed => panic!("expected a boot failure, got a hook failure"),
+    };
+
+    assert_eq!(failure.cause, BootFailureCause::SpawnFailed);
+    assert_eq!(
+        failure.to_string(),
+        "the OS refused to start the child process: the forked child did not reach the \
+         worker: child died: exit code 76"
+    );
+}
+
 #[test]
 fn a_ready_frame_of_another_version_is_a_protocol_mismatch() {
     let reply = BootReply::Lost(lost(

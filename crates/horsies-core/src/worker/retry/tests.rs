@@ -195,10 +195,15 @@ fn each_timeout_refusal_has_python_s_text() {
 /// Python `read_stored_timeout` and `read_stored_retry_policy`: the reason of
 /// a text that `loads_json` refuses, and of a JSON value that is not an
 /// object. The texts after `JSON parse failed: ` are those of `loads_json`
-/// (`core::codec::python_loads`).
+/// (`core::codec::python_loads`). The dispatch read and the retry limit of
+/// enqueue give one reason for each text, an empty text included.
 #[test]
 fn an_unreadable_text_has_python_s_reason() {
     let cases = [
+        (
+            "",
+            "stored task_options do not parse: JSON parse failed: the text is empty",
+        ),
         (
             "{",
             "stored task_options do not parse: JSON parse failed: Expecting property name \
@@ -654,7 +659,6 @@ fn the_delay_is_at_least_one_second() {
 fn options_without_a_policy_store_zero_retries() {
     for text in [
         None,
-        Some(""),
         Some("{}"),
         Some(r#"{"queue": "default"}"#),
         Some(r#"{"retry_policy": null, "timeout_ms": null}"#),
