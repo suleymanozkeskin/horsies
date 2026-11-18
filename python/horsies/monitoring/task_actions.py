@@ -34,6 +34,14 @@ from typing import TYPE_CHECKING, ClassVar, assert_never
 from sqlalchemy import text
 
 from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
+from horsies._catalog.monitoring_errors import (
+    TaskActionCoreError as TaskActionCoreError,
+    TaskActionDbOperationFailed as TaskActionDbOperationFailed,
+    TaskActionNotCancellable as TaskActionNotCancellable,
+    TaskActionNotFound as TaskActionNotFound,
+    TaskActionStoredDataInvalid as TaskActionStoredDataInvalid,
+    TaskActionWorkflowTask as TaskActionWorkflowTask,
+)
 from horsies._core import (
     CancelFailed,
     CancelRefusedStatus,
@@ -55,72 +63,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True, frozen=True)
-class TaskActionNotFound:
-    """No task has this id. Nothing changed.
-
-    Neither the live table nor history holds the task (retention can
-    remove it).
-    """
-
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_FOUND
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    task_id: uuid.UUID
-
-
-@dataclass(slots=True, frozen=True)
-class TaskActionNotCancellable:
-    """The task's status does not admit the cancel. Nothing changed.
-
-    ``current_status`` is the status that the cancel found: a terminal
-    status, or ``RUNNING`` when ``include_running`` is ``False``. A call
-    with ``include_running=True`` cancels a ``RUNNING`` task.
-    """
-
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_CANCELLABLE
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    task_id: uuid.UUID
-    current_status: TaskStatus
-
-
-@dataclass(slots=True, frozen=True)
-class TaskActionWorkflowTask:
-    """The task belongs to a workflow. Nothing changed.
-
-    Only the workflow primitives drive a workflow task: pause, resume and
-    cancel on its workflow. ``current_status`` is the task's status.
-    """
-
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_IS_WORKFLOW_TASK
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    task_id: uuid.UUID
-    current_status: TaskStatus
-
-
-@dataclass(slots=True, frozen=True)
-class TaskActionDbOperationFailed:
-    """The cancel statement failed with a database or driver error, or the
-    core of this process could not run it.
-
-    ``retryable`` is the core's classification of the cause: ``True`` when
-    the condition may clear, for example a lost connection. ``exception``
-    is the core's class of the cause (a ``CoreFailure`` leaf class, with the
-    subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
-    committed and its reply was lost: a repeated cancel tells which,
-    because a committed cancel answers ``TaskActionNotCancellable`` with
-    ``CANCELLED``.
-    """
-
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DB_OPERATION_FAILED
-    message: str = field(repr=False)
-    retryable: bool
-    task_id: uuid.UUID
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
 class TaskActionEventLoopLimit:
     """The broker holds resource sets for its limit of open event loops. Nothing ran.
 
@@ -136,30 +78,7 @@ class TaskActionEventLoopLimit:
     loop_limit: EventLoopLimit
 
 
-@dataclass(slots=True, frozen=True)
-class TaskActionStoredDataInvalid:
-    """Stored task data does not parse. Nothing changed: the cancel refused the task.
-
-    ``exception`` is an ``OutcomeDecodeError`` with the core's message, for
-    example a history status that is not a task status. A repeat gives the
-    same result until the stored row changes.
-    """
-
-    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.STORED_DATA_INVALID
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    task_id: uuid.UUID
-    exception: BaseException = field(repr=False)
-
-
-type TaskActionError = (
-    TaskActionNotFound
-    | TaskActionNotCancellable
-    | TaskActionWorkflowTask
-    | TaskActionDbOperationFailed
-    | TaskActionEventLoopLimit
-    | TaskActionStoredDataInvalid
-)
+type TaskActionError = TaskActionCoreError | TaskActionEventLoopLimit
 """Every failure of a task action: one variant per ``TaskActionErrorCode``."""
 
 
