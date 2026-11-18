@@ -11,6 +11,7 @@ use crate::db::{
     parse_connection_url, CheckoutClass, ConnectPlan, ConnectionAge, ConnectionEnvironment,
     IdlePing, PoolPlan, PoolRole, PoolSizing, Reserve, StatementProtocol, DEFAULT_SOCKET_SETTINGS,
 };
+use crate::test_support::LogCapture;
 
 const SCHEDULE_INTERVAL_SECONDS: u32 = 60;
 
@@ -116,6 +117,11 @@ async fn a_due_slot_fires_and_records_its_run_at_the_database_time() {
         slot + chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS))
     );
     assert_eq!(row.run_count, 1);
+    assert_eq!(
+        row.config_hash,
+        vec![0_u8; 32],
+        "the fire keeps the stored digest"
+    );
     let last_run_at = row.last_run_at.expect("a recorded run has its time");
     assert!(before <= last_run_at && last_run_at <= after);
     let sent_at: DateTime<Utc> =
@@ -157,6 +163,15 @@ async fn a_fire_that_finds_no_state_row_creates_it_and_writes_no_task() {
         row.config_hash,
         compute_config_hash(&enabled(&schedule)).to_vec()
     );
+    // Python `test_scheduler_service.py::TestCheckScheduleOneStatement::test_a_missing_state_row_is_healed_from_the_database_time`:
+    // the first run after the database time of the due read, no run.
+    let healed = enabled(&schedule);
+    assert_eq!(
+        row.next_run_at,
+        next_run_at(&healed.pattern, database_now, &healed.timezone)
+            .expect("an interval has a next run")
+    );
+    assert_eq!((row.last_run_at, row.last_task_id), (None, None));
     assert_eq!(task_count(&pool, &schedule.task_name).await, 0);
     cleanup(&pool, &schedule.task_name, &schedule.name).await;
 }
@@ -225,7 +240,15 @@ async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_
         .execute(&pool)
         .await
         .unwrap();
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
     fire().await.expect("the repeated fire");
+    let moved = capture.lines_starting(
+        tracing::Level::DEBUG,
+        "schedule was moved by another scheduler",
+    );
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0].field("schedule"), Some(schedule.name.as_str()));
     let core = core_pool_of(&pool);
     let schedules = vec![schedule.clone()];
     tick_on(&core, &schedules, &commands_for(&schedules))
@@ -298,17 +321,28 @@ async fn a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fires_eac
             .execute(&mut *holder)
             .await
             .expect("hold the state row");
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
     let tick = {
+        use tracing::instrument::WithSubscriber;
+
         let core = Arc::clone(&core);
         let schedules = schedules.clone();
         let commands = commands.clone();
-        tokio::spawn(async move { tick_on(&core, &schedules, &commands).await })
+        tokio::spawn(
+            async move { tick_on(&core, &schedules, &commands).await }.with_current_subscriber(),
+        )
     };
     terminate_the_waiting_fire(&mut holder).await;
     holder.rollback().await.expect("release the state row");
     tick.await
         .expect("the tick joins")
         .expect("a lost fire does not fail the tick");
+    let transient = capture.lines_starting(
+        tracing::Level::WARN,
+        &format!("Schedule '{}' fire failed (transient)", schedule.name),
+    );
+    assert_eq!(transient.len(), 1, "{transient:?}");
 
     let row = state::test_rows::state_row(&pool, &schedule.name)
         .await
@@ -567,6 +601,21 @@ async fn the_slot_task_id_of_the_database_matches_its_vectors_and_layout() {
         slot_task_id(&pool, "daily", slot).await,
         slot_task_id(&pool, "daily", slot + chrono::Duration::seconds(60)).await
     );
+    // Python `test_schedule_slot_task_id.py::test_another_name_or_another_microsecond_gives_another_id`
+    // and `::test_one_instant_in_another_time_zone_gives_one_id`: one more
+    // microsecond inside the same millisecond gives another id, and the
+    // instant written in another zone gives the same id.
+    assert_ne!(
+        slot_task_id(&pool, "daily", slot).await,
+        slot_task_id(&pool, "daily", slot + chrono::Duration::microseconds(1)).await
+    );
+    let other_zone: Uuid = sqlx::query_scalar(
+        "SELECT horsies_schedule_slot_task_id('daily', '2026-11-16 11:00:00+01'::timestamptz)",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("compute the slot task id of the instant in another zone");
+    assert_eq!(other_zone, slot_task_id(&pool, "daily", slot).await);
 }
 
 /// A slot time before the Unix epoch, or at or after 2^48 ms, has no slot
@@ -593,4 +642,146 @@ async fn the_slot_task_id_refuses_a_slot_time_outside_the_uuid7_range() {
     }
     let last = slot_task_id(&pool, "daily", end - chrono::Duration::microseconds(1)).await;
     assert_eq!(last.as_bytes()[..6], [0xff; 6]);
+}
+
+/// Python `test_scheduler_service.py::TestCheckAndRunSchedules::test_iterates_due_states_and_checks_each`:
+/// one tick fires every schedule of its due read: each due slot gets its
+/// task and each row records one run.
+#[tokio::test]
+#[serial]
+async fn one_tick_fires_every_due_schedule_of_its_due_read() {
+    let pool = test_pool().await;
+    let core = core_pool_of(&pool);
+    let schedules = vec![own_schedule("tick_first"), own_schedule("tick_second")];
+    let slot = whole_second_database_time(&pool).await - chrono::Duration::seconds(1);
+    for schedule in &schedules {
+        state::test_rows::seed_state(&pool, &schedule.name, slot).await;
+    }
+
+    tick_on(&core, &schedules, &commands_for(&schedules))
+        .await
+        .expect("the tick");
+    core.close();
+
+    for schedule in &schedules {
+        let row = state::test_rows::state_row(&pool, &schedule.name)
+            .await
+            .unwrap();
+        assert_eq!(
+            (row.last_task_id, row.run_count),
+            (Some(slot_task_id(&pool, &schedule.name, slot).await), 1),
+            "{}",
+            schedule.name
+        );
+        assert_eq!(
+            row.next_run_at,
+            slot + chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS))
+        );
+        assert_eq!(task_count(&pool, &schedule.task_name).await, 1);
+        cleanup(&pool, &schedule.task_name, &schedule.name).await;
+    }
+}
+
+/// Python `test_scheduler_service.py::TestCheckAndRunSchedules::test_check_schedule_error_does_not_block_others`:
+/// the database refuses the fire of the first due schedule; the tick moves
+/// that row past its slot with no run, and still fires the next schedule.
+#[tokio::test]
+#[serial]
+async fn a_refused_fire_of_one_schedule_does_not_stop_the_fire_of_the_next() {
+    let pool = test_pool().await;
+    let core = core_pool_of(&pool);
+    let refused = own_schedule("tick_refused");
+    let fired = own_schedule("tick_fired");
+    let schedules = vec![refused.clone(), fired.clone()];
+    let slot = whole_second_database_time(&pool).await - chrono::Duration::seconds(1);
+    // The due read returns the soonest row first: the refused one.
+    let refused_slot = slot - chrono::Duration::seconds(1);
+    state::test_rows::seed_state(&pool, &refused.name, refused_slot).await;
+    state::test_rows::seed_state(&pool, &fired.name, slot).await;
+    refuse_slot_rows(&pool, &refused.task_name).await;
+
+    let ticked = tick_on(&core, &schedules, &commands_for(&schedules)).await;
+    drop_slot_refusal(&pool).await;
+    core.close();
+
+    ticked.expect("a refused fire does not fail the tick");
+    let interval = chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS));
+    let refused_row = state::test_rows::state_row(&pool, &refused.name)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            refused_row.next_run_at,
+            refused_row.run_count,
+            refused_row.last_task_id
+        ),
+        (refused_slot + interval, 0, None)
+    );
+    assert_eq!(task_count(&pool, &refused.task_name).await, 0);
+    let fired_row = state::test_rows::state_row(&pool, &fired.name)
+        .await
+        .unwrap();
+    assert_eq!(
+        (fired_row.next_run_at, fired_row.run_count),
+        (slot + interval, 1)
+    );
+    assert_eq!(task_count(&pool, &fired.task_name).await, 1);
+    for schedule in [refused, fired] {
+        cleanup(&pool, &schedule.task_name, &schedule.name).await;
+    }
+}
+
+/// Python `test_scheduler_service.py::TestCheckScheduleOutcomes::test_a_failed_move_past_a_refusal_is_logged_for_the_next_tick`:
+/// the database refuses the fire, and the fire of no slots that moves the
+/// row past the refused slot fails too. Both are logged; the row keeps its
+/// slot and records no run, and no task is written.
+#[tokio::test]
+#[serial]
+async fn a_skip_that_fails_after_a_refused_fire_is_logged_and_leaves_the_row() {
+    let pool = test_pool().await;
+    let schedule = own_schedule("skip_failure");
+    let database_now = whole_second_database_time(&pool).await;
+    let slot = database_now - chrono::Duration::seconds(1);
+    state::test_rows::seed_state(&pool, &schedule.name, slot).await;
+    let _created = sqlx::raw_sql(
+        "CREATE FUNCTION test_fail_schedule_state() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected state write failure'; END $$;
+         CREATE TRIGGER test_fail_schedule_state BEFORE UPDATE ON horsies_schedule_state
+             FOR EACH ROW EXECUTE FUNCTION test_fail_schedule_state();",
+    )
+    .execute(&pool)
+    .await
+    .expect("create the state failure trigger");
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+
+    let fired = fire_once(&pool, &schedule, slot, database_now).await;
+    let _dropped = sqlx::raw_sql(
+        "DROP TRIGGER test_fail_schedule_state ON horsies_schedule_state;
+         DROP FUNCTION test_fail_schedule_state();",
+    )
+    .execute(&pool)
+    .await
+    .expect("drop the state failure trigger");
+
+    fired.expect("a refused fire is handled by the skip");
+    let refused = capture.lines_starting(
+        tracing::Level::ERROR,
+        &format!("Schedule '{}' fire refused (permanent)", schedule.name),
+    );
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    let skip_failed = capture.lines_starting(
+        tracing::Level::ERROR,
+        &format!(
+            "Schedule '{}' could not move past the refused slot",
+            schedule.name
+        ),
+    );
+    assert_eq!(skip_failed.len(), 1, "{skip_failed:?}");
+    let row = state::test_rows::state_row(&pool, &schedule.name)
+        .await
+        .unwrap();
+    assert_eq!((row.next_run_at, row.run_count), (slot, 0));
+    assert_eq!(task_count(&pool, &schedule.task_name).await, 0);
+    cleanup(&pool, &schedule.task_name, &schedule.name).await;
 }
