@@ -7,11 +7,11 @@
 //! owes nothing).
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome, PhaseTwoForm};
 use crate::broker::PostgresBroker;
+use crate::test_support::sql::{self, TestPool};
 
 /// The ids of one seeded workflow node and its task.
 struct SeededRecord {
@@ -23,11 +23,11 @@ struct SeededRecord {
 /// phase-2 record of that task with `kind`, as the terminal move writes it
 /// (`horsies_move_task_to_history`). The task row itself has moved to
 /// history, so no live row is seeded.
-async fn seed_record(pool: &PgPool, kind: &str) -> SeededRecord {
+async fn seed_record(pool: &TestPool, kind: &str) -> SeededRecord {
     let task_id = Uuid::new_v4();
     let workflow_id = Uuid::new_v4();
     let node_row_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -38,7 +38,7 @@ async fn seed_record(pool: &PgPool, kind: &str) -> SeededRecord {
     .execute(pool)
     .await
     .expect("seed workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
@@ -53,7 +53,7 @@ async fn seed_record(pool: &PgPool, kind: &str) -> SeededRecord {
     .execute(pool)
     .await
     .expect("seed workflow node");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_phase2_pending (
              task_id, workflow_id, workflow_node_row_id, terminalization_kind,
              recovery_source, history_class, history_anchor, history_schema_version,
@@ -79,8 +79,8 @@ async fn seed_record(pool: &PgPool, kind: &str) -> SeededRecord {
 
 /// Delete the workflow; its node and the phase-2 record go with it (both
 /// foreign keys cascade).
-async fn cleanup(pool: &PgPool, seeded: &SeededRecord) {
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+async fn cleanup(pool: &TestPool, seeded: &SeededRecord) {
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(seeded.workflow_id)
         .execute(pool)
         .await
@@ -107,8 +107,8 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
 #[tokio::test]
 #[serial]
 async fn a_complete_locked_record_owes_phase_two() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let seeded = seed_record(&pool, "COMPLETE_LOCKED").await;
 
     let outcome = replay_of_committed_write(&broker, seeded.task_id, true).await;
@@ -131,8 +131,8 @@ async fn a_complete_locked_record_owes_phase_two() {
 #[tokio::test]
 #[serial]
 async fn failure_and_expiry_records_owe_phase_two() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     for kind in [
         "FAIL_RUNNING",
         "FAIL_STALE",
@@ -162,8 +162,8 @@ async fn failure_and_expiry_records_owe_phase_two() {
 #[tokio::test]
 #[serial]
 async fn a_consumed_record_owes_nothing() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let outcome = replay_of_committed_write(&broker, Uuid::new_v4(), true).await;
 
@@ -178,8 +178,8 @@ async fn a_consumed_record_owes_nothing() {
 #[tokio::test]
 #[serial]
 async fn a_plain_task_replay_owes_nothing() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let outcome = replay_of_committed_write(&broker, Uuid::new_v4(), false).await;
 
