@@ -311,8 +311,19 @@ class TestFailureFamily:
             assert f"'{field}'" in stale
 
     def test_stale_miss_path_uses_null_claim_parameters(self) -> None:
+        """The miss passes the owner parameters with the fence of the
+        evidence. BEAT_AGE refuses an owner, so its miss gets NULL claim
+        parameters and no fence; OWNER_GONE fences on the owner and its
+        claim generation."""
         stale = failure_family_fragments()[1]
-        assert 'NULL::text, NULL::timestamptz' in stale
+        beat_age = stale.index("WHEN 'BEAT_AGE' THEN")
+        no_owner = stale.index('num_nulls(p_owner_worker_id, p_owner_claimed_at) <> 2')
+        owner_gone = stale.index("WHEN 'OWNER_GONE' THEN", beat_age)
+        assert beat_age < no_owner < owner_gone
+        assert (
+            "CASE p_evidence WHEN 'OWNER_GONE' THEN 'OWNER_AND_GENERATION' ELSE 'NONE' END,\n"
+            '            p_owner_worker_id, p_owner_claimed_at'
+        ) in stale
 
     def test_the_failed_attempt_passes_reason_and_code_to_the_move(self) -> None:
         failed = failure_family_fragments()[0]
