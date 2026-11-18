@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import Final, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,7 +41,7 @@ from horsies.core.workflows.lifecycle import (
     start_workflow,
     start_workflow_async,
 )
-from tests.sync_facade_support import outcome_shape
+from tests.sync_facade_support import SHAPE_DEPTH_BOUND, outcome_shape
 
 pytestmark = [pytest.mark.unit]
 
@@ -512,6 +512,45 @@ START_REFUSALS: Final[dict[str, Callable[[], tuple[WorkflowSpec[int], str]]]] = 
 }
 
 
+CALL_SITE_ARROW: Final = '  --> '
+"""The first line of the call-site block of a validation report."""
+REPORT_NOTE: Final = '   = '
+"""The first line of a note or help entry, the end of the call-site block."""
+
+
+def _without_call_site(shape: object, depth: int = 0) -> object:
+    """``shape`` with the call-site block (the ``-->`` line and the source
+    lines under it) removed from each text. A validation report names the
+    line that called the start; the blocking and the awaitable start are
+    called from two lines of this test, so only that block differs. Pure."""
+    assert depth <= SHAPE_DEPTH_BOUND, f'a shape nested deeper than {SHAPE_DEPTH_BOUND} levels'
+    match shape:
+        case str():
+            return _text_without_call_site(shape)
+        case tuple():
+            items = cast('tuple[object, ...]', shape)
+            return tuple(_without_call_site(item, depth + 1) for item in items)
+        case _:
+            return shape
+
+
+def _text_without_call_site(text: str) -> str:
+    kept: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        match (in_block, line.startswith(CALL_SITE_ARROW), line.startswith(REPORT_NOTE)):
+            case (_, True, _):
+                in_block = True
+            case (True, False, True):
+                in_block = False
+                kept.append(line)
+            case (True, False, False):
+                pass
+            case (False, False, _):
+                kept.append(line)
+    return '\n'.join(kept)
+
+
 @pytest.mark.parametrize('refusal', list(START_REFUSALS))
 def test_start_workflow_refuses_as_start_workflow_async_refuses(refusal: str) -> None:
     """A refusal of the prevalidation or of the spec data makes no core call."""
@@ -522,7 +561,9 @@ def test_start_workflow_refuses_as_start_workflow_async_refuses(refusal: str) ->
     blocking = start_workflow(spec, broker, workflow_id, SENT_AT)
     awaited = asyncio.run(start_workflow_async(spec, broker, workflow_id, SENT_AT))
 
-    assert outcome_shape(blocking) == outcome_shape(awaited)
+    assert _without_call_site(outcome_shape(blocking)) == _without_call_site(
+        outcome_shape(awaited),
+    )
     answers.handle.start_workflow.assert_not_called()
     answers.handle.start_workflow_async.assert_not_called()
 
