@@ -8,7 +8,8 @@ modules re-export them. This test pins, for each class, that the public
 name is the generated class, and that its fields (with their `repr` flags),
 its `code` class value and its `retryable` class value are the ones of the
 hand-written class that it replaced. It also pins the generated exception
-class ``OutcomeDecodeError`` to the shape of the class that it replaced.
+classes ``OutcomeDecodeError`` and ``HistoryContractError`` to the shape of
+the classes that they replaced.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import pytest
 import horsies
 from horsies._catalog import (
     broker_errors,
+    history_errors,
     lifecycle_errors,
     monitoring_errors,
     retention_class,
@@ -29,6 +31,7 @@ from horsies._catalog import (
 )
 from horsies._catalog.error_detail import NoCause as GeneratedNoCause
 from horsies.core.brokers import result_types
+from horsies.core.history import errors as history_error_module
 from horsies.core.history import periods
 from horsies.core.history.ddl import classes
 from horsies.core.lifecycle import outcomes
@@ -130,6 +133,38 @@ class TestOutcomeDecodeError:
 
         assert doc is not None
         assert doc.startswith('The returned row does not satisfy the wire contract.')
+
+
+class TestHistoryContractError:
+    """The class of ``MonitoringQueryHistoryContractViolation.exception``
+    and the base of the history errors: a plain ``Exception`` subclass whose
+    one argument is its message."""
+
+    def test_the_public_name_is_the_generated_class(self) -> None:
+        assert history_error_module.HistoryContractError is history_errors.HistoryContractError
+
+    def test_it_is_an_exception_subclass_and_no_dataclass(self) -> None:
+        generated = history_errors.HistoryContractError
+
+        assert generated.__bases__ == (Exception,)
+        assert not dataclasses.is_dataclass(generated)
+
+    def test_its_text_and_its_args_are_its_message(self) -> None:
+        error = history_errors.HistoryContractError('history row has status BOGUS')
+
+        assert str(error) == 'history row has status BOGUS'
+        assert error.args == ('history row has status BOGUS',)
+
+    def test_it_keeps_python_s_doc(self) -> None:
+        assert history_errors.HistoryContractError.__doc__ == (
+            'The database state violates an invariant this subsystem relies on.'
+        )
+
+    def test_the_history_errors_of_python_are_its_subclasses(self) -> None:
+        assert issubclass(history_error_module.LeafLockNotHeld, history_errors.HistoryContractError)
+        assert issubclass(
+            history_error_module.HistoryParentAbsent, history_errors.HistoryContractError,
+        )
 
 
 def test_no_cause_is_the_generated_class_without_fields() -> None:

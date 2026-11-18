@@ -50,9 +50,10 @@ from horsies.core.worker.child_frames import (
 
 logger = get_logger('worker')
 
-# The child closes its loop after a stop frame. The parent kills a child that
-# has not exited CHILD_STOP_TIMEOUT_S (10 s) after that frame, so the close
-# must end before that time: LOOP_CLOSE_TIMEOUT_S plus
+# The child closes its loop after a stop frame. The worker kills a child that
+# has not exited CHILD_STOP_TIMEOUT (10 s, horsies-core
+# worker/executor/supervisor/channel.rs) after that frame, so the close must
+# end before that time: LOOP_CLOSE_TIMEOUT_S plus
 # ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S plus EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S stays
 # under it.
 LOOP_CLOSE_TIMEOUT_S: Final = 5.0

@@ -100,6 +100,7 @@ fn every_shared_result_field_is_checked() {
         run: run_ref(7, T1),
         end: SeatEnd::TimedOut,
         rss: rss(1.0),
+        child: ChildAfterFrame::ServesOn,
     }));
     assert_each_change_refused(
         &frame,
@@ -116,6 +117,9 @@ fn every_shared_result_field_is_checked() {
             ("end", Some(json!({"kind": "worker_failure", "detail": 3}))),
             ("rss_mb", Some(json!("x"))),
             ("rss_mb", Some(json!(true))),
+            ("child", None),
+            ("child", Some(json!("retires"))),
+            ("child", Some(json!(1))),
         ],
     );
 }
@@ -127,6 +131,7 @@ fn a_timed_out_seat_end_carries_no_body() {
         run: run_ref(7, T1),
         end: SeatEnd::TimedOut,
         rss: RssReading::Unreadable,
+        child: ChildAfterFrame::ServesOn,
     }));
     let (meta, body) = meta_text_and_body(&frame);
     assert!(body.is_empty());
@@ -397,6 +402,7 @@ fn a_result_body_that_is_not_utf8_is_refused() {
         end: RunEnd::Result(envelope("x")),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     }));
     let (meta, _) = meta_text_and_body(&frame);
     assert_eq!(
@@ -474,6 +480,7 @@ fn every_result_field_is_checked() {
         end: RunEnd::Result(envelope("x")),
         rss: rss(1.0),
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     }));
     assert_each_change_refused(
         &frame,
@@ -496,6 +503,9 @@ fn every_result_field_is_checked() {
                 "task_loop",
                 Some(json!({"kind": "unavailable", "detail": "OSError"})),
             ),
+            ("child", None),
+            ("child", Some(json!("retires"))),
+            ("child", Some(json!(1))),
         ],
     );
 }

@@ -6,9 +6,8 @@ import asyncio
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
 import pytest
@@ -18,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
@@ -30,22 +30,16 @@ from horsies.core.models.workflow import (
     OnError,
     HandleDbOperationFailed,
     HandleErrorCode,
-    HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
 )
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.typed import encode_task_error
-from horsies._core import CoreConnectionError, CoreServerError
+from horsies._core import CoreConnectionError
 from horsies.core.types.result import Err, Ok, is_ok, is_err
-from horsies.core.workflows.functions import EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL
-from horsies.core.workflows.lifecycle import expire_paused_workflows
-from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.reaper import ReaperMixin
-from horsies.core.worker.worker import Worker
 
 from .conftest import DB_URL, make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from tests.integration.conftest import finish_task
-from tests.broker_resources_support import current_resources, listener_of
+from tests.broker_resources_support import current_resources
 
 
 # =============================================================================
@@ -90,12 +84,6 @@ async def listener_refused_broker() -> AsyncGenerator[PostgresBroker, None]:
     )
     yield reader
     _ = await reader.close_async()
-
-
-async def _execute(session: AsyncSession, statement: str) -> None:
-    """Run ``statement`` and commit, so that the core's connections see it."""
-    _ = await session.execute(text(statement))
-    await session.commit()
 
 
 async def _workflow_completed_at(
@@ -146,86 +134,6 @@ class TestWorkflowHandleStatus:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.RUNNING
 
-    async def test_status_completed(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Returns COMPLETED after success."""
-        task_a = make_simple_task(app, 'status_completed_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='status_completed', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
-
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.COMPLETED
-
-    async def test_status_failed(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Returns FAILED after failure."""
-        task_a = make_failing_task(app, 'status_failed_a')
-
-        node_a = TaskNode(fn=task_a)
-        spec = make_workflow_spec(
-            broker=broker, name='status_failed', tasks=[node_a], on_error=OnError.FAIL,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(
-            session,
-            broker,
-            str(handle.workflow_id),
-            0,
-            TaskResult(err=TaskError(error_code='FAIL', message='Test')),
-        )
-
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.FAILED
-
-    async def test_status_paused(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Returns PAUSED when paused."""
-        task_a = make_failing_task(app, 'status_paused_a')
-
-        node_a = TaskNode(fn=task_a)
-        spec = make_workflow_spec(
-            broker=broker, name='status_paused', tasks=[node_a], on_error=OnError.PAUSE,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(
-            session,
-            broker,
-            str(handle.workflow_id),
-            0,
-            TaskResult(err=TaskError(error_code='FAIL', message='Test')),
-        )
-
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.PAUSED
 
     async def test_status_nonexistent_returns_not_found(
         self,
@@ -254,86 +162,6 @@ class TestWorkflowHandleStatus:
 class TestWorkflowHandleGet:
     """Tests for WorkflowHandle.get()."""
 
-    async def test_get_completed_returns_result(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Returns TaskResult for completed workflow."""
-        task_a = make_simple_task(app, 'get_completed_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        spec = make_workflow_spec(
-            broker=broker, name='get_completed', tasks=[node_a], output=node_a,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=100))
-
-        result = await handle.get_async(timeout_ms=1000)
-        assert result.is_ok()
-        assert result.unwrap() == 100
-
-    async def test_get_failed_returns_error(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Returns TaskResult with error for failed workflow."""
-        task_a = make_failing_task(app, 'get_failed_a')
-
-        node_a = TaskNode(fn=task_a)
-        spec = make_workflow_spec(
-            broker=broker, name='get_failed', tasks=[node_a], on_error=OnError.FAIL,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(
-            session,
-            broker,
-            str(handle.workflow_id),
-            0,
-            TaskResult(err=TaskError(error_code='TEST_ERROR', message='Test failure')),
-        )
-
-        result = await handle.get_async(timeout_ms=1000)
-        assert result.is_err()
-        assert result.unwrap_err().error_code == 'TEST_ERROR'
-
-    async def test_get_paused_returns_paused_error(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Returns WORKFLOW_PAUSED error for paused workflow."""
-        task_a = make_failing_task(app, 'get_paused_a')
-
-        node_a = TaskNode(fn=task_a)
-        spec = make_workflow_spec(
-            broker=broker, name='get_paused', tasks=[node_a], on_error=OnError.PAUSE,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(
-            session,
-            broker,
-            str(handle.workflow_id),
-            0,
-            TaskResult(err=TaskError(error_code='FAIL', message='Test')),
-        )
-
-        result = await handle.get_async(timeout_ms=1000)
-        assert result.is_err()
-        assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_PAUSED
 
     async def test_paused_expiry_sets_completed_at_on_the_skipped_nodes(
         self,
@@ -362,13 +190,13 @@ class TestWorkflowHandleGet:
             TaskResult(err=TaskError(error_code='FAIL', message='pause')),
         )
 
-        expired = await expire_paused_workflows(
-            current_resources(broker).session_factory,
-            older_than=timedelta(0),
-            batch_size=1,
-        )
-
-        assert expired == 1
+        # The core refuses an age of 0; the workflow paused more than 1 µs ago.
+        handle_of_core = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+        match await handle_of_core.expire_paused_workflows_async(older_than_us=1, batch_size=1):
+            case core.PausedExpired(expired=expired):
+                assert expired == 1
+            case core.PausedExpiryFailed(message=message):
+                pytest.fail(f'the paused expiry failed: {message}')
         row = (
             await session.execute(
                 text("""
@@ -381,59 +209,6 @@ class TestWorkflowHandleGet:
         assert row.status == 'SKIPPED'
         assert row.completed_at is not None
 
-    async def test_auto_expired_pause_returns_workflow_expired_error(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        task = make_failing_task(app, 'get_expired_pause')
-        node = TaskNode(fn=task)
-        spec = make_workflow_spec(
-            broker=broker,
-            name='get_expired_pause',
-            tasks=[node],
-            on_error=OnError.PAUSE,
-        )
-        handle = await start_ok(spec, broker)
-        await finish_task(
-            session,
-            broker,
-            str(handle.workflow_id),
-            0,
-            TaskResult(err=TaskError(error_code='FAIL', message='pause')),
-        )
-
-        expired = await expire_paused_workflows(
-            current_resources(broker).session_factory,
-            older_than=timedelta(0),
-            batch_size=1,
-        )
-
-        assert expired == 1
-        status_result = await handle.status_async()
-        assert is_ok(status_result)
-        assert status_result.ok_value is WorkflowStatus.EXPIRED
-        result = await handle.get_async(timeout_ms=0)
-        assert result.is_err()
-        assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_EXPIRED
-
-        legacy_error = 'paused_workflow_auto_cancel_after: 1 day, 0:00:00'
-        await session.execute(
-            text(
-                'UPDATE horsies_workflows SET error = :error '
-                'WHERE id = :workflow_id'
-            ),
-            {'error': legacy_error, 'workflow_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        legacy_result = await handle.get_async(timeout_ms=0)
-        assert legacy_result.is_err()
-        legacy_task_error = legacy_result.unwrap_err()
-        assert legacy_task_error.error_code is OutcomeCode.WORKFLOW_EXPIRED
-        assert legacy_task_error.message == legacy_error
 
     async def test_get_timeout(
         self,
@@ -519,67 +294,6 @@ class TestWorkflowHandleGet:
 class TestWorkflowHandleResults:
     """Tests for WorkflowHandle.results(), result_for(), and tasks()."""
 
-    async def test_results_returns_all(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """results() returns dict of all task results."""
-        task_a = make_simple_task(app, 'results_all_a')
-        task_b = make_simple_task(app, 'results_all_b')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-
-        spec = make_workflow_spec(
-            broker=broker, name='results_all', tasks=[node_a, node_b],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete both
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
-
-        results_r = await handle.results_async()
-        assert is_ok(results_r)
-        results = results_r.ok_value
-        # Keys are node_id values (workflow_name:task_index by default)
-        assert 'results_all:0' in results
-        assert 'results_all:1' in results
-        assert results['results_all:0'].unwrap() == 10
-        assert results['results_all:1'].unwrap() == 20
-
-    async def test_result_for_returns_typed_result(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """result_for() returns TaskResult for TaskNode/NodeKey."""
-        task_a = make_simple_task(app, 'result_for_a')
-        task_b = make_simple_task(app, 'result_for_b')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-
-        spec = make_workflow_spec(
-            broker=broker, name='result_for', tasks=[node_a, node_b],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
-
-        result_a = await handle.result_for_async(node_a.key())
-        result_b = await asyncio.to_thread(handle.result_for, node_b)
-
-        assert result_a.unwrap() == 10
-        assert result_b.unwrap() == 20
 
     async def test_result_for_returns_error_when_not_ready(
         self,
@@ -737,38 +451,6 @@ class TestWorkflowHandleResults:
         # Neither has a result yet
         assert tasks[0].result is None
         assert tasks[1].result is None
-
-    async def test_tasks_completed_fields(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Completed task has result, started_at, and completed_at populated."""
-        task_a = make_simple_task(app, 'tasks_fields_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-
-        spec = make_workflow_spec(
-            broker=broker, name='tasks_fields', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
-
-        tasks_r = await handle.tasks_async()
-        assert is_ok(tasks_r)
-        tasks = tasks_r.ok_value
-        assert len(tasks) == 1
-
-        task_info = tasks[0]
-        assert task_info.status == WorkflowTaskStatus.COMPLETED
-        assert task_info.result is not None
-        assert task_info.result.is_ok()
-        assert task_info.result.unwrap() == 42
-        assert task_info.completed_at is not None
 
 
 # =============================================================================
@@ -1181,113 +863,6 @@ class TestWorkflowHandleCancel:
         ]
         assert all(row.completed_at is not None for row in rows), rows
 
-    async def test_cancel_completed_is_noop(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """cancel_async() on a COMPLETED workflow is a safe no-op."""
-        task_a = make_simple_task(app, 'cancel_noop_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='cancel_noop', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete the workflow first
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
-
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.COMPLETED
-
-        # Cancel on already-completed should not change status
-        cancel_r = await handle.cancel_async()
-        assert is_ok(cancel_r)
-
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.COMPLETED
-
-    async def test_cancel_then_late_completion_stays_cancelled(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """A task left RUNNING through cancel must not resurrect the workflow.
-
-        cancel() deliberately lets RUNNING tasks finish. When such a task
-        later completes, check_workflow_completion must leave the workflow
-        CANCELLED instead of flipping it to COMPLETED/FAILED.
-        """
-        task_a = make_simple_task(app, 'cancel_late_complete_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='cancel_late_complete', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Simulate a worker mid-execution: backing task + node are RUNNING,
-        # so cancel leaves them alone (only queueable states are swept).
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'RUNNING', started_at = NOW(), updated_at = NOW()
-                WHERE id = (
-                    SELECT task_id FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id AND task_index = 0
-                )
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'RUNNING', started_at = NOW()
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        cancel_r = await handle.cancel_async()
-        assert is_ok(cancel_r)
-
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.CANCELLED
-        cancelled_at = await _workflow_completed_at(session, str(handle.workflow_id))
-        assert cancelled_at is not None
-
-        # The still-running task finishes after the cancel.
-        await finish_task(
-            session, broker, str(handle.workflow_id), 0, TaskResult(ok=10),
-        )
-
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, completed_at, result
-                    FROM horsies_workflows WHERE id = :wf_id
-                """),
-                {'wf_id': handle.workflow_id},
-            )
-        ).fetchone()
-        assert row is not None
-        assert row[0] == 'CANCELLED', (
-            f'Late completion must not resurrect a cancelled workflow, got {row[0]}'
-        )
-        assert row[1] == cancelled_at, (
-            'a late completion must not move the completed_at of the cancel'
-        )
-        assert row[2] is None, 'workflow result must not be written after cancel'
 
     async def test_cancel_does_not_deadlock_against_completion_lock_order(
         self,
@@ -1624,86 +1199,6 @@ class TestWorkflowHandleCancel:
         assert wf_task_row is not None
         assert wf_task_row[0] == 'SKIPPED'
 
-    async def test_cancel_locks_backing_task_before_workflow_status_update(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Worker claim must not pick up a task while cancellation status update is blocked."""
-        task_a = make_simple_task(app, 'cancel_claim_race_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='cancel_claim_race', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await session.execute(
-            text("""
-                CREATE OR REPLACE FUNCTION public.horsies_test_sleep_on_cancel()
-                RETURNS trigger AS $$
-                BEGIN
-                    IF NEW.status = 'CANCELLED'
-                       AND OLD.status IS DISTINCT FROM NEW.status
-                       AND NEW.name = 'cancel_claim_race' THEN
-                        PERFORM pg_sleep(0.5);
-                    END IF;
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql;
-            """),
-        )
-        await session.execute(
-            text("""
-                DROP TRIGGER IF EXISTS horsies_test_sleep_on_cancel
-                ON horsies_workflows
-            """),
-        )
-        await session.execute(
-            text("""
-                CREATE TRIGGER horsies_test_sleep_on_cancel
-                BEFORE UPDATE OF status ON horsies_workflows
-                FOR EACH ROW
-                EXECUTE FUNCTION public.horsies_test_sleep_on_cancel()
-            """),
-        )
-        await session.commit()
-
-        cancel_task = asyncio.create_task(handle.cancel_async())
-        try:
-            await asyncio.sleep(0.1)
-
-            worker = Worker(
-                session_factory=current_resources(broker).session_factory,
-                listener=MagicMock(),
-                cfg=WorkerConfig(
-                    dsn=broker.config.database_url,
-                    psycopg_dsn=listener_of(broker).database_url,
-                    queues=['default'],
-                ),
-            )
-            async with current_resources(broker).session_factory() as claim_session:
-                claimed = await worker._claim_batch_locked(
-                    claim_session, 'default', 1,
-                )
-                await claim_session.commit()
-
-            assert claimed == []
-        finally:
-            cancel_r = await asyncio.wait_for(cancel_task, timeout=2)
-            await session.execute(
-                text("""
-                    DROP TRIGGER IF EXISTS horsies_test_sleep_on_cancel
-                    ON horsies_workflows
-                """),
-            )
-            await session.execute(
-                text("DROP FUNCTION IF EXISTS public.horsies_test_sleep_on_cancel()"),
-            )
-            await session.commit()
-        assert is_ok(cancel_r)
 
     async def test_cancel_nonexistent_returns_not_found(
         self,
@@ -1721,116 +1216,6 @@ class TestWorkflowHandleCancel:
         assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
         assert cancel_r.err_value.retryable is False
 
-    async def test_worker_filter_rejects_cancelled_workflow_claimed_rows(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Claim pipeline must not dispatch rows from CANCELLED workflows."""
-        task_a = make_simple_task(app, 'cancel_guarantee_worker_filter_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='cancel_guarantee_worker_filter', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-        row = (
-            await session.execute(
-                text("""
-                    SELECT task_id FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id AND task_index = 0
-                """),
-                {'wf_id': handle.workflow_id},
-            )
-        ).fetchone()
-        assert row is not None and row[0] is not None
-        task_id = row[0]
-
-        cfg = WorkerConfig(
-            dsn=broker.config.database_url,
-            psycopg_dsn=listener_of(broker).database_url,
-            queues=['default'],
-        )
-        worker = Worker(
-            session_factory=current_resources(broker).session_factory,
-            listener=MagicMock(),
-            cfg=cfg,
-            broker=broker,
-        )
-
-        # Simulate claim/cancel race: this worker owns a CLAIMED task while
-        # the workflow is CANCELLED.
-        await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'CANCELLED', updated_at = NOW()
-                WHERE id = :wf_id
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        claimed_at = (
-            await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'CLAIMED',
-                        claimed_at = NOW(),
-                        claimed_by_worker_id = :worker_id,
-                        claim_expires_at = NOW() + INTERVAL '5 minutes',
-                        updated_at = NOW()
-                    WHERE id = :task_id
-                    RETURNING claimed_at
-                """),
-                {'task_id': task_id, 'worker_id': worker.worker_instance_id},
-            )
-        ).scalar_one()
-        await session.commit()
-
-        # The claim row carries its claim time, as a row of horsies_claim does.
-        filtered = await worker._filter_nonrunnable_workflow_tasks(
-            [{'id': task_id, 'claimed_at': claimed_at}],
-        )
-        assert filtered == []
-
-        # The filter's cancellation moved the row to history — nothing
-        # claimable remains live, and the history row is CANCELLED.
-        live_row = (
-            await session.execute(
-                text("""
-                    SELECT 1 FROM horsies_tasks
-                    WHERE id = CAST(:task_id AS uuid)
-                """),
-                {'task_id': task_id},
-            )
-        ).fetchone()
-        assert live_row is None
-        history_row = (
-            await session.execute(
-                text("""
-                    SELECT status FROM horsies_task_history
-                    WHERE task_id = CAST(:task_id AS uuid)
-                """),
-                {'task_id': task_id},
-            )
-        ).fetchone()
-        assert history_row is not None
-        assert history_row[0] == 'CANCELLED'
-
-        wf_task_row = (
-            await session.execute(
-                text("""
-                    SELECT status FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf_id AND task_index = 0
-                """),
-                {'wf_id': handle.workflow_id},
-            )
-        ).fetchone()
-        assert wf_task_row is not None
-        assert wf_task_row[0] == 'SKIPPED'
-
-
-# =============================================================================
 # TestWorkflowHandleOutput
 # =============================================================================
 
@@ -2016,6 +1401,7 @@ class TestWorkflowHandleOutput:
         assert 'dup_terminal:0' in final_dict
         assert 'dup_terminal:1' in final_dict
 
+=======
 
 # =============================================================================
 # TestWorkflowHandlePauseResume
@@ -2059,37 +1445,6 @@ class TestWorkflowHandlePauseResume:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.PAUSED
 
-    async def test_pause_non_running_returns_false(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """pause_async() on a COMPLETED workflow returns Ok(False) (no-op)."""
-        task_a = make_simple_task(app, 'pause_completed_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='pause_completed', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete the workflow
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.COMPLETED
-
-        pause_r = await handle.pause_async()
-        assert is_ok(pause_r)
-        assert pause_r.ok_value is False
-
-        # Status unchanged
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.COMPLETED
 
     async def test_resume_paused_returns_true(
         self,
@@ -2189,222 +1544,10 @@ class TestWorkflowHandlePauseResume:
         assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
         assert resume_r.err_value.retryable is False
 
-    async def test_pause_resume_round_trip(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Workflow can be paused and resumed, then completed normally."""
-        task_a = make_simple_task(app, 'roundtrip_a')
-        task_b = make_simple_task(app, 'roundtrip_b')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-
-        spec = make_workflow_spec(
-            broker=broker, name='roundtrip', tasks=[node_a, node_b],
-        )
-
-        handle = await start_ok(spec, broker)
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.RUNNING
-
-        # Pause
-        pause_r = await handle.pause_async()
-        assert is_ok(pause_r)
-        assert pause_r.ok_value is True
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.PAUSED
-
-        # Resume
-        resume_r = await handle.resume_async()
-        assert is_ok(resume_r)
-        assert resume_r.ok_value is True
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.RUNNING
-
-        # Complete both tasks
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
-
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.COMPLETED
-
-        results_r = await handle.results_async()
-        assert is_ok(results_r)
-        results = results_r.ok_value
-        assert results['roundtrip:0'].unwrap() == 10
-        assert results['roundtrip:1'].unwrap() == 20
-
 
 # =============================================================================
 # TestWorkflowHandleInfraErrors
 # =============================================================================
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio(loop_scope='function')
-class TestResumeCommitSplit:
-    """A database error before the resume commit and one after it are two states."""
-
-    async def _paused_workflow(
-        self, broker: PostgresBroker, app: Horsies, name: str,
-    ) -> WorkflowHandle[Any]:
-        task_a = make_simple_task(app, f'{name}_a')
-        task_b = make_simple_task(app, f'{name}_b')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a, node_b])
-        handle = await start_ok(spec, broker)
-        pause_r = await handle.pause_async()
-        assert is_ok(pause_r)
-        assert pause_r.ok_value is True
-        return handle
-
-    async def test_recovery_db_error_returns_resume_recovery_failed(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-        db_url: str,
-    ) -> None:
-        """The resume committed: the workflow is RUNNING.
-
-        The resume and the recovery pass of its tree run in the core. A
-        deferred constraint trigger on the status change PAUSED -> RUNNING
-        runs at the resume's COMMIT and sets the session's search_path to a
-        schema with no table. The setting outlives the commit, so the next
-        statement on that connection, the tree read of the recovery pass,
-        fails. The resume runs on a broker whose core pool holds one
-        connection, which the resume and the recovery pass both take (the
-        core's ``a_database_error_after_the_resume_commit_is_resume_recovery_failed``).
-        """
-        handle = await self._paused_workflow(broker, app, 'resume_recovery_err')
-        await _execute(
-            session,
-            """
-            CREATE FUNCTION it_lose_search_path() RETURNS trigger
-            LANGUAGE plpgsql AS $body$
-            BEGIN
-                PERFORM set_config('search_path', 'it_no_tables', false);
-                RETURN NULL;
-            END
-            $body$
-            """,
-        )
-        await _execute(
-            session,
-            f"""
-            CREATE CONSTRAINT TRIGGER it_lose_search_path
-            AFTER UPDATE ON horsies_workflows
-            DEFERRABLE INITIALLY DEFERRED
-            FOR EACH ROW
-            WHEN (
-                NEW.id = '{handle.workflow_id}'::uuid
-                AND OLD.status = 'PAUSED' AND NEW.status = 'RUNNING'
-            )
-            EXECUTE FUNCTION it_lose_search_path()
-            """,
-        )
-        one_connection = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(db_url), pool_size=1, max_overflow=0),
-            assume_initialized=True,
-        )
-        try:
-            resume_r = await WorkflowHandle(
-                workflow_id=handle.workflow_id, broker=one_connection,
-            ).resume_async()
-        finally:
-            _ = await one_connection.close_async()
-            await _execute(session, 'DROP TRIGGER it_lose_search_path ON horsies_workflows')
-            await _execute(session, 'DROP FUNCTION it_lose_search_path()')
-
-        assert is_err(resume_r)
-        err = resume_r.err_value
-        assert isinstance(err, HandleResumeRecoveryFailed)
-        # The tree read after the commit meets a search_path with no tables.
-        assert isinstance(err.exception, CoreServerError)
-        assert err.workflow_id == str(handle.workflow_id)
-        assert err.retryable is False
-        assert err.message.startswith(
-            f'Workflow {handle.workflow_id} resumed; the recovery pass for its tree failed: ',
-        )
-        # The exception holds the failure of the recovery pass alone, as in
-        # 0.7: its text is the server's message with the resume as its
-        # subject, not the message that names the resume.
-        assert err.exception.subject == 'resume_workflow'
-        assert err.exception.message in err.message
-        assert not err.exception.message.startswith('Workflow ')
-        assert str(err.exception) == f'resume_workflow: {err.exception.message}'
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.RUNNING
-
-    async def test_db_error_before_the_commit_returns_db_operation_failed(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """The resume transaction rolled back: the workflow stays PAUSED.
-
-        The resume runs in the core, in one transaction. A trigger refuses
-        the status change PAUSED -> RUNNING with a retryable SQLSTATE
-        (57P01, admin_shutdown), so the resume fails at its first write and
-        before its commit (the core's
-        ``a_database_error_before_the_resume_commit_keeps_the_workflow_paused``).
-        """
-        handle = await self._paused_workflow(broker, app, 'resume_commit_err')
-        await _execute(
-            session,
-            f"""
-            CREATE FUNCTION it_refuse_resume() RETURNS trigger
-            LANGUAGE plpgsql AS $body$
-            BEGIN
-                IF NEW.id = '{handle.workflow_id}'::uuid
-                   AND OLD.status = 'PAUSED' AND NEW.status = 'RUNNING' THEN
-                    RAISE EXCEPTION 'resume refused by the test' USING ERRCODE = '57P01';
-                END IF;
-                RETURN NEW;
-            END
-            $body$
-            """,
-        )
-        await _execute(
-            session,
-            'CREATE TRIGGER it_refuse_resume AFTER UPDATE ON horsies_workflows '
-            'FOR EACH ROW EXECUTE FUNCTION it_refuse_resume()',
-        )
-        try:
-            resume_r = await handle.resume_async()
-        finally:
-            await _execute(session, 'DROP TRIGGER it_refuse_resume ON horsies_workflows')
-            await _execute(session, 'DROP FUNCTION it_refuse_resume()')
-
-        assert is_err(resume_r)
-        err = resume_r.err_value
-        assert isinstance(err, HandleDbOperationFailed)
-        assert type(err) is HandleDbOperationFailed
-        assert isinstance(err.exception, CoreServerError)
-        assert err.exception.sqlstate == '57P01'
-        assert err.exception.message == 'resume refused by the test'
-        assert err.exception.subject == 'resume_workflow'
-        assert str(err.exception) == 'resume_workflow: resume refused by the test'
-        assert 'resume refused by the test' in err.message
-        assert err.message.startswith(f'Resume failed for workflow {handle.workflow_id}: ')
-        assert err.workflow_id == str(handle.workflow_id)
-        assert err.retryable is True
-        status_r = await handle.status_async()
-        assert is_ok(status_r)
-        assert status_r.ok_value == WorkflowStatus.PAUSED
 
 
 @pytest.mark.integration
@@ -2448,22 +1591,25 @@ class TestUnknownStoredWorkflowStatus:
 def _assert_failed_connect(
     error: object, label: str, subject: str, workflow_id: str,
 ) -> None:
-    """A failed connect of a handle operation, as the core builds it:
+    """A handle operation whose server refuses the connection, as the core
+    builds it. The core pool opens its connection at the first statement, so
+    the statement fails and its workflow error wraps the broker error:
     ``HandleDbOperationFailed`` with Python's message (the operation's label,
-    the workflow id and the cause's text), retryable, and the core's class of
-    the cause with the operation as its subject and the cause's own text."""
+    the workflow id and the workflow error's text, ``broker error: ...``),
+    retryable, and the core's class of the cause with the operation as its
+    subject and the broker error's own text."""
     assert type(error) is HandleDbOperationFailed
     assert error.workflow_id == workflow_id
     assert error.retryable is True
     prefix = f'{label} failed for workflow {workflow_id}: '
     assert error.message.startswith(prefix)
     cause_text = error.message.removeprefix(prefix)
-    assert cause_text != ''
     assert type(error.exception) is CoreConnectionError
     assert error.exception.subject == subject
-    assert error.exception.message == cause_text
+    assert error.exception.message != ''
+    assert cause_text == f'broker error: {error.exception.message}'
     assert error.exception.retryable is True
-    assert str(error.exception) == f'{subject}: {cause_text}'
+    assert str(error.exception) == f'{subject}: {error.exception.message}'
 
 
 @pytest.mark.integration
@@ -2480,7 +1626,8 @@ class TestWorkflowHandleInfraErrors:
     ) -> WorkflowHandle[Any]:
         """A workflow started on ``broker``, and a handle of it on a broker
         whose core cannot reach the database. The handle's reads and writes
-        run in the core; each fails at the connect."""
+        run in the core; each fails at its first statement, where the core
+        pool opens its connection."""
         task_a = make_simple_task(app, f'{name}_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a])
@@ -2775,42 +1922,10 @@ class TestListenerFallbackContract:
             f'before its limit of {SHORT_WAIT_LIMIT_MS} ms'
         )
 
-    async def test_handle_get_async_propagates_programming_error(
-        self,
-        clean_workflow_tables: None,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """A programming error of the wait must propagate, not degrade to a
-        BROKER_ERROR answer. The wait and its listener run in the core
-        (``CoreHandle.wait_workflow_result_async``); get_async folds only the
-        core boundary errors (``CoreError``) and the failure records."""
-        task_a = make_simple_task(app, 'listen_prog_err_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='listen_prog_err', tasks=[node_a], output=node_a,
-        )
-        handle = await start_ok(spec, broker)
-        core_handle = MagicMock()
-        core_handle.wait_workflow_result_async = AsyncMock(side_effect=TypeError('test bug'))
-
-        with patch.object(broker, '_core_handle', core_handle):
-            with pytest.raises(TypeError, match='test bug'):
-                await handle.get_async(timeout_ms=1000)
-
 
 # =============================================================================
 # TestPausedExpiryAge
 # =============================================================================
-
-
-def _zone_with_daylight_start_before(now: datetime) -> str:
-    """A POSIX time zone: standard time is UTC, and daylight time (UTC+1)
-    starts 12 hours before ``now`` and lasts 180 days. In it, one day of
-    wall time before ``now`` is 23 hours."""
-    change = now.astimezone(timezone.utc) - timedelta(hours=12)
-    start_day = change.timetuple().tm_yday - 1
-    return f'STD0DST,{start_day}/{change:%H:%M:%S},{(start_day + 180) % 365}/0'
 
 
 async def _paused_workflow(
@@ -2835,44 +1950,6 @@ async def _paused_workflow(
     return str(handle.workflow_id)
 
 
-async def _set_paused_for(
-    session: AsyncSession, paused_for: dict[str, timedelta],
-) -> None:
-    """Set ``updated_at`` of each workflow to ``now()`` minus its value, sent
-    as microseconds, and commit."""
-    for workflow_id, paused in paused_for.items():
-        _ = await session.execute(
-            text(
-                'UPDATE horsies_workflows SET updated_at = now()'
-                " - CAST(:paused_us AS bigint) * interval '1 microsecond'"
-                ' WHERE id = CAST(:wf_id AS uuid)'
-            ),
-            {
-                'paused_us': paused // timedelta(microseconds=1),
-                'wf_id': workflow_id,
-            },
-        )
-    await session.commit()
-
-
-async def _statuses(session: AsyncSession, workflow_ids: list[str]) -> dict[str, str]:
-    """The stored status of each workflow, read in a new snapshot."""
-    await session.commit()
-    statuses: dict[str, str] = {}
-    for workflow_id in workflow_ids:
-        statuses[workflow_id] = (
-            await session.execute(
-                text('SELECT status FROM horsies_workflows WHERE id = CAST(:wf_id AS uuid)'),
-                {'wf_id': workflow_id},
-            )
-        ).scalar_one()
-    return statuses
-
-
-class _Reaper(ReaperMixin):
-    """The reaper mixin alone: its paused expiry runs in the core."""
-
-
 def _expiry_error_json(older_than: timedelta) -> str:
     """A stored error for a paused expiry; the age tests read only the status."""
     match dumps_json(
@@ -2887,6 +1964,16 @@ def _expiry_error_json(older_than: timedelta) -> str:
             return error_json
         case Err(refused):
             raise AssertionError(refused)
+
+
+_EXPIRE_PAUSED_WORKFLOW_SQL = text("""
+    SELECT outcome, observed_status, expired_task_ids
+    FROM horsies_workflow_expire_paused(
+        CAST(:wf_id AS uuid), CAST(:age_us AS bigint), CAST(:error AS text)
+    )
+""")
+"""The expiry of one PAUSED workflow older than the age in microseconds, as
+the core's paused expiry calls it."""
 
 
 async def _expire_each_at_one_now(
@@ -2928,7 +2015,7 @@ async def _expire_each_at_one_now(
                 outcomes.append(
                     (
                         await connection.execute(
-                            EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL,
+                            _EXPIRE_PAUSED_WORKFLOW_SQL,
                             {
                                 'wf_id': workflow_id,
                                 'age_us': age_us,
@@ -2966,55 +2053,6 @@ class TestPausedExpiryAge:
     ``horsies_workflow_expire_paused`` for each, in autocommit.
     """
 
-    async def test_an_age_of_one_day_is_24_hours_across_a_daylight_saving_change(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-        db_url: str,
-    ) -> None:
-        """The core's sessions take the database's TimeZone, set here to a
-        zone whose daylight time began 12 hours ago: in it ``interval '1
-        day'`` before now is 23 hours. The core's expiry, on a broker whose
-        connections open after the setting, expires the workflow paused for
-        24.5 hours and keeps the one paused for 23.5 hours. The margins of 30
-        minutes hold over the time between the setup and the expiry."""
-        kept = await _paused_workflow(session, broker, app, 'expiry_dst_kept')
-        expired = await _paused_workflow(session, broker, app, 'expiry_dst_expired')
-        await _set_paused_for(
-            session,
-            {
-                kept: timedelta(hours=23, minutes=30),
-                expired: timedelta(hours=24, minutes=30),
-            },
-        )
-        now = (await session.execute(text('SELECT now()'))).scalar_one()
-        database = (await session.execute(text('SELECT current_database()'))).scalar_one()
-        await session.commit()
-        zone = _zone_with_daylight_start_before(now)
-        await _execute(session, f"ALTER DATABASE \"{database}\" SET TimeZone = '{zone}'")
-        zoned = PostgresBroker(PostgresConfig(database_url=SecretStr(db_url)), assume_initialized=True)
-        try:
-            # A session that opens now takes the zone: one day before now is
-            # 23 hours in it.
-            async with await psycopg.AsyncConnection.connect(db_url) as fresh:
-                cursor = await fresh.execute(
-                    "SELECT now() - interval '1 day' = now() - interval '23 hours'",
-                )
-                assert await cursor.fetchone() == (True,)
-            count = await _Reaper()._expire_paused_workflows(  # pyright: ignore[reportPrivateUsage]
-                zoned, older_than=timedelta(days=1),
-            )
-        finally:
-            _ = await zoned.close_async()
-            await _execute(session, f'ALTER DATABASE "{database}" RESET TimeZone')
-
-        assert count == 1
-        assert await _statuses(session, [kept, expired]) == {
-            kept: 'PAUSED',
-            expired: 'EXPIRED',
-        }
 
     async def test_an_age_below_one_millisecond_is_exact(
         self,

@@ -49,6 +49,7 @@ async fn listener_broker(application_name: &str) -> (PostgresBroker, PgPool) {
     let broker = PostgresBroker::from_pool_and_session_url(
         pool.clone(),
         &format!("{url}{separator}application_name={application_name}"),
+        crate::ClientFamily::Rust,
     );
     (broker, pool)
 }

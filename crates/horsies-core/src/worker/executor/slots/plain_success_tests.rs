@@ -122,7 +122,10 @@ async fn plain_successes_settle_through_the_batcher() {
     let second = claimed_now();
     seed_running(&pool, first.task_id, WORKER, first.claimed_at).await;
     seed_running(&pool, second.task_id, WORKER, second.claimed_at).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(pool.clone())));
+    let writer = writer(Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    )));
 
     let (first_settled, second_settled) = tokio::join!(
         writer.settle(&first, reported_value()),
@@ -148,7 +151,10 @@ async fn a_plain_success_on_a_row_this_claim_does_not_hold_writes_nothing() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, OTHER_WORKER, claimed.claimed_at).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(pool.clone())));
+    let writer = writer(Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    )));
 
     let settled = writer.settle(&claimed, reported_value()).await;
 
@@ -268,6 +274,7 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let writer = Arc::new(writer_with_queue_room(Arc::new(PostgresBroker::from_pool(
         pool.clone(),
+        crate::ClientFamily::Rust,
     ))));
     let mut plain = Vec::with_capacity(2 * BATCH_ROWS);
     for _ in 0..2 * BATCH_ROWS {
@@ -355,7 +362,10 @@ async fn a_plain_success_settle_is_one_round_trip() {
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(proxied.clone())));
+    let writer = writer(Arc::new(PostgresBroker::from_pool(
+        proxied.clone(),
+        crate::ClientFamily::Rust,
+    )));
     let warm_up = claimed_now();
     seed_running(&pool, warm_up.task_id, WORKER, warm_up.claimed_at).await;
     assert_eq!(
@@ -391,7 +401,10 @@ async fn a_stop_for_a_node_not_linked_sends_no_statement() {
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let writer = writer(Arc::new(PostgresBroker::from_pool(proxied.clone())));
+    let writer = writer(Arc::new(PostgresBroker::from_pool(
+        proxied.clone(),
+        crate::ClientFamily::Rust,
+    )));
     let task = ClaimedTask {
         kind: TaskKind::WorkflowTask,
         ..claimed_now()

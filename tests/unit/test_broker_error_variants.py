@@ -61,8 +61,6 @@ from horsies.core.models.tasks import (
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, is_err
-from horsies.core.utils.loop_runner import LoopRunnerError
-from horsies.core.worker.reaper import _operation_sqlstate  # pyright: ignore[reportPrivateUsage]
 from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
@@ -410,29 +408,3 @@ class TestProcessBoundaries:
             _raise_schema_error(error)
 
         assert raised.value.__cause__ is None
-
-    def test_reaper_sqlstate_reads_the_driver_cause(self) -> None:
-        driver_error = MagicMock()
-        driver_error.sqlstate = '55P03'
-        wrapper = RuntimeError('lock not available')
-        wrapper.orig = driver_error  # type: ignore[attr-defined]
-        error = BrokerOperationFailed(
-            code=BrokerErrorCode.CLEANUP_FAILED,
-            message='audit refused',
-            retryable=False,
-            exception=wrapper,
-        )
-
-        assert _operation_sqlstate(error) == '55P03'
-
-    def test_reaper_sqlstate_of_an_error_without_a_cause_is_none(self) -> None:
-        error = BrokerListenerDisabled(message='no listener')
-
-        assert _operation_sqlstate(error) is None
-
-    def test_a_loop_runner_failure_keeps_the_runner_error(self) -> None:
-        runner_error = LoopRunnerError('Loop runner is not running')
-        error = BrokerLoopRunnerFailed(message='runner stopped', exception=runner_error)
-
-        assert broker_error_cause(error) is runner_error
-        assert error.retryable is False

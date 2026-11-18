@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies._catalog.child_bounds import CANCELLED_WRITE_END_SECONDS
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.run_return import StoppedBeforeRunning
@@ -30,11 +31,6 @@ from horsies.core.worker.shared_lifecycle import (
 )
 from tests.fixtures.child_core import wait_for_start_statements_to_end
 from tests.integration.conftest import compute_test_command_fingerprint
-from tests.integration.test_pause_abandon_after_resume import (
-    WORKER_ID as PAUSE_WORKER_ID,
-    _node_and_task,
-    _seed_paused_workflow_with_claimed_node,
-)
 from tests.integration.test_workflow_node_handoff import (
     WORKER_ID as NODE_WORKER_ID,
     _seed_claimed_workflow_task,
@@ -44,6 +40,95 @@ from tests.integration.test_workflow_node_handoff import (
 pytestmark = [pytest.mark.integration]
 
 WORKER_ID = 'shared-lifecycle-worker'
+PAUSE_WORKER_ID = 'abandon-after-resume-worker'
+"""The worker that holds the claim of the node of a paused workflow."""
+
+
+async def _seed_paused_workflow_with_claimed_node(
+    session: AsyncSession,
+    claimed_at: datetime,
+) -> tuple[str, str]:
+    task_id = str(uuid.uuid4())
+    workflow_id = str(uuid.uuid4())
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='abandon_after_resume')
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    claimed_at, claimed_by_worker_id, claim_expires_at,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution
+                ) VALUES (
+                    :id, 'abandon_after_resume', 'default', 100, '{}', 'CLAIMED',
+                    :sent_at, NOW(), NOW(), NOW(), 0, 0, :claimed_at, :worker_id,
+                    NOW() + interval '1 minute', TRUE, 'standard_30d', NULL, NULL,
+                    FALSE, 'ISOLATED'
+                )
+        """),
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'claimed_at': claimed_at,
+            'worker_id': PAUSE_WORKER_ID,
+            'command_fingerprint': fingerprint,
+        },
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflows
+                (id, name, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at)
+            VALUES (:id, 'abandon_after_resume_wf', 'PAUSED', 'fail', 0, :id,
+                    NOW(), NOW(), NOW(), NOW())
+        """),
+        {'id': workflow_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflow_tasks
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, is_subworkflow, status,
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES ('NONE', :id, :workflow_id, 0, 'node_0', 'abandon_after_resume',
+                    '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
+                    'ENQUEUED', :task_id, NOW(),
+                    0, 'ISOLATED', 'standard_30d')
+        """),
+        {'id': str(uuid.uuid4()), 'workflow_id': workflow_id, 'task_id': task_id},
+    )
+    await session.commit()
+    return workflow_id, task_id
+
+
+async def _node_and_task(
+    session: AsyncSession,
+    workflow_id: str,
+    task_id: str,
+) -> tuple[str, str | None, str, str | None]:
+    """(node status, node task id, workflow status, live task status)."""
+    node = (
+        await session.execute(
+            text("""
+                SELECT wt.status, wt.task_id, w.status AS workflow_status
+                FROM horsies_workflow_tasks wt
+                JOIN horsies_workflows w ON w.id = wt.workflow_id
+                WHERE wt.workflow_id = CAST(:wf AS uuid)
+            """),
+            {'wf': workflow_id},
+        )
+    ).one()
+    live_task = (
+        await session.execute(
+            text('SELECT status FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
+            {'id': task_id},
+        )
+    ).scalar_one_or_none()
+    node_task = None if node.task_id is None else str(node.task_id)
+    return str(node.status), node_task, str(node.workflow_status), live_task
 
 
 async def _seed_claimed_task(
@@ -126,7 +211,7 @@ async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
     )
     running = await _row(session, task_id)
     await session.commit()
-    await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
+    _ = await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
     marked = await _row(session, task_id)
 
     assert started is None
@@ -151,7 +236,7 @@ async def test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound(
     start does not commit once the lock is gone: the row stays CLAIMED with
     no beat."""
     statements_s = shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
-    cancel_end_s = shared_lifecycle.CANCELLED_WRITE_END_S
+    cancel_end_s = CANCELLED_WRITE_END_SECONDS
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     await session.execute(

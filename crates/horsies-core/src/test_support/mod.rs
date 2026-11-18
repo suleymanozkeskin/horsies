@@ -92,7 +92,7 @@ pub(crate) async fn broker_with_closed_sqlx_pools(
     let adapter =
         sqlx::postgres::PgPoolOptions::new().connect_lazy_with((*pool.connect_options()).clone());
     adapter.close().await;
-    crate::broker::PostgresBroker::from_pool(adapter)
+    crate::broker::PostgresBroker::from_pool(adapter, ClientFamily::Rust)
 }
 
 /// Installs the schema into the template of this process: the

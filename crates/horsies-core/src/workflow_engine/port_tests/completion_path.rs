@@ -47,7 +47,7 @@ async fn a_second_completion_of_a_node_keeps_the_first_result() {
     assert_eq!(first.status, "COMPLETED");
 
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         &TestChildSpecs::empty(),
     )
@@ -158,7 +158,7 @@ async fn phase_two_of_a_task_with_no_node_changes_nothing() {
     let task_id = Uuid::new_v4();
 
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         &TestChildSpecs::empty(),
     )

@@ -391,14 +391,21 @@ impl PrunePassError {
     }
 }
 
+impl MonitoringQueryErrorSource {
+    /// The cause of the error that a monitoring read met. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::Database(error) => FailureCause::of_sqlx_error(error),
+            Self::History(error) => error.failure_cause(),
+            Self::Broker(error) => error.failure_cause(),
+        }
+    }
+}
+
 impl MonitoringQueryError {
     /// The cause of a failed monitoring read: the cause of its source. Pure.
     pub fn failure_cause(&self) -> FailureCause {
-        match self.error_source() {
-            MonitoringQueryErrorSource::Database(error) => FailureCause::of_sqlx_error(error),
-            MonitoringQueryErrorSource::History(error) => error.failure_cause(),
-            MonitoringQueryErrorSource::Broker(error) => error.failure_cause(),
-        }
+        self.error_source().failure_cause()
     }
 }
 

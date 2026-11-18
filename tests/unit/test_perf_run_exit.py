@@ -15,6 +15,7 @@ exited nonzero. The same job at the same commit passed minutes earlier.
 from __future__ import annotations
 
 import dataclasses
+from typing import NoReturn
 
 import pytest
 
@@ -29,7 +30,7 @@ from tests.perf.__main__ import (
     _select_scenarios,
 )
 from tests.perf.counters import Counts
-from tests.perf.scenarios import Scenario, SingleRowScenario, scenario_by_name
+from tests.perf.scenarios import Scenario, SingleRowScenario
 from tests.perf.runner import (
     Conditions,
     Measurement,
@@ -37,12 +38,33 @@ from tests.perf.runner import (
     RunResult,
     _contract_violations,
 )
-from tests.perf.statistics import Verdict
+from tests.perf.statistics import Budget, Verdict
+
+
+def _never_run(*_args: object) -> NoReturn:
+    raise AssertionError('the tests of the exit rules run no scenario')
+
+
+_SCENARIO = SingleRowScenario(
+    name='run-exit-example',
+    description='a scenario built for these tests',
+    p50_budget=Budget(fraction=0.10, floor_ms=1.0),
+    p99_budget=Budget(fraction=0.15, floor_ms=2.0),
+    payload_bytes=1024,
+    seed=_never_run,
+    cleanup=_never_run,
+    baseline=_never_run,
+    candidate=None,
+    baseline_invocation=_never_run,
+    candidate_invocation=None,
+    exact_client_statements_per_operation=1,
+)
+"""A single-row scenario with no candidate side, one statement per operation."""
 
 
 def _conditions(comparison: str, observations: int = 200) -> Conditions:
     return Conditions(
-        scenario='owned-claim-expiry',
+        scenario=_SCENARIO.name,
         description='a scenario built for these tests',
         server_version='PostgreSQL 16.4',
         fsync='off',
@@ -92,12 +114,10 @@ def _with_candidate() -> Scenario:
     contract checks are exercised on a scenario whose candidate is its own
     baseline.
     """
-    scenario = scenario_by_name('owned-claim-expiry')
-    assert isinstance(scenario, SingleRowScenario)
     return dataclasses.replace(
-        scenario,
-        candidate=scenario.baseline,
-        candidate_invocation=scenario.baseline_invocation,
+        _SCENARIO,
+        candidate=_SCENARIO.baseline,
+        candidate_invocation=_SCENARIO.baseline_invocation,
     )
 
 
@@ -280,7 +300,7 @@ class TestCandidateContractChecks:
 
     def test_a_scenario_without_candidate_has_no_contract_to_break(self) -> None:
         report = _contract_violations(
-            scenario=scenario_by_name('owned-claim-expiry'),
+            scenario=_SCENARIO,
             conditions=_conditions('existing statement against function'),
             baseline=Measurement(samples_ms=[1.0], counts=_counts()),
             candidate=Measurement(
@@ -353,10 +373,10 @@ class TestScenarioSelection:
 
 class TestObservationCount:
     def test_default_uses_the_declared_gate_minimum(self) -> None:
-        scenario = scenario_by_name('owned-claim-expiry')
+        scenario = _SCENARIO
         assert _observations_for(scenario, 'gate', None) == 10_000
         assert _minimum_observations(scenario, 'gate') == 10_000
 
     def test_override_supports_an_inconclusive_retry(self) -> None:
-        scenario = scenario_by_name('owned-claim-expiry')
+        scenario = _SCENARIO
         assert _observations_for(scenario, 'gate', 20_000) == 20_000

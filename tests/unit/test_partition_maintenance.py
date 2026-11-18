@@ -9,13 +9,11 @@ and the stamp check names every function that republication renders.
 
 from __future__ import annotations
 
-import inspect
 from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
-from horsies.core.history.maintenance.coverage import ensure_partition_coverage
 from horsies.core.models.retention import RetentionConfig
 
 pytestmark = [pytest.mark.unit]
@@ -57,40 +55,6 @@ class TestConfigBounds:
         interval_ceiling_s = 3_600
         heartbeat_floor_s = 2 * 3_600
         assert interval_ceiling_s < heartbeat_floor_s
-
-
-class TestEnsureSequence:
-    def test_stages_run_in_dependency_order(self) -> None:
-        """Registration precedes coverage; coverage precedes publication."""
-        source = inspect.getsource(ensure_partition_coverage)
-        positions = [
-            source.index('register_heartbeat_class('),
-            source.index('register_finite_retention_class('),
-            source.index('ensure_leaf_coverage('),
-            source.index('ensure_heartbeat_coverage('),
-            source.index('republish('),
-        ]
-        assert positions == sorted(positions)
-
-
-class TestPruningWiring:
-    def test_maintenance_pass_prunes_after_coverage(self) -> None:
-        """The tick runs coverage, then pruning, then reschedules.
-
-        This pin is the defect's own shape: the pruning mechanism once
-        existed fully tested with no production caller, so configured
-        retention durations were silently unenforced. It goes red if
-        the pruning call ever leaves the reaper pass.
-        """
-        from horsies.core.worker.reaper import ReaperMixin
-
-        source = inspect.getsource(ReaperMixin._run_reaper_pass)  # pyright: ignore[reportPrivateUsage]
-        positions = [
-            source.index('self._run_partition_coverage('),
-            source.index('self._run_partition_pruning('),
-            source.index('state.next_partition_maintenance_at = ('),
-        ]
-        assert positions == sorted(positions)
 
 
 class TestPruneCandidateKinds:

@@ -100,7 +100,7 @@ fn config_with_fast_beats(url: &str) -> AppConfig {
 /// A worker of `config` with one isolated child that holds its first run
 /// and writes its pid to `pid_file`, and a drain of `drain_secs`.
 async fn worker_holding_one_task(config: AppConfig, pid_file: &Path, drain_secs: u64) -> Worker {
-    let broker = PostgresBroker::connect_worker_with(&config.broker)
+    let broker = PostgresBroker::connect_worker_with(&config.broker, crate::ClientFamily::Rust)
         .await
         .expect("connect the broker of a worker");
     let database_url = DatabaseUrl::new(config.broker.database_url.clone());

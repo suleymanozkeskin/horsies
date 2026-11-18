@@ -692,16 +692,16 @@ class TestClose:
 
     def test_close_steps_end_before_the_parent_kills_the_child(self) -> None:
         """The worst case of the close: the leftovers use the whole deadline,
-        then each later step uses its minimum. It must end before the parent
-        kills a child that has not exited after its stop frame."""
-        from horsies.core.worker.slots import CHILD_STOP_TIMEOUT_S
-
+        then each later step uses its minimum: 7 s. The worker kills a child
+        that has not exited some time after its stop frame; the core test
+        ``supervisor/tests.rs::the_stop_wait_outlasts_the_close_of_a_python_child``
+        pins that wait above this sum."""
         worst_case_s = (
             task_loop_module.LOOP_CLOSE_TIMEOUT_S
             + task_loop_module.ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S
             + task_loop_module.EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S
         )
-        assert worst_case_s < CHILD_STOP_TIMEOUT_S
+        assert worst_case_s == 7.0
 
     def test_close_is_bounded_when_executor_work_does_not_end(
         self,

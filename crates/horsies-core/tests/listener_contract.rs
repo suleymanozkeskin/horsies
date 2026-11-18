@@ -68,7 +68,7 @@ mod test_database;
 /// binary creates empty databases only, so it never runs.
 #[allow(dead_code)]
 async fn install_template(url: &str) {
-    let broker = horsies_core::PostgresBroker::connect(url)
+    let broker = horsies_core::PostgresBroker::connect(url, horsies_core::ClientFamily::Rust)
         .await
         .expect("connect the template broker");
     broker

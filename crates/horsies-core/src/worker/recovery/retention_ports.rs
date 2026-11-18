@@ -72,7 +72,7 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut next_partition_maintenance = tokio::time::Instant::now();
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         crate::test_support::child_specs::no_child_specs().as_ref(),
         &recovery,
         retention,
@@ -256,7 +256,7 @@ async fn expired_worker_states_go_and_recent_ones_stay() {
     retention.terminal_record_retention_hours = None;
 
     run_retention_cleanup(
-        &crate::broker::PostgresBroker::from_pool(database.pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust),
         &retention,
     )
     .await;
@@ -337,7 +337,7 @@ async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
     retention.terminal_record_retention_hours = Some(RETENTION_HOURS);
 
     run_retention_cleanup(
-        &crate::broker::PostgresBroker::from_pool(database.pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust),
         &retention,
     )
     .await;
@@ -467,7 +467,8 @@ async fn a_delayed_send_stamps_the_mapped_period_class() {
     retention
         .queue_retention
         .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
-    let broker = crate::broker::PostgresBroker::from_pool(database.pool.clone());
+    let broker =
+        crate::broker::PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust);
     let task_id = broker
         .enqueue(
             "port_delayed_send",

@@ -26,7 +26,8 @@ pub use crate::core::history::reads::detail::TaskAbsenceReason;
 /// window resolver builds it.
 pub use crate::core::history::reads::pages::HistoryWindow;
 pub use errors::{
-    MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
+    HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorCode,
+    MonitoringQueryErrorSource, MonitoringResult,
 };
 pub use execution_classes::{class_report_info, slot_health_info};
 pub use history_window::{

@@ -234,6 +234,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::SendSuppressed>()?;
     module.add_class::<operations::enqueue::SendAsyncContext>()?;
     module.add_class::<operations::enqueue::SendValidationFailed>()?;
+    module.add_class::<operations::enqueue::SendRefusalUnreadableJson>()?;
+    module.add_class::<operations::enqueue::SendRefusalByRule>()?;
+    module.add_class::<operations::enqueue::SendRefusalByValueRule>()?;
     module.add_class::<operations::enqueue::SendEnqueueFailed>()?;
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
     module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
@@ -299,7 +302,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::monitoring_reads::TaskBreakdownQuery>()?;
     module.add_class::<operations::monitoring_reads::WorkflowRunsQuery>()?;
     module.add_class::<operations::monitoring_reads::MonitoringJson>()?;
-    module.add_class::<operations::monitoring_reads::MonitoringFailed>()?;
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;
     module.add_class::<operations::task_lists::TaskListComplete>()?;
     module.add_class::<operations::task_lists::TaskListTruncated>()?;

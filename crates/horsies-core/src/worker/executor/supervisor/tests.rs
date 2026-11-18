@@ -56,6 +56,19 @@ const POOL_SERVING: PoolAtFailure = PoolAtFailure {
 // Exits
 // ---------------------------------------------------------------------------
 
+/// A Python child closes its task loop after the stop frame within 7 s:
+/// `LOOP_CLOSE_TIMEOUT_S` (5 s), then `ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S` and
+/// `EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S` (1 s each) of
+/// `python/horsies/core/worker/task_loop.py`. The Python test
+/// `tests/unit/test_task_loop.py::TestClose::test_close_steps_end_before_the_parent_kills_the_child`
+/// pins that sum. The parent waits longer for the exit, so it does not kill
+/// a child that is still closing.
+#[test]
+fn the_stop_wait_outlasts_the_close_of_a_python_child() {
+    let python_child_close = Duration::from_secs(7);
+    assert!(python_child_close < CHILD_STOP_TIMEOUT);
+}
+
 #[test]
 fn exit_codes_are_read_in_the_protocol() {
     assert_eq!(ReapedExit::ExitedWith(0).meaning(), ExitMeaning::Clean);

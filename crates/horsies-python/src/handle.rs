@@ -1353,7 +1353,8 @@ impl CoreHandle {
     }
 
     /// One page of the task list (`horsies_monitoring_task_list`):
-    /// `MonitoringJson` of the core's `TaskListPage`, or `MonitoringFailed`.
+    /// `MonitoringJson` of the core's `TaskListPage`, or a generated
+    /// `MonitoringQueryCoreError` class.
     /// Reads only, in one statement. Awaitable only: its caller,
     /// `horsies.monitoring.list_tasks`, is a coroutine. A cancelled await
     /// drops the read.
@@ -1374,7 +1375,7 @@ impl CoreHandle {
 
     /// One task with its attempts (`horsies_monitoring_task_detail`):
     /// `MonitoringJson` of the core's `TaskDetail`, `TaskDetailAbsent`, or
-    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only: its
+    /// a generated `MonitoringQueryCoreError` class. Reads only, in one statement. Awaitable only: its
     /// caller, `horsies.monitoring.get_task_detail`, is a coroutine. A
     /// cancelled await drops the read.
     fn monitoring_task_detail_async<'py>(
@@ -1393,7 +1394,8 @@ impl CoreHandle {
     }
 
     /// The facets of one scope (`horsies_monitoring_task_facets`):
-    /// `MonitoringJson` of the core's `Facets`, or `MonitoringFailed`. Reads
+    /// `MonitoringJson` of the core's `Facets`, or a generated
+    /// `MonitoringQueryCoreError` class. Reads
     /// only, in one statement. Awaitable only: its caller,
     /// `horsies.monitoring.task_facets`, is a coroutine. A cancelled await
     /// drops the read.
@@ -1414,7 +1416,7 @@ impl CoreHandle {
 
     /// The count of each task status (`horsies_monitoring_task_stats`):
     /// `MonitoringJson` of the core's `Vec<StatusCount>`, or
-    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only: its
+    /// a generated `MonitoringQueryCoreError` class. Reads only, in one statement. Awaitable only: its
     /// caller, `horsies.monitoring.task_stats`, is a coroutine. A cancelled
     /// await drops the read.
     fn monitoring_task_stats_async<'py>(
@@ -1433,7 +1435,8 @@ impl CoreHandle {
     }
 
     /// The task counts per group (`horsies_monitoring_task_breakdown`):
-    /// `MonitoringJson` of the core's `Breakdown`, or `MonitoringFailed`.
+    /// `MonitoringJson` of the core's `Breakdown`, or a generated
+    /// `MonitoringQueryCoreError` class.
     /// Reads only, in one statement. Awaitable only. A cancelled await drops
     /// the read.
     fn monitoring_task_breakdown_async<'py>(
@@ -1452,7 +1455,8 @@ impl CoreHandle {
     }
 
     /// The names of the root runs (`horsies_monitoring_workflow_names`):
-    /// `MonitoringJson` of the core's `Vec<String>`, or `MonitoringFailed`.
+    /// `MonitoringJson` of the core's `Vec<String>`, or a generated
+    /// `MonitoringQueryCoreError` class.
     /// Reads only, in one statement. Awaitable only. A cancelled await drops
     /// the read.
     fn monitoring_workflow_names_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1468,7 +1472,7 @@ impl CoreHandle {
 
     /// The newest root runs (`horsies_monitoring_workflow_runs`):
     /// `MonitoringJson` of the core's `Vec<WorkflowRunSummary>`, or
-    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only. A
+    /// a generated `MonitoringQueryCoreError` class. Reads only, in one statement. Awaitable only. A
     /// cancelled await drops the read.
     fn monitoring_workflow_runs_async<'py>(
         &self,
@@ -1487,7 +1491,8 @@ impl CoreHandle {
 
     /// One run with its nodes and edges (`horsies_monitoring_workflow_run`):
     /// `MonitoringJson` of the core's `Option<WorkflowRunDetail>` (`null`
-    /// when no run has the id), or `MonitoringFailed`. Reads only, in one
+    /// when no run has the id), or a generated
+    /// `MonitoringQueryCoreError` class. Reads only, in one
     /// statement. Awaitable only. A cancelled await drops the read.
     fn monitoring_workflow_run_async<'py>(
         &self,
@@ -1506,7 +1511,8 @@ impl CoreHandle {
 
     /// One node with its task (`horsies_monitoring_workflow_node`):
     /// `MonitoringJson` of the core's `Option<WorkflowTaskDetail>` (`null`
-    /// when the run has no node at the index), or `MonitoringFailed`. Reads
+    /// when the run has no node at the index), or a generated
+    /// `MonitoringQueryCoreError` class. Reads
     /// only, in one statement. Awaitable only. A cancelled await drops the
     /// read. An index outside 32 bits raises `OverflowError`.
     #[pyo3(signature = (workflow_id, *, task_index))]
@@ -1528,7 +1534,7 @@ impl CoreHandle {
 
     /// Every schedule state (`horsies_monitoring_schedules`):
     /// `MonitoringJson` of the core's `Vec<ScheduleStateInfo>`, or
-    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only. A
+    /// a generated `MonitoringQueryCoreError` class. Reads only, in one statement. Awaitable only. A
     /// cancelled await drops the read.
     fn monitoring_schedules_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;

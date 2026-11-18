@@ -285,7 +285,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
 async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     for (seed, include_running) in [
         (TaskSeed::pending(), false),
@@ -369,7 +369,7 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
 async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     let missing = Uuid::new_v4();
     let absent = cancel_task_action(&broker, missing, false).await;
@@ -451,7 +451,7 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
         .acquire_timeout(std::time::Duration::from_millis(250))
         .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
         .expect("lazy unreachable W3 pool");
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task = cancel_task(&broker, Uuid::new_v4(), false)
         .await
         .expect_err("task database failure");
@@ -467,7 +467,7 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
 async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let children = TestChildSpecs::empty();
 
     let running_to_pause = seed_workflow(&pool, WorkflowStatus::Running).await;
@@ -569,7 +569,10 @@ const LOCK_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(20)
 async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
-    let broker = std::sync::Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = std::sync::Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let task_id = seed_baseline_pending_task(&pool).await;
 
     let mut holder = pool.begin().await.expect("holder transaction");

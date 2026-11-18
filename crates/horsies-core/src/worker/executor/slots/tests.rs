@@ -18,11 +18,11 @@ use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryReq
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildConnection, ChildFrame, ChildKind,
-    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork,
-    NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText,
-    ResultFrame, RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText,
-    TaskSendPool, TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildAfterFrame, ChildConnection,
+    ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame,
+    IsolatedChild, IsolatedWork, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId,
+    ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, SharedWork,
+    StoredOptionsRefusal, TaskInputText, TaskSendPool, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::{read_stored_options, StoredOptions};
@@ -924,6 +924,7 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     }))
     .unwrap()
     .to_bytes();

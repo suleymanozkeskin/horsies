@@ -46,7 +46,9 @@ use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
 use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::task::send_types::TaskSendError;
 use crate::failure_cause::FailureCause;
-use crate::monitoring::{MonitoringQueryError, TaskActionError};
+use crate::monitoring::{
+    HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorSource, TaskActionError,
+};
 use crate::workflow_engine::error::WorkflowError;
 use crate::{BrokerOperationError, BrokerOperationFailedCode, HandleOperationError};
 
@@ -257,6 +259,29 @@ impl ExceptionCause for WorkflowError {
     }
 }
 
+/// The error of a monitoring read is the core's class of its cause, with
+/// its text and its retry rule.
+impl ExceptionCause for MonitoringQueryErrorSource {
+    fn exception_value(&self) -> ExceptionValue {
+        ExceptionValue::CoreFailure {
+            text: self.to_string(),
+            retryable: self.is_retryable(),
+            cause: self.failure_cause(),
+        }
+    }
+}
+
+/// Stored history data outside the read contract is a
+/// `HistoryContractError` with the error's text.
+impl ExceptionCause for HistoryContractSource {
+    fn exception_value(&self) -> ExceptionValue {
+        ExceptionValue::Generated {
+            class: HISTORY_CONTRACT_ERROR,
+            text: self.to_string(),
+        }
+    }
+}
+
 /// A row outside the wire contract is an `OutcomeDecodeError` with the
 /// error's text.
 impl ExceptionCause for OutcomeDecodeError {
@@ -291,9 +316,18 @@ pub const OUTCOME_DECODE_ERROR: ExceptionClass = ExceptionClass {
           against a contract the other does not implement.",
 };
 
+/// The database state violates an invariant of the history reads (Python
+/// `horsies.core.history.errors.HistoryContractError`; the core's
+/// [`HistoryContractSource`]).
+pub const HISTORY_CONTRACT_ERROR: ExceptionClass = ExceptionClass {
+    python_module: "history_errors",
+    python_class: "HistoryContractError",
+    doc: "The database state violates an invariant this subsystem relies on.",
+};
+
 /// Every exception class of the core for the Python package, in render
 /// order.
-pub const EXCEPTION_CLASSES: &[ExceptionClass] = &[OUTCOME_DECODE_ERROR];
+pub const EXCEPTION_CLASSES: &[ExceptionClass] = &[OUTCOME_DECODE_ERROR, HISTORY_CONTRACT_ERROR];
 
 /// A union of some classes of one catalog: the failures of one operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1162,6 +1196,108 @@ mod tests {
         assert!(OUTCOME_DECODE_ERROR
             .doc
             .starts_with("The returned row does not satisfy the wire contract.\n\nNever raised"));
+        assert_eq!(
+            HISTORY_CONTRACT_ERROR.doc,
+            "The database state violates an invariant this subsystem relies on."
+        );
+    }
+
+    /// One value of each variant of the monitoring query catalog: a failed
+    /// connect, and a history row that breaks the read contract.
+    fn every_monitoring_query_error() -> Vec<MonitoringQueryError> {
+        vec![
+            MonitoringQueryError::connect_failed(
+                "task list query",
+                BrokerError::ConnectionFailed("connection refused".to_owned()),
+            ),
+            MonitoringQueryError::history(
+                "task detail history read",
+                crate::HistoryError::Contract("bad row".to_owned()),
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_values_of_each_monitoring_query_name_the_instance_slots_of_its_class() {
+        let catalog = <MonitoringQueryError as ErrorEnum>::ERROR_CATALOG;
+        let errors = every_monitoring_query_error();
+        for error in &errors {
+            let class = catalog
+                .classes
+                .iter()
+                .find(|class| class.python_class == error.python_class())
+                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+            let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
+            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+        }
+        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let classes: HashSet<&str> = catalog
+            .classes
+            .iter()
+            .map(|class| class.python_class)
+            .collect();
+        assert_eq!(covered, classes);
+    }
+
+    /// Python's `MonitoringQueryDbOperationFailed` of a failed connect: the
+    /// message names the read and holds the error's text; the exception is
+    /// the core's class of the cause with the same text.
+    #[test]
+    fn a_monitoring_database_failure_builds_its_exception_from_its_source() {
+        let failed = MonitoringQueryError::connect_failed(
+            "task list query",
+            BrokerError::ConnectionFailed("connection refused".to_owned()),
+        );
+        assert_eq!(
+            failed.slot_values(),
+            vec![
+                SlotValue {
+                    name: "message",
+                    value: SlotData::Str(
+                        "task list query failed: connection failed: connection refused"
+                    ),
+                },
+                SlotValue {
+                    name: "retryable",
+                    value: SlotData::Bool(true),
+                },
+                SlotValue {
+                    name: "exception",
+                    value: SlotData::Exception(ExceptionValue::CoreFailure {
+                        text: "connection failed: connection refused".to_owned(),
+                        retryable: true,
+                        cause: FailureCause::Connection,
+                    }),
+                },
+            ]
+        );
+    }
+
+    /// Python's `MonitoringQueryHistoryContractViolation`: the message names
+    /// the read and holds the error's text; the exception is a
+    /// `HistoryContractError` with that text.
+    #[test]
+    fn a_history_contract_violation_builds_a_history_contract_error() {
+        let cause = crate::HistoryError::Contract("bad row".to_owned());
+        let text = cause.to_string();
+        let violation = MonitoringQueryError::history("task detail history read", cause);
+        assert_eq!(
+            violation.slot_values(),
+            vec![
+                SlotValue {
+                    name: "message",
+                    value: SlotData::Str(&format!("task detail history read failed: {text}")),
+                },
+                SlotValue {
+                    name: "exception",
+                    value: SlotData::Exception(ExceptionValue::Generated {
+                        class: HISTORY_CONTRACT_ERROR,
+                        text,
+                    }),
+                },
+            ]
+        );
+        assert_eq!(violation.failure_cause(), FailureCause::ContractViolation);
     }
 
     const WORKFLOW: Uuid = Uuid::from_u128(0x7a1b_2c3d_4e5f_4061_8273_9a4b_5c6d_7e8f);

@@ -146,6 +146,11 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
+// The exit codes of the worker process (the codes of a child are in
+// `frame_protocol`): `horsies-codegen` renders every exit code into the
+// Python `_catalog`.
+pub use crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE;
+pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
 // The worker connection check of a client's live check (`check --live`):
 // on a connected broker (the Rust client), and on a lazy handle (the Python
 // bridge).

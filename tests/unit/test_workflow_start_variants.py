@@ -4,23 +4,21 @@
 ``WorkflowStartErrorCode`` member. A variant's repr hides the message and
 the cause. Every variant carries ``workflow_name`` and ``workflow_id``.
 
-The id-conflict site is tested on the Python start caller before the core
-switch (``tests/dualrun/reference/workflow_start_caller.py``);
-``test_workflow_start_through_core.py`` tests the core's answer.
+A refused spec keeps its ``WorkflowValidationError`` as the cause
+(``start_workflow_async``); ``test_workflow_start_through_core.py`` tests
+the id conflict that the core answers.
 """
 
 from __future__ import annotations
 
-import uuid
-
 from typing import Any, get_args
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from horsies.core.brokers.resources import EventLoopLimit
-from horsies.core.types.result import Ok, is_err
-from tests.dualrun.reference.workflow_start_caller import start_workflow_async
+from horsies.core.types.result import is_err
+from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
@@ -33,8 +31,6 @@ from horsies.core.workflows.start_types import (
     WorkflowStartRetryable,
     WorkflowStartValidationFailed,
 )
-from tests.broker_resources_support import attach_resources, fake_resources
-from tests.workflow_start_support import outcome_row, start_session
 
 pytestmark = [pytest.mark.unit]
 
@@ -139,48 +135,6 @@ def _make_spec(name: str = 'conflict-wf') -> Any:
     spec.on_error.value = 'FAIL_WORKFLOW'
     spec.definition_key = None
     return spec
-
-
-def _session_with_existing_row(existing_name: str) -> tuple[Any, Any]:
-    """A session whose start statement finds a workflow named ``existing_name``
-    on the id (``EXISTS``; nothing written)."""
-    session, session_ctx, _ = start_session([outcome_row('EXISTS', existing_name)])
-    return session, session_ctx
-
-
-class TestIdConflict:
-    @pytest.mark.asyncio
-    async def test_another_workflow_name_on_the_id_is_an_id_conflict(self) -> None:
-        session, session_ctx = _session_with_existing_row('other-wf')
-        broker = MagicMock()
-        broker.ensure_schema_initialized = AsyncMock(return_value=Ok(None))
-        attach_resources(
-            broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)),
-        )
-
-        result = await start_workflow_async(_make_spec(), broker, WORKFLOW_ID)
-
-        assert is_err(result)
-        assert isinstance(result.err_value, WorkflowStartIdConflict)
-        assert result.err_value.existing_workflow_name == 'other-wf'
-        assert result.err_value.workflow_name == 'conflict-wf'
-        assert result.err_value.workflow_id == WORKFLOW_ID
-        session.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_the_same_name_on_the_id_returns_the_existing_handle(self) -> None:
-        session, session_ctx = _session_with_existing_row('conflict-wf')
-        broker = MagicMock()
-        broker.ensure_schema_initialized = AsyncMock(return_value=Ok(None))
-        attach_resources(
-            broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)),
-        )
-
-        result = await start_workflow_async(_make_spec(), broker, WORKFLOW_ID)
-
-        assert not is_err(result)
-        assert result.ok_value.workflow_id == uuid.UUID(WORKFLOW_ID)
-        session.commit.assert_not_awaited()
 
 
 class TestValidationCause:

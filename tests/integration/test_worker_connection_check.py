@@ -16,6 +16,7 @@ import asyncio
 
 import pytest
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from horsies.core.app import Horsies
@@ -37,11 +38,6 @@ from horsies.core.models.worker_profile import (
     SharedThreadChildren,
     WorkerProfile,
 )
-from horsies.core.worker.profile_fit import (
-    ServerConnectionLimit,
-    ServerConnectionLimitUnreadable,
-    read_server_connection_limit,
-)
 from horsies.core.utils.url import sqlalchemy_url
 
 pytestmark = [pytest.mark.integration]
@@ -49,18 +45,28 @@ pytestmark = [pytest.mark.integration]
 THREAD_SEATS = 8
 
 
+_CONNECTION_LIMIT_SQL = text(
+    """
+    SELECT
+        current_setting('max_connections')::int,
+        current_setting('superuser_reserved_connections')::int,
+        COALESCE(current_setting('reserved_connections', true), '0')::int
+    """
+)
+
+
 async def _usable_slots(db_url: str) -> int:
-    """The slots that an ordinary role can use on the test server."""
+    """The slots that an ordinary role can use on the test server:
+    ``max_connections`` less the superuser and the role reserved slots
+    (``reserved_connections`` exists from Postgres 16 on)."""
     engine = create_async_engine(sqlalchemy_url(db_url))
     try:
-        factory = async_sessionmaker(engine, class_=AsyncSession)
-        match await read_server_connection_limit(factory):
-            case ServerConnectionLimit() as limit:
-                return limit.usable()
-            case ServerConnectionLimitUnreadable(reason=reason):
-                raise AssertionError(f'the connection limit is unreadable: {reason}')
+        async with async_sessionmaker(engine, class_=AsyncSession)() as session:
+            result = await session.execute(_CONNECTION_LIMIT_SQL)
+            max_connections, superuser_reserved, reserved = result.one()
     finally:
         await engine.dispose()
+    return max(0, int(max_connections) - int(superuser_reserved) - int(reserved))
 
 
 @pytest.mark.asyncio(loop_scope='function')

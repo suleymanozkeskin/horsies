@@ -294,7 +294,7 @@ fn test_queue() -> String {
 }
 
 fn writer(pool: PgPool) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
+    let broker = Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,

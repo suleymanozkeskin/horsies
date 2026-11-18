@@ -34,6 +34,7 @@ from tests.e2e.helpers.workflow import (
 from tests.e2e.tasks import workflows as wf_tasks
 from tests.e2e.tasks.basic import healthcheck
 from tests.broker_resources_support import current_resources
+from tests.workflow_recovery_support import workflow_recovery_pass
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -510,7 +511,6 @@ async def test_success_policy_multiple_cases(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
     """T6.9: Recovery finalizes stuck workflows with correct results/errors."""
-    from horsies.core.workflows.recovery import recover_stuck_workflows_global
     from sqlalchemy import text
 
     with run_worker(
@@ -545,9 +545,7 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
             await session.commit()
 
         # Run recovery
-        report = await recover_stuck_workflows_global(
-            current_resources(broker).session_factory, broker,
-        )
+        report = await workflow_recovery_pass(broker)
         assert report.recovered >= 1, 'Should recover at least one workflow'
 
         # Verify workflow is back to COMPLETED
@@ -563,7 +561,6 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_recovery_preserves_failed_state(broker: PostgresBroker) -> None:
     """T6.9b: Recovery re-finalizes a failed workflow stuck in RUNNING."""
-    from horsies.core.workflows.recovery import recover_stuck_workflows_global
     from sqlalchemy import text
 
     with run_worker(
@@ -598,9 +595,7 @@ async def test_recovery_preserves_failed_state(broker: PostgresBroker) -> None:
         assert wf_status == 'RUNNING'
 
         # Run recovery
-        report = await recover_stuck_workflows_global(
-            current_resources(broker).session_factory, broker,
-        )
+        report = await workflow_recovery_pass(broker)
         assert report.recovered >= 1, 'Should recover at least one workflow'
 
         # Verify workflow is back to FAILED (not COMPLETED)
