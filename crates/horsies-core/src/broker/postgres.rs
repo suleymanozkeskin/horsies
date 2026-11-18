@@ -3930,7 +3930,7 @@ mod filter_non_runnable_tests {
                 .unwrap();
         assert_eq!(task_status, "CANCELLED", "task must be cancelled");
 
-        let (node_status, linked): (String, Option<String>) = sql::query_as(
+        let (node_status, linked): (String, Option<Uuid>) = sql::query_as(
             "SELECT status, task_id FROM horsies_workflow_tasks WHERE workflow_id = $1",
         )
         .bind(&wf_id)
