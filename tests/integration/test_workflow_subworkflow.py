@@ -443,10 +443,10 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=4)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=4)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
@@ -460,7 +460,7 @@ class TestSubworkflowIntegration:
         )
         child_info = child_row.fetchone()
         assert child_info is not None
-        assert child_info[0] == handle.workflow_id
+        assert child_info[0] == str(handle.workflow_id)
         assert child_info[1] == 1
         assert child_info[2] is not None
 
@@ -515,7 +515,7 @@ class TestSubworkflowIntegration:
 
         # Complete the child workflow's inner task (returns int 42).
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=42),
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=42),
         )
 
         # result_for must decode via the workflow's definition_key (int),
@@ -548,10 +548,10 @@ class TestSubworkflowIntegration:
         unregister_workflow_spec(spec.name)
 
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=4)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=4)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
@@ -580,17 +580,17 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=7)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=7)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         _, child_id, _ = row
         assert isinstance(child_id, str)
 
         await finish_task(session, broker, child_id, 0, TaskResult(ok=7))
 
-        row_after = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row_after = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row_after is not None
         status, _, result_json = row_after
         assert status == 'COMPLETED'
@@ -622,10 +622,10 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=-1)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=-1)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, result_json = row
         assert status == 'FAILED'
@@ -654,12 +654,12 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         child_id = await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
+            session, broker, str(handle.workflow_id), 0,
             TaskResult(err=TaskError(error_code='CHILD_FAILED', message='Deliberate failure')),
         )
 
         # Parent node should now be FAILED
-        parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        parent_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert parent_row is not None
         status, _, result_json = parent_row
         assert status == 'FAILED'
@@ -738,7 +738,7 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
@@ -866,7 +866,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         child_id = await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
+            session, broker, str(handle.workflow_id), 0,
             TaskResult(err=TaskError(error_code='CHILD_FAILED', message='Test')),
         )
 
@@ -921,7 +921,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         parent_child_row = await self._get_workflow_task_row(
-            session, handle.workflow_id, 0
+            session, str(handle.workflow_id), 0
         )
         assert parent_child_row is not None
         child_status, child_id, _ = parent_child_row
@@ -931,7 +931,7 @@ class TestSubworkflowIntegration:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='PARENT_FAIL', message='parent failed')),
         )
@@ -972,7 +972,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=42),
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=42),
         )
 
         # Parent workflow should be COMPLETED
@@ -1019,8 +1019,8 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Both children should be RUNNING
-        row1 = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-        row2 = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row1 = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
+        row2 = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row1 is not None and row2 is not None
         assert row1[0] == 'RUNNING'
         assert row2[0] == 'RUNNING'
@@ -1034,7 +1034,7 @@ class TestSubworkflowIntegration:
         await finish_task(session, broker, child2_id, 0, TaskResult(ok=5))
 
         # Post task should now be ENQUEUED
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
+        post_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 2)
         assert post_row is not None
         assert post_row[0] == 'ENQUEUED'
 
@@ -1065,7 +1065,7 @@ class TestSubworkflowIntegration:
         assert parent_depth.scalar_one() == 0
 
         # Check child depth
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         child_id = row[1]
         assert isinstance(child_id, str)
@@ -1178,7 +1178,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Get child workflow ID
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         child_id = row[1]
         assert isinstance(child_id, str)
@@ -1189,7 +1189,7 @@ class TestSubworkflowIntegration:
             {'wf_id': child_id},
         )
         root_id = child_row.scalar_one()
-        assert root_id == handle.workflow_id
+        assert root_id == str(handle.workflow_id)
 
     # -----------------------------------------------------------------
     # New: error / non-happy paths
@@ -1232,11 +1232,11 @@ class TestSubworkflowIntegration:
 
             # Complete dependency → triggers subworkflow load → fails
             await finish_task(
-                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+                session, broker, str(handle.workflow_id), 0, TaskResult(ok=1),
             )
 
             # Subworkflow node should be FAILED
-            row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+            row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
             assert row is not None
             status, _, result_json = row
             assert status == 'FAILED'
@@ -1311,10 +1311,10 @@ class TestSubworkflowIntegration:
 
         try:
             await finish_task(
-                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+                session, broker, str(handle.workflow_id), 0, TaskResult(ok=1),
             )
 
-            parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+            parent_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
             assert parent_row is not None
             status, child_id, result_json = parent_row
             assert status == 'FAILED'
@@ -1429,15 +1429,15 @@ class TestSubworkflowIntegration:
                 match='Failed to serialize kwargs for child sub',
             ):
                 await finish_task(
-                    session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+                    session, broker, str(handle.workflow_id), 0, TaskResult(ok=1),
                 )
             await session.rollback()
 
-            upstream_row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+            upstream_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
             assert upstream_row is not None
             assert upstream_row[0] == 'ENQUEUED'
 
-            parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+            parent_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
             assert parent_row is not None
             status, child_id, result_json = parent_row
             assert status == 'PENDING'
@@ -1488,18 +1488,18 @@ class TestSubworkflowIntegration:
 
         # Complete child1 with failure
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
+            session, broker, str(handle.workflow_id), 0,
             TaskResult(err=TaskError(error_code='C1_FAIL', message='child 1 failed')),
         )
 
         # Complete child2 with success
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 1,
+            session, broker, str(handle.workflow_id), 1,
             TaskResult(ok=5),
         )
 
         # Downstream should be SKIPPED (has failed dep, allow_failed_deps=False)
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
+        post_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 2)
         assert post_row is not None
         assert post_row[0] == 'SKIPPED'
 
@@ -1528,8 +1528,8 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
 
-        row1 = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-        row2 = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row1 = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
+        row2 = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row1 is not None and row2 is not None
         child1_id = row1[1]
         child2_id = row2[1]
@@ -1538,14 +1538,14 @@ class TestSubworkflowIntegration:
         await self._complete_child_workflow(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='C1_FAIL', message='child 1 failed')),
         )
         await self._complete_child_workflow(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='C2_FAIL', message='child 2 failed')),
         )
@@ -1590,12 +1590,12 @@ class TestSubworkflowIntegration:
 
         # Complete task A with failure
         await finish_task(
-            session, broker, handle.workflow_id, 0,
+            session, broker, str(handle.workflow_id), 0,
             TaskResult(err=TaskError(error_code='A_FAIL', message='upstream failed')),
         )
 
         # Subworkflow should still be RUNNING despite failed upstream
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
@@ -1629,11 +1629,11 @@ class TestSubworkflowIntegration:
 
         # Complete only task A → join='any' should trigger subworkflow start
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=10),
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=10),
         )
 
         # Subworkflow should already be RUNNING (didn't wait for B)
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 2)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
@@ -1670,21 +1670,21 @@ class TestSubworkflowIntegration:
 
         # Complete A → child starts
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=6),
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=6),
         )
 
         # Complete child → should enqueue post task
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 1, TaskResult(ok=50),
+            session, broker, str(handle.workflow_id), 1, TaskResult(ok=50),
         )
 
         # Post task should be ENQUEUED
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
+        post_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 2)
         assert post_row is not None
         assert post_row[0] == 'ENQUEUED'
 
         # Subworkflow node should be COMPLETED with the child's result
-        child_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        child_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert child_row is not None
         assert child_row[0] == 'COMPLETED'
         tr = _decode_task_result(child_row[2])
@@ -1723,7 +1723,7 @@ class TestSubworkflowIntegration:
 
         # Complete child with failure
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
+            session, broker, str(handle.workflow_id), 0,
             TaskResult(err=TaskError(error_code='CHILD_ERR', message='Something went wrong')),
         )
 
@@ -1746,7 +1746,7 @@ class TestSubworkflowIntegration:
         assert summary.error_summary is not None and len(summary.error_summary) > 0
 
         # Downstream post task should be ENQUEUED (allow_failed_deps=True)
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        post_row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert post_row is not None
         assert post_row[0] == 'ENQUEUED'
 
@@ -1778,14 +1778,14 @@ class TestSubworkflowIntegration:
 
         # Complete both upstream tasks
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=10),
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=10),
         )
         await finish_task(
-            session, broker, handle.workflow_id, 1, TaskResult(ok=20),
+            session, broker, str(handle.workflow_id), 1, TaskResult(ok=20),
         )
 
         # Subworkflow should be RUNNING
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 2)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
@@ -1818,7 +1818,7 @@ class TestSubworkflowIntegration:
         assert parent_depth_row.scalar_one() == 0
 
         # Middle workflow: depth = 1
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         middle_id = row[1]
         assert isinstance(middle_id, str)
@@ -1830,7 +1830,7 @@ class TestSubworkflowIntegration:
         middle_info = middle_depth_row.fetchone()
         assert middle_info is not None
         assert middle_info[0] == 1
-        assert middle_info[1] == handle.workflow_id
+        assert middle_info[1] == str(handle.workflow_id)
 
         # Grandchild workflow: depth = 2, same root
         grandchild_row = await session.execute(
@@ -1852,7 +1852,7 @@ class TestSubworkflowIntegration:
         grandchild_info = grandchild_depth_row.fetchone()
         assert grandchild_info is not None
         assert grandchild_info[0] == 2
-        assert grandchild_info[1] == handle.workflow_id
+        assert grandchild_info[1] == str(handle.workflow_id)
 
     async def test_broker_app_missing_marks_node_failed(
         self,
@@ -1884,12 +1884,12 @@ class TestSubworkflowIntegration:
             # Completing dep triggers subworkflow enqueue → broker.app is None.
             # Post-ENQUEUED failures are converted to FAILED state instead of raising.
             await finish_task(
-                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+                session, broker, str(handle.workflow_id), 0, TaskResult(ok=1),
             )
         finally:
             broker.app = original_app
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, result_json = row
         assert status == 'FAILED'
@@ -2074,7 +2074,7 @@ class TestSubworkflowRecovery:
         handle = await start_ok(spec, broker)
 
         # Complete task A to make child READY
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
         # Verify child is RUNNING (started normally)
         child_row = await session.execute(

@@ -874,7 +874,7 @@ async def _pause(database: DualRunDatabase, workflow_id: UUID) -> str:
     """Pause ``workflow_id``; the text of the outcome, ``Ok(True)`` when it
     paused."""
     async with open_broker(database) as broker:
-        return repr(await pause_workflow(broker, str(workflow_id)))
+        return repr(await pause_workflow(broker, workflow_id))
 
 
 def _wait_for_stop_point(

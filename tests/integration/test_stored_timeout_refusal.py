@@ -249,9 +249,9 @@ async def test_a_refused_timeout_fails_its_workflow_node(
     claim_pass: ClaimPass = await worker._claim_and_dispatch_all()
 
     assert claim_pass.claimed == 1
-    assert await get_workflow_task_status(session, handle.workflow_id, 0) == 'FAILED'
-    assert await get_workflow_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
-    assert await get_workflow_status(session, handle.workflow_id) == 'FAILED'
+    assert await get_workflow_task_status(session, str(handle.workflow_id), 0) == 'FAILED'
+    assert await get_workflow_task_status(session, str(handle.workflow_id), 1) == 'SKIPPED'
+    assert await get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
 
 async def test_a_refused_timeout_retries_until_max_retries_when_asked(

@@ -87,7 +87,7 @@ async def _start(app: Horsies, broker: PostgresBroker, nodes: list[Any], name: s
     )
     r = await start_workflow_async(spec, broker)
     assert not is_err(r), r
-    return r.ok_value.workflow_id
+    return str(r.ok_value.workflow_id)
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -391,7 +391,7 @@ class TestBatchedPromotionSemantics:
         )
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
-        wf_id = start_r.ok_value.workflow_id
+        wf_id = str(start_r.ok_value.workflow_id)
         await _corrupt_stored_options(session, wf_id, 2)
 
         await finish_task(session, broker, wf_id, 0, TaskResult(ok=0))
@@ -425,7 +425,7 @@ class TestBatchedPromotionSemantics:
         # Resume re-enqueues the READY sibling through the normal path.
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        resume_r = await resume_workflow(broker, wf_id)
+        resume_r = await resume_workflow(broker, uuid.UUID(wf_id))
         assert not is_err(resume_r), resume_r
         statuses_after = await _statuses(session, wf_id)
         assert statuses_after[1] == 'ENQUEUED'

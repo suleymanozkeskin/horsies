@@ -759,9 +759,9 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     assert is_ok(result)
     # No reaper/recovery ran: finalize alone resolved the workflow per
     # on_error (node FAILED with TASK_EXPIRED, sibling SKIPPED, wf FAILED).
-    assert await get_workflow_task_status(session, handle.workflow_id, 0) == 'FAILED'
-    assert await get_workflow_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
-    assert await get_workflow_status(session, handle.workflow_id) == 'FAILED'
+    assert await get_workflow_task_status(session, str(handle.workflow_id), 0) == 'FAILED'
+    assert await get_workflow_task_status(session, str(handle.workflow_id), 1) == 'SKIPPED'
+    assert await get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
     node_result = (
         await session.execute(
             text("""

@@ -139,13 +139,26 @@ before you upgrade a 0.7 deployment.
   (`Status failed for workflow <id>: <cause>`). The records `HandleFailed`
   and `WorkflowResumeRecoveryFailed` of `horsies._core` are removed.
   `workflow_id` and the id in the message are the canonical text of the
-  UUID: a `WorkflowHandle` made from another spelling of the same UUID
-  (upper case, braces) gets the canonical form there.
+  UUID.
   `HandleResumeRecoveryFailed.exception` holds the failure of the work
   after the commit alone, as in 0.7, and its `retryable` is the rule of that
   failure. A failed `result_for` read keeps the `BROKER_ERROR` message of
   0.7, which names the node: `DB query failed for result_for node
   <node_id> in workflow <id>: <cause>`.
+
+- **`WorkflowHandle.workflow_id` is a `uuid.UUID`, and
+  `WorkflowHandle.for_id(text, broker)` parses a workflow id text.**
+  `for_id` returns `Ok(handle)` for every spelling that `uuid.UUID` accepts
+  (upper case, braces, `urn:uuid:`, no hyphens), or
+  `Err(HandleInvalidWorkflowId)` (new, exported from `horsies`: `message`,
+  `workflow_id_text`, `exception`) for text that is not a UUID; it reads
+  nothing. pyright refuses a `str` id in `WorkflowHandle(...)`, and
+  `pause_workflow`, `resume_workflow`, `pause_workflow_sync` and
+  `resume_workflow_sync` take a `uuid.UUID`. A handle that a start returns
+  holds the UUID that the start sent. The handle methods no longer parse the
+  id at each call: in 0.7 a handle made from text that is not a UUID
+  returned `DB_OPERATION_FAILED` from each call. The `workflow_id` of the
+  handle error classes stays a `str`, the canonical text of the UUID.
 
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
@@ -173,7 +186,7 @@ before you upgrade a 0.7 deployment.
   and the rerun outcomes; `mint_task_id()`; and in `horsies.monitoring`,
   `get_task_detail`, `cancel_task` and the task ids of their models. Text
   becomes a task id only at the web API path. Workflow ids keep their text
-  type.
+  type, except `WorkflowHandle.workflow_id`.
 
 - **One `input_json` holds the task input.** `TaskSendPayload.input_json`
   (the keyword arguments as one JSON object, or `None` for none) replaces

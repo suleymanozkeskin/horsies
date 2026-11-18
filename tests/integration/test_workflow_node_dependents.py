@@ -49,7 +49,7 @@ async def _start(app: Horsies, broker: PostgresBroker, nodes: list[Any]) -> str:
     )
     started = await start_workflow_async(spec, broker)
     assert is_ok(started), started
-    return started.ok_value.workflow_id
+    return str(started.ok_value.workflow_id)
 
 
 async def test_phase_two_of_a_leaf_does_not_read_dependents(

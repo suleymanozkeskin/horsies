@@ -22,6 +22,7 @@ resumed; the response says so and carries a warning.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any, assert_never
 
@@ -183,7 +184,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
     """Build the action router bound to one broker."""
     router = APIRouter(tags=['actions'])
 
-    async def _current_status(workflow_id: str) -> WorkflowStatus | _Outcome:
+    async def _current_status(workflow_id: uuid.UUID) -> WorkflowStatus | _Outcome:
         """Re-read a run's status, or the response explaining why we cannot."""
         handle: WorkflowHandle[Any] = WorkflowHandle(
             workflow_id=workflow_id, broker=broker
@@ -225,8 +226,9 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
         is read or changed.
         """
-        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
-        result = await pause_workflow(broker, workflow_id)
+        workflow_key = require_path_uuid('workflow_id', workflow_id)
+        workflow_id = str(workflow_key)
+        result = await pause_workflow(broker, workflow_key)
         if is_err(result):
             return _respond(
                 'workflows.pause', workflow_id, _handle_failed(result.err_value)
@@ -234,7 +236,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         if result.ok_value:
             return _respond('workflows.pause', workflow_id, _succeeded('paused'))
 
-        current = await _current_status(workflow_id)
+        current = await _current_status(workflow_key)
         if isinstance(current, _Outcome):
             return _respond('workflows.pause', workflow_id, current)
         return _respond(
@@ -255,8 +257,9 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
         is read or changed.
         """
-        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
-        result = await resume_workflow(broker, workflow_id)
+        workflow_key = require_path_uuid('workflow_id', workflow_id)
+        workflow_id = str(workflow_key)
+        result = await resume_workflow(broker, workflow_key)
         if is_err(result):
             error = result.err_value
             match error:
@@ -273,7 +276,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         if result.ok_value:
             return _respond('workflows.resume', workflow_id, _succeeded('resumed'))
 
-        current = await _current_status(workflow_id)
+        current = await _current_status(workflow_key)
         if isinstance(current, _Outcome):
             return _respond('workflows.resume', workflow_id, current)
         return _respond(
@@ -292,9 +295,10 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
         is read or changed.
         """
-        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
+        workflow_key = require_path_uuid('workflow_id', workflow_id)
+        workflow_id = str(workflow_key)
         handle: WorkflowHandle[Any] = WorkflowHandle(
-            workflow_id=workflow_id, broker=broker
+            workflow_id=workflow_key, broker=broker
         )
         result = await handle.cancel_async()
         if is_err(result):
@@ -302,7 +306,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
                 'workflows.cancel', workflow_id, _handle_failed(result.err_value)
             )
 
-        current = await _current_status(workflow_id)
+        current = await _current_status(workflow_key)
         if isinstance(current, _Outcome):
             return _respond('workflows.cancel', workflow_id, current)
         if current is WorkflowStatus.CANCELLED:

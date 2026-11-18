@@ -172,13 +172,13 @@ class TestOnErrorFail:
 
         handle = await start_ok(spec, broker)
 
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=4))
 
-        assert await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
 
         # No error stored
-        error = await _get_workflow_error(session, handle.workflow_id)
+        error = await _get_workflow_error(session, str(handle.workflow_id))
         assert error is None
 
     @pytest.mark.parametrize(
@@ -214,7 +214,7 @@ class TestOnErrorFail:
 
         sentinel_result_for_forced: str | None = None
         if initial_status == 'COMPLETED':
-            await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
+            await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
         else:
             sentinel_result_for_forced = f'pre-existing-{initial_status.lower()}-payload'
             await session.execute(
@@ -235,7 +235,7 @@ class TestOnErrorFail:
         with caplog.at_level(logging.WARNING, logger='horsies.workflow.engine'):
             await _fail_enqueued_task(
                 session,
-                handle.workflow_id,
+                str(handle.workflow_id),
                 0,
                 'late enqueue failure should not overwrite terminal task',
                 broker,
@@ -271,7 +271,7 @@ class TestOnErrorFail:
 
         # CAS-miss must short-circuit before _handle_workflow_task_failure, so the
         # workflow's error column stays untouched regardless of the starting state.
-        assert await _get_workflow_error(session, handle.workflow_id) is None
+        assert await _get_workflow_error(session, str(handle.workflow_id)) is None
 
     @pytest.mark.parametrize(
         'initial_status',
@@ -304,7 +304,7 @@ class TestOnErrorFail:
 
         sentinel_result_for_forced: str | None = None
         if initial_status == 'COMPLETED':
-            await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=99))
+            await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=99))
         else:
             sentinel_result_for_forced = (
                 f'pre-existing-subworkflow-{initial_status.lower()}-payload'
@@ -328,7 +328,7 @@ class TestOnErrorFail:
             await _fail_subworkflow_load(
                 session,
                 broker,
-                handle.workflow_id,
+                str(handle.workflow_id),
                 0,
                 'subworkflow_terminal_guard_workflow',
                 'tests.unregistered_child.v1',
@@ -363,7 +363,7 @@ class TestOnErrorFail:
         ), f'Expected subworkflow guard warning, got: {warning_messages}'
 
         # CAS-miss must short-circuit before _handle_workflow_task_failure.
-        assert await _get_workflow_error(session, handle.workflow_id) is None
+        assert await _get_workflow_error(session, str(handle.workflow_id)) is None
 
     async def test_fail_stores_error_keeps_running(
         self,
@@ -396,22 +396,22 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Workflow should still be RUNNING because B can still run
-        status = await _get_workflow_status(session, handle.workflow_id)
+        status = await _get_workflow_status(session, str(handle.workflow_id))
         assert status == 'RUNNING'
 
         # Error should be stored with correct content
-        error = await _get_workflow_error(session, handle.workflow_id)
+        error = await _get_workflow_error(session, str(handle.workflow_id))
         assert error is not None
         assert error['error_code'] == 'TEST_FAIL'
 
         # B should be ENQUEUED (can run with failed dep)
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
 
     async def test_fail_continues_propagation_injects_error(
         self,
@@ -443,13 +443,13 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='INJECTED_ERR', message='Injected')),
         )
 
         # B should be ENQUEUED (allow_failed_deps=True)
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
 
         # Verify injected kwargs contain the error from A
         wt_result = await session.execute(
@@ -500,13 +500,13 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B is ENQUEUED
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
 
     async def test_fail_allow_failed_deps_false_skipped(
         self,
@@ -538,13 +538,13 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B should be SKIPPED
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'SKIPPED'
 
     async def test_fail_skipped_propagates(
         self,
@@ -573,16 +573,16 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B should be SKIPPED
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'SKIPPED'
 
         # C should also be SKIPPED (waits for SKIPPED B)
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'SKIPPED'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'SKIPPED'
 
     async def test_fail_final_status_failed(
         self,
@@ -609,13 +609,13 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Workflow should now be FAILED (all tasks terminal)
-        status = await _get_workflow_status(session, handle.workflow_id)
+        status = await _get_workflow_status(session, str(handle.workflow_id))
         assert status == 'FAILED'
 
     async def test_fail_error_stored_as_taskerror(
@@ -637,7 +637,7 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(
                 err=TaskError(
@@ -649,7 +649,7 @@ class TestOnErrorFail:
         )
 
         # Check error column
-        error_data = await _get_workflow_error(session, handle.workflow_id)
+        error_data = await _get_workflow_error(session, str(handle.workflow_id))
         assert error_data is not None
 
         # Should be TaskError structure, not TaskResult
@@ -684,7 +684,7 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FIRST_ERROR', message='First')),
         )
@@ -693,15 +693,15 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='SECOND_ERROR', message='Second')),
         )
 
         # Workflow is FAILED
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
-        error_data = await _get_workflow_error(session, handle.workflow_id)
+        error_data = await _get_workflow_error(session, str(handle.workflow_id))
         assert error_data is not None
         assert error_data['error_code'] == 'FIRST_ERROR'
 
@@ -737,18 +737,18 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B runs and recovers
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=999))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=999))
 
         # A failed, so the workflow is FAILED and stores no result
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
-        assert await _get_workflow_result(session, handle.workflow_id) is None
-        assert await _get_node_ok(session, handle.workflow_id, 1) == 999
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
+        assert await _get_workflow_result(session, str(handle.workflow_id)) is None
+        assert await _get_node_ok(session, str(handle.workflow_id), 1) == 999
 
     async def test_skip_propagates_through_chain(
         self,
@@ -781,17 +781,17 @@ class TestOnErrorFail:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B SKIPPED, C also SKIPPED (no deadlock)
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'SKIPPED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'SKIPPED'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'SKIPPED'
 
         # Workflow resolves to FAILED
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
 
 @pytest.mark.integration
@@ -836,13 +836,13 @@ class TestOnErrorPause:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Workflow should be PAUSED immediately
-        status = await _get_workflow_status(session, handle.workflow_id)
+        status = await _get_workflow_status(session, str(handle.workflow_id))
         assert status == 'PAUSED'
 
     async def test_pause_stores_error(
@@ -863,7 +863,7 @@ class TestOnErrorPause:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(
                 err=TaskError(
@@ -873,10 +873,10 @@ class TestOnErrorPause:
             ),
         )
 
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # Error column should contain the TaskError content
-        error_data = await _get_workflow_error(session, handle.workflow_id)
+        error_data = await _get_workflow_error(session, str(handle.workflow_id))
         assert error_data is not None
         assert error_data['error_code'] == 'PAUSE_ERR'
         assert error_data['message'] == 'Paused due to error'
@@ -913,13 +913,13 @@ class TestOnErrorPause:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B should NOT be enqueued (PAUSE stops propagation)
-        status = await _get_task_status(session, handle.workflow_id, 1)
+        status = await _get_task_status(session, str(handle.workflow_id), 1)
         assert status == 'PENDING'
 
     async def test_pause_pending_stays_pending(
@@ -949,14 +949,14 @@ class TestOnErrorPause:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B and C should remain PENDING
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'PENDING'
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'PENDING'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'PENDING'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'PENDING'
 
     async def test_pause_blocks_propagation_from_other_task(
         self,
@@ -982,27 +982,27 @@ class TestOnErrorPause:
         handle = await start_ok(spec, broker)
 
         # A and B are both ENQUEUED (roots)
-        assert await _get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 0) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
 
         # Fail A -> workflow PAUSED
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # Now B completes (was already enqueued)
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=100))
 
         # C should still be PENDING (PAUSE guard blocks propagation)
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'PENDING'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'PENDING'
 
         # Workflow still PAUSED
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
     async def test_pause_already_enqueued_may_complete(
         self,
@@ -1026,23 +1026,23 @@ class TestOnErrorPause:
         handle = await start_ok(spec, broker)
 
         # Both A and B are ENQUEUED
-        assert await _get_task_status(session, handle.workflow_id, 0) == 'ENQUEUED'
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 0) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
 
         # Fail A -> PAUSED
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # B can still complete (was already enqueued)
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=200))
         assert (
-            await _get_task_status(session, handle.workflow_id, 1) == 'COMPLETED'
+            await _get_task_status(session, str(handle.workflow_id), 1) == 'COMPLETED'
         )
 
     async def test_pause_second_failure_does_not_overwrite_error(
@@ -1071,29 +1071,29 @@ class TestOnErrorPause:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FIRST_ERROR', message='First')),
         )
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # B was already enqueued and also fails
         # PAUSE_WORKFLOW_ON_ERROR_SQL has WHERE status = 'RUNNING', so it's a no-op
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='SECOND_ERROR', message='Second')),
         )
 
         # Original error preserved (second SET_WORKFLOW_ERROR_SQL targets RUNNING, not PAUSED)
-        error_data = await _get_workflow_error(session, handle.workflow_id)
+        error_data = await _get_workflow_error(session, str(handle.workflow_id))
         assert error_data is not None
         assert error_data['error_code'] == 'FIRST_ERROR'
 
         # Still PAUSED (not overwritten to something else)
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
     async def test_pause_guard_blocks_pending_to_ready(
         self,
@@ -1139,11 +1139,11 @@ class TestOnErrorPause:
         await session.commit()
 
         # Try to make B ready - the guard should block this
-        await try_make_ready_and_enqueue(session, broker, handle.workflow_id, 1)
+        await try_make_ready_and_enqueue(session, broker, str(handle.workflow_id), 1)
         await session.commit()
 
         # B should still be PENDING (guard blocked PENDING -> READY)
-        b_status = await _get_task_status(session, handle.workflow_id, 1)
+        b_status = await _get_task_status(session, str(handle.workflow_id), 1)
         assert b_status == 'PENDING', f'Expected PENDING but got {b_status}'
 
     async def test_pause_guard_blocks_ready_to_enqueued(
@@ -1190,17 +1190,17 @@ class TestOnErrorPause:
         await session.commit()
 
         # Verify B is READY
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'READY'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'READY'
 
         # Try to enqueue B - the guard should block this
-        result = await enqueue_workflow_task(session, handle.workflow_id, 1, {})
+        result = await enqueue_workflow_task(session, str(handle.workflow_id), 1, {})
         await session.commit()
 
         # Result should be None (guard blocked the enqueue)
         assert result is None, f'Expected None but got {result}'
 
         # B should still be READY (not ENQUEUED)
-        b_status = await _get_task_status(session, handle.workflow_id, 1)
+        b_status = await _get_task_status(session, str(handle.workflow_id), 1)
         assert b_status == 'READY', f'Expected READY but got {b_status}'
 
         # Verify no task row was created for B
@@ -1260,17 +1260,17 @@ class TestResume:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # Complete B while paused
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=100))
 
         # C should still be PENDING (PAUSE guard blocked it)
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'PENDING'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'PENDING'
 
         # Resume workflow
         resume_r = await handle.resume_async()
@@ -1282,10 +1282,10 @@ class TestResume:
         session.expire_all()
 
         # Workflow should be RUNNING
-        assert await _get_workflow_status(session, handle.workflow_id) == 'RUNNING'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'RUNNING'
 
         # C should now be ENQUEUED (resume re-evaluated PENDING tasks)
-        c_status = await _get_task_status(session, handle.workflow_id, 2)
+        c_status = await _get_task_status(session, str(handle.workflow_id), 2)
         assert c_status == 'ENQUEUED', f'Expected ENQUEUED but got {c_status}'
 
 
@@ -1344,7 +1344,7 @@ class TestEnqueuedFailureConversion:
 
         result = await enqueue_workflow_task(
             session,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             {0: TaskResult(ok=1)},
             broker=broker,
@@ -1418,11 +1418,11 @@ class TestEnqueuedFailureConversion:
         result = await enqueue_subworkflow_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             {0: TaskResult(ok=2)},
             parent_depth=0,
-            root_workflow_id=handle.workflow_id,
+            root_workflow_id=str(handle.workflow_id),
         )
         await session.commit()
 
@@ -1489,7 +1489,7 @@ class TestEnqueuedFailureConversion:
         await session.commit()
 
         # Verify B is READY
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'READY'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'READY'
 
         # Resume workflow
         resume_r = await handle.resume_async()
@@ -1498,7 +1498,7 @@ class TestEnqueuedFailureConversion:
         assert resumed is True
 
         # B should now be ENQUEUED
-        b_status = await _get_task_status(session, handle.workflow_id, 1)
+        b_status = await _get_task_status(session, str(handle.workflow_id), 1)
         assert b_status == 'ENQUEUED', f'Expected ENQUEUED but got {b_status}'
 
         # Verify task_id was created
@@ -1532,7 +1532,7 @@ class TestEnqueuedFailureConversion:
         handle = await start_ok(spec, broker)
 
         # Workflow is RUNNING
-        assert await _get_workflow_status(session, handle.workflow_id) == 'RUNNING'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'RUNNING'
 
         # Resume should be no-op (returns False)
         resume_r = await handle.resume_async()
@@ -1541,7 +1541,7 @@ class TestEnqueuedFailureConversion:
         assert resumed is False
 
         # Status unchanged
-        assert await _get_workflow_status(session, handle.workflow_id) == 'RUNNING'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'RUNNING'
 
     async def test_resume_noop_when_completed(
         self,
@@ -1563,9 +1563,9 @@ class TestEnqueuedFailureConversion:
         handle = await start_ok(spec, broker)
 
         # Complete A -> workflow COMPLETED
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
         assert (
-            await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+            await _get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
         )
 
         # Resume should be no-op
@@ -1576,7 +1576,7 @@ class TestEnqueuedFailureConversion:
 
         # Status unchanged
         assert (
-            await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+            await _get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
         )
 
     async def test_resume_noop_when_failed(
@@ -1602,11 +1602,11 @@ class TestEnqueuedFailureConversion:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
         # Resume should be no-op on terminal FAILED state
         resume_r = await handle.resume_async()
@@ -1615,7 +1615,7 @@ class TestEnqueuedFailureConversion:
         assert resumed is False
 
         # Status unchanged
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     async def test_resume_all_tasks_terminal_completes(
         self,
@@ -1648,11 +1648,11 @@ class TestEnqueuedFailureConversion:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # Resume -> B is still PENDING, resume evaluates it -> B gets SKIPPED
         resume_r = await handle.resume_async()
@@ -1663,14 +1663,14 @@ class TestEnqueuedFailureConversion:
         session.expire_all()
 
         # B should be SKIPPED (dep A failed, allow_failed_deps=False)
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'SKIPPED'
 
         # Now all tasks are terminal. Check what state the workflow ended up in.
         # resume_workflow doesn't call check_workflow_completion directly,
         # but try_make_ready_and_enqueue -> SKIP cascade -> _process_dependents ->
         # eventually check_workflow_completion should fire.
         # If it didn't, we may end up stuck in RUNNING - that would be a bug to catch.
-        final_status = await _get_workflow_status(session, handle.workflow_id)
+        final_status = await _get_workflow_status(session, str(handle.workflow_id))
         assert final_status == 'FAILED', (
             f'Expected FAILED after resume with all terminal tasks, got {final_status}'
         )
@@ -1706,14 +1706,14 @@ class TestEnqueuedFailureConversion:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
-        assert await _get_workflow_status(session, handle.workflow_id) == 'PAUSED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # B was already enqueued, complete it while paused
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=42))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=42))
 
         # Resume workflow
         resume_r = await handle.resume_async()
@@ -1725,13 +1725,13 @@ class TestEnqueuedFailureConversion:
 
         # All tasks terminal now. Workflow should be FAILED because A failed
         # (error column has_error=True, failed=1).
-        final_status = await _get_workflow_status(session, handle.workflow_id)
+        final_status = await _get_workflow_status(session, str(handle.workflow_id))
         assert final_status == 'FAILED', (
             f'Expected FAILED after resume with prior error, got {final_status}'
         )
 
         # Error should still contain A's error
-        error_data = await _get_workflow_error(session, handle.workflow_id)
+        error_data = await _get_workflow_error(session, str(handle.workflow_id))
         assert error_data is not None
         assert error_data['error_code'] == 'TEST_FAIL'
 
@@ -1780,13 +1780,13 @@ class TestAllowFailedDeps:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='ERR_CODE', message='Error message')),
         )
 
         # B is enqueued with failed result injected
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
 
         # Check the injected kwargs contain error
         wt_result = await session.execute(
@@ -1838,17 +1838,17 @@ class TestAllowFailedDeps:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST', message='Test')),
         )
 
         # B recovers with success
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=999))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=999))
 
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
-        assert await _get_workflow_result(session, handle.workflow_id) is None
-        assert await _get_node_ok(session, handle.workflow_id, 1) == 999
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
+        assert await _get_workflow_result(session, str(handle.workflow_id)) is None
+        assert await _get_node_ok(session, str(handle.workflow_id), 1) == 999
 
     async def test_allow_failed_deps_chain(
         self,
@@ -1886,16 +1886,16 @@ class TestAllowFailedDeps:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST', message='Test')),
         )
 
         # B recovers
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=100))
 
         # C should be enqueued (B succeeded)
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
     async def test_allow_failed_deps_partial(
         self,
@@ -1939,14 +1939,14 @@ class TestAllowFailedDeps:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='Failed')),
         )
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=100))
 
         # C should be enqueued (allow_failed_deps=True)
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
     async def test_allow_failed_deps_receives_upstream_skipped(
         self,
@@ -1981,16 +1981,16 @@ class TestAllowFailedDeps:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='Failed')),
         )
 
         # B should be SKIPPED
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'SKIPPED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'SKIPPED'
 
         # C should be ENQUEUED
-        assert await _get_task_status(session, handle.workflow_id, 2) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
         # Check injected kwargs
         wt_result = await session.execute(
@@ -2046,13 +2046,13 @@ class TestAllowFailedDeps:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # B should be ENQUEUED (allow_failed_deps=True, no args_from needed)
-        assert await _get_task_status(session, handle.workflow_id, 1) == 'ENQUEUED'
+        assert await _get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
 
 
 @pytest.mark.integration
@@ -2166,19 +2166,19 @@ class TestSuccessPolicy:
         handle = await start_ok(spec, broker)
 
         # Complete A successfully
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
         # Fail B
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Workflow should be FAILED
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     async def test_success_case_satisfied_completes(
         self,
@@ -2205,20 +2205,20 @@ class TestSuccessPolicy:
         handle = await start_ok(spec, broker)
 
         # Complete A successfully
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
         # Fail B
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Workflow should be COMPLETED (case [A] is satisfied)
         assert (
-            await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+            await _get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
         )
 
     async def test_all_cases_unsatisfied_fails(
@@ -2250,13 +2250,13 @@ class TestSuccessPolicy:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Workflow should be FAILED (B is SKIPPED, not COMPLETED)
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     async def test_optional_fails_but_case_satisfied_completes(
         self,
@@ -2288,23 +2288,23 @@ class TestSuccessPolicy:
         handle = await start_ok(spec, broker)
 
         # Complete A successfully
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
         # Fail B (optional)
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Complete C successfully
-        await finish_task(session, broker, handle.workflow_id, 2, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=4))
 
         # Workflow should be COMPLETED (case [A] is satisfied, B is optional)
         assert (
-            await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+            await _get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
         )
 
     async def test_multiple_success_cases_any_satisfied(
@@ -2340,17 +2340,17 @@ class TestSuccessPolicy:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Complete B successfully
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=2))
 
         # Workflow should be COMPLETED (case [B] is satisfied)
         assert (
-            await _get_workflow_status(session, handle.workflow_id) == 'COMPLETED'
+            await _get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
         )
 
     async def test_success_case_not_met_error(
@@ -2381,17 +2381,17 @@ class TestSuccessPolicy:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test')),
         )
 
         # Workflow should be FAILED
-        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
         # Required task (B) was SKIPPED, so no required task FAILED.
         # Expect the sentinel WORKFLOW_SUCCESS_CASE_NOT_MET.
-        error_data = await _get_workflow_error(session, handle.workflow_id)
+        error_data = await _get_workflow_error(session, str(handle.workflow_id))
         assert error_data is not None
 
         # A failed first, but B (required) was SKIPPED not FAILED

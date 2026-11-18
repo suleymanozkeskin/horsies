@@ -655,7 +655,7 @@ async def test_pause_resets_retry_window_claimed_workflow_task(
         worker_id='retry-window-worker',
     )
 
-    result = await pause_workflow(broker, workflow_id)
+    result = await pause_workflow(broker, uuid.UUID(workflow_id))
 
     assert is_ok(result)
     assert result.ok_value is True

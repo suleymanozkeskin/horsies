@@ -11,6 +11,8 @@ switch (``tests/dualrun/reference/workflow_start_caller.py``);
 
 from __future__ import annotations
 
+import uuid
+
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock
 
@@ -177,7 +179,7 @@ class TestIdConflict:
         result = await start_workflow_async(_make_spec(), broker, WORKFLOW_ID)
 
         assert not is_err(result)
-        assert result.ok_value.workflow_id == WORKFLOW_ID
+        assert result.ok_value.workflow_id == uuid.UUID(WORKFLOW_ID)
         session.commit.assert_not_awaited()
 
 

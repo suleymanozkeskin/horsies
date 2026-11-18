@@ -341,7 +341,7 @@ async def start_workflow_async(
         return Ok(cast(
             'WorkflowHandle[OutT]',
             WorkflowHandle(
-                workflow_id=wf_id,
+                workflow_id=uuid.UUID(wf_id),
                 broker=broker,
                 out_type=(
                     _resolve_source_node_ok_type(spec.output)

@@ -93,10 +93,10 @@ class TestSkipSetsCompletedAt:
             broker,
         )
 
-        await finish_task(session, broker, handle.workflow_id, 0, _FAILED)
-        await finish_task(session, broker, handle.workflow_id, 1, _FAILED)
+        await finish_task(session, broker, str(handle.workflow_id), 0, _FAILED)
+        await finish_task(session, broker, str(handle.workflow_id), 1, _FAILED)
 
-        status, completed_at = await _node(session, handle.workflow_id, 2)
+        status, completed_at = await _node(session, str(handle.workflow_id), 2)
         assert status == 'SKIPPED'
         assert completed_at is not None
 
@@ -113,9 +113,9 @@ class TestSkipSetsCompletedAt:
             broker,
         )
 
-        await finish_task(session, broker, handle.workflow_id, 0, _FAILED)
+        await finish_task(session, broker, str(handle.workflow_id), 0, _FAILED)
 
-        status, completed_at = await _node(session, handle.workflow_id, 1)
+        status, completed_at = await _node(session, str(handle.workflow_id), 1)
         assert status == 'SKIPPED'
         assert completed_at is not None
 
@@ -133,12 +133,12 @@ class TestSkipSetsCompletedAt:
             ),
             broker,
         )
-        await _fail_dependencies_in_place(session, handle.workflow_id, [0, 1])
+        await _fail_dependencies_in_place(session, str(handle.workflow_id), [0, 1])
 
-        await try_make_ready_and_enqueue(session, broker, handle.workflow_id, 2)
+        await try_make_ready_and_enqueue(session, broker, str(handle.workflow_id), 2)
         await session.commit()
 
-        status, completed_at = await _node(session, handle.workflow_id, 2)
+        status, completed_at = await _node(session, str(handle.workflow_id), 2)
         assert status == 'SKIPPED'
         assert completed_at is not None
 
@@ -155,11 +155,11 @@ class TestSkipSetsCompletedAt:
             ),
             broker,
         )
-        await _fail_dependencies_in_place(session, handle.workflow_id, [0])
+        await _fail_dependencies_in_place(session, str(handle.workflow_id), [0])
 
-        await try_make_ready_and_enqueue(session, broker, handle.workflow_id, 1)
+        await try_make_ready_and_enqueue(session, broker, str(handle.workflow_id), 1)
         await session.commit()
 
-        status, completed_at = await _node(session, handle.workflow_id, 1)
+        status, completed_at = await _node(session, str(handle.workflow_id), 1)
         assert status == 'SKIPPED'
         assert completed_at is not None

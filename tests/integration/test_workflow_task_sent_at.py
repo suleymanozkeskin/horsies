@@ -87,7 +87,7 @@ class TestEngineTaskSentAt:
         )
         started = await start_workflow_async(spec, broker, sent_at=START_CALL_TIME)
         assert not is_err(started), started
-        workflow_id = started.ok_value.workflow_id
+        workflow_id = str(started.ok_value.workflow_id)
 
         assert await _workflow_sent_at(session, workflow_id) == START_CALL_TIME
         assert await _task_sent_at(session, workflow_id) == {0: START_CALL_TIME}

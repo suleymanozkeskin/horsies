@@ -137,7 +137,7 @@ async def test_handle_pause_notifies_each_paused_workflow_through_the_trigger(
     )
 
     with _captured_statements(current_resources(broker).engine) as statements:
-        paused = await pause_workflow(broker, parent_id)
+        paused = await pause_workflow(broker, uuid.UUID(parent_id))
 
     assert is_ok(paused) and paused.ok_value is True, paused
     assert sorted(await _received(workflow_done_listener)) == sorted(

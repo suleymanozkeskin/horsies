@@ -75,9 +75,9 @@ async def _chain_after_phase_one(
         definition_key=f'wf-phase-{uuid.uuid4().hex[:6]}',
     )
     handle = await start_ok(spec, broker)
-    done = await finish_phase_one(session, broker, handle.workflow_id, 0, TaskResult(ok=1))
+    done = await finish_phase_one(session, broker, str(handle.workflow_id), 0, TaskResult(ok=1))
     assert done.facts is PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW
-    return handle.workflow_id, done
+    return str(handle.workflow_id), done
 
 
 def _owed(done: PhaseOneDone) -> _NodeFinishOwed:

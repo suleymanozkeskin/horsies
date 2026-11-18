@@ -207,7 +207,7 @@ class TestStartAnswers:
             )
 
         assert is_ok(result)
-        assert result.ok_value.workflow_id == WORKFLOW_ID
+        assert result.ok_value.workflow_id == uuid.UUID(WORKFLOW_ID)
         arguments = request_class.call_args.kwargs
         assert arguments['workflow_id'] == uuid.UUID(WORKFLOW_ID)
         assert arguments['sent_at'] == SENT_AT

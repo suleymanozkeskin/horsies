@@ -131,7 +131,7 @@ def test_workflow_call_gets_connection_released_by_task_runner(
     )
     time.sleep(WAITER_START_DELAY_SECONDS)
     handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=str(uuid.uuid4()), broker=broker,
+        workflow_id=uuid.uuid4(), broker=broker,
     )
 
     outcome, elapsed = _timed_call(handle.status)
@@ -165,7 +165,7 @@ def test_ping_workers_after_sync_workflow_wait(
     app = one_connection_app.app
     broker = app.get_broker()
     handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=str(uuid.uuid4()), broker=broker,
+        workflow_id=uuid.uuid4(), broker=broker,
     )
 
     waited, _ = _timed_call(lambda: handle.get(timeout_ms=RESULT_WAIT_MS))

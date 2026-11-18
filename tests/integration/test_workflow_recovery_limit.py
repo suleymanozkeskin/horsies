@@ -462,7 +462,7 @@ async def _start_a_then_b(harness: Harness) -> tuple[str, str]:
     )
     started = await start_workflow_async(spec, harness.broker)
     assert not is_err(started), started
-    workflow_id = started.ok_value.workflow_id
+    workflow_id = str(started.ok_value.workflow_id)
     await _refuse_task_inserts(harness, workflow_id)
     async with harness.sessions() as session:
         task_id = (
@@ -716,7 +716,7 @@ class TestLimitOnEachCase:
         assert reports[-1].metrics['case_1'].limit_reached == 1
 
         handle: WorkflowHandle[Any] = WorkflowHandle(
-            workflow_id=workflow_id, broker=harness.broker,
+            workflow_id=uuid.UUID(workflow_id), broker=harness.broker,
         )
         outcome = await handle.get_async(timeout_ms=0)
         assert outcome.is_err()

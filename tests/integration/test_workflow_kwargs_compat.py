@@ -281,7 +281,7 @@ class TestSubworkflowKwargsOnly:
         handle = await start_ok(spec, broker)
 
         # Complete upstream task to trigger subworkflow start
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=7))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=7))
         await session.commit()
 
         # Subworkflow should be RUNNING

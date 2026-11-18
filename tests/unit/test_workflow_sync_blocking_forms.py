@@ -145,8 +145,8 @@ def _answering(method: str, answer: object) -> CoreAnswers:
     return CoreAnswers(handle=handle, runner=runner)
 
 
-def _workflow_handle(workflow_id: str = WORKFLOW_ID) -> WorkflowHandle[int]:
-    return WorkflowHandle(workflow_id=workflow_id, broker=APP.get_broker(), out_type=int)
+def _workflow_handle() -> WorkflowHandle[int]:
+    return WorkflowHandle(workflow_id=WORKFLOW_KEY, broker=APP.get_broker(), out_type=int)
 
 
 async def _awaited(awaitable: Awaitable[object]) -> object:
@@ -410,20 +410,6 @@ def test_a_sync_facade_gives_the_outcome_of_its_async_form(facade: str, answer: 
 
 
 @pytest.mark.parametrize('facade', list(FACADES))
-def test_an_id_that_is_not_a_uuid_is_refused_as_the_async_form_refuses_it(facade: str) -> None:
-    """No core call in either form."""
-    entry = FACADES[facade]
-    answers = _answering(entry.blocking_form, next(iter(entry.answers.values())))
-
-    blocking = entry.blocking(_workflow_handle(NOT_A_UUID))
-    awaited = asyncio.run(_awaited(entry.awaited(_workflow_handle(NOT_A_UUID))))
-
-    assert outcome_shape(blocking) == outcome_shape(awaited)
-    getattr(answers.handle, entry.blocking_form).assert_not_called()
-    getattr(answers.handle, f'{entry.blocking_form}_async').assert_not_called()
-
-
-@pytest.mark.parametrize('facade', list(FACADES))
 def test_a_defect_of_the_call_propagates_from_both_forms(facade: str) -> None:
     """An exception that is not a CoreError is not a catalog outcome."""
     entry = FACADES[facade]
@@ -612,4 +598,4 @@ def test_a_minted_id_is_one_uuid_for_the_request_and_the_handle() -> None:
 
     assert is_ok(started), started
     minted = started.ok_value.workflow_id
-    assert request_class.call_args.kwargs['workflow_id'] == uuid.UUID(minted)
+    assert request_class.call_args.kwargs['workflow_id'] == minted

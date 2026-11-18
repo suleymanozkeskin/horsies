@@ -55,7 +55,7 @@ async def cancel_async(self: WorkflowHandle[Any]) -> HandleResult[None]:
         return Err(HandleDbOperationFailed(
             message=f'Cancel failed for workflow {self.workflow_id}: {exc}',
             retryable=is_retryable_connection_error(exc),
-            workflow_id=self.workflow_id,
+            workflow_id=str(self.workflow_id),
             exception=exc,
         ))
     match decode_cancel_outcome(rows):
@@ -64,7 +64,7 @@ async def cancel_async(self: WorkflowHandle[Any]) -> HandleResult[None]:
         case CancelOutcome.NOT_FOUND:
             return Err(HandleWorkflowNotFound(
                 message=f'Workflow {self.workflow_id} not found',
-                workflow_id=self.workflow_id,
+                workflow_id=str(self.workflow_id),
             ))
         case _ as unreachable:
             assert_never(unreachable)

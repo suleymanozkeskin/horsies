@@ -240,7 +240,7 @@ class TestWorkflowPaths:
         )
         started = await start_workflow_async(spec, broker)
         assert isinstance(started, Ok), started
-        workflow_id = started.ok_value.workflow_id
+        workflow_id = str(started.ok_value.workflow_id)
 
         root_id = await _node_task_id(session, workflow_id, 0)
         assert await _stored_class(session, root_id) == 'SHARED_THREAD'

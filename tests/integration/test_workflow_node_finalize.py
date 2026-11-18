@@ -115,7 +115,7 @@ async def _start_chain(app: Horsies, broker: PostgresBroker) -> str:
     )
     started = await start_workflow_async(spec, broker)
     assert is_ok(started), started
-    return started.ok_value.workflow_id
+    return str(started.ok_value.workflow_id)
 
 
 async def _run_node_a(session: AsyncSession, workflow_id: str) -> _RunningNode:
@@ -347,7 +347,7 @@ async def test_a_lost_claim_generation_writes_nothing_and_owes_nothing(
 
 async def _cancel(broker: PostgresBroker, workflow_id: str) -> None:
     cancelled = await WorkflowHandle(
-        workflow_id=workflow_id, broker=broker
+        workflow_id=uuid.UUID(workflow_id), broker=broker
     ).cancel_async()
     assert is_ok(cancelled), cancelled
 

@@ -222,14 +222,14 @@ async def _status(
             if row is None:
                 return Err(HandleWorkflowNotFound(
                     message=f'Workflow {self.workflow_id} not found',
-                    workflow_id=self.workflow_id,
+                    workflow_id=str(self.workflow_id),
                 ))
-            return _parse_stored_workflow_status(self.workflow_id, row.status)
+            return _parse_stored_workflow_status(str(self.workflow_id), row.status)
     except SQLAlchemyError as exc:
         return Err(HandleDbOperationFailed(
             message=f'DB query failed for workflow {self.workflow_id} status: {exc}',
             retryable=is_retryable_connection_error(exc),
-            workflow_id=self.workflow_id,
+            workflow_id=str(self.workflow_id),
             exception=exc,
         ))
 
@@ -250,7 +250,7 @@ async def get_async(
     if process_role() is ProcessRole.RUNS_TASK_BODIES:
         return cast(
             'TaskResult[Any, TaskError]',
-            _wait_inside_task_result(self.workflow_id, 'get_async'),
+            _wait_inside_task_result(str(self.workflow_id), 'get_async'),
         )
 
     start = time.monotonic()
@@ -268,7 +268,7 @@ async def get_async(
                             f'WorkflowHandle.get() for workflow '
                             f'{self.workflow_id}: {refused.message}'
                         ),
-                        data={'workflow_id': self.workflow_id},
+                        data={'workflow_id': str(self.workflow_id)},
                     ),
                 ),
             )
@@ -279,7 +279,7 @@ async def get_async(
         case Err(loop_limit):
             return cast(
                 'TaskResult[Any, TaskError]',
-                _event_loop_limit_task_result(self.workflow_id, loop_limit),
+                _event_loop_limit_task_result(str(self.workflow_id), loop_limit),
             )
         case Ok(resources):
             pass
@@ -422,7 +422,7 @@ async def _drain_queue_for_workflow(
     """Drain notifications until one matches this workflow."""
     while True:
         note = await q.get()
-        if note.payload == self.workflow_id:
+        if note.payload == str(self.workflow_id):
             return
 
 
@@ -456,7 +456,7 @@ async def _get_result(
                 return cast(
                     'TaskResult[Any, TaskError]',
                     _removed_after_status_read(
-                        self.workflow_id, WorkflowStatus.COMPLETED,
+                        str(self.workflow_id), WorkflowStatus.COMPLETED,
                     ),
                 )
             match row.result:
@@ -464,14 +464,14 @@ async def _get_result(
                     return cast(
                         'TaskResult[Any, TaskError]',
                         _completed_without_stored_result(
-                            self.workflow_id, 'NULL',
+                            str(self.workflow_id), 'NULL',
                         ),
                     )
                 case '':
                     return cast(
                         'TaskResult[Any, TaskError]',
                         _completed_without_stored_result(
-                            self.workflow_id, 'empty',
+                            str(self.workflow_id), 'empty',
                         ),
                     )
                 case stored_result:
@@ -487,7 +487,7 @@ async def _get_result(
                         loads_r.ok_value,
                         self.out_type,
                         app=self.broker.app,
-                        workflow_id=self.workflow_id,
+                        workflow_id=str(self.workflow_id),
                     )
                     return cast('TaskResult[Any, TaskError]', decoded)
     except SQLAlchemyError as exc:
@@ -532,7 +532,7 @@ async def _get_error(
             if row is None:
                 return cast(
                     'TaskResult[Any, TaskError]',
-                    _removed_after_status_read(self.workflow_id, status),
+                    _removed_after_status_read(str(self.workflow_id), status),
                 )
             match row.error:
                 case None:
@@ -548,13 +548,13 @@ async def _get_error(
                 case '':
                     return cast(
                         'TaskResult[Any, TaskError]',
-                        _empty_stored_error(self.workflow_id),
+                        _empty_stored_error(str(self.workflow_id)),
                     )
                 case stored_error:
                     return cast(
                         'TaskResult[Any, TaskError]',
                         _decode_stored_workflow_error(
-                            self.workflow_id, status, stored_error,
+                            str(self.workflow_id), status, stored_error,
                         ),
                     )
     except SQLAlchemyError as exc:
@@ -596,7 +596,7 @@ async def result_for_async(
         case Err(loop_limit):
             return cast(
                 'TaskResult[Any, TaskError]',
-                _event_loop_limit_task_result(self.workflow_id, loop_limit),
+                _event_loop_limit_task_result(str(self.workflow_id), loop_limit),
             )
         case Ok(resources):
             pass
@@ -665,7 +665,7 @@ def _workflow_node_rows(
         case []:
             return Err(HandleWorkflowNotFound(
                 message=f'Workflow {self.workflow_id} not found',
-                workflow_id=self.workflow_id,
+                workflow_id=str(self.workflow_id),
             ))
         case [only] if only.workflow_task_id is None:
             return Ok([])
@@ -723,7 +723,7 @@ async def results_async(self: WorkflowHandle[Any]) -> HandleResult[dict[str, Tas
         return Err(HandleDbOperationFailed(
             message=f'DB query failed for workflow {self.workflow_id} results: {exc}',
             retryable=is_retryable_connection_error(exc),
-            workflow_id=self.workflow_id,
+            workflow_id=str(self.workflow_id),
             exception=exc,
         ))
 
@@ -783,7 +783,7 @@ async def tasks_async(self: WorkflowHandle[Any]) -> HandleResult[list[WorkflowTa
                                 f'sub_workflow_summary JSON corrupt for node '
                                 f'{row.node_id}: {summary_loads_r.err_value}'
                             ),
-                            workflow_id=self.workflow_id,
+                            workflow_id=str(self.workflow_id),
                             exception=summary_loads_r.err_value,
                         ))
                     try:
@@ -796,7 +796,7 @@ async def tasks_async(self: WorkflowHandle[Any]) -> HandleResult[list[WorkflowTa
                                 f'sub_workflow_summary invalid for node '
                                 f'{row.node_id}: {summary_exc}'
                             ),
-                            workflow_id=self.workflow_id,
+                            workflow_id=str(self.workflow_id),
                             exception=summary_exc,
                         ))
 
@@ -805,7 +805,7 @@ async def tasks_async(self: WorkflowHandle[Any]) -> HandleResult[list[WorkflowTa
                     index=row.task_index,
                     name=row.task_name,
                     status=stored_node_status(
-                        workflow_id=self.workflow_id,
+                        workflow_id=str(self.workflow_id),
                         node_id=row.node_id,
                         stored=row.status,
                     ),
@@ -820,6 +820,6 @@ async def tasks_async(self: WorkflowHandle[Any]) -> HandleResult[list[WorkflowTa
         return Err(HandleDbOperationFailed(
             message=f'DB query failed for workflow {self.workflow_id} tasks: {exc}',
             retryable=is_retryable_connection_error(exc),
-            workflow_id=self.workflow_id,
+            workflow_id=str(self.workflow_id),
             exception=exc,
         ))

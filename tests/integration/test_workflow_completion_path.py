@@ -120,7 +120,7 @@ class TestCompletionStatementBudget:
         spec = _chain_spec(app)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
-        wf_id = start_r.ok_value.workflow_id
+        wf_id = str(start_r.ok_value.workflow_id)
 
         # B waits only on A, so phase 2 of A promotes B.
         promote_stmts = await _phase_two_statements(session, broker, wf_id, 0, TaskResult(ok=1))
@@ -144,7 +144,7 @@ class TestCompletionStatementBudget:
         spec = _chain_spec(app)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
-        wf_id = start_r.ok_value.workflow_id
+        wf_id = str(start_r.ok_value.workflow_id)
 
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='BENCH_FAIL', message='forced'),
@@ -171,7 +171,7 @@ class TestCompletionEquivalence:
         spec = _chain_spec(app)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
-        wf_id = start_r.ok_value.workflow_id
+        wf_id = str(start_r.ok_value.workflow_id)
 
         await finish_task(session, broker, wf_id, 0, TaskResult(ok=1))
         await session.commit()
@@ -196,7 +196,7 @@ class TestCompletionEquivalence:
         spec = _chain_spec(app, on_error=OnError.FAIL)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
-        wf_id = start_r.ok_value.workflow_id
+        wf_id = str(start_r.ok_value.workflow_id)
 
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='BENCH_FAIL', message='forced'),
@@ -220,7 +220,7 @@ class TestCompletionEquivalence:
         spec = _chain_spec(app, on_error=OnError.PAUSE)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
-        wf_id = start_r.ok_value.workflow_id
+        wf_id = str(start_r.ok_value.workflow_id)
 
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='BENCH_FAIL', message='forced'),
@@ -245,7 +245,7 @@ class TestCompletionEquivalence:
         spec = _chain_spec(app)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
-        wf_id = start_r.ok_value.workflow_id
+        wf_id = str(start_r.ok_value.workflow_id)
 
         await session.execute(
             text("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = :wf"),

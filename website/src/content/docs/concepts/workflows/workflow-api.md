@@ -128,7 +128,8 @@ match spec.start():
 
 | Attribute / Method | Type / Signature | Description |
 |---|---|---|
-| `.workflow_id` | `str` | Workflow UUID |
+| `WorkflowHandle.for_id(text, broker)` | `(str, PostgresBroker) -> Result[WorkflowHandle[Any], HandleInvalidWorkflowId]` | The handle of a workflow id text, or `HandleInvalidWorkflowId` when the text is not a UUID. Reads nothing |
+| `.workflow_id` | `uuid.UUID` | Workflow id; `str(handle.workflow_id)` is its canonical text |
 | `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
 | `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[OutT, TaskError]` | Block until completion or timeout. A COMPLETED workflow whose output node is SKIPPED returns `WORKFLOW_OUTPUT_SKIPPED`: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy) |
 | `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id; `Ok({})` before any node has a result, `HandleWorkflowNotFound` when no workflow has the id |
@@ -138,11 +139,13 @@ match spec.start():
 | `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |
 | `.resume()` / `.resume_async()` | `-> HandleResult[bool]` | Resume paused workflow |
 
+`WorkflowHandle(workflow_id=..., broker=...)` takes a `uuid.UUID`. `for_id` parses a text once: every spelling that `uuid.UUID` accepts (upper case, braces, `urn:uuid:`, no hyphens) gives the same UUID. Text that is not a UUID is `HandleInvalidWorkflowId` with `message`, `workflow_id_text` (the text as given) and `exception` (the `ValueError` of `uuid.UUID`); the same text gives the same error. It is not a `HandleOperationError` variant.
+
 ### HandleResult
 
 `HandleResult[T] = Result[T, HandleOperationError]`
 
-Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()` and their `*_async` forms, and by `pause_workflow()`, `resume_workflow()`, `pause_workflow_sync()` and `resume_workflow_sync()`.
+Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()` and their `*_async` forms, and by `pause_workflow()`, `resume_workflow()`, `pause_workflow_sync()` and `resume_workflow_sync()`. These four functions take the workflow id as a `uuid.UUID`.
 
 **HandleOperationError variants:**
 

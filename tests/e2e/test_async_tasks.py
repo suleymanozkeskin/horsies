@@ -128,7 +128,7 @@ async def test_an_async_task_runs_as_a_workflow_node(broker: PostgresBroker) -> 
 
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory,
-            handle.workflow_id,
+            str(handle.workflow_id),
             timeout_s=30.0,
         )
         assert status == 'COMPLETED'
@@ -250,7 +250,7 @@ async def test_a_workflow_successor_starts_after_the_work_its_upstream_left(
         handle = await start_ok_in_thread(async_tasks.spec_left_work)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory,
-            handle.workflow_id,
+            str(handle.workflow_id),
             timeout_s=30.0,
         )
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)

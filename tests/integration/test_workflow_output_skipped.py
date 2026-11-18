@@ -277,15 +277,15 @@ class TestOutputNodeUnderSuccessPolicy:
         spec: WorkflowSpec[int] = SkippedOutputChild.build_with(app)
         handle = await start_ok(spec, broker)
 
-        await self._run_skipped_child(session, broker, handle.workflow_id)
+        await self._run_skipped_child(session, broker, str(handle.workflow_id))
 
-        row = await self._workflow_row(session, handle.workflow_id)
+        row = await self._workflow_row(session, str(handle.workflow_id))
         assert row.status == 'COMPLETED'
-        assert (await self._node(session, handle.workflow_id, 1)).status == 'SKIPPED'
+        assert (await self._node(session, str(handle.workflow_id), 1)).status == 'SKIPPED'
         got = await handle.get_async(timeout_ms=2000)
         assert got.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
         assert got.err_value.data == {
-            'workflow_id': handle.workflow_id,
+            'workflow_id': str(handle.workflow_id),
             'output_node_id': f'{SkippedOutputChild.name}:1',
             'output_task_index': 1,
             'output_task_name': 'output_skipped_out',
@@ -298,10 +298,10 @@ class TestOutputNodeUnderSuccessPolicy:
         spec: WorkflowSpec[int] = FailedOutputChild.build_with(app)
         handle = await start_ok(spec, broker)
 
-        await self._run_failed_child(session, broker, handle.workflow_id)
+        await self._run_failed_child(session, broker, str(handle.workflow_id))
 
-        row = await self._workflow_row(session, handle.workflow_id)
-        node = await self._node(session, handle.workflow_id, 0)
+        row = await self._workflow_row(session, str(handle.workflow_id))
+        node = await self._node(session, str(handle.workflow_id), 0)
         assert row.status == 'COMPLETED'
         assert node.status == 'FAILED'
         assert row.result == node.result
@@ -344,20 +344,20 @@ class TestOutputNodeUnderSuccessPolicy:
 
         await self._run_child(
             session, broker, child_def,
-            await self._child_of(session, handle.workflow_id, 0),
+            await self._child_of(session, str(handle.workflow_id), 0),
         )
 
-        node = await self._node(session, handle.workflow_id, 0)
+        node = await self._node(session, str(handle.workflow_id), 0)
         assert node.status == 'FAILED'
         summary = json.loads(node.sub_workflow_summary)
         assert summary['status'] == 'COMPLETED'
         assert summary['output'] is None
 
-        skipped = await self._node(session, handle.workflow_id, 1)
+        skipped = await self._node(session, str(handle.workflow_id), 1)
         assert skipped.status == 'SKIPPED'
         assert skipped.task_id is None
 
-        row = await self._workflow_row(session, handle.workflow_id)
+        row = await self._workflow_row(session, str(handle.workflow_id))
         assert row.status == 'FAILED'
         assert row.result is None
         assert _code(await handle.get_async(timeout_ms=2000)) == expected_code
@@ -408,10 +408,10 @@ class TestOutputNodeUnderSuccessPolicy:
 
         await self._run_child(
             session, broker, child_def,
-            await self._child_of(session, handle.workflow_id, 0),
+            await self._child_of(session, str(handle.workflow_id), 0),
         )
 
-        waiting = await self._node(session, handle.workflow_id, 1)
+        waiting = await self._node(session, str(handle.workflow_id), 1)
         assert waiting.status == 'ENQUEUED'
         task_row = await session.execute(
             text('SELECT input FROM horsies_tasks WHERE id = :id'),
@@ -447,10 +447,10 @@ class TestOutputNodeUnderSuccessPolicy:
         handle = await start_ok(spec, broker)
 
         await self._run_skipped_child(
-            session, broker, await self._child_of(session, handle.workflow_id, 0),
+            session, broker, await self._child_of(session, str(handle.workflow_id), 0),
         )
 
-        waiting = await self._node(session, handle.workflow_id, 1)
+        waiting = await self._node(session, str(handle.workflow_id), 1)
         task_row = await session.execute(
             text('SELECT input FROM horsies_tasks WHERE id = :id'),
             {'id': waiting.task_id},
@@ -485,12 +485,12 @@ class TestOutputNodeUnderSuccessPolicy:
         )
         handle = await start_ok(spec, broker)
 
-        await self._finish(session, broker, handle.workflow_id, 0, FAILED_RESULT)
+        await self._finish(session, broker, str(handle.workflow_id), 0, FAILED_RESULT)
         await self._run_skipped_child(
-            session, broker, await self._child_of(session, handle.workflow_id, 1),
+            session, broker, await self._child_of(session, str(handle.workflow_id), 1),
         )
 
-        assert (await self._node(session, handle.workflow_id, 2)).status == 'SKIPPED'
+        assert (await self._node(session, str(handle.workflow_id), 2)).status == 'SKIPPED'
 
     async def test_join_quorum_does_not_count_the_failed_node(
         self, setup: tuple[AsyncSession, PostgresBroker, Horsies],
@@ -518,12 +518,12 @@ class TestOutputNodeUnderSuccessPolicy:
         )
         handle = await start_ok(spec, broker)
 
-        await self._finish(session, broker, handle.workflow_id, 0, OK_RESULT)
+        await self._finish(session, broker, str(handle.workflow_id), 0, OK_RESULT)
         await self._run_skipped_child(
-            session, broker, await self._child_of(session, handle.workflow_id, 1),
+            session, broker, await self._child_of(session, str(handle.workflow_id), 1),
         )
 
-        assert (await self._node(session, handle.workflow_id, 2)).status == 'SKIPPED'
+        assert (await self._node(session, str(handle.workflow_id), 2)).status == 'SKIPPED'
 
     async def test_parent_success_case_is_not_met_and_get_names_the_cause(
         self, setup: tuple[AsyncSession, PostgresBroker, Horsies],
@@ -538,11 +538,11 @@ class TestOutputNodeUnderSuccessPolicy:
             definition_key='tests.integration.output_skipped_policy_parent.v1',
         )
         handle = await start_ok(spec, broker)
-        child_id = await self._child_of(session, handle.workflow_id, 0)
+        child_id = await self._child_of(session, str(handle.workflow_id), 0)
 
         await self._run_skipped_child(session, broker, child_id)
 
-        row = await self._workflow_row(session, handle.workflow_id)
+        row = await self._workflow_row(session, str(handle.workflow_id))
         assert row.status == 'FAILED'
         got = await handle.get_async(timeout_ms=2000)
         assert got.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
@@ -570,13 +570,13 @@ class TestOutputNodeUnderSuccessPolicy:
         handle = await start_ok(spec, broker)
 
         await self._run_skipped_child(
-            session, broker, await self._child_of(session, handle.workflow_id, 0),
+            session, broker, await self._child_of(session, str(handle.workflow_id), 0),
         )
-        before = await self._workflow_row(session, handle.workflow_id)
+        before = await self._workflow_row(session, str(handle.workflow_id))
         assert before.status == 'RUNNING'
-        await self._finish(session, broker, handle.workflow_id, 1, OK_RESULT)
+        await self._finish(session, broker, str(handle.workflow_id), 1, OK_RESULT)
 
-        row = await self._workflow_row(session, handle.workflow_id)
+        row = await self._workflow_row(session, str(handle.workflow_id))
         assert row.status == 'COMPLETED'
         stored_error = await session.execute(
             text('SELECT error FROM horsies_workflows WHERE id = :wf_id'),
@@ -606,17 +606,17 @@ class TestOutputNodeUnderSuccessPolicy:
         handle = await start_ok(spec, broker)
 
         await self._run_skipped_child(
-            session, broker, await self._child_of(session, handle.workflow_id, 0),
+            session, broker, await self._child_of(session, str(handle.workflow_id), 0),
         )
 
-        assert (await self._workflow_row(session, handle.workflow_id)).status == 'PAUSED'
-        assert (await self._node(session, handle.workflow_id, 1)).status == 'PENDING'
+        assert (await self._workflow_row(session, str(handle.workflow_id))).status == 'PAUSED'
+        assert (await self._node(session, str(handle.workflow_id), 1)).status == 'PENDING'
 
         _handle_value(await handle.resume_async())
         await session.commit()
 
-        assert (await self._node(session, handle.workflow_id, 1)).status == 'SKIPPED'
-        assert (await self._workflow_row(session, handle.workflow_id)).status == 'FAILED'
+        assert (await self._node(session, str(handle.workflow_id), 1)).status == 'SKIPPED'
+        assert (await self._workflow_row(session, str(handle.workflow_id))).status == 'FAILED'
         got = await handle.get_async(timeout_ms=2000)
         assert got.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
 
@@ -632,15 +632,15 @@ class TestOutputNodeUnderSuccessPolicy:
             definition_key='tests.integration.output_skipped_grand.v1',
         )
         handle = await start_ok(spec, broker)
-        mid_id = await self._child_of(session, handle.workflow_id, 0)
+        mid_id = await self._child_of(session, str(handle.workflow_id), 0)
         child_id = await self._child_of(session, mid_id, 0)
 
         await self._run_skipped_child(session, broker, child_id)
 
         assert (await self._node(session, mid_id, 0)).status == 'FAILED'
         assert (await self._workflow_row(session, mid_id)).status == 'FAILED'
-        assert (await self._node(session, handle.workflow_id, 0)).status == 'FAILED'
-        row = await self._workflow_row(session, handle.workflow_id)
+        assert (await self._node(session, str(handle.workflow_id), 0)).status == 'FAILED'
+        row = await self._workflow_row(session, str(handle.workflow_id))
         assert row.status == 'FAILED'
         got = await handle.get_async(timeout_ms=2000)
         assert got.err_value.error_code is OutcomeCode.SUBWORKFLOW_FAILED
@@ -659,7 +659,7 @@ class TestOutputNodeUnderSuccessPolicy:
             definition_key='tests.integration.output_skipped_grand_with_case.v1',
         )
         handle = await start_ok(spec, broker)
-        mid_id = await self._child_of(session, handle.workflow_id, 0)
+        mid_id = await self._child_of(session, str(handle.workflow_id), 0)
         child_id = await self._child_of(session, mid_id, 0)
 
         await self._finish(session, broker, mid_id, 1, OK_RESULT)
@@ -667,8 +667,8 @@ class TestOutputNodeUnderSuccessPolicy:
 
         assert (await self._node(session, mid_id, 0)).status == 'FAILED'
         assert (await self._workflow_row(session, mid_id)).status == 'COMPLETED'
-        assert (await self._node(session, handle.workflow_id, 0)).status == 'FAILED'
-        assert (await self._workflow_row(session, handle.workflow_id)).status == 'FAILED'
+        assert (await self._node(session, str(handle.workflow_id), 0)).status == 'FAILED'
+        assert (await self._workflow_row(session, str(handle.workflow_id))).status == 'FAILED'
         got = await handle.get_async(timeout_ms=2000)
         assert got.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
         assert (got.err_value.data or {})['workflow_id'] == child_id
@@ -692,9 +692,9 @@ class TestOutputNodeUnderSuccessPolicy:
         )
         handle = await start_ok(spec, broker)
 
-        await self._finish(session, broker, handle.workflow_id, 1, OK_RESULT)
+        await self._finish(session, broker, str(handle.workflow_id), 1, OK_RESULT)
         await self._run_skipped_child(
-            session, broker, await self._child_of(session, handle.workflow_id, 0),
+            session, broker, await self._child_of(session, str(handle.workflow_id), 0),
         )
 
         got = await handle.get_async(timeout_ms=2000)
@@ -815,11 +815,11 @@ class TestOutputNodeUnderSuccessPolicy:
             definition_key='tests.integration.output_skipped_required_unreadable.v1',
         )
         handle = await start_ok(spec, broker)
-        child_id = await self._child_of(session, handle.workflow_id, 0)
+        child_id = await self._child_of(session, str(handle.workflow_id), 0)
 
         await self._complete_child_with_text(session, broker, child_id, stored)
 
-        row = await self._workflow_row(session, handle.workflow_id)
+        row = await self._workflow_row(session, str(handle.workflow_id))
         assert row.status == 'FAILED'
         got = await handle.get_async(timeout_ms=2000)
         assert got.err_value.error_code is (
@@ -843,7 +843,7 @@ class TestOutputNodeUnderSuccessPolicy:
         )
         handle = await start_ok(spec, broker)
 
-        await self._run_skipped_child(session, broker, handle.workflow_id)
+        await self._run_skipped_child(session, broker, str(handle.workflow_id))
 
         got = await handle.get_async(timeout_ms=2000)
         entry = got.ok_value[f'{spec.name}:1']

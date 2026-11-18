@@ -171,7 +171,7 @@ async def _start(app: Horsies, broker: PostgresBroker, fn: Any, shape: str) -> s
     )
     started = await start_workflow_async(spec, broker)
     assert is_ok(started), started
-    return started.ok_value.workflow_id
+    return str(started.ok_value.workflow_id)
 
 
 async def _run_node_a(

@@ -246,7 +246,7 @@ async def test_batch_abandon_refuses_after_a_committed_resume(
         session,
         claimed_at,
     )
-    resumed = await resume_workflow(broker, workflow_id)
+    resumed = await resume_workflow(broker, uuid.UUID(workflow_id))
     assert is_ok(resumed) and resumed.ok_value is True
 
     async with current_resources(broker).session_factory() as worker_session:
