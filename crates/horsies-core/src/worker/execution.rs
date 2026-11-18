@@ -1741,6 +1741,7 @@ mod task_input_tests {
 #[cfg(test)]
 mod workflow_ctx_tests {
     use super::workflow_ctx_text;
+    use crate::core::codec::JsonText;
     use crate::core::task::error::TaskError;
     use crate::core::task::result::TaskResult;
     use crate::core::workflow::context::WorkflowContext;
@@ -1792,7 +1793,41 @@ mod workflow_ctx_tests {
         let summary = ctx
             .summary_for(&NodeKey::<i32>::new("sub".to_owned()))
             .unwrap();
-        assert_eq!(summary.output, Some(serde_json::json!(5)));
+        assert_eq!(summary.output.as_ref().map(JsonText::get), Some("5"));
+    }
+
+    /// A summary output outside the `i64` and `u64` range keeps its stored text in the `workflow_ctx` field,
+    /// and the task's context reads it as `u128` or `i128`.
+    #[test]
+    fn a_summary_output_keeps_its_stored_text() {
+        let summary = |output: &str| {
+            format!(
+                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+            )
+        };
+        let wide = "340282366920938463463374607431768211455";
+        let below = "-9223372036854775809";
+        let payload = serde_json::json!({
+            "workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 2,
+            "task_name": "consume",
+            "summaries_by_id": {"wide": summary(wide), "below": summary(below)},
+        });
+        let text = workflow_ctx_text(&payload.to_string()).unwrap();
+        for output in [wide, below] {
+            assert!(text.contains(&summary(output)), "{text}");
+        }
+        let ctx: WorkflowContext = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            ctx.output_for(&NodeKey::<u128>::new("wide".to_owned()))
+                .unwrap(),
+            Some(u128::MAX)
+        );
+        assert_eq!(
+            ctx.output_for(&NodeKey::<i128>::new("below".to_owned()))
+                .unwrap(),
+            Some(i128::from(i64::MIN) - 1)
+        );
     }
 
     #[test]

@@ -93,8 +93,10 @@ pub(crate) fn task_error_of(
                     .unwrap_or_else(|| panic!("{name}: a sub-workflow id is text")),
             )
             .unwrap_or_else(|error| panic!("{name}: {error}")),
-            sub_workflow_summary: SubWorkflowSummary::from_stored_value(&sub_workflow["summary"])
-                .unwrap_or_else(|refused| panic!("{name}: {refused}")),
+            sub_workflow_summary: SubWorkflowSummary::from_stored_text(
+                &sub_workflow["summary"].to_string(),
+            )
+            .unwrap_or_else(|refused| panic!("{name}: {refused}")),
         }),
     };
     TaskError {

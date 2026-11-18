@@ -750,7 +750,11 @@ unless it starts with "Added".
 - **`WorkflowContext::result_for::<T, E>` returns `Result<TaskOutcome<T,
   E>, WorkflowContextError>`** (`NotInContext`, `Unreadable`,
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
-  `output_for` the child's output read as `T`.
+  `output_for` the child's output read as `T`. `SubWorkflowSummary.output`
+  is `Option<JsonText>`, the child's output as its stored text (`get`,
+  `decode::<T>`); `output_for` and the summary of `WorkflowHandle::tasks`
+  read it from that text, so an integer outside the `i64` and `u64` range
+  reads as `u128` or `i128`, as in Python.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
   `UserErrorCode`, with every user code as checked text. `UserCode` and
   `UserCodeRefused` are exported at the crate root, so the outcome type of

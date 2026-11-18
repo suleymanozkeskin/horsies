@@ -2,7 +2,9 @@ use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::core::codec::user_value::{check_user_value, UserValueRefused, MAX_VALUE_JSON_DEPTH};
+use crate::core::codec::user_value::{
+    check_user_value, check_user_value_text, UserValueRefused, MAX_VALUE_JSON_DEPTH,
+};
 use crate::core::workflow::summary::SubWorkflowSummary;
 
 // =============================================================================
@@ -659,7 +661,7 @@ impl TaskError {
                 .sub_workflow_summary
                 .output
                 .as_ref()
-                .and_then(|output| check_user_value(output, SUMMARY_OUTPUT_DEPTH_LIMIT).err()),
+                .and_then(|output| check_user_value_text(output, SUMMARY_OUTPUT_DEPTH_LIMIT).err()),
         }
     }
 
@@ -747,7 +749,7 @@ fn read_sub_workflow_failure(
     let sub_workflow_summary: SubWorkflowSummary =
         required_field(fields, SUB_WORKFLOW_SUMMARY_KEY)?;
     if let Some(output) = &sub_workflow_summary.output {
-        check_user_value(output, SUMMARY_OUTPUT_DEPTH_LIMIT).map_err(|refusal| {
+        check_user_value_text(output, SUMMARY_OUTPUT_DEPTH_LIMIT).map_err(|refusal| {
             StoredErrorRefused::UserValue {
                 field: SUB_WORKFLOW_SUMMARY_KEY,
                 refusal,
@@ -837,6 +839,7 @@ impl std::error::Error for TaskError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::codec::JsonText;
     use crate::core::task::result::TaskResult;
     use crate::core::workflow::status::WorkflowStatus;
     use serde_json::json;
@@ -1181,6 +1184,22 @@ mod tests {
         assert_eq!(details.sub_workflow_summary.completed_tasks, 1);
     }
 
+    /// A summary output outside the `i64` and `u64` range is written with its text.
+    #[test]
+    fn a_summary_output_is_written_as_its_text() {
+        for output in [
+            "340282366920938463463374607431768211455",
+            "-9223372036854775809",
+        ] {
+            let summary = SubWorkflowSummary {
+                output: Some(JsonText::parse(output).unwrap()),
+                ..failed_summary()
+            };
+            let text = serde_json::to_string(&sub_workflow_error(summary)).unwrap();
+            assert!(text.contains(&format!(r#""output":{output},"#)), "{text}");
+        }
+    }
+
     #[test]
     fn sub_workflow_details_none_for_plain_error() {
         let err = TaskError::new("SOME_OTHER_ERROR", "nope").unwrap();
@@ -1194,7 +1213,7 @@ mod tests {
     #[test]
     fn a_refused_summary_output_is_stored_as_null() {
         let summary = SubWorkflowSummary {
-            output: Some(json!({"__h_task_result__": true})),
+            output: Some(JsonText::parse(r#"{"__h_task_result__": true}"#).unwrap()),
             ..failed_summary()
         };
         let err = sub_workflow_error(summary);
