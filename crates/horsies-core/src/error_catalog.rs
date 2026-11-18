@@ -1508,8 +1508,6 @@ mod tests {
         assert!(!failed.retryable());
     }
 
-    const TASK: Uuid = Uuid::from_u128(0x0193_a1f2_4c5d_7e6f_8a9b_0c1d_2e3f_4a5b);
-
     /// One value of each variant of the broker catalog, each built by the
     /// constructor of its code where it has one.
     fn every_broker_error() -> Vec<BrokerOperationError> {

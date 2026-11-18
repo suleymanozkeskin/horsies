@@ -322,20 +322,30 @@ mod tests {
         }
     }
 
+    /// The request that the three values read as; a refusal fails the test
+    /// with its code and message.
+    fn accepted(target: &str, timeout: &str, minimum: &str) -> PingRequest {
+        match request_of(target, timeout, minimum) {
+            Ok(request) => request,
+            Err(failed) => panic!(
+                "{target}, {timeout}, {minimum} refused: {} {}",
+                failed.error.code(),
+                failed.error.message()
+            ),
+        }
+    }
+
     #[test]
     fn a_valid_ping_keeps_its_window_count_and_target() {
         assert_eq!(
-            request_of("'w1'", "2.5", "None"),
-            Ok(PingRequest {
+            accepted("'w1'", "2.5", "None"),
+            PingRequest {
                 target_worker_id: Some("w1".to_owned()),
                 window: Duration::from_millis(2_500),
                 min_responses: None,
-            })
+            }
         );
-        assert_eq!(
-            request_of("None", "2", "1").map(|request| request.min_responses),
-            Ok(Some(1))
-        );
+        assert_eq!(accepted("None", "2", "1").min_responses, Some(1));
     }
 
     #[test]
@@ -359,10 +369,7 @@ mod tests {
     #[test]
     fn an_endless_window_is_the_longest_window() {
         for timeout in ["float('inf')", "1e300"] {
-            assert_eq!(
-                request_of("None", timeout, "None").map(|request| request.window),
-                Ok(Duration::MAX)
-            );
+            assert_eq!(accepted("None", timeout, "None").window, Duration::MAX);
         }
     }
 
@@ -382,8 +389,8 @@ mod tests {
             );
         }
         assert_eq!(
-            request_of("None", "1", "2 ** 70").map(|request| request.min_responses),
-            Ok(Some(usize::MAX))
+            accepted("None", "1", "2 ** 70").min_responses,
+            Some(usize::MAX)
         );
     }
 
