@@ -283,7 +283,7 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let broker = PostgresBroker::from_pool(proxied);
+    let broker = PostgresBroker::from_pool(proxied, crate::ClientFamily::Rust);
     plain_phase_two(&broker).await.expect("warm up");
     proxy.reset_round_trips();
 

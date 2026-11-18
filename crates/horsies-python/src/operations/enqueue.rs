@@ -6,11 +6,11 @@
 //! again. The core's refusals that need no connection run first, then the
 //! first send of a handle installs the schema once, as Python's broker does.
 //! The outcome is `Enqueued`, `SendValidationFailed` (the core refused the
-//! input, the options or the idempotency key, before any connect),
-//! `SendEnqueueFailed` for a retention class key that no class derives (as
-//! Python's broker answers it), or one class per other variant of the core's
-//! send error catalog (`TaskSendError`), each with only the facts of its
-//! state.
+//! input, the options, the idempotency key or an empty retention class key,
+//! before any connect), `SendEnqueueFailed` for a retention class key that
+//! is not empty and that no class derives (as Python's broker answers it),
+//! or one class per other variant of the core's send error catalog
+//! (`TaskSendError`), each with only the facts of its state.
 
 use std::sync::Arc;
 
@@ -189,30 +189,108 @@ pub struct SendAsyncContext {
     pub message: String,
 }
 
+/// The cause of a refused send: the refused text does not read as JSON.
+/// `reader_error` is the JSON reader's error.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct SendRefusalUnreadableJson {
+    pub reader_error: String,
+}
+
+/// The cause of a refused send: a rule refused a value that reads. The
+/// message is the only fact.
+#[pyclass(module = "horsies._core", frozen)]
+#[derive(Clone, Debug)]
+pub struct SendRefusalByRule {}
+
+/// The cause of a refused send: a rule of the version-1 command or of the
+/// scoped idempotency key refused a value. `rule` is the rule's text.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct SendRefusalByValueRule {
+    pub rule: String,
+}
+
+/// The cause of a refused send.
+#[derive(Clone, Debug)]
+pub enum RefusalCauseRecord {
+    UnreadableJson(SendRefusalUnreadableJson),
+    ByRule(SendRefusalByRule),
+    ByValueRule(SendRefusalByValueRule),
+}
+
+impl<'py> IntoPyObject<'py> for RefusalCauseRecord {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self {
+            Self::UnreadableJson(unreadable) => unreadable.into_bound_py_any(py),
+            Self::ByRule(by_rule) => by_rule.into_bound_py_any(py),
+            Self::ByValueRule(by_value_rule) => by_value_rule.into_bound_py_any(py),
+        }
+    }
+}
+
 /// The core refused the send before any statement. Nothing was written.
 /// `code` is `INVALID_INPUT` (the input, or a fact of the call: the start,
 /// the sent instant, the idempotency key, the fingerprint) or
-/// `INVALID_TASK_OPTIONS`. `cause_text` is the JSON reader's
-/// error when the refused text does not read, and `None` when a rule refused
-/// a value that reads.
-#[pyclass(module = "horsies._core", frozen, get_all)]
+/// `INVALID_TASK_OPTIONS`. `cause` is `SendRefusalUnreadableJson`,
+/// `SendRefusalByRule` or `SendRefusalByValueRule`.
+#[pyclass(module = "horsies._core", frozen)]
 #[derive(Clone, Debug)]
 pub struct SendValidationFailed {
+    #[pyo3(get)]
     pub code: String,
+    #[pyo3(get)]
     pub message: String,
-    pub cause_text: Option<String>,
+    cause: RefusalCauseRecord,
+}
+
+#[pymethods]
+impl SendValidationFailed {
+    /// `SendRefusalUnreadableJson`, `SendRefusalByRule` or
+    /// `SendRefusalByValueRule`.
+    #[getter]
+    fn cause<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.cause.clone().into_bound_py_any(py)
+    }
 }
 
 impl SendValidationFailed {
-    /// The record of a core refusal. Pure.
-    fn of(refusal: &EnqueueRefusal, message: String) -> Self {
+    /// The record of a core refusal of a send of `task_name`. Pure.
+    ///
+    /// A rule of the version-1 command or of the scoped idempotency key
+    /// keeps Python's message (`enqueue input refused for <task>: <rule>`,
+    /// `idempotency key refused for <task>: <rule>`) and the rule as the
+    /// cause. Any other refusal keeps `core_message`, the core's text of the
+    /// error.
+    fn of(task_name: &str, refusal: &EnqueueRefusal, core_message: String) -> Self {
+        let (message, cause) = match &refusal.cause {
+            EnqueueRefusalCause::JsonUnreadable(reader_error) => (
+                core_message,
+                RefusalCauseRecord::UnreadableJson(SendRefusalUnreadableJson {
+                    reader_error: reader_error.clone(),
+                }),
+            ),
+            EnqueueRefusalCause::RuleRefused => (
+                core_message,
+                RefusalCauseRecord::ByRule(SendRefusalByRule {}),
+            ),
+            EnqueueRefusalCause::CommandRuleRefused(rule) => (
+                format!("enqueue input refused for {task_name}: {rule}"),
+                RefusalCauseRecord::ByValueRule(SendRefusalByValueRule { rule: rule.clone() }),
+            ),
+            EnqueueRefusalCause::KeyRuleRefused(rule) => (
+                format!("idempotency key refused for {task_name}: {rule}"),
+                RefusalCauseRecord::ByValueRule(SendRefusalByValueRule { rule: rule.clone() }),
+            ),
+        };
         Self {
             code: refused_code(refusal.part).to_string(),
             message,
-            cause_text: match &refusal.cause {
-                EnqueueRefusalCause::JsonUnreadable(text) => Some(text.clone()),
-                EnqueueRefusalCause::RuleRefused => None,
-            },
+            cause,
         }
     }
 }
@@ -275,7 +353,8 @@ pub enum SendOutcome {
     Enqueued(Uuid),
     /// The core refused the input or the options before any statement.
     Invalid(SendValidationFailed),
-    /// No retention class derives the class key; nothing was written.
+    /// No retention class derives the class key, which is not empty;
+    /// nothing was written.
     RetentionKeyRefused(SendEnqueueFailed),
     /// The send catalog's answer to a broker error; it carries the cause of
     /// that error.
@@ -311,7 +390,7 @@ fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, Py
         TaskSendError::ValidationFailed { message, .. } => SendValidationFailed {
             code: BrokerErrorCode::InvalidInput.to_string(),
             message,
-            cause_text: None,
+            cause: RefusalCauseRecord::ByRule(SendRefusalByRule {}),
         }
         .into_bound_py_any(py),
         TaskSendError::EnqueueFailed {
@@ -366,14 +445,10 @@ pub async fn enqueue_operation(
     connection: BrokerConnection,
     command: Arc<EnqueueCommand>,
 ) -> SendOutcome {
-    let retention = match EnqueueRetention::from_class_key(&command.retention_class_key) {
+    let retention = match send_retention(&command.retention_class_key) {
         Ok(retention) => retention,
-        Err(refused_key) => {
-            return SendOutcome::RetentionKeyRefused(retention_key_refused(
-                command.task_id,
-                &command.task_name,
-                &refused_key,
-            ));
+        Err(refused) => {
+            return retention_refused(command.task_id, &command.task_name, refused);
         }
     };
     let (enqueued_at, enqueue_delay_seconds) = match command.start {
@@ -413,6 +488,48 @@ pub async fn enqueue_operation(
     }
 }
 
+/// Why the retention class key of a send was refused.
+#[derive(Debug)]
+enum RetentionKeyRefusal {
+    /// The key is empty: a rule of the version-1 command.
+    Empty,
+    /// The key is not empty, and no class derives it.
+    NotDerived(RetentionClassKeyRefused),
+}
+
+/// The retention of the class key `class_key` of a send. Pure.
+///
+/// Errors: `RetentionKeyRefusal::Empty` for an empty key, and
+/// `RetentionKeyRefusal::NotDerived` for a key that no class derives.
+fn send_retention(class_key: &str) -> Result<EnqueueRetention, RetentionKeyRefusal> {
+    match class_key.is_empty() {
+        true => Err(RetentionKeyRefusal::Empty),
+        false => {
+            EnqueueRetention::from_class_key(class_key).map_err(RetentionKeyRefusal::NotDerived)
+        }
+    }
+}
+
+/// The outcome of a refused retention class key of the send `task_id` of
+/// `task_name`, as Python's broker answers it. Nothing was written. Pure.
+///
+/// - An empty key: `EnqueueCommandV1` refuses it before any statement:
+///   `SendValidationFailed` (`INVALID_INPUT`, with the rule as the cause).
+/// - A key that no class derives: `retention_key_refused` (`ENQUEUE_FAILED`,
+///   not retryable).
+fn retention_refused(task_id: Uuid, task_name: &str, refused: RetentionKeyRefusal) -> SendOutcome {
+    match refused {
+        RetentionKeyRefusal::Empty => {
+            let refusal = EnqueueRefusal::empty_retention_class_key();
+            let core_message = BrokerError::EnqueueContract(refusal.clone()).to_string();
+            SendOutcome::Invalid(SendValidationFailed::of(task_name, &refusal, core_message))
+        }
+        RetentionKeyRefusal::NotDerived(refused_key) => SendOutcome::RetentionKeyRefused(
+            retention_key_refused(task_id, task_name, &refused_key),
+        ),
+    }
+}
+
 /// The record of a retention class key that no class derives, as Python's
 /// broker answers it: Python sends the key, the CHECK
 /// `horsies_tasks_retention_class_key_form` refuses the insert, and the
@@ -447,9 +564,11 @@ fn refused(
     error: &BrokerError,
 ) -> SendOutcome {
     match error {
-        BrokerError::EnqueueContract(refusal) => {
-            SendOutcome::Invalid(SendValidationFailed::of(refusal, error.to_string()))
-        }
+        BrokerError::EnqueueContract(refusal) => SendOutcome::Invalid(SendValidationFailed::of(
+            &command.task_name,
+            refusal,
+            error.to_string(),
+        )),
         other => SendOutcome::Refused(send_error_from_enqueue(
             command.task_id,
             command.payload(retention),
@@ -477,9 +596,15 @@ mod tests {
             message: "task input refused: trailing characters".to_owned(),
             cause: EnqueueRefusalCause::JsonUnreadable("trailing characters".to_owned()),
         };
-        let record = SendValidationFailed::of(&refusal, refusal.message.clone());
+        let record = SendValidationFailed::of("t", &refusal, refusal.message.clone());
         assert_eq!(record.code, "INVALID_INPUT");
-        assert_eq!(record.cause_text.as_deref(), Some("trailing characters"));
+        assert_eq!(record.message, refusal.message);
+        match record.cause {
+            RefusalCauseRecord::UnreadableJson(unreadable) => {
+                assert_eq!(unreadable.reader_error, "trailing characters");
+            }
+            other => panic!("an unreadable input gave the cause {other:?}"),
+        }
     }
 
     #[test]
@@ -505,8 +630,91 @@ mod tests {
             SendPart::TaskOptions,
             "task_options refused for t: retry_policy is not an object".to_owned(),
         );
-        let record = SendValidationFailed::of(&refusal, refusal.message.clone());
+        let record = SendValidationFailed::of("t", &refusal, refusal.message.clone());
         assert_eq!(record.code, "INVALID_TASK_OPTIONS");
-        assert_eq!(record.cause_text, None);
+        assert_eq!(record.message, refusal.message);
+        assert!(
+            matches!(record.cause, RefusalCauseRecord::ByRule(_)),
+            "{:?}",
+            record.cause
+        );
+    }
+
+    /// Python's broker refuses a value of the version-1 command with
+    /// `enqueue input refused for <task>: <rule>` and the `ValueError` of
+    /// `EnqueueCommandV1`, and a key with `idempotency key refused for
+    /// <task>: <rule>` and the `ValueError` of `ScopedIdempotencyKey`.
+    #[test]
+    fn a_command_rule_and_a_key_rule_keep_the_python_message_and_the_rule() {
+        for (cause, message, rule) in [
+            (
+                EnqueueRefusalCause::CommandRuleRefused(
+                    "priority must be between 1 and 100".to_owned(),
+                ),
+                "enqueue input refused for send.task: priority must be between 1 and 100",
+                "priority must be between 1 and 100",
+            ),
+            (
+                EnqueueRefusalCause::KeyRuleRefused("idempotency key must be non-empty".to_owned()),
+                "idempotency key refused for send.task: idempotency key must be non-empty",
+                "idempotency key must be non-empty",
+            ),
+        ] {
+            let refusal = EnqueueRefusal {
+                part: SendPart::Input,
+                message: "the core's text".to_owned(),
+                cause,
+            };
+            let record =
+                SendValidationFailed::of("send.task", &refusal, "the core's text".to_owned());
+            assert_eq!(record.code, "INVALID_INPUT", "{rule}");
+            assert_eq!(record.message, message);
+            match record.cause {
+                RefusalCauseRecord::ByValueRule(by_value_rule) => {
+                    assert_eq!(by_value_rule.rule, rule);
+                }
+                other => panic!("{rule}: the cause is {other:?}"),
+            }
+        }
+    }
+
+    /// Python's `EnqueueCommandV1` refuses an empty retention class key
+    /// before any statement (`INVALID_INPUT`); a key that is not empty and
+    /// that no class derives reaches the CHECK of the insert
+    /// (`ENQUEUE_FAILED`).
+    #[test]
+    fn an_empty_retention_key_is_invalid_input_and_an_underived_one_a_failed_enqueue() {
+        let task_id = Uuid::from_u128(7);
+        let empty = send_retention("").expect_err("an empty key is refused");
+        assert!(matches!(empty, RetentionKeyRefusal::Empty), "{empty:?}");
+        match retention_refused(task_id, "send.task", empty) {
+            SendOutcome::Invalid(record) => {
+                assert_eq!(record.code, "INVALID_INPUT");
+                assert_eq!(
+                    record.message,
+                    "enqueue input refused for send.task: retention_class_key must be non-empty"
+                );
+                match record.cause {
+                    RefusalCauseRecord::ByValueRule(by_value_rule) => {
+                        assert_eq!(by_value_rule.rule, "retention_class_key must be non-empty");
+                    }
+                    other => panic!("an empty key gave the cause {other:?}"),
+                }
+            }
+            _ => panic!("an empty key is not SendValidationFailed"),
+        }
+        let underived = send_retention("standard_0d").expect_err("0 days is below the bounds");
+        assert!(
+            matches!(underived, RetentionKeyRefusal::NotDerived(_)),
+            "{underived:?}"
+        );
+        match retention_refused(task_id, "send.task", underived) {
+            SendOutcome::RetentionKeyRefused(record) => assert!(!record.retryable),
+            _ => panic!("an underived key is not SendEnqueueFailed"),
+        }
+        assert!(matches!(
+            send_retention("forever"),
+            Ok(EnqueueRetention::Forever)
+        ));
     }
 }

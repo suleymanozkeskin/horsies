@@ -74,7 +74,7 @@ impl SpecDatabase {
     }
 
     pub(super) fn broker(&self) -> PostgresBroker {
-        PostgresBroker::from_pool(self.pool.clone())
+        PostgresBroker::from_pool(self.pool.clone(), crate::ClientFamily::Rust)
     }
 
     /// The URL of this database, for a direct connection of the test.

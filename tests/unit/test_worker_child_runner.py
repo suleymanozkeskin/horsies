@@ -7,7 +7,7 @@ update, or the reason of a stop before it.
 Sections:
 A. _serialization_error_response
 B. _debug_imports_log
-C. _child_initializer
+C. The boot of a child (child_main.boot_app)
 E. (removed: the start reads the workflow in its own statement)
 F. The stop before start of a workflow task
 I. _run_task_entry error paths
@@ -49,7 +49,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.types.result import Err
+from horsies.core.types.result import Err, Ok
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
     OptionsUnreadable,
@@ -57,8 +57,10 @@ from horsies.core.worker.stored_timeout import (
     TimeoutValueInvalid,
 )
 from horsies.core.task_decorator import TaskBodyKind
-from horsies.core.worker.task_loop import LoopOpen, TaskLoop
-from horsies.core.worker.child_main import python_program_of
+from horsies.core.models.boot_failure import AppLoadFailed
+from horsies.core.worker.task_loop import AsyncTaskPresence, LoopOpen, TaskLoop
+from horsies.core.worker.child_frames import BootFailedFrame
+from horsies.core.worker.child_main import boot_app
 from horsies.core.worker.child_runner import (
     RunTheTask,
     _debug_imports_log,
@@ -255,7 +257,7 @@ class TestDebugImportsLog:
 
 
 # ===================================================================
-# C. _child_initializer
+# C. The boot of a child (child_main.boot_app)
 # ===================================================================
 
 
@@ -263,26 +265,38 @@ _INIT_POOL: Final = pool(min_size=0, max_size=1, check=False)
 """The pool of the child kind of the init frames of these tests."""
 
 
-def _initializer_arguments(
+def _boot_init_frame(
     app_locator: str,
     imports: tuple[str, ...],
-) -> tuple[core.InitFrame, core.PythonProgram]:
+) -> core.InitFrame:
     """The init frame of an isolated child of ``app_locator`` with
-    ``imports``, a task-send pool of 2 and the pool ``_INIT_POOL``, and its
-    Python program: the arguments of ``_child_initializer``."""
-    init = init_frame(
+    ``imports``, a task-send pool of 2 and the pool ``_INIT_POOL``: the
+    argument of ``boot_app``."""
+    return init_frame(
         app_locator=app_locator,
         imports=imports,
         log_level='info',
         child_kind=isolated_kind(task_send_pool=2, child_pool=_INIT_POOL),
     )
-    return init, python_program_of(init)
+
+
+def _app_load_failed(detail: str) -> Err[BootFailedFrame]:
+    """The boot of a child whose app import raised ``RuntimeError(detail)``."""
+    return Err(
+        BootFailedFrame(cause=AppLoadFailed(), error_name='RuntimeError', detail=detail),
+    )
 
 
 @pytest.mark.unit
-class TestChildInitializer:
-    """_child_initializer wires up the child process environment from its
-    init frame."""
+class TestChildBoot:
+    """``boot_app`` wires up the child process environment from its init
+    frame: it imports the app and its task modules
+    (``import_app_for_child``), then runs the per-child start steps
+    (``finish_child_start``). A failure of the import ends the boot with a
+    named ``BootFailedFrame``, before the core handle of the child is built.
+
+    ``restore_parent_state`` is replaced in each test: it sets
+    ``sys.path``, ``sys.argv`` and the process name of the process."""
 
     def _make_patches(
         self,
@@ -293,14 +307,16 @@ class TestChildInitializer:
         discovered_raises: bool = False,
         keys_list_raises: bool = False,
     ) -> dict[str, Any]:
-        """Build a dict of mock objects for all _child_initializer dependencies."""
+        """Build a dict of mock objects for all dependencies of the boot."""
         mock_app = MagicMock()
         if app_tasks is not None:
             mock_app.tasks.keys_list.return_value = list(app_tasks.keys())
             mock_app.tasks.keys.return_value = app_tasks.keys()
+            mock_app.tasks.values.return_value = list(app_tasks.values())
         else:
             mock_app.tasks.keys_list.return_value = []
             mock_app.tasks.keys.return_value = {}.keys()
+            mock_app.tasks.values.return_value = []
 
         if discovered_modules is not None:
             mock_app.get_discovered_task_modules.return_value = discovered_modules
@@ -316,6 +332,7 @@ class TestChildInitializer:
 
         return {'app': mock_app}
 
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -330,17 +347,19 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
-        from horsies.core.worker.child_runner import _child_initializer
-
+        """The boot hands the located app on as the current app of the
+        child, and builds the core handle from the init frame."""
         mocks = self._make_patches(app_tasks={'add': True})
         mock_locate_app.return_value = mocks['app']
 
-        init, program = _initializer_arguments('mymod:app', ('extra_mod',))
+        init = _boot_init_frame('mymod:app', ('extra_mod',))
 
-        returned = _child_initializer(init, program)
+        booted = boot_app(init)
 
-        assert returned is mocks['app']
+        assert booted == Ok(AsyncTaskPresence.NO_ASYNC_TASK)
+        mock_restore.assert_called_once_with(init)
         mock_set_level.assert_called_once_with(20)
         mock_locate_app.assert_called_once_with('mymod:app')
         mock_set_current.assert_called_once_with(mocks['app'])
@@ -348,6 +367,7 @@ class TestChildInitializer:
         mocks['app'].set_task_send_pool.assert_called_once_with(2)
         mock_init_core_handle.assert_called_once_with(init)
 
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -360,38 +380,37 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
         """The child opens no pool of its own: the bounds of the pool of its
         kind and the connection settings reach the core handle in the init
         frame (``CoreChildHandle.from_init``)."""
-        from horsies.core.worker.child_runner import _child_initializer
-
         mocks = self._make_patches(app_tasks={'add': True})
         mock_locate_app.return_value = mocks['app']
-        init, program = _initializer_arguments('mymod:app', ())
+        init = _boot_init_frame('mymod:app', ())
 
-        _ = _child_initializer(init, program)
+        _ = boot_app(init)
 
         mock_init_core_handle.assert_called_once_with(init)
         handed: core.InitFrame = mock_init_core_handle.call_args.args[0]
         child_pool = handed.child_kind.pool
         assert (child_pool.min_size, child_pool.max_size, child_pool.check) == (0, 1, False)
 
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.logging.configure_logging')
-    def test_child_initializer_discards_inherited_broker(
+    def test_the_boot_discards_the_inherited_broker(
         self,
         mock_set_level: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
-        from horsies.core.worker.child_runner import _child_initializer
-
         from horsies.core.brokers.postgres import PostgresBroker
 
         mocks = self._make_patches(app_tasks={'add': True})
@@ -399,7 +418,7 @@ class TestChildInitializer:
         mocks['app']._broker = inherited_broker
         mock_locate_app.return_value = mocks['app']
 
-        _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
+        _ = boot_app(_boot_init_frame('mymod:app', ()))
 
         inherited_broker.discard_inherited_resources.assert_called_once_with()
         assert mocks['app']._broker is None
@@ -449,71 +468,75 @@ class TestChildInitializer:
         finally:
             _ = app.get_broker().close()
 
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.logging.configure_logging')
-    def test_suppress_sends_failure_propagates(
+    def test_a_failed_send_suppression_fails_the_boot(
         self,
         mock_set_level: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
-        from horsies.core.worker.child_runner import _child_initializer
-
         mocks = self._make_patches(suppress_raises=True)
         mock_locate_app.return_value = mocks['app']
 
-        with pytest.raises(RuntimeError, match='suppress failed'):
-            _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
+        booted = boot_app(_boot_init_frame('mymod:app', ()))
+
+        assert booted == _app_load_failed('suppress failed')
         mock_init_core_handle.assert_not_called()
 
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.logging.configure_logging')
-    def test_discovered_task_modules_failure_propagates(
+    def test_a_failed_module_discovery_fails_the_boot(
         self,
         mock_set_level: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
-        from horsies.core.worker.child_runner import _child_initializer
-
         mocks = self._make_patches(discovered_raises=True)
         mock_locate_app.return_value = mocks['app']
 
-        with pytest.raises(RuntimeError, match='discovery failed'):
-            _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
+        booted = boot_app(_boot_init_frame('mymod:app', ()))
+
+        assert booted == _app_load_failed('discovery failed')
         mock_init_core_handle.assert_not_called()
 
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.logging.configure_logging')
-    def test_keys_list_failure_propagates(
+    def test_a_failed_task_listing_fails_the_boot(
         self,
         mock_set_level: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
-        from horsies.core.worker.child_runner import _child_initializer
-
         mocks = self._make_patches(keys_list_raises=True, app_tasks={'t1': 1})
         mock_locate_app.return_value = mocks['app']
 
-        with pytest.raises(RuntimeError, match='keys_list failed'):
-            _ = _child_initializer(*_initializer_arguments('mymod:app', ()))
+        booted = boot_app(_boot_init_frame('mymod:app', ()))
 
+        assert booted == _app_load_failed('keys_list failed')
+
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -530,20 +553,18 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
-        from horsies.core.worker.child_runner import _child_initializer
-
         mocks = self._make_patches()
         mock_locate_app.return_value = mocks['app']
 
-        _ = _child_initializer(
-            *_initializer_arguments('/tmp/myapp.py:app', ('/tmp/tasks.py',)),
-        )
+        _ = boot_app(_boot_init_frame('/tmp/myapp.py:app', ('/tmp/tasks.py',)))
         # /tmp/tasks.py should be imported via import_by_path, not import_module
         assert mock_import_path.called
         # samefile was checked to avoid re-importing the app module
         mock_samefile.assert_called()
 
+    @patch('horsies.core.worker.child_main.restore_parent_state')
     @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -560,16 +581,13 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_core_handle: MagicMock,
+        mock_restore: MagicMock,
     ) -> None:
         """When import file matches app file, import_by_path is NOT called."""
-        from horsies.core.worker.child_runner import _child_initializer
-
         mocks = self._make_patches()
         mock_locate_app.return_value = mocks['app']
 
-        _ = _child_initializer(
-            *_initializer_arguments('/tmp/myapp.py:app', ('/tmp/myapp.py',)),
-        )
+        _ = boot_app(_boot_init_frame('/tmp/myapp.py:app', ('/tmp/myapp.py',)))
         # import_by_path should NOT be called because samefile returns True
         mock_import_path.assert_not_called()
 
@@ -1966,18 +1984,6 @@ class TestStartAttempt:
 
 
 # ===================================================================
-# N. Workflow ctx task_result_from_json error path
-# ===================================================================
-
-
-# (TestWorkflowCtxTaskResultFromJsonError removed: the legacy
-# JSON-string-shape protection has been replaced by the strict-serde
-# per-node decode fold — see the comment above
-# test_workflow_ctx_summaries_by_id_bad_json. Per-node decode failures
-# are exercised at the model layer in test_workflow_handle_decode.py.)
-
-
-# ===================================================================
 # O. Happy-path lines for workflow injection + taskresult serde
 # ===================================================================
 
@@ -2509,4 +2515,3 @@ class TestRunTaskEntryCoroutineCall:
         assert _ok_value(payload, int) == 5
         assert isinstance(loop_state, LoopOpen)
         assert seen == [loop_state.loop]
-

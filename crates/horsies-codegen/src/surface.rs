@@ -1465,13 +1465,37 @@ const RECORD_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "SendValidationFailed",
-        doc: "The core refused the send before any statement. Nothing was written. cause_text is the\nJSON reader's error when the refused text does not read.",
+        doc: "The core refused the send before any statement. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("code", "Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']"),
             property("message", "str"),
-            property("cause_text", "str | None"),
+            property(
+                "cause",
+                "SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule",
+            ),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalUnreadableJson",
+        doc: "The refused text does not read as JSON. reader_error is the JSON reader's error.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("reader_error", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalByRule",
+        doc: "A rule refused a value that reads. The message is the only fact.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalByValueRule",
+        doc: "A rule of the version-1 command or of the scoped idempotency key refused a value. rule is\nthe rule's text.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rule", "str")],
         methods: &[],
     },
     StubClass {
@@ -3442,7 +3466,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "ProtocolNumbers",
         doc: "The protocol version, the exit codes of a child, the spawn request byte, and the bounds\nthat a child applies before it builds a frame: the names of a report of left work, and the\nbytes of a body.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
+        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("core_stopped_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
         methods: &[],
     },
     StubClass {
@@ -3525,7 +3549,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "ResultFrame",
         doc: "An isolated task ended and left no work on a task loop.",
-        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']")]),
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },
@@ -3553,7 +3577,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "SharedResultFrame",
         doc: "A run of a shared child ended; its seat is free.",
-        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },

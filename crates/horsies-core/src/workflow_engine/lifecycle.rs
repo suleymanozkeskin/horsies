@@ -480,7 +480,13 @@ pub(crate) async fn resume_with(
     ))
     .await
     .map_err(|failure| {
-        ResumeFailure::Handle(resume_recovery_failed(workflow_id, &failure.error))
+        ResumeFailure::Handle(resume_recovery_failed(
+            workflow_id,
+            AfterResumeCommit::ParentAdvance {
+                child_workflow_id: failure.failed_child_workflow_id,
+            },
+            &failure.error,
+        ))
     })?;
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
     // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree (Python
@@ -491,17 +497,44 @@ pub(crate) async fn resume_with(
         workflow_id,
     ))
     .await
-    .map_err(|error| ResumeFailure::Handle(resume_recovery_failed(workflow_id, &error)))?;
+    .map_err(|error| {
+        ResumeFailure::Handle(resume_recovery_failed(
+            workflow_id,
+            AfterResumeCommit::TreeRecovery,
+            &error,
+        ))
+    })?;
     Ok(true)
 }
 
+/// The work after a resume commit that failed.
+enum AfterResumeCommit {
+    /// The advance of the parent of `child_workflow_id`, a child workflow
+    /// that the resume ended.
+    ParentAdvance { child_workflow_id: Uuid },
+    /// The recovery pass over the tree of the resumed workflow.
+    TreeRecovery,
+}
+
 /// The error of a resume that committed and whose work after the commit failed: `RESUME_RECOVERY_FAILED`, not
-/// retryable (the workflow is RUNNING).
-fn resume_recovery_failed(workflow_id: Uuid, error: &WorkflowError) -> HandleOperationError {
-    HandleOperationError::ResumeRecoveryFailed {
-        message: format!(
+/// retryable (the workflow is RUNNING). The message names the failed work as the Python resume did
+/// (`tests/dualrun/reference/workflow_resume_caller.py`). Pure.
+fn resume_recovery_failed(
+    workflow_id: Uuid,
+    failed: AfterResumeCommit,
+    error: &WorkflowError,
+) -> HandleOperationError {
+    let message = match failed {
+        AfterResumeCommit::ParentAdvance { child_workflow_id } => format!(
+            "Workflow {workflow_id} resumed; the parent advance of child workflow \
+             {child_workflow_id} failed: {error}"
+        ),
+        AfterResumeCommit::TreeRecovery => format!(
             "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
         ),
+    };
+    HandleOperationError::ResumeRecoveryFailed {
+        message,
         workflow_id,
         cause: error.failure_cause(),
     }
@@ -594,8 +627,10 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_of_a_running_workflow_writes_nothing() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let child_specs = TestChildSpecs::empty();
@@ -629,8 +664,10 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_on_consistent_running_workflow_is_noop_false() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let child_specs = TestChildSpecs::empty();
@@ -660,8 +697,10 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_fails_a_ready_node_whose_args_from_names_a_static_member() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::enqueue_history_tests::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::enqueue_history_tests::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &workflow_id, "PAUSED", None).await;
@@ -729,8 +768,10 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn p6_workflow_enqueue_lifecycle_resume_persists_never_eligible_facts() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::enqueue_history_tests::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::enqueue_history_tests::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &workflow_id, "PAUSED", None).await;
@@ -852,6 +893,7 @@ mod p7_lifecycle_tests {
         PostgresBroker::from_pool(
             PgPool::connect_lazy("postgres://postgres@127.0.0.1:1/horsies_unreachable")
                 .expect("a lazy pool"),
+            crate::ClientFamily::Rust,
         )
     }
 
@@ -999,7 +1041,7 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, unrelated_id, "RUNNING", None).await;
 
         assert!(resume_client_workflow(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             root_id,
             &TestChildSpecs::empty()
         )
@@ -1034,11 +1076,12 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_claimed_backing(&pool, workflow_id, old_task_id).await;
 
-        assert!(
-            pause_workflow(&PostgresBroker::from_pool(pool.clone()), workflow_id)
-                .await
-                .unwrap()
-        );
+        assert!(pause_workflow(
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            workflow_id
+        )
+        .await
+        .unwrap());
         let paused: (String, String, Option<Uuid>) = sqlx::query_as(
             "SELECT w.status, wt.status, wt.task_id
              FROM horsies_workflows w
@@ -1064,7 +1107,7 @@ mod p7_lifecycle_tests {
         );
 
         assert!(resume_client_workflow(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             workflow_id,
             &TestChildSpecs::empty()
         )
@@ -1100,7 +1143,7 @@ mod p7_lifecycle_tests {
         .unwrap();
 
         let expired = expire_paused_workflows(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             age(chrono::Duration::hours(1)),
             10,
         )
@@ -1190,7 +1233,7 @@ mod p7_lifecycle_tests {
 
         assert_eq!(
             expire_paused_workflows(
-                &PostgresBroker::from_pool(pool.clone()),
+                &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
                 age(chrono::Duration::hours(1)),
                 10,
             )
@@ -1199,7 +1242,7 @@ mod p7_lifecycle_tests {
             1,
         );
         let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
-            &crate::broker::PostgresBroker::from_pool(pool.clone()),
+            &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             &TestChildSpecs::empty(),
             parent_id,
         )
@@ -1299,7 +1342,7 @@ mod p7_lifecycle_tests {
 
         assert_eq!(
             expire_paused_workflows(
-                &PostgresBroker::from_pool(pool.clone()),
+                &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
                 age(chrono::Duration::hours(1)),
                 10,
             )
@@ -1316,7 +1359,7 @@ mod p7_lifecycle_tests {
         assert_eq!(child_status, "EXPIRED");
 
         let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
-            &crate::broker::PostgresBroker::from_pool(pool.clone()),
+            &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             &TestChildSpecs::empty(),
             parent_id,
         )
@@ -1419,8 +1462,10 @@ mod cancel_lock_order_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn cancel_matches_completion_lock_order_no_deadlock() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
@@ -1441,7 +1486,7 @@ mod cancel_lock_order_tests {
         let cancel_pool = pool.clone();
         let cancel_wf = wf.clone();
         let cancel_task = tokio::spawn(async move {
-            let cancel_broker = PostgresBroker::from_pool(cancel_pool);
+            let cancel_broker = PostgresBroker::from_pool(cancel_pool, crate::ClientFamily::Rust);
             cancel_workflow(
                 &cancel_broker,
                 Uuid::parse_str(&cancel_wf).expect("test identity must be UUID"),
@@ -1574,11 +1619,12 @@ mod cancel_tree_tests {
         seed_pending_node(&pool, parent_id).await;
         seed_pending_node(&pool, child_id).await;
 
-        assert!(
-            cancel_workflow(&PostgresBroker::from_pool(pool.clone()), parent_id)
-                .await
-                .unwrap()
-        );
+        assert!(cancel_workflow(
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            parent_id
+        )
+        .await
+        .unwrap());
 
         for workflow_id in [parent_id, child_id] {
             assert_eq!(
@@ -1623,7 +1669,11 @@ mod cancel_tree_tests {
         .await
         .unwrap();
 
-        let outcome = cancel_workflow(&PostgresBroker::from_pool(pool.clone()), parent_id).await;
+        let outcome = cancel_workflow(
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            parent_id,
+        )
+        .await;
 
         sqlx::query("DROP TRIGGER cw_refuse_child_cancel ON horsies_workflows")
             .execute(&pool)
@@ -1716,8 +1766,7 @@ mod client_family_tests {
         .execute(&pool)
         .await
         .expect("insert workflow");
-        let python =
-            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+        let python = PostgresBroker::from_pool(pool.clone(), ClientFamily::Python);
 
         let refusals = [
             pause_workflow(&python, workflow_id)
@@ -1741,7 +1790,7 @@ mod client_family_tests {
         }
         assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");
 
-        let rust = PostgresBroker::from_pool(pool.clone());
+        let rust = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
         assert!(pause_workflow(&rust, workflow_id)
             .await
             .expect("pause of the recorded family"));

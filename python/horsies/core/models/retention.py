@@ -15,7 +15,7 @@ policy on workflow rows, not a response to a crash.
 
 from __future__ import annotations
 
-from typing import Annotated, Final, Self
+from typing import Annotated, ClassVar, Final, Self
 
 from datetime import timedelta
 
@@ -113,7 +113,7 @@ def _period_error(subject: str, refused: PeriodRefused) -> ConfigurationError:
 class RetentionConfig(BaseModel):
     """How long records live, and how their storage is kept ahead."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
 
     worker_state_retention_hours: Annotated[

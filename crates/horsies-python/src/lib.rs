@@ -235,6 +235,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::SendSuppressed>()?;
     module.add_class::<operations::enqueue::SendAsyncContext>()?;
     module.add_class::<operations::enqueue::SendValidationFailed>()?;
+    module.add_class::<operations::enqueue::SendRefusalUnreadableJson>()?;
+    module.add_class::<operations::enqueue::SendRefusalByRule>()?;
+    module.add_class::<operations::enqueue::SendRefusalByValueRule>()?;
     module.add_class::<operations::enqueue::SendEnqueueFailed>()?;
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
     module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;

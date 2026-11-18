@@ -37,7 +37,7 @@ async fn a_live_worker_answers_a_ping_and_lists_its_state() {
     let url = crate::broker::terminalization_matrix::migrated_database_url().await;
     let app_config = AppConfig::for_database_url(url);
     let broker = Arc::new(
-        PostgresBroker::connect_worker_with(&app_config.broker)
+        PostgresBroker::connect_worker_with(&app_config.broker, crate::ClientFamily::Rust)
             .await
             .expect("connect the broker"),
     );

@@ -694,15 +694,34 @@ class SendAsyncContext:
 
 @final
 class SendValidationFailed:
-    """The core refused the send before any statement. Nothing was written. cause_text is the
-    JSON reader's error when the refused text does not read.
-    """
+    """The core refused the send before any statement. Nothing was written."""
     @property
     def code(self) -> Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']: ...
     @property
     def message(self) -> str: ...
     @property
-    def cause_text(self) -> str | None: ...
+    def cause(self) -> SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule: ...
+
+
+@final
+class SendRefusalUnreadableJson:
+    """The refused text does not read as JSON. reader_error is the JSON reader's error."""
+    @property
+    def reader_error(self) -> str: ...
+
+
+@final
+class SendRefusalByRule:
+    """A rule refused a value that reads. The message is the only fact."""
+
+
+@final
+class SendRefusalByValueRule:
+    """A rule of the version-1 command or of the scoped idempotency key refused a value. rule is
+    the rule's text.
+    """
+    @property
+    def rule(self) -> str: ...
 
 
 @final
@@ -2987,6 +3006,8 @@ class ProtocolNumbers:
     @property
     def protocol_mismatch_exit_code(self) -> int: ...
     @property
+    def core_stopped_exit_code(self) -> int: ...
+    @property
     def child_hook_failed_exit_code(self) -> int: ...
     @property
     def spawn_request_byte(self) -> int: ...
@@ -3071,7 +3092,7 @@ class BootFailedFrame:
 @final
 class ResultFrame:
     """An isolated task ended and left no work on a task loop."""
-    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final
@@ -3097,7 +3118,7 @@ class LeftWorkStuckFrame:
 @final
 class SharedResultFrame:
     """A run of a shared child ended; its seat is free."""
-    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE']) -> None: ...
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final

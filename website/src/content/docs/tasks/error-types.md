@@ -76,6 +76,11 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 - Every call that runs on the core raises them. No call returns them as a result, and no result type has a variant for them.
 - This covers the task sends and the four retry methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
 - Nothing ran. `close()` and `close_async()` raise them after the resource sets of the broker closed and its sync runner stopped.
+- In a worker child, the child ends itself at its next core call and the worker replaces it. The child exits with code 80; its last log line names the cause.
+  - At the start of a task, before task code ran: the worker releases the claim with no attempt charged, and a new child runs the task.
+  - After a body that finished: the child reports the result first, and the worker writes it as for any task. The task keeps its result, with no second run.
+  - A body that the refusal ended (a core call of the body raised `CoreStopped` and the body let it out, or returned it as its error) has no result: the child reports nothing, and the task takes the crashed-child path (`WORKER_CRASHED`) and its retry policy. So does every other run of a shared child whose body still runs when the child exits.
+  - A fork of a child exits at once and writes nothing to the worker.
 - The Rust client has the fork state only. Every public call of the Rust client that runs on the core panics in a process that was forked without `exec` after the core's process runtime started in its parent, async and blocking forms alike, with both process ids and the fix; nothing ran. No Rust result type holds the fork. The Rust client has no stopped-core state: a panic in a core task of a Rust program is the program's panic.
 
 | Raised | Cause | What to do |

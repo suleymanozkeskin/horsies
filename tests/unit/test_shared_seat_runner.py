@@ -37,7 +37,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.worker import child_runner, shared_child, shared_runner
+from horsies.core.worker import child_main, child_runner, shared_child, shared_runner
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_frames import (
     ChildFrame,
@@ -46,7 +46,7 @@ from horsies.core.worker.child_frames import (
     SeatTimedOut,
     SharedResultFrame,
 )
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import MarkerDone, MarkerEnd, ResultEnvelope
 from horsies.core.worker.shared_child import (
     FrameWithResult,
     SeatReturn,
@@ -104,6 +104,14 @@ def seat_sync() -> TaskResult[int, TaskError]:
 async def seat_never() -> TaskResult[int, TaskError]:
     RAN.append('seat_never')
     return TaskResult(ok=1)
+
+
+@APP.task(
+    task_name='seat_core_stopped', execution=Execution.SHARED_ASYNC, timeout_ms=1000
+)
+async def seat_core_stopped() -> TaskResult[int, TaskError]:
+    """A core call of the body met the stopped core of the child."""
+    raise core.CoreStopped('log forwarder', 'planned panic')
 
 
 @APP.task(task_name='seat_raises', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
@@ -261,7 +269,7 @@ class _Steps:
 
     def __init__(self) -> None:
         self.confirm = AsyncMock(return_value=None)
-        self.mark = AsyncMock(return_value=None)
+        self.mark = AsyncMock(return_value=MarkerDone())
 
 
 @pytest.fixture
@@ -379,6 +387,34 @@ def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
     assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
 
+def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
+    steps: _Steps,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The refusal leaves the body through the exception mapping of the
+    task; the child ends before the run returns, so the worker takes the
+    crashed-child path."""
+    codes: list[int] = []
+
+    def record_exit(code: int) -> NoReturn:
+        codes.append(code)
+        raise _Exited(code)
+
+    monkeypatch.setattr(child_main.os, '_exit', record_exit)
+    monkeypatch.setattr(child_main.logging, 'shutdown', lambda: None)
+
+    with pytest.raises(_Exited):
+        _run(_frame('seat_core_stopped'))
+
+    assert codes == [child_main.CORE_STOPPED_EXIT_CODE]
+    assert (
+        f'During the body of task {TASK_ID}: the core of this child stopped after '
+        'a panic in a core background task (log forwarder; planned panic)'
+    ) in caplog.text
+    steps.mark.assert_not_awaited()
+
+
 def test_a_cancel_of_the_body_ends_the_run(steps: _Steps) -> None:
     """The seat loop turns a cancel of its deadline into the timeout; the run
     itself only has to end."""
@@ -474,8 +510,8 @@ class _RealSeatRunner:
     async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
         return await shared_runner.run_seat_task(frame)
 
-    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
-        await shared_runner.mark_seat_finalizing(frame)
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
+        return await shared_runner.mark_seat_finalizing(frame)
 
 
 @pytest.fixture
@@ -575,8 +611,9 @@ class TestTheMarkerOnTheSeatLoop:
         run returned in time, so its end is what it returned, and no
         deadline report goes out; the end report follows the marker."""
 
-        async def waits_on_the_pool(*_args: object) -> None:
+        async def waits_on_the_pool(*_args: object) -> MarkerEnd:
             await asyncio.sleep(1.5)
+            return MarkerDone()
 
         steps.mark.side_effect = waits_on_the_pool
         took_s: list[float] = []
@@ -609,9 +646,10 @@ class TestTheMarkerOnTheSeatLoop:
         run needs a second cancel."""
         one_connection = asyncio.Semaphore(1)
 
-        async def one_pooled_connection(*_args: object) -> None:
+        async def one_pooled_connection(*_args: object) -> MarkerEnd:
             async with one_connection:
                 await asyncio.sleep(0.2)
+            return MarkerDone()
 
         steps.mark.side_effect = one_pooled_connection
         seats = 8
@@ -650,8 +688,9 @@ class TestTheMarkerOnTheSeatLoop:
         results_at_marker: list[int] = []
         writers: list[_RecordingWriter] = []
 
-        async def record(*_args: object) -> None:
+        async def record(*_args: object) -> MarkerEnd:
             results_at_marker.append(len(writers[0].results()))
+            return MarkerDone()
 
         steps.mark.side_effect = record
 

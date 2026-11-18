@@ -86,7 +86,10 @@ fn writer(pool: &PgPool) -> OutcomeWriter {
 
 /// The writer of [`writer`] with the payload policy `payload`.
 fn writer_with_payload(pool: &PgPool, payload: PayloadPolicy) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,

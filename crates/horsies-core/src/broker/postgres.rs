@@ -139,6 +139,7 @@ mod sent_input_tests {
 #[cfg(test)]
 mod checked_send_tests {
     use super::*;
+    use crate::broker::error::EnqueueRefusalCause;
 
     const TASK_ID: Uuid = Uuid::from_u128(7);
 
@@ -155,6 +156,24 @@ mod checked_send_tests {
             Some(TASK_ID),
             None,
             idempotency_key,
+            EnqueueRetention::Forever,
+            false,
+        )
+    }
+
+    fn checked_with_priority(priority: i32) -> Result<CheckedSend<'static>, BrokerError> {
+        CheckedSend::check(
+            "send.task",
+            "{}",
+            "default",
+            priority,
+            Some(Utc::now()),
+            None,
+            None,
+            None,
+            Some(TASK_ID),
+            None,
+            None,
             EnqueueRetention::Forever,
             false,
         )
@@ -177,6 +196,58 @@ mod checked_send_tests {
             Err(other) => panic!("an empty key gave {other}"),
             Ok(send) => panic!("an empty key passed the check: {send:?}"),
         }
+    }
+
+    /// A rule of the scoped key and a rule of the version-1 command keep the
+    /// text of the rule as the cause: Python's `ScopedIdempotencyKey` and
+    /// `EnqueueCommandV1` raise that text as a `ValueError`.
+    #[test]
+    fn a_key_rule_and_a_command_rule_keep_the_rule_text() {
+        let over = "k".repeat(256);
+        for (case, outcome, expected) in [
+            (
+                "empty key",
+                checked(Some("")).map(|_send| ()),
+                EnqueueRefusalCause::KeyRuleRefused("idempotency key must be non-empty".to_owned()),
+            ),
+            (
+                "key over the bound",
+                checked(Some(&over)).map(|_send| ()),
+                EnqueueRefusalCause::KeyRuleRefused(
+                    "idempotency key must be at most 255 UTF-8 bytes".to_owned(),
+                ),
+            ),
+            (
+                "priority 0",
+                checked_with_priority(0).map(|_send| ()),
+                EnqueueRefusalCause::CommandRuleRefused(
+                    "priority must be between 1 and 100".to_owned(),
+                ),
+            ),
+        ] {
+            match outcome {
+                Err(BrokerError::EnqueueContract(refusal)) => {
+                    assert_eq!(refusal.part, SendPart::Input, "{case}");
+                    assert_eq!(refusal.cause, expected, "{case}");
+                }
+                Err(other) => panic!("{case} gave {other}"),
+                Ok(()) => panic!("{case} passed the check"),
+            }
+        }
+    }
+
+    /// An empty retention class key is the command's rule, with the
+    /// command's text (Python `EnqueueCommandV1`).
+    #[test]
+    fn an_empty_retention_class_key_is_the_command_rule() {
+        let refusal = EnqueueRefusal::empty_retention_class_key();
+        assert_eq!(refusal.part, SendPart::Input);
+        assert_eq!(
+            refusal.cause,
+            EnqueueRefusalCause::CommandRuleRefused(
+                "retention_class_key must be non-empty".to_owned()
+            )
+        );
     }
 
     #[test]
@@ -1008,9 +1079,9 @@ pub struct PostgresBroker {
     /// default retention config, or the one that the client set with
     /// [`PostgresBroker::with_install_coverage`].
     install_coverage: CoverageRequest,
-    /// The client family of this handle. The constructors of this type serve
-    /// the Rust client; the Python bridge sets `Python` with
-    /// [`PostgresBroker::with_client_family`].
+    /// The client family of this handle: the family that its install records
+    /// and that its writes check. Every constructor takes it from its
+    /// caller; it does not change after construction.
     client_family: ClientFamily,
     /// Set once the family check before the first write passed.
     client_family_admitted: tokio::sync::OnceCell<()>,
@@ -1020,9 +1091,9 @@ pub struct PostgresBroker {
 }
 
 impl PostgresBroker {
-    /// Construct a test broker on the database of a test's sqlx pool. The
-    /// sqlx pool is the adapter pool; the core pools connect to the same
-    /// database ([`crate::broker::pools::handle_for_test_pool`]).
+    /// Construct a test broker of `family` on the database of a test's sqlx
+    /// pool. The sqlx pool is the adapter pool; the core pools connect to the
+    /// same database ([`crate::broker::pools::handle_for_test_pool`]).
     ///
     /// The broker has no session URL, so it has no listener: result waits
     /// poll, and an operation that needs a listener is refused with
@@ -1030,36 +1101,44 @@ impl PostgresBroker {
     /// [`from_pool_and_session_url`](Self::from_pool_and_session_url) for a
     /// broker with a listener.
     #[cfg(test)]
-    pub fn from_pool(pool: PgPool) -> Self {
+    pub fn from_pool(pool: PgPool, family: ClientFamily) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::MigrateAndValidate,
             ProcessListener::without_session_url(),
+            family,
         )
     }
 
-    /// Construct a test broker on the database of a test's sqlx pool, with
-    /// its listener on `session_url`: the process listener of that URL, which
-    /// opens its connection at the first subscription with the default socket
-    /// settings (`DEFAULT_SOCKET_SETTINGS`). The URL is parsed then.
+    /// Construct a test broker of `family` on the database of a test's sqlx
+    /// pool, with its listener on `session_url`: the process listener of that
+    /// URL, which opens its connection at the first subscription with the
+    /// default socket settings (`DEFAULT_SOCKET_SETTINGS`). The URL is parsed
+    /// then.
     #[cfg(test)]
-    pub fn from_pool_and_session_url(pool: PgPool, session_url: &str) -> Self {
+    pub fn from_pool_and_session_url(
+        pool: PgPool,
+        session_url: &str,
+        family: ClientFamily,
+    ) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::MigrateAndValidate,
             ProcessListener::on_session_url(session_url, DEFAULT_SOCKET_SETTINGS),
+            family,
         )
     }
 
-    /// Construct a test monitoring broker that never applies migrations or
-    /// checks the fleet cutover gate. It has no session URL, so it has no
-    /// listener.
+    /// Construct a test monitoring broker of `family` that never applies
+    /// migrations or checks the fleet cutover gate. It has no session URL, so
+    /// it has no listener.
     #[cfg(test)]
-    pub fn from_pool_observe_only(pool: PgPool) -> Self {
+    pub fn from_pool_observe_only(pool: PgPool, family: ClientFamily) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::ObserveOnly,
             ProcessListener::without_session_url(),
+            family,
         )
     }
 
@@ -1068,6 +1147,7 @@ impl PostgresBroker {
         pool: PgPool,
         schema_initialization_mode: SchemaInitializationMode,
         listener: ProcessListener,
+        family: ClientFamily,
     ) -> Self {
         Self {
             core: crate::broker::pools::handle_for_test_pool(&pool),
@@ -1081,64 +1161,79 @@ impl PostgresBroker {
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             install_coverage: default_install_coverage(),
-            client_family: ClientFamily::Rust,
+            client_family: family,
             client_family_admitted: tokio::sync::OnceCell::new(),
             result_reader: ResultReaderSeen::default(),
         }
     }
 
-    /// Construct a test broker with an explicit keyed-enqueue reservation
-    /// window. `None` selects the 24-hour contract default.
+    /// Construct a test broker of `family` with an explicit keyed-enqueue
+    /// reservation window. `None` selects the 24-hour contract default.
     #[cfg(test)]
     pub fn from_pool_with_idempotency_reservation_window(
         pool: PgPool,
         window: Option<chrono::Duration>,
+        family: ClientFamily,
     ) -> Result<Self, BrokerError> {
-        Self::from_pool_with_enqueue_policy(pool, false, window)
+        Self::from_pool_with_enqueue_policy(pool, false, window, family)
     }
 
-    /// Construct a test broker with both enqueue-time broker policies.
+    /// Construct a test broker of `family` with both enqueue-time broker
+    /// policies.
     #[cfg(test)]
     pub fn from_pool_with_enqueue_policy(
         pool: PgPool,
         retain_rerun_input_default: bool,
         window: Option<chrono::Duration>,
+        family: ClientFamily,
     ) -> Result<Self, BrokerError> {
         let micros = idempotency_reservation_window_micros(window)?;
-        let mut broker = Self::from_pool(pool);
+        let mut broker = Self::from_pool(pool, family);
         broker.retain_rerun_input_default = retain_rerun_input_default;
         broker.idempotency_reservation_window_micros = micros;
         Ok(broker)
     }
 
-    /// Connect using a raw database URL.
+    /// Connect using a raw database URL, for a client of `family`.
     ///
     /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
     /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
-    pub async fn connect(database_url: &str) -> Result<Self, BrokerError> {
-        Self::connect_with(&PostgresConfig::from_url(database_url)).await
+    pub async fn connect(database_url: &str, family: ClientFamily) -> Result<Self, BrokerError> {
+        Self::connect_with(&PostgresConfig::from_url(database_url), family).await
     }
 
-    /// Connect using a `PostgresConfig` from horsies-core.
-    pub async fn connect_with(config: &PostgresConfig) -> Result<Self, BrokerError> {
+    /// Connect using a `PostgresConfig` from horsies-core, for a client of
+    /// `family`.
+    pub async fn connect_with(
+        config: &PostgresConfig,
+        family: ClientFamily,
+    ) -> Result<Self, BrokerError> {
         Self::connect_with_schema_initialization_mode(
             config,
             SchemaInitializationMode::MigrateAndValidate,
+            family,
         )
         .await
     }
 
-    /// Connect a monitoring broker without applying migrations or checking
-    /// the task-history fleet gate.
-    pub async fn connect_observe_only(config: &PostgresConfig) -> Result<Self, BrokerError> {
-        Self::connect_with_schema_initialization_mode(config, SchemaInitializationMode::ObserveOnly)
-            .await
+    /// Connect a monitoring broker of `family` without applying migrations
+    /// or checking the task-history fleet gate.
+    pub async fn connect_observe_only(
+        config: &PostgresConfig,
+        family: ClientFamily,
+    ) -> Result<Self, BrokerError> {
+        Self::connect_with_schema_initialization_mode(
+            config,
+            SchemaInitializationMode::ObserveOnly,
+            family,
+        )
+        .await
     }
 
-    /// Connect the broker of a worker's child: no migration and no fleet
-    /// gate check, as [`Self::connect_observe_only`]; the main URL pool keeps
-    /// `kept_open` connections open and, with `check`, pings every pooled
-    /// connection at checkout ([`PoolProfile::Child`]).
+    /// Connect the broker of a worker's child of `family`: no migration and
+    /// no fleet gate check, as [`Self::connect_observe_only`]; the main URL
+    /// pool keeps `kept_open` connections open and, with `check`, pings
+    /// every pooled connection at checkout ([`PoolProfile::Child`]).
     ///
     /// Must run inside a tokio runtime when `kept_open` keeps connections
     /// open: the pool starts the task that opens them.
@@ -1146,23 +1241,29 @@ impl PostgresBroker {
         config: &PostgresConfig,
         kept_open: crate::db::KeptOpen,
         check: bool,
+        family: ClientFamily,
     ) -> Result<Self, BrokerError> {
         Self::connect_with_profile(
             config,
             SchemaInitializationMode::ObserveOnly,
             PoolProfile::Child { kept_open, check },
+            family,
         )
         .await
     }
 
-    /// Connect a worker's broker: the main URL pool is the worker profile
-    /// pool, which keeps [`crate::db::WORKER_RESERVED_CONNECTIONS`] free from
-    /// batch checkouts for the reaper and the per-task writes.
-    pub async fn connect_worker_with(config: &PostgresConfig) -> Result<Self, BrokerError> {
+    /// Connect a worker's broker of `family`: the main URL pool is the worker
+    /// profile pool, which keeps [`crate::db::WORKER_RESERVED_CONNECTIONS`]
+    /// free from batch checkouts for the reaper and the per-task writes.
+    pub async fn connect_worker_with(
+        config: &PostgresConfig,
+        family: ClientFamily,
+    ) -> Result<Self, BrokerError> {
         Self::connect_with_profile(
             config,
             SchemaInitializationMode::MigrateAndValidate,
             PoolProfile::Worker,
+            family,
         )
         .await
     }
@@ -1170,18 +1271,26 @@ impl PostgresBroker {
     async fn connect_with_schema_initialization_mode(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
+        family: ClientFamily,
     ) -> Result<Self, BrokerError> {
-        Self::connect_with_profile(config, schema_initialization_mode, PoolProfile::Producer).await
+        Self::connect_with_profile(
+            config,
+            schema_initialization_mode,
+            PoolProfile::Producer,
+            family,
+        )
+        .await
     }
 
     /// Checks the config and builds the core pools and the sqlx adapter
-    /// pools. Opens no connection: each pool connects at its first checkout,
-    /// so a broker whose operations all run on the core pools holds no
-    /// adapter connection.
+    /// pools of a broker of `family`. Opens no connection: each pool connects
+    /// at its first checkout, so a broker whose operations all run on the
+    /// core pools holds no adapter connection.
     async fn connect_with_profile(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
         profile: PoolProfile,
+        family: ClientFamily,
     ) -> Result<Self, BrokerError> {
         config.validate()?;
         let core = CoreHandle::open(config, profile)?;
@@ -1214,27 +1323,29 @@ impl PostgresBroker {
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             install_coverage: default_install_coverage(),
-            client_family: ClientFamily::Rust,
+            client_family: family,
             client_family_admitted: tokio::sync::OnceCell::new(),
             result_reader: ResultReaderSeen::default(),
         })
     }
 
-    /// Connect with an explicit keyed-enqueue reservation window. Validation
-    /// happens before any database connection is attempted.
+    /// Connect a broker of `family` with an explicit keyed-enqueue
+    /// reservation window. Validation happens before any database connection
+    /// is attempted.
     pub async fn connect_with_idempotency_reservation_window(
         config: &PostgresConfig,
         window: Option<chrono::Duration>,
+        family: ClientFamily,
     ) -> Result<Self, BrokerError> {
         let micros = idempotency_reservation_window_micros(window)?;
-        let mut broker = Self::connect_with(config).await?;
+        let mut broker = Self::connect_with(config, family).await?;
         broker.idempotency_reservation_window_micros = micros;
         Ok(broker)
     }
 
-    /// Connect with the schema behaviour and the keyed-enqueue reservation
-    /// window of a client manifest, with the pools of `profile`: a producer,
-    /// a worker process (the main URL pool keeps
+    /// Connect a broker of `family` with the schema behaviour and the
+    /// keyed-enqueue reservation window of a client manifest, with the pools
+    /// of `profile`: a producer, a worker process (the main URL pool keeps
     /// [`WORKER_RESERVED_CONNECTIONS`] free from batch checkouts), or a
     /// worker's child. The window is checked before any database connection
     /// is attempted.
@@ -1243,10 +1354,11 @@ impl PostgresBroker {
         schema_initialization_mode: SchemaInitializationMode,
         window: chrono::Duration,
         profile: PoolProfile,
+        family: ClientFamily,
     ) -> Result<Self, BrokerError> {
         let micros = idempotency_reservation_window_micros(Some(window))?;
         let mut broker =
-            Self::connect_with_profile(config, schema_initialization_mode, profile).await?;
+            Self::connect_with_profile(config, schema_initialization_mode, profile, family).await?;
         broker.idempotency_reservation_window_micros = micros;
         Ok(broker)
     }
@@ -1281,13 +1393,6 @@ impl PostgresBroker {
         )
         .await
         .map_err(BrokerError::from)
-    }
-
-    /// The same handle for a client of `family`. The install records it, and
-    /// every write checks it once.
-    pub fn with_client_family(mut self, family: ClientFamily) -> Self {
-        self.client_family = family;
-        self
     }
 
     /// The client family of this handle: the family that its install records
@@ -3257,6 +3362,7 @@ mod tests {
         let broker = PostgresBroker::from_pool_and_session_url(
             pool,
             "postgresql://horsies@127.0.0.1:1/horsies",
+            crate::ClientFamily::Rust,
         )
         .without_listener();
         let mode = broker.result_wait_mode(Uuid::from_u128(7)).await;
@@ -3487,8 +3593,10 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn fused_finalize_completes_running_task() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -3520,8 +3628,10 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn fused_finalize_noop_when_not_running() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -3545,8 +3655,10 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn fused_finalize_noop_on_wrong_worker() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -3579,8 +3691,10 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn fused_finalize_fenced_by_claimed_at() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -3689,8 +3803,10 @@ mod prestart_expiry_tests {
     #[tokio::test]
     #[serial]
     async fn prestart_expiry_waits_for_the_deadline_and_then_expires_any_generation() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -3789,7 +3905,7 @@ mod absent_result_wait_tests {
     #[serial]
     async fn a_result_wait_with_no_limit_ends_for_a_missing_task() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool(pool);
+        let broker = PostgresBroker::from_pool(pool, crate::ClientFamily::Rust);
         let missing = Uuid::new_v4();
 
         // An outer timeout: a wait with no limit on a missing task that
@@ -3921,8 +4037,10 @@ mod filter_non_runnable_tests {
     #[tokio::test]
     #[serial]
     async fn paused_workflow_cancels_task_and_resets_node() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4();
@@ -4057,8 +4175,10 @@ mod terminal_at_stamp_tests {
     use uuid::Uuid;
 
     async fn connect() -> PostgresBroker {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         broker
     }
@@ -4424,7 +4544,7 @@ mod session_settings_tests {
         let separator = if url.contains('?') { '&' } else { '?' };
         let mut config = config(url.clone(), false);
         config.session_database_url = Some(format!("{url}{separator}application_name=jit_session"));
-        let broker = PostgresBroker::connect_with(&config)
+        let broker = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
             .await
             .expect("connect broker");
         assert_eq!(jit(broker.pool()).await, "off");
@@ -4477,15 +4597,18 @@ mod broker_operation_error_tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy(UNREACHABLE_URL)
             .expect("a lazy pool opens no connection");
-        PostgresBroker::from_pool(pool)
+        PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)
     }
 
     #[tokio::test]
     async fn connect_refuses_a_driver_suffix_scheme_before_any_connection() {
-        let refused = PostgresBroker::connect("postgresql+psycopg://horsies@127.0.0.1:1/horsies")
-            .await
-            .err()
-            .expect("the scheme is refused");
+        let refused = PostgresBroker::connect(
+            "postgresql+psycopg://horsies@127.0.0.1:1/horsies",
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .err()
+        .expect("the scheme is refused");
 
         assert!(matches!(
             &refused,
@@ -4500,7 +4623,7 @@ mod broker_operation_error_tests {
     async fn connect_with_refuses_a_config_rule_as_not_retryable() {
         let config = PostgresConfig::from_url("mysql://horsies@127.0.0.1:1/horsies");
 
-        let refused = PostgresBroker::connect_with(&config)
+        let refused = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
             .await
             .err()
             .expect("the scheme is refused");
@@ -4565,6 +4688,7 @@ mod broker_operation_error_tests {
             PgPoolOptions::new()
                 .connect_lazy(UNREACHABLE_URL)
                 .expect("a lazy pool opens no connection"),
+            crate::ClientFamily::Rust,
         );
         for broker in [unreachable_broker(), observe_only] {
             let Err(refused) = broker
@@ -4662,7 +4786,7 @@ mod connect_tests {
 
     #[tokio::test]
     async fn a_connect_opens_no_connection() {
-        let broker = PostgresBroker::connect(UNREACHABLE_URL)
+        let broker = PostgresBroker::connect(UNREACHABLE_URL, crate::ClientFamily::Rust)
             .await
             .expect("a connect opens no connection, so it needs no server");
 
@@ -4675,7 +4799,7 @@ mod connect_tests {
         let mut config = PostgresConfig::from_url(UNREACHABLE_URL);
         config.session_database_url = Some("postgresql://horsies@127.0.0.1:2/horsies".to_owned());
 
-        let broker = PostgresBroker::connect_worker_with(&config)
+        let broker = PostgresBroker::connect_worker_with(&config, crate::ClientFamily::Rust)
             .await
             .expect("a connect opens no connection, so it needs no server");
 
@@ -4703,7 +4827,7 @@ mod result_wait_tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
-        PostgresBroker::from_pool(pool)
+        PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)
     }
 
     fn refused_limits() -> [Duration; 2] {
@@ -4744,6 +4868,7 @@ mod result_wait_tests {
             PgPoolOptions::new()
                 .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
                 .expect("a lazy pool opens no connection"),
+            crate::ClientFamily::Rust,
         );
         for broker in [unreachable_broker(), observe_only] {
             let mode = broker.result_wait_mode(Uuid::new_v4()).await;
@@ -4764,6 +4889,7 @@ mod result_wait_tests {
         PostgresBroker::from_pool_and_session_url(
             crate::broker::terminalization_matrix::migrated_pool().await,
             &format!("{url}{separator}application_name={application_name}"),
+            crate::ClientFamily::Rust,
         )
     }
 
@@ -4853,7 +4979,7 @@ mod result_wait_tests {
             tcp_keepalives: Default::default(),
             tcp_user_timeout: Default::default(),
         };
-        let broker = PostgresBroker::connect_observe_only(&config)
+        let broker = PostgresBroker::connect_observe_only(&config, crate::ClientFamily::Rust)
             .await
             .expect("connect an observe-only broker");
 
@@ -4920,7 +5046,7 @@ mod stale_and_expired_list_tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
-        let broker = PostgresBroker::from_pool(pool);
+        let broker = PostgresBroker::from_pool(pool, crate::ClientFamily::Rust);
 
         for minutes in [
             -1,
@@ -5000,7 +5126,7 @@ mod stale_and_expired_list_tests {
     async fn the_stale_list_follows_the_latest_beat() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let task_name = format!("stale_list_{}", Uuid::new_v4().simple());
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         let beatless = seed(&pool, &task_name, "RUNNING", None).await;
         let old_beat = seed(&pool, &task_name, "RUNNING", None).await;
         let fresh_beat = seed(&pool, &task_name, "RUNNING", None).await;
@@ -5030,7 +5156,7 @@ mod stale_and_expired_list_tests {
     async fn the_expired_list_carries_enqueued_at_and_expired_for() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let task_name = format!("expired_list_{}", Uuid::new_v4().simple());
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         let expired = seed(&pool, &task_name, "PENDING", Some(2)).await;
         let _not_yet = seed(&pool, &task_name, "PENDING", Some(-5)).await;
 
@@ -5364,7 +5490,7 @@ mod client_family_tests {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
 
-        let broker = PostgresBroker::from_pool(pool);
+        let broker = PostgresBroker::from_pool(pool, crate::ClientFamily::Rust);
         broker
             .ensure_client_family_for_write()
             .await
@@ -5377,8 +5503,7 @@ mod client_family_tests {
     #[serial]
     async fn a_handle_of_the_other_family_is_refused_before_its_first_write() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker =
-            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+        let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Python);
 
         let refused = broker.ensure_client_family_for_write().await.unwrap_err();
 
@@ -5400,8 +5525,7 @@ mod client_family_tests {
     #[serial]
     async fn a_send_of_a_handle_with_migrations_off_into_the_other_family_is_refused() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool_observe_only(pool.clone())
-            .with_client_family(ClientFamily::Python);
+        let broker = PostgresBroker::from_pool_observe_only(pool.clone(), ClientFamily::Python);
         let task_id = Uuid::new_v4();
 
         let refused = broker

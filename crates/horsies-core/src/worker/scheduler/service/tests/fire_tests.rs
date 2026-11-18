@@ -500,7 +500,10 @@ async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_on
 #[serial]
 async fn a_running_scheduler_fires_a_due_slot_and_stops() {
     let pool = test_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let schedule = own_schedule("spawned");
     let manifest = manifest_for(std::slice::from_ref(&schedule));
     let stop = SchedulerStop::new();

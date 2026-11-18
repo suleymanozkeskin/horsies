@@ -29,6 +29,11 @@ use crate::tasks::{basic, classes, custom, recovery};
 /// the parent, its children and the first claim.
 pub const READY_LIMIT: Duration = Duration::from_secs(60);
 
+/// The line that the core worker logs once its start ended: its children,
+/// its startup coverage, the liveness lock and its services (the ping
+/// responder among them) run (`horsies-core` `worker/worker.rs`).
+pub const WORKER_READY_LINE: &str = "worker ready";
+
 /// The result wait of one readiness probe.
 const READY_PROBE: Duration = Duration::from_millis(500);
 
@@ -147,10 +152,14 @@ impl Suite {
         )
     }
 
-    /// Start a worker of `profile` and wait until it ran a readiness task
-    /// of the profile's class (Python `run_worker` with its ready check).
+    /// Start a worker of `profile` and wait until it logged
+    /// [`WORKER_READY_LINE`] and a readiness task of the profile's class ran
+    /// (Python `run_worker` with its ready check). The log line is this
+    /// worker's own: with two workers of one profile, the first can run the
+    /// readiness task of the second before the second answers pings.
     pub async fn worker(&self, profile: Profile) -> TestProcess {
         let mut worker = self.spawn_worker(profile);
+        worker.wait_for_log(WORKER_READY_LINE, READY_LIMIT).await;
         self.wait_ready(&mut worker, profile).await;
         worker
     }

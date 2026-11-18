@@ -33,7 +33,7 @@ impl MonitoringTestDatabase {
 
     /// A broker on this database.
     pub(crate) fn broker(&self) -> PostgresBroker {
-        PostgresBroker::from_pool(self.pool.clone())
+        PostgresBroker::from_pool(self.pool.clone(), crate::ClientFamily::Rust)
     }
 
     pub(crate) async fn drop(self) {

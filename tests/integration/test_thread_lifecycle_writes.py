@@ -38,6 +38,7 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies import _core as core
+from horsies._catalog.child_bounds import CANCELLED_WRITE_END_SECONDS
 from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.child_frames import (
     ChildFrame,
@@ -74,8 +75,9 @@ LOCK_HELD_S = 0.5
 """How long a test holds a row lock before it reads what the seat did."""
 STATEMENTS_S = shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
 """The time after which the core sends the cancel request of a start."""
-CANCEL_END_S = shared_lifecycle.CANCELLED_WRITE_END_S
-"""The longest end of a start after its cancel request."""
+CANCEL_END_S = CANCELLED_WRITE_END_SECONDS
+"""The longest end of a start after its cancel request (the core's
+``CANCELLED_WRITE_END``)."""
 ATTEMPT_END_S = shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S + CANCEL_END_S
 """The longest time of one start attempt in the core."""
 REFUSAL = refusal(

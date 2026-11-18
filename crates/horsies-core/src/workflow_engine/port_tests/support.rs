@@ -740,7 +740,10 @@ pub(super) fn child_specs_of(children: &[WorkflowSpec]) -> TestChildSpecs {
 
 /// A broker on `pool` for the start and the reads.
 pub(super) fn broker(pool: &PgPool) -> Arc<PostgresBroker> {
-    Arc::new(PostgresBroker::from_pool(pool.clone()))
+    Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ))
 }
 
 /// Starts `spec` through the core's start of a client spec
@@ -1100,7 +1103,7 @@ pub(super) async fn try_finish_task(
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
     let _ = finish_phase1(pool, task_id, outcome).await;
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         child_specs,
     )
@@ -1401,7 +1404,10 @@ impl CountedBroker {
         let upstream = database_options(pool);
         let proxy = WireProxy::start(&upstream).await;
         let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-        let broker = Arc::new(PostgresBroker::from_pool(proxied.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            proxied.clone(),
+            crate::ClientFamily::Rust,
+        ));
         Self {
             proxy,
             proxied,

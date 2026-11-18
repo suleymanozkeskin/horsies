@@ -228,7 +228,7 @@ impl SoftCapWorker {
                 false => self.submit(row.id),
             }
         }
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         let free = self.free_capacity();
         let admitted = admit_held_rows(&broker, &self.names.worker_id, &mut self.hold, || free)
             .await

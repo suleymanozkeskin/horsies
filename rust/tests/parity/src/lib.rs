@@ -600,16 +600,18 @@ pub const SCENARIOS: &[Scenario] = &[
         reruns: &[],
         health: Health::NotPinged,
     },
-    // Layer 2: two workers. A worker claims only the classes that its
-    // profile has children for, so each task has one possible worker.
+    // Layer 2: two workers, and each task has one possible worker. A worker
+    // with isolated children also serves a shared class that it has no
+    // children for, through its ISOLATED budget; a worker with no isolated
+    // children serves only the classes of its own children (the core's
+    // `ClaimPlan::route`). So neither worker here serves the class of the
+    // other.
     Scenario {
         name: "several_workers",
-        profiles: &[ISOLATED, SHARED_ASYNC],
+        profiles: &[SHARED_ASYNC, SHARED_THREAD],
         sends: &[
-            send("parity.add", &[("a", 2), ("b", 3)]),
             send("parity.add_async", &[("a", 2), ("b", 3)]),
-            send("parity.refuse", &[("value", 7)]),
-            send("parity.refuse_async", &[("value", 7)]),
+            send("parity.add_thread", &[("a", 2), ("b", 3)]),
         ],
         workflows: &[],
         actions: &[],

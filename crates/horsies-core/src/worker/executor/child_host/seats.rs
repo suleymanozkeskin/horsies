@@ -53,11 +53,12 @@ use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
 use crate::worker::executor::protocol::{
-    BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildFrame, DispatchNumber, FailureDetail,
-    IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverCancelFrame,
-    LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, ResultFrame,
-    RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, SharedRunFrame,
-    SharedWork, StoredOptionsRefusal, TaskInputText, TaskTimeoutMs, LOOP_BLOCK_LIMIT,
+    BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildAfterFrame, ChildFrame, DispatchNumber,
+    FailureDetail, IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
+    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork,
+    ParentFrame, ResultFrame, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
+    SharedRunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskTimeoutMs,
+    LOOP_BLOCK_LIMIT,
 };
 
 /// How often the poll watch reads the polls in progress.
@@ -123,6 +124,7 @@ async fn send_isolated_result(context: &HostContext, task_id: uuid::Uuid, end: R
         end,
         rss: read_rss(),
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     });
     context.writer.send(frame).await;
 }
@@ -382,6 +384,7 @@ async fn async_seat(
         run: run_ref,
         end,
         rss: read_rss(),
+        child: ChildAfterFrame::ServesOn,
     });
     context.writer.send(frame).await;
     in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -691,6 +694,7 @@ pub(super) async fn serve_shared_thread(
                     "the OS refused a seat thread: {error}"
                 )))),
                 rss: read_rss(),
+                child: ChildAfterFrame::ServesOn,
             });
             context.writer.send(frame).await;
             in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -725,6 +729,7 @@ fn thread_seat(
             run: run_ref,
             end,
             rss: read_rss(),
+            child: ChildAfterFrame::ServesOn,
         }));
 }
 

@@ -573,7 +573,10 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool.clone(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "snapshot-test".to_owned(),
             std::process::id() as i32,
@@ -695,6 +698,157 @@ mod tests {
         );
     }
 
+    /// Python `test_health_models.py::TestSlotHealth::test_each_cause_that_can_clear_round_trips`:
+    /// a down slot of each cause that can clear reads back from the written
+    /// column as it was written.
+    #[test]
+    fn each_cause_that_can_clear_round_trips_through_the_column() {
+        use crate::broker::slot_health::{
+            parse_slot_health, ClearableBootCause, DownSlot, SlotHealth,
+        };
+        use crate::worker::executor::protocol::ShortageErrno;
+        use chrono::TimeZone;
+        use std::num::{NonZeroU32, NonZeroU64};
+
+        let down_since = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("a valid test instant");
+        for (written, read) in [
+            (
+                BootFailureCause::ResourceShortage(ShortageErrno::Enomem),
+                ClearableBootCause::ResourceShortage(ShortageErrno::Enomem),
+            ),
+            (
+                BootFailureCause::ThreadStartRefused,
+                ClearableBootCause::ThreadStartRefused,
+            ),
+        ] {
+            let column = slots_down_json(&[(
+                2,
+                DownState {
+                    cause: written,
+                    detail: "x".to_owned(),
+                    down_since,
+                    failed_boots: NonZeroU32::new(1).expect("1"),
+                },
+            )]);
+
+            let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+                panic!("the written down slot reads back: {column}");
+            };
+
+            assert_eq!(
+                slots.as_slice(),
+                [DownSlot {
+                    slot: 2,
+                    cause: read,
+                    detail: "x".to_owned(),
+                    down_since,
+                    failed_boots: NonZeroU64::new(1).expect("1"),
+                }]
+            );
+        }
+    }
+
+    /// Python `test_health_models.py::TestSlotHealth::test_the_writer_covers_every_down_slot_field`:
+    /// each field of the read `DownSlot` reaches the stored entry, so a new
+    /// field cannot be read without a writer. The pattern names every field
+    /// with no rest: a new field does not compile here until it is checked
+    /// and named in the written keys.
+    #[test]
+    fn the_writer_covers_every_down_slot_field() {
+        use crate::broker::slot_health::{
+            parse_slot_health, ClearableBootCause, DownSlot, SlotHealth,
+        };
+        use crate::worker::executor::protocol::ShortageErrno;
+        use chrono::TimeZone;
+        use std::collections::BTreeSet;
+        use std::num::NonZeroU32;
+
+        let written_since = Utc
+            .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+            .single()
+            .expect("a valid test instant");
+        let column = slots_down_json(&[(
+            1,
+            DownState {
+                cause: BootFailureCause::ResourceShortage(ShortageErrno::Emfile),
+                detail: "OSError: [Errno 24] Too many open files".to_owned(),
+                down_since: written_since,
+                failed_boots: NonZeroU32::new(3).expect("3"),
+            },
+        )]);
+        let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+            panic!("the written down slot reads back: {column}");
+        };
+        let [DownSlot {
+            slot,
+            cause,
+            detail,
+            down_since,
+            failed_boots,
+        }] = slots.as_slice()
+        else {
+            panic!("one down slot: {:?}", slots.as_slice());
+        };
+
+        assert_eq!(*slot, 1);
+        assert_eq!(
+            *cause,
+            ClearableBootCause::ResourceShortage(ShortageErrno::Emfile)
+        );
+        assert_eq!(detail, "OSError: [Errno 24] Too many open files");
+        assert_eq!(*down_since, written_since);
+        assert_eq!(failed_boots.get(), 3);
+        let keys: BTreeSet<&str> = column[0]
+            .as_object()
+            .expect("an entry is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["slot", "cause", "detail", "down_since", "failed_boots"])
+        );
+    }
+
+    /// Python `test_health_models.py::TestClassCapacity::test_the_writer_covers_every_read_field`:
+    /// each field of the read `ClassBudget` but the budget (the key of its
+    /// entry) reaches the stored entry, so a new field cannot be read
+    /// without a writer. The pattern names every field with no rest.
+    #[test]
+    fn the_writer_covers_every_read_field_of_a_budget() {
+        use crate::broker::class_budgets::{parse_class_capacity, ClassBudget};
+        use std::collections::BTreeSet;
+
+        let column = class_capacity_json(&[BudgetColumn {
+            budget: Execution::Isolated,
+            capacity: 1,
+            serves: vec![Execution::Isolated],
+        }]);
+        let budgets = parse_class_capacity(&column).expect("the written column reads back");
+        let [ClassBudget {
+            budget,
+            capacity,
+            serves,
+        }] = budgets.as_slice()
+        else {
+            panic!("one budget: {:?}", budgets.as_slice());
+        };
+
+        assert_eq!(*budget, Execution::Isolated);
+        assert_eq!(*capacity, 1);
+        assert_eq!(serves.as_slice(), [Execution::Isolated]);
+        let keys: BTreeSet<&str> = column["ISOLATED"]
+            .as_object()
+            .expect("an entry is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, BTreeSet::from(["capacity", "serves"]));
+    }
+
     /// Python `test_claim_plan.py::test_budgets_and_worker_state_capacity`:
     /// each budget maps to its capacity and the classes it serves.
     #[test]
@@ -807,7 +961,10 @@ mod tests {
         assert!(worker_config.queue_max_concurrency.is_empty());
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool.clone(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "baseline-columns-test".to_owned(),
             std::process::id() as i32,
@@ -1002,7 +1159,10 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_pool(
+                pool.clone(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "first-snapshot-test".to_owned(),
             std::process::id() as i32,

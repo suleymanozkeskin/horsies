@@ -2093,7 +2093,7 @@ mod tests {
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
         let worker = worker_of_one_idle_child(
-            Arc::new(PostgresBroker::from_pool(pool)),
+            Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
             AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
             WorkerConfig::default(),
         );
@@ -2122,6 +2122,7 @@ mod tests {
         let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
             test_pool().await,
             &crate::broker::terminalization_matrix::migrated_database_url().await,
+            crate::ClientFamily::Rust,
         ));
         let worker = worker_of_one_idle_child(
             Arc::clone(&broker),
@@ -2356,7 +2357,10 @@ mod tests {
     }
 
     async fn test_broker() -> Arc<PostgresBroker> {
-        Arc::new(PostgresBroker::from_pool(test_pool().await))
+        Arc::new(PostgresBroker::from_pool(
+            test_pool().await,
+            crate::ClientFamily::Rust,
+        ))
     }
 
     /// A broker on a loopback port where no server listens: every statement
@@ -2368,7 +2372,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
-        PostgresBroker::from_pool(pool)
+        PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)
     }
 
     /// The claim generation of every row that `insert_claimed_task` seeds and
@@ -2746,7 +2750,7 @@ mod tests {
             .connect_lazy(url)
             .expect("a lazy pool opens no connection");
         Worker::of_child_specs(
-            Arc::new(PostgresBroker::from_pool(pool)),
+            Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
             crate::test_support::child_specs::no_child_specs(),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
@@ -2780,7 +2784,7 @@ mod tests {
             .connect_lazy(url)
             .expect("a lazy pool opens no connection");
         let refused = Worker::of_child_specs(
-            Arc::new(PostgresBroker::from_pool(pool)),
+            Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
             crate::test_support::child_specs::no_child_specs(),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
@@ -4190,6 +4194,7 @@ mod tests {
             .database(&format!("horsies_missing_{}", Uuid::new_v4().simple()));
         let failed_phase2_broker = PostgresBroker::from_pool(
             sqlx::postgres::PgPoolOptions::new().connect_lazy_with(missing_database),
+            crate::ClientFamily::Rust,
         );
 
         let child_specs = crate::test_support::child_specs::TestChildSpecs::empty();
@@ -4956,7 +4961,7 @@ mod tests {
         let pending = insert_pending_task(&database.pool).await;
         let before = start_facts(&database.pool, pending).await;
         let worker = start_test_worker(
-            PostgresBroker::from_pool(database.pool.clone()),
+            PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust),
             database.config_url.clone(),
         );
 
@@ -4988,7 +4993,10 @@ mod tests {
         let before = start_facts(&database.pool, pending).await;
 
         let worker = start_test_worker(
-            PostgresBroker::from_pool_observe_only(database.pool.clone()),
+            PostgresBroker::from_pool_observe_only(
+                database.pool.clone(),
+                crate::ClientFamily::Rust,
+            ),
             database.config_url.clone(),
         );
         let not_recorded = refused_run(&worker).await;
@@ -5005,7 +5013,10 @@ mod tests {
 
         database.record_family("PYTHON").await;
         let worker = start_test_worker(
-            PostgresBroker::from_pool_observe_only(database.pool.clone()),
+            PostgresBroker::from_pool_observe_only(
+                database.pool.clone(),
+                crate::ClientFamily::Rust,
+            ),
             database.config_url.clone(),
         );
         let python = refused_run(&worker).await;
@@ -5043,7 +5054,7 @@ mod tests {
         assert!(held);
         let before = start_facts(&database.pool, pending).await;
         let worker = start_test_worker(
-            PostgresBroker::from_pool(database.pool.clone()),
+            PostgresBroker::from_pool(database.pool.clone(), crate::ClientFamily::Rust),
             database.config_url.clone(),
         );
 
@@ -5069,21 +5080,24 @@ mod tests {
         let main_url = crate::broker::terminalization_matrix::migrated_database_url().await;
         let separator = if main_url.contains('?') { '&' } else { '?' };
         let session_url = format!("{main_url}{separator}application_name=start_session");
-        let broker = PostgresBroker::connect_with(&PostgresConfig {
-            database_url: main_url.clone(),
-            session_database_url: Some(session_url),
-            pgbouncer_transaction_mode: false,
-            pool_pre_ping: true,
-            worker_pool_pre_ping: false,
-            pool_size: 30,
-            max_overflow: 30,
-            retain_rerun_input_default: false,
-            pool_timeout: 30,
-            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
-            echo: false,
-            tcp_keepalives: Default::default(),
-            tcp_user_timeout: Default::default(),
-        })
+        let broker = PostgresBroker::connect_with(
+            &PostgresConfig {
+                database_url: main_url.clone(),
+                session_database_url: Some(session_url),
+                pgbouncer_transaction_mode: false,
+                pool_pre_ping: true,
+                worker_pool_pre_ping: false,
+                pool_size: 30,
+                max_overflow: 30,
+                retain_rerun_input_default: false,
+                pool_timeout: 30,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
+                echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
+            },
+            crate::ClientFamily::Rust,
+        )
         .await
         .expect("connect broker with a separate session pool");
         broker.pool().close().await;
@@ -5177,10 +5191,12 @@ mod tests {
         // The worker writes its plain successes on the worker pool and
         // claims on the wakes of its listener: a broker of a worker.
         let worker_url = database_url_for(&database.config_url, database.database.name());
-        let broker =
-            PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
-                .await
-                .expect("connect the broker of a worker");
+        let broker = PostgresBroker::connect_worker_with(
+            &test_app_config(worker_url.clone()).broker,
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .expect("connect the broker of a worker");
         // Two isolated children: the held claim counts in the isolated
         // budget (`horsies_claim_in_flight`) and fills one slot; the claim
         // of the pending task takes the other.
@@ -5284,10 +5300,12 @@ mod tests {
         .await
         .expect("install the claim refusal");
         let worker_url = database_url_for(&database.config_url, database.database.name());
-        let broker =
-            PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
-                .await
-                .expect("connect the broker of a worker");
+        let broker = PostgresBroker::connect_worker_with(
+            &test_app_config(worker_url.clone()).broker,
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .expect("connect the broker of a worker");
         let worker = worker_of_idle_children(
             Arc::new(broker),
             test_app_config(worker_url),
@@ -5392,21 +5410,24 @@ mod tests {
         .await
         .expect("install the pool write log");
         let database_url = database_url_for(&database.config_url, database.database.name());
-        let broker = PostgresBroker::connect_with(&PostgresConfig {
-            database_url: with_application_name(&database_url, "reaper_runtime"),
-            session_database_url: Some(with_application_name(&database_url, "reaper_session")),
-            pgbouncer_transaction_mode: false,
-            pool_pre_ping: true,
-            worker_pool_pre_ping: false,
-            pool_size: 30,
-            max_overflow: 30,
-            retain_rerun_input_default: false,
-            pool_timeout: 30,
-            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
-            echo: false,
-            tcp_keepalives: Default::default(),
-            tcp_user_timeout: Default::default(),
-        })
+        let broker = PostgresBroker::connect_with(
+            &PostgresConfig {
+                database_url: with_application_name(&database_url, "reaper_runtime"),
+                session_database_url: Some(with_application_name(&database_url, "reaper_session")),
+                pgbouncer_transaction_mode: false,
+                pool_pre_ping: true,
+                worker_pool_pre_ping: false,
+                pool_size: 30,
+                max_overflow: 30,
+                retain_rerun_input_default: false,
+                pool_timeout: 30,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
+                echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
+            },
+            crate::ClientFamily::Rust,
+        )
         .await
         .expect("connect a broker with two pools");
         let mut app_config = test_app_config(database.config_url.clone());
