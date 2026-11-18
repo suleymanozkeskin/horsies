@@ -770,7 +770,7 @@ unless it starts with "Added".
   that runs a tokio runtime it runs nothing and answers `ASYNC_CONTEXT`:
   `TaskSendError::AsyncContext` with the prepared task id and payload (an
   async retry sends them), `ReadError::AsyncContext` (added; not kept by
-  the handle), `BrokerErrorCode::AsyncContext`, `HRS-217` in the check
+  the handle), `BrokerOperationError::AsyncContext`, `HRS-217` in the check
   report, `WorkflowStartErrorCode::AsyncContext` with the workflow id of
   the start, `HandleErrorCode::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
@@ -782,6 +782,16 @@ unless it starts with "Added".
   `ForkedAfterCoreStart` in the same state. A blocking send whose runtime
   the operating system refused to start is still a retryable
   `EnqueueFailed`.
+- **`BrokerOperationError` is an enum with one variant per state.** The
+  variants are Python's classes that the core produces: `OperationFailed`
+  (with a `BrokerOperationFailedCode`, the nine operation codes),
+  `EnqueueFailed`, `PayloadMismatch`, `IdempotencyKeyConflict` (with
+  `owner_task_id`), `InvalidJsonPayload`, `InvalidTaskOptions`,
+  `InvalidInput`, `AsyncContext`, `ListenerDisabled` and `WaitInsideTask`.
+  Each has only the facts of its state; `retryable` is a field of
+  `OperationFailed` and `EnqueueFailed` only. The fields `code`, `message`,
+  `retryable` and `cause` become the methods `code()`, `message()`,
+  `retryable()` and `failure_cause()`.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

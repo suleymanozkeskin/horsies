@@ -159,13 +159,13 @@ async fn an_unreadable_slot_health_fails_the_read() {
         .expect_err("the list read meets the same row");
 
     for error in [failed, listed] {
-        assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-        assert!(!error.retryable);
-        assert!(error.message.contains("w-odd"), "{}", error.message);
+        assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!error.retryable());
+        assert!(error.message().contains("w-odd"), "{}", error.message());
         assert!(
-            error.message.contains("slots_down is unreadable"),
+            error.message().contains("slots_down is unreadable"),
             "{}",
-            error.message
+            error.message()
         );
     }
     database.drop().await;
@@ -190,15 +190,19 @@ async fn an_unreadable_class_capacity_fails_the_read() {
         .await
         .expect_err("an unreadable class_capacity fails the read");
 
-    assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(!failed.retryable);
-    assert!(failed.message.contains("w-odd"), "{}", failed.message);
+    assert_eq!(failed.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(!failed.retryable());
+    assert!(failed.message().contains("w-odd"), "{}", failed.message());
     assert!(
-        failed.message.contains("class_capacity is unreadable"),
+        failed.message().contains("class_capacity is unreadable"),
         "{}",
-        failed.message
+        failed.message()
     );
-    assert!(failed.message.contains("'EXCLUSIVE'"), "{}", failed.message);
+    assert!(
+        failed.message().contains("'EXCLUSIVE'"),
+        "{}",
+        failed.message()
+    );
     database.drop().await;
 }
 

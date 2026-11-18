@@ -87,7 +87,7 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 |------|-------|
 | A send or a retry | `TaskSendError::AsyncContext` with the prepared `task_id` and `payload`, and nothing written |
 | `get`, `info`, `get_result`, `get_raw_result`, `get_task_info` | `ReadError::AsyncContext { message }` |
-| A health read | `BrokerOperationError` with `BrokerErrorCode::AsyncContext`, not retryable |
+| A health read | `BrokerOperationError::AsyncContext`, not retryable |
 | `check_live` | `CheckReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
 | A workflow start or `retry_start` | `WorkflowStartError` with `WorkflowStartErrorCode::AsyncContext`, the `workflow_id` of the start, not retryable, and nothing written |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `HandleErrorCode::AsyncContext`, not retryable |
@@ -114,7 +114,7 @@ When the process runtime of the core cannot run the call, the call returns the d
 |------|-------|
 | A send or a retry | `TaskSendError::EnqueueFailed` with the task id and payload when the operating system refused the runtime's threads. In a fork, the send panics: see below |
 | A read | `ReadError::Database` |
-| A health read | `BrokerOperationError` with the code of the read |
+| A health read | `BrokerOperationError::OperationFailed` with the code of the read |
 | `check_live` | `CheckReport` with the connectivity refusal |
 | A workflow start | `WorkflowStartError` with `EnqueueFailed` and the `workflow_id` of the start |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `DbOperationFailed` |

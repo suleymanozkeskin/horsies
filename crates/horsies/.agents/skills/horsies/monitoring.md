@@ -36,9 +36,12 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | `get_class_coverage()` | `ClassCoverage`: whether a live worker can run each pending execution class |
 | `get_class_report()` | `ClassReport`: the load of each execution class |
 
-- Every read returns `Result<_, BrokerOperationError>` (`code`, `message`,
-  `retryable`). Each read connects the app's handle and installs the schema
-  once per handle, as a send does.
+- Every read returns `Result<_, BrokerOperationError>`: one variant per
+  state, with `code()`, `message()` and `retryable()`. A failed read is
+  `OperationFailed` with its `BrokerOperationFailedCode`; a refused
+  argument is `InvalidInput`; an app with no listener is
+  `ListenerDisabled`. Each read connects the app's handle and installs the
+  schema once per handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,
   `min_responses` workers replied, `timeout` passed. A zero `timeout` is
   `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
