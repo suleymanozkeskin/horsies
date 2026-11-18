@@ -11,7 +11,7 @@ use serde_json::value::RawValue;
 ///
 /// Errors: the `serde_json::Error` of a text that is not one JSON object.
 /// Pure.
-pub(crate) fn object_members(text: &str) -> Result<Vec<(String, &RawValue)>, serde_json::Error> {
+pub fn object_members(text: &str) -> Result<Vec<(String, &RawValue)>, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     let members = ObjectMembers::deserialize(&mut deserializer)?;
     deserializer.end()?;

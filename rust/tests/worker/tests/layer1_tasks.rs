@@ -575,7 +575,10 @@ async fn test_task_info_after_completion() {
     assert_eq!(info.queue_name, "default");
     assert_eq!(info.status, TaskStatus::Completed);
     let result = info.result.expect("the result was asked for");
-    assert_eq!(result.ok(), Some(serde_json::json!(42)));
+    assert_eq!(
+        result.ok().map(|value| value.get().to_owned()),
+        Some("42".to_owned())
+    );
     assert_eq!(info.attempts.map(|attempts| attempts.len()), Some(1));
 }
 

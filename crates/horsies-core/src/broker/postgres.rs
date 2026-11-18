@@ -76,9 +76,11 @@ use crate::db::{
 /// `VALIDATION_FAILED`, `core/task_decorator.py:2378-2387`). An object input is Python's keyword input: no
 /// member name is an engine key, and each member value has no engine key at any depth and at most
 /// `MAX_VALUE_JSON_DEPTH` levels. Any other input except `null` is one value under the same rules. A text that
-/// is not strict JSON is refused.
+/// is not strict JSON is refused. The members are checked from their texts, so an integer of any width that
+/// the strict rule takes is checked as it is sent.
 fn check_sent_input(input: &str) -> Result<(), BrokerError> {
-    let value: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
+    crate::core::codec::check_json_text(input).map_err(|refused| {
+        let error = crate::core::codec::JsonReadError::Refused(refused);
         BrokerError::EnqueueContract(EnqueueRefusal::unreadable_json(
             SendPart::Input,
             format!("task input refused: {error}"),
@@ -86,17 +88,7 @@ fn check_sent_input(input: &str) -> Result<(), BrokerError> {
         ))
     })?;
     let no_engine_members: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let checked = match &value {
-        serde_json::Value::Object(members) => {
-            crate::core::codec::user_value::check_task_input(&[], members, &no_engine_members)
-        }
-        serde_json::Value::Null => Ok(()),
-        other => crate::core::codec::user_value::check_task_input(
-            std::slice::from_ref(other),
-            &serde_json::Map::new(),
-            &no_engine_members,
-        ),
-    };
+    let checked = crate::core::codec::user_value::check_input_text(input, &no_engine_members);
     checked.map_err(|refusal| {
         BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
             SendPart::Input,
@@ -131,6 +123,14 @@ mod sent_input_tests {
         assert!(check_sent_input(r#"{"x": {"y": [1, 2]}}"#).is_ok());
         assert!(check_sent_input("[1]").is_ok());
         assert!(check_sent_input("null").is_ok());
+        let wide = format!(
+            r#"{{"max": 340282366920938463463374607431768211455, "below": -9223372036854775809, "long": {}}}"#,
+            "9".repeat(400)
+        );
+        assert!(
+            check_sent_input(&wide).is_ok(),
+            "an integer of any width the strict rule takes"
+        );
     }
 }
 

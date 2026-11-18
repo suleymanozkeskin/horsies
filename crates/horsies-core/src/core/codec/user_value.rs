@@ -6,7 +6,10 @@
 //! - At most [`MAX_VALUE_JSON_DEPTH`] levels of arrays and objects. A stored text may have
 //!   [`MAX_JSON_DEPTH`] levels, so the engine has room for the envelopes that it puts around a value.
 
+use serde_json::value::RawValue;
+
 use super::json_text::JsonText;
+use super::object_members::object_members;
 use super::strict_read::{text_shape, MAX_INT_DIGITS, MAX_JSON_DEPTH};
 
 /// Key prefixes that only the engine writes (Python `_RESERVED_KEY_PREFIXES`, `core/codec/typed.py:152`).
@@ -122,8 +125,13 @@ pub fn check_user_value(
 /// Pure. The text is read once and no value is built, so an integer outside the `i64` and `u64` range is
 /// checked as it is stored.
 pub fn check_user_value_text(value: &JsonText, depth_limit: usize) -> Result<(), UserValueRefused> {
-    let shape =
-        text_shape(value.get()).expect("the text of a JsonText passed the strict read rule");
+    check_checked_text(value.get(), depth_limit)
+}
+
+/// [`check_user_value_text`] on a text that passed the strict read rule, or on a member or an element of one:
+/// such a text is read in place, with no copy. Pure.
+pub(crate) fn check_checked_text(text: &str, depth_limit: usize) -> Result<(), UserValueRefused> {
+    let shape = text_shape(text).expect("a text that passed the strict read rule reads again");
     match (shape.engine_key, shape.deepest > depth_limit) {
         (Some(key), _) => Err(UserValueRefused::EngineKey { key }),
         (None, true) => Err(UserValueRefused::DeeperThanValueBound { limit: depth_limit }),
@@ -189,6 +197,73 @@ pub fn check_task_input(
         })?;
     }
     Ok(())
+}
+
+/// [`check_task_input`] on the members of an object input, from their texts: each member name, and each member
+/// value whose name is not in `engine_kwargs`, in text order. The members are parts of a text that passed the
+/// strict read rule. No member is read into a `serde_json::Value`, so an integer of any width is checked as it is
+/// stored. Pure.
+pub(crate) fn check_input_members(
+    members: &[(String, &RawValue)],
+    engine_kwargs: &std::collections::HashSet<String>,
+) -> Result<(), InputRefused> {
+    for (name, value) in members {
+        if is_engine_key(name) {
+            return Err(InputRefused::KwargName { name: name.clone() });
+        }
+        if engine_kwargs.contains(name) {
+            continue;
+        }
+        check_checked_text(value.get(), MAX_VALUE_JSON_DEPTH).map_err(|refusal| {
+            InputRefused::Kwarg {
+                name: name.clone(),
+                refusal,
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// The kind of a task input text that passed the strict read rule.
+pub(crate) enum InputText<'a> {
+    /// `null`: no input.
+    Null,
+    /// An object: Python's keyword input, as its members in text order.
+    Object(Vec<(String, &'a RawValue)>),
+    /// Any other value: one positional value.
+    OneValue,
+}
+
+/// The kind of the task input `text`, which passed the strict read rule. Pure.
+///
+/// Panics: when serde_json does not read the members of a strict JSON object text, a defect of one of the two
+/// readers.
+pub(crate) fn input_text_kind(text: &str) -> InputText<'_> {
+    match text
+        .trim_start_matches([' ', '\t', '\n', '\r'])
+        .as_bytes()
+        .first()
+    {
+        Some(b'n') => InputText::Null,
+        Some(b'{') => InputText::Object(
+            object_members(text).expect("a strict JSON object text reads as its members"),
+        ),
+        Some(_) | None => InputText::OneValue,
+    }
+}
+
+/// [`check_task_input`] on a whole input text that passed the strict read rule: `null` passes, an object is
+/// checked by [`check_input_members`], and any other value is one positional value. Pure.
+pub(crate) fn check_input_text(
+    text: &str,
+    engine_kwargs: &std::collections::HashSet<String>,
+) -> Result<(), InputRefused> {
+    match input_text_kind(text) {
+        InputText::Null => Ok(()),
+        InputText::Object(members) => check_input_members(&members, engine_kwargs),
+        InputText::OneValue => check_checked_text(text, MAX_VALUE_JSON_DEPTH)
+            .map_err(|refusal| InputRefused::Arg { index: 0, refusal }),
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +427,45 @@ mod tests {
         let engine: std::collections::HashSet<String> = ["dep".to_owned()].into_iter().collect();
         assert_eq!(check_task_input(&[], &dep, &engine), Ok(()));
         assert!(check_task_input(&[], &dep, &no_engine).is_err());
+    }
+
+    /// The text check of an input gives the refusals of the value check, with every integer as stored.
+    #[test]
+    fn the_input_text_check_gives_the_refusals_of_the_value_check() {
+        let no_engine = std::collections::HashSet::new();
+        let wide = r#"{"a": 340282366920938463463374607431768211455, "b": [-9223372036854775809]}"#;
+        assert_eq!(check_input_text(wide, &no_engine), Ok(()));
+        assert_eq!(check_input_text("null", &no_engine), Ok(()));
+        assert_eq!(check_input_text(" [1, 2]", &no_engine), Ok(()));
+        assert_eq!(
+            check_input_text(r#"[{"__h_x": 1}]"#, &no_engine),
+            Err(InputRefused::Arg {
+                index: 0,
+                refusal: UserValueRefused::EngineKey {
+                    key: "__h_x".to_owned()
+                }
+            })
+        );
+        assert_eq!(
+            check_input_text(r#"{"a": 1, "__h_workflow_ctx__": {}}"#, &no_engine),
+            Err(InputRefused::KwargName {
+                name: "__h_workflow_ctx__".to_owned()
+            })
+        );
+        let deep = format!(r#"{{"a": {}{}}}"#, "[".repeat(201), "]".repeat(201));
+        assert_eq!(
+            check_input_text(&deep, &no_engine),
+            Err(InputRefused::Kwarg {
+                name: "a".to_owned(),
+                refusal: UserValueRefused::DeeperThanValueBound {
+                    limit: MAX_VALUE_JSON_DEPTH
+                }
+            })
+        );
+        let dep = r#"{"dep": {"__h_task_result__": true, "ok": 1, "err": null}}"#;
+        let engine: std::collections::HashSet<String> = ["dep".to_owned()].into_iter().collect();
+        assert_eq!(check_input_text(dep, &engine), Ok(()));
+        assert!(check_input_text(dep, &no_engine).is_err());
     }
 
     #[test]
