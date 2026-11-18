@@ -6,6 +6,7 @@
 
 pub(crate) mod child_specs;
 mod database;
+pub(crate) mod history;
 mod log_capture;
 pub(crate) mod sql;
 mod sqlx_bridge;

@@ -5,6 +5,7 @@
 //! (`TestTypedRefusals.test_refused_value_in_a_stored_envelope_fails_closed`).
 
 use super::*;
+use crate::test_support::sql;
 
 /// A stored envelope whose input holds `Infinity`, a number outside the
 /// binary64 range, or a lone UTF-16 surrogate is input corrupt, and the rerun
@@ -13,8 +14,8 @@ use super::*;
 #[tokio::test]
 #[serial]
 async fn a_refused_value_in_a_stored_envelope_fails_closed() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     for (input, python_text) in [
         (
@@ -29,7 +30,7 @@ async fn a_refused_value_in_a_stored_envelope_fails_closed() {
     ] {
         let payload = format!("{{\"input\":{input},\"options\":null}}").into_bytes();
         let digest = Sha256::digest(&payload).to_vec();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_task_history
              SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
                  rerun_input_digest = $2, rerun_input_inline = $3
@@ -58,7 +59,7 @@ async fn a_refused_value_in_a_stored_envelope_fails_closed() {
         );
     }
     let reruns: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
+        sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
             .bind(source)
             .fetch_one(&pool)
             .await

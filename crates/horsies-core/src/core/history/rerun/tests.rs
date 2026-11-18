@@ -1,7 +1,6 @@
 use chrono::{DateTime, Duration, DurationRound, Utc};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::operations::{
@@ -11,14 +10,12 @@ use super::operations::{
 use super::provenance::RERUN_FIELD_PROVENANCE;
 use crate::broker::client_family::ClientFamily;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
-use crate::core::history::ddl::classes::register_period_class;
 use crate::core::history::identity::fingerprint::EnqueueCommandV1;
 use crate::core::history::identity::keys::{ScopedIdempotencyKey, IDEMPOTENCY_SCOPE_VERSION};
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
-use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::RetentionDays;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -28,7 +25,9 @@ use crate::db::{
     CheckoutClass, IsolationLevel, ParameterType, RollbackOutcome, SqlScript, StatementBound,
     StatementFailure, TypedStatement,
 };
-use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
+use crate::test_support::history::register_period_class;
+use crate::test_support::sql::{self, TestPool};
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 mod ports;
 
@@ -142,7 +141,7 @@ fn terminal_result(kind: TerminalSource) -> String {
 }
 
 async fn seed_source(
-    pool: &PgPool,
+    pool: &TestPool,
     kind: TerminalSource,
     workflow_task: bool,
     rerun_root: Option<Uuid>,
@@ -165,7 +164,7 @@ async fn seed_source(
             Some(Utc::now() - Duration::minutes(1)),
         ),
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              status, sent_at, enqueued_at, started_at, claimed_at,
@@ -207,7 +206,7 @@ async fn seed_source(
 
     let workflow_id = if workflow_task {
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, definition_key, depth,
                  root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -219,7 +218,7 @@ async fn seed_source(
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                  downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
@@ -247,7 +246,7 @@ async fn seed_source(
     // their own attempt.
     match kind {
         TerminalSource::Cancelled | TerminalSource::Expired => {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_task_attempts (
                      task_id, attempt, outcome, will_retry, started_at, finished_at,
                      error_code, error_message, failed_reason, worker_id,
@@ -309,39 +308,39 @@ async fn seed_source(
     (task_id, workflow_id)
 }
 
-async fn cleanup(pool: &PgPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
-    sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = ANY($1)")
+async fn cleanup(pool: &TestPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
+    sql::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM horsies_key_reservations WHERE task_id = ANY($1)")
+    sql::query("DELETE FROM horsies_key_reservations WHERE task_id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
         .await
         .ok();
     // The attempt rows first: their foreign key refuses the task delete.
-    sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = ANY($1)")
+    sql::query("DELETE FROM horsies_task_attempts WHERE task_id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
+    sql::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = ANY($1)")
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = ANY($1)")
+    sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = ANY($1)")
         .bind(workflow_ids)
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
+    sql::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
         .bind(workflow_ids)
         .execute(pool)
         .await
@@ -351,15 +350,14 @@ async fn cleanup(pool: &PgPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
 #[tokio::test]
 #[serial]
 async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let mut registration = pool.acquire().await.unwrap();
-    register_period_class(
+    let _registered = register_period_class(
         &mut registration,
         RetentionDays::parse_period(Duration::days(14)).unwrap(),
     )
-    .await
-    .unwrap();
+    .await;
     drop(registration);
     let deadline = (Utc::now() + Duration::hours(2))
         .duration_trunc(Duration::microseconds(1))
@@ -381,7 +379,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         let retain_rerun_input = index != 2;
         let (source, _) = seed_source(&pool, kind, false, None).await;
         let before: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+            sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
                 .bind(source)
                 .fetch_one(&pool)
                 .await
@@ -405,7 +403,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         assert_eq!(rerun_root_task_id, source);
         assert_ne!(new_task_id, source);
         assert_eq!(new_task_id.get_version_num(), 7);
-        let row = sqlx::query(
+        let row = sql::query(
             "SELECT task_name, queue_name, priority, input, task_options, execution,
                     status, retry_count, max_retries, good_until,
                     retention_class_key, rerun_of_task_id, rerun_root_task_id,
@@ -419,20 +417,20 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(row.get::<String, _>("task_name"), "p8.rerun");
-        assert_eq!(row.get::<String, _>("queue_name"), "default");
-        assert_eq!(row.get::<i32, _>("priority"), 50);
-        assert_eq!(row.get::<String, _>("input"), PAYLOAD_INPUT);
-        assert_eq!(row.get::<String, _>("task_options"), PAYLOAD_OPTIONS);
-        assert_eq!(row.get::<String, _>("execution"), "ISOLATED");
-        assert_eq!(row.get::<String, _>("status"), "PENDING");
-        assert_eq!(row.get::<i32, _>("retry_count"), 0);
-        assert_eq!(row.get::<i32, _>("max_retries"), 3);
-        assert_eq!(row.get::<DateTime<Utc>, _>("good_until"), deadline);
-        assert_eq!(row.get::<String, _>("retention_class_key"), target_class);
-        assert_eq!(row.get::<Uuid, _>("rerun_of_task_id"), source);
-        assert_eq!(row.get::<Uuid, _>("rerun_root_task_id"), source);
-        assert_eq!(row.get::<bool, _>("retain_rerun_input"), retain_rerun_input);
+        assert_eq!(row.get::<_, String>("task_name"), "p8.rerun");
+        assert_eq!(row.get::<_, String>("queue_name"), "default");
+        assert_eq!(row.get::<_, i32>("priority"), 50);
+        assert_eq!(row.get::<_, String>("input"), PAYLOAD_INPUT);
+        assert_eq!(row.get::<_, String>("task_options"), PAYLOAD_OPTIONS);
+        assert_eq!(row.get::<_, String>("execution"), "ISOLATED");
+        assert_eq!(row.get::<_, String>("status"), "PENDING");
+        assert_eq!(row.get::<_, i32>("retry_count"), 0);
+        assert_eq!(row.get::<_, i32>("max_retries"), 3);
+        assert_eq!(row.get::<_, DateTime<Utc>>("good_until"), deadline);
+        assert_eq!(row.get::<_, String>("retention_class_key"), target_class);
+        assert_eq!(row.get::<_, Uuid>("rerun_of_task_id"), source);
+        assert_eq!(row.get::<_, Uuid>("rerun_root_task_id"), source);
+        assert_eq!(row.get::<_, bool>("retain_rerun_input"), retain_rerun_input);
         let expected_fingerprint = EnqueueCommandV1::new(
             "p8.rerun",
             "default",
@@ -451,7 +449,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         .fingerprint()
         .unwrap();
         assert_eq!(
-            row.get::<Vec<u8>, _>("command_fingerprint"),
+            row.get::<_, Vec<u8>>("command_fingerprint"),
             expected_fingerprint
         );
         for field in [
@@ -462,7 +460,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
             "finalizing_at",
         ] {
             assert!(
-                row.get::<Option<DateTime<Utc>>, _>(field).is_none(),
+                row.get::<_, Option<DateTime<Utc>>>(field).is_none(),
                 "{field}"
             );
         }
@@ -472,11 +470,11 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
             "worker_hostname",
             "worker_process_name",
         ] {
-            assert!(row.get::<Option<String>, _>(field).is_none(), "{field}");
+            assert!(row.get::<_, Option<String>>(field).is_none(), "{field}");
         }
-        assert!(row.get::<Option<i32>, _>("worker_pid").is_none());
+        assert!(row.get::<_, Option<i32>>("worker_pid").is_none());
         let after: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+            sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
                 .bind(source)
                 .fetch_one(&pool)
                 .await
@@ -490,8 +488,8 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
 #[tokio::test]
 #[serial]
 async fn root_lineage_is_preserved_across_multiple_reruns() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let original = Uuid::new_v4();
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, Some(original)).await;
     let outcome = broker
@@ -516,15 +514,15 @@ async fn root_lineage_is_preserved_across_multiple_reruns() {
 #[tokio::test]
 #[serial]
 async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let python_payload = br#"{"input":{"v":1e-06},"options":{"nested":[1e+20,0.0001,-0.0]}}"#;
     assert_eq!(
         digest_hex(python_payload),
         "b1f1429240dc21f6584df5cd92073ea0b620826459b8b2624cd54f7bb74b6a4e"
     );
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET rerun_input_inline = $2, rerun_input_digest = sha256($2)
          WHERE task_id = $1",
@@ -545,7 +543,7 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
     let RerunOutcome::Enqueued { new_task_id, .. } = outcome else {
         panic!("expected enqueue");
     };
-    let row = sqlx::query(
+    let row = sql::query(
         "SELECT input, task_options, command_fingerprint
          FROM horsies_tasks WHERE id = $1",
     )
@@ -553,9 +551,9 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(row.get::<String, _>("input"), r#"{"v":1e-06}"#);
+    assert_eq!(row.get::<_, String>("input"), r#"{"v":1e-06}"#);
     assert_eq!(
-        row.get::<String, _>("task_options"),
+        row.get::<_, String>("task_options"),
         r#"{"nested":[1e+20,0.0001,-0.0]}"#
     );
     let expected_fingerprint = EnqueueCommandV1::new(
@@ -576,7 +574,7 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
     .fingerprint()
     .unwrap();
     assert_eq!(
-        row.get::<Vec<u8>, _>("command_fingerprint"),
+        row.get::<_, Vec<u8>>("command_fingerprint"),
         expected_fingerprint
     );
     cleanup(&pool, &[source, new_task_id], &[]).await;
@@ -585,11 +583,11 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
 #[tokio::test]
 #[serial]
 async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
     let (workflow_task, workflow_id) = seed_source(&pool, TerminalSource::Failed, true, None).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
     let mut corrupt_eligibility = connection
         .begin(IsolationLevel::ServerDefault)
@@ -642,7 +640,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     );
     assert!(rolled_back(corrupt_eligibility.rollback().await));
     let live = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
             retry_count, max_retries, command_fingerprint_version, command_fingerprint,
@@ -676,7 +674,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     assert!(live_snapshot.raw_result.is_none());
     // The worker identity columns are NOT NULL in the baseline attempt
     // table.
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_task_attempts (
              task_id, attempt, outcome, will_retry, started_at, finished_at,
              worker_id, worker_hostname, worker_pid, worker_process_name
@@ -711,7 +709,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     // terminal task is in history. A stored result that is not a task result
     // is INVALID_JSON_PAYLOAD.
     let non_object = b"[]".to_vec();
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET result_payload = $2, result_digest = sha256($2)
          WHERE task_id = $1",
@@ -789,11 +787,11 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
 #[tokio::test]
 #[serial]
 async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     for disposition in ["DECLINED_BY_POLICY", "OVER_BOUND", "NEVER_ELIGIBLE"] {
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_task_history
              SET rerun_input_disposition = $2,
                  rerun_input_version = NULL,
@@ -825,7 +823,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         format!("{{\"input\":{PAYLOAD_INPUT},\"options\":{PAYLOAD_OPTIONS}}}").into_bytes();
     let valid_digest = Sha256::digest(&valid_payload).to_vec();
 
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
     let mut incomplete = connection
         .begin(IsolationLevel::ServerDefault)
@@ -864,7 +862,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     drop(connection);
     core.close();
 
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET rerun_input_disposition = 'INLINE', rerun_input_version = 2,
              rerun_input_digest = $2, rerun_input_inline = $3
@@ -890,7 +888,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
 
     for payload in [b"not-json".to_vec(), br#"{"args":[],"kwargs":{}}"#.to_vec()] {
         let digest = Sha256::digest(&payload).to_vec();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_task_history
              SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
                  rerun_input_digest = $2, rerun_input_inline = $3
@@ -913,7 +911,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             RerunOutcome::InputCorrupt { task_id, .. } if task_id == source
         ));
     }
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history SET rerun_input_inline = 'tampered'::bytea
          WHERE task_id = $1",
     )
@@ -933,7 +931,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             if task_id == source && detail.contains("digest")
     ));
     let new_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
+        sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
             .bind(source)
             .fetch_one(&pool)
             .await
@@ -944,10 +942,10 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
 
 /// Store a valid version-1 inline envelope with `options_json` as the source's
 /// rerun input.
-async fn store_inline_input(pool: &PgPool, source: Uuid, options_json: &str) {
+async fn store_inline_input(pool: &TestPool, source: Uuid, options_json: &str) {
     let payload = format!("{{\"input\":{PAYLOAD_INPUT},\"options\":{options_json}}}").into_bytes();
     let digest = Sha256::digest(&payload).to_vec();
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
              rerun_input_digest = $2, rerun_input_inline = $3
@@ -961,8 +959,8 @@ async fn store_inline_input(pool: &PgPool, source: Uuid, options_json: &str) {
     .unwrap();
 }
 
-async fn rerun_count(pool: &PgPool, source: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
+async fn rerun_count(pool: &TestPool, source: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
         .bind(source)
         .fetch_one(pool)
         .await
@@ -972,10 +970,10 @@ async fn rerun_count(pool: &PgPool, source: Uuid) -> i64 {
 #[tokio::test]
 #[serial]
 async fn an_unknown_stored_status_is_source_corrupt() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    sqlx::query("UPDATE horsies_task_history SET status = 'BOGUS' WHERE task_id = $1")
+    sql::query("UPDATE horsies_task_history SET status = 'BOGUS' WHERE task_id = $1")
         .bind(source)
         .execute(&pool)
         .await
@@ -998,8 +996,8 @@ async fn an_unknown_stored_status_is_source_corrupt() {
 #[tokio::test]
 #[serial]
 async fn a_rerun_keeps_the_execution_class_of_the_request() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     store_inline_input(&pool, source, "{\"execution\":\"SHARED_THREAD\"}").await;
     let RerunOutcome::Enqueued { new_task_id, .. } = broker
@@ -1012,7 +1010,7 @@ async fn a_rerun_keeps_the_execution_class_of_the_request() {
     else {
         panic!("a source with a stored execution class must enqueue");
     };
-    let execution: String = sqlx::query_scalar("SELECT execution FROM horsies_tasks WHERE id = $1")
+    let execution: String = sql::query_scalar("SELECT execution FROM horsies_tasks WHERE id = $1")
         .bind(new_task_id)
         .fetch_one(&pool)
         .await
@@ -1024,8 +1022,8 @@ async fn a_rerun_keeps_the_execution_class_of_the_request() {
 #[tokio::test]
 #[serial]
 async fn an_invalid_stored_execution_is_input_corrupt() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     store_inline_input(&pool, source, "{\"execution\":\"PARALLEL\"}").await;
     assert!(matches!(
@@ -1046,8 +1044,8 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
 #[tokio::test]
 #[serial]
 async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let command = || RerunTask::new(source, None, Some("p8-replay".to_owned()));
     let first = broker
@@ -1067,7 +1065,7 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
         }
     );
     let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
+        sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
             .bind(source)
             .fetch_one(&pool)
             .await
@@ -1125,15 +1123,15 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
 #[tokio::test]
 #[serial]
 async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let caller_key = "p8-post-claim-insert-failure";
     let key_digest = ScopedIdempotencyKey::new("p8.rerun", caller_key)
         .unwrap()
         .digest();
 
-    sqlx::query(
+    sql::query(
         "CREATE OR REPLACE FUNCTION horsies_p8_reject_rerun_insert()
          RETURNS trigger LANGUAGE plpgsql AS $function$
          BEGIN
@@ -1144,7 +1142,7 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
+    sql::query(
         "CREATE TRIGGER horsies_p8_reject_rerun_insert_trigger
          BEFORE INSERT ON horsies_tasks
          FOR EACH ROW
@@ -1171,16 +1169,16 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
         "{error:?}"
     );
 
-    sqlx::query("DROP TRIGGER horsies_p8_reject_rerun_insert_trigger ON horsies_tasks")
+    sql::query("DROP TRIGGER horsies_p8_reject_rerun_insert_trigger ON horsies_tasks")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DROP FUNCTION horsies_p8_reject_rerun_insert()")
+    sql::query("DROP FUNCTION horsies_p8_reject_rerun_insert()")
         .execute(&pool)
         .await
         .unwrap();
 
-    let reservation_count: i64 = sqlx::query_scalar(
+    let reservation_count: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_key_reservations
              WHERE idempotency_key_digest = $1",
     )
@@ -1189,7 +1187,7 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
     .await
     .unwrap();
     let row_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
+        sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
             .bind(source)
             .fetch_one(&pool)
             .await
@@ -1201,10 +1199,10 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
 #[tokio::test]
 #[serial]
 async fn unregistered_class_refuses_before_source_or_reservation_writes() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    let before: (i64, i64) = sqlx::query_as(
+    let before: (i64, i64) = sql::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks),
                 (SELECT count(*) FROM horsies_key_reservations)",
     )
@@ -1221,7 +1219,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
     assert!(
         matches!(error, RerunError::UnknownRetentionClass(ref key) if key == "p8_not_registered")
     );
-    let after: (i64, i64) = sqlx::query_as(
+    let after: (i64, i64) = sql::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks),
                 (SELECT count(*) FROM horsies_key_reservations)",
     )
@@ -1232,7 +1230,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
     // The class check and the detail read are one statement, which calls the
     // published detail reader (Python `read_rerun_source`): a missing reader
     // is the server's `42883` for the whole read, whatever the class.
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
     let mut missing_reader = connection
         .begin(IsolationLevel::ServerDefault)
@@ -1268,8 +1266,8 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
 #[tokio::test]
 #[serial]
 async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
     let raw = broker
         .get_raw_result_record(completed, None)
@@ -1338,7 +1336,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .is_absent());
 
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history SET result_digest = decode(repeat('00', 32), 'hex')
          WHERE task_id = $1",
     )
@@ -1361,7 +1359,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     assert_eq!(raw_error.code(), crate::BrokerErrorCode::InvalidJsonPayload);
 
     let non_object = b"[]".to_vec();
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET result_payload = $2, result_digest = sha256($2)
          WHERE task_id = $1",
@@ -1384,7 +1382,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     // it, so a stored content type cannot disagree with the version.
 
     let attempt_payload: Vec<u8> =
-        sqlx::query_scalar("SELECT attempt_snapshot FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT attempt_snapshot FROM horsies_task_history WHERE task_id = $1")
             .bind(failed)
             .fetch_one(&pool)
             .await
@@ -1392,7 +1390,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     let mut attempt_rows: serde_json::Value = serde_json::from_slice(&attempt_payload).unwrap();
     attempt_rows[0][1] = serde_json::json!("FOREIGN_OUTCOME");
     let corrupt_attempt_payload = serde_json::to_vec(&attempt_rows).unwrap();
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET attempt_snapshot = $2, attempt_snapshot_digest = sha256($2)
          WHERE task_id = $1",
@@ -1420,7 +1418,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     // A detail reader removed out of band refuses the history read
     // (SQLSTATE 42883, TASK_INFO_QUERY_FAILED); the next publication of the
     // readers makes the read answer again.
-    sqlx::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
+    sql::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
         .execute(&pool)
         .await
         .unwrap();
@@ -1433,7 +1431,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     assert!(refused.message().contains("42883"), "{}", refused.message());
     let mut publication = pool.begin().await.unwrap();
     StagedLoaderPublisher
-        .republish(publication.as_mut())
+        .republish(&mut *publication)
         .await
         .unwrap();
     publication.commit().await.unwrap();
@@ -1447,8 +1445,8 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
 #[tokio::test]
 #[serial]
 async fn provenance_table_is_exhaustive_over_the_live_schema() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let actual: std::collections::BTreeSet<String> = sqlx::query_scalar(
+    let pool = crate::test_support::migrated_pool().await;
+    let actual: std::collections::BTreeSet<String> = sql::query_scalar(
         "SELECT column_name FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'horsies_tasks'",
     )
@@ -1504,10 +1502,10 @@ fn public_facade_exports_the_complete_typed_surface() {
 async fn a_handle_of_another_client_family_reruns_nothing() {
     use crate::broker::client_family::{ClientFamily, RecordedFamily};
 
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Python);
-    let before: (i64, i64) = sqlx::query_as(
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Python);
+    let before: (i64, i64) = sql::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks),
                 (SELECT count(*) FROM horsies_key_reservations)",
     )
@@ -1528,7 +1526,7 @@ async fn a_handle_of_another_client_family_reruns_nothing() {
             own: ClientFamily::Python,
         }
     ));
-    let after: (i64, i64) = sqlx::query_as(
+    let after: (i64, i64) = sql::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks),
                 (SELECT count(*) FROM horsies_key_reservations)",
     )
@@ -1565,9 +1563,9 @@ async fn the_same_prepared_rerun_write_run_twice_gives_one_task() {
     use super::caller::CallerTransaction;
     use super::steps::{decode_rerun_write, RerunWriteOutcome};
 
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
     let mut transaction = connection
         .begin(IsolationLevel::ServerDefault)
@@ -1585,7 +1583,7 @@ async fn the_same_prepared_rerun_write_run_twice_gives_one_task() {
     }
     transaction.commit().await.unwrap();
     drop(connection);
-    let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+    let tasks: i64 = sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
         .bind(write.new_task_id())
         .fetch_one(&pool)
         .await
@@ -1603,9 +1601,9 @@ async fn a_rerun_rolls_back_with_the_callers_transaction() {
     use super::caller::CallerTransaction;
     use super::steps::{decode_rerun_write, RerunWriteOutcome};
 
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
     let mut transaction = connection
         .begin(IsolationLevel::ServerDefault)
@@ -1621,7 +1619,7 @@ async fn a_rerun_rolls_back_with_the_callers_transaction() {
     ));
     assert!(rolled_back(transaction.rollback().await));
     drop(connection);
-    let (tasks, reservations): (i64, i64) = sqlx::query_as(
+    let (tasks, reservations): (i64, i64) = sql::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks WHERE id = $1),
                 (SELECT count(*) FROM horsies_key_reservations WHERE task_id = $1)",
     )

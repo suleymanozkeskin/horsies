@@ -244,7 +244,7 @@ fn result_wire_row(row: &Row) -> Result<ResultWireRow, RowDecodeError> {
     })
 }
 
-fn history_detail_wire_row(row: &Row) -> Result<HistoryDetailWireRow, RowDecodeError> {
+pub(crate) fn history_detail_wire_row(row: &Row) -> Result<HistoryDetailWireRow, RowDecodeError> {
     let statement: &TypedStatement = &TASK_DETAIL;
     Ok(HistoryDetailWireRow {
         task_id: column(row, statement, "task_id")?,
