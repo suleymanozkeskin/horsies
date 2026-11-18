@@ -184,6 +184,29 @@ before you upgrade a 0.7 deployment.
   of the core; a refused class read and a worker snapshot that does not
   read give `CoreContractViolation` (0.7: `ValueError`).
 
+- **The core builds the error classes of an enqueue.** `PostgresBroker.enqueue`
+  and `enqueue_async` return the `BrokerInvalidInput`,
+  `BrokerInvalidTaskOptions`, `BrokerEnqueueFailed`, `BrokerPayloadMismatch`
+  or `BrokerIdempotencyKeyConflict` class that the core builds, and the task
+  sends map it to their `TaskSend*` class with the payload of the send, as
+  in 0.7 (`input_json` is `None` for a send with no keyword arguments). The
+  `exception` of a refusal is the one of 0.7: the `ValueError` of a rule of
+  the version-1 command or of the idempotency key, with the rule as its
+  text; a `SerializationError` with the reader's error for a JSON text that
+  does not read; `NoCause()` for another rule. `ENQUEUE_FAILED` has the
+  message of 0.7, `Failed to enqueue task <name>: <cause>`, and the core's
+  class of the cause with its own text (0.7: the driver's exception); a
+  retention class key that no class derives gives `CorePreconditionFailed`,
+  not retryable (0.7: the check violation of the insert). A conflicting row
+  that was gone before the compare keeps the message of 0.7 and `NoCause()`,
+  not retryable. `PAYLOAD_MISMATCH` has the core's message, `payload
+  mismatch for task_id <task_id>: the existing task has a different command
+  or idempotency key` (0.7 named the task and the part that differs). The
+  records `SendValidationFailed`, `SendRefusalUnreadableJson`,
+  `SendRefusalByRule`, `SendRefusalByValueRule`, `SendEnqueueFailed`,
+  `SendPayloadMismatch`, `SendKeyConflict`, `SendPayloadTooLarge`,
+  `SendSuppressed` and `SendAsyncContext` of `horsies._core` are removed.
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async
@@ -1128,17 +1151,22 @@ unless it starts with "Added".
   `cause: BrokerOperationSource` (new: `Broker(BrokerError)`,
   `ClassRead(ClassReadRefused)`, `Snapshot(WorkerStateUnreadable)`,
   `Listen(ListenError)`, `TaskInfoMoved { task_id, passes }`,
-  `ArgumentUnreadable`); `EnqueueFailed`, `InvalidJsonPayload`,
-  `InvalidTaskOptions` and `InvalidInput` have `cause: BrokerCheckCause`
-  (new: `Error(BrokerError)` or `Check`). `BrokerOperationError` is no
-  longer `Clone`, and its `Error::source` is the cause. Constructors per
-  operation code build Python's message: `schema_init_failed`,
-  `task_info_query_failed`, `task_info_invalid_json`,
+  `ArgumentUnreadable`); `EnqueueFailed` and `InvalidJsonPayload` have
+  `cause: BrokerCheckCause` (new: `Error(BrokerError)` or `Check`);
+  `InvalidTaskOptions` and `InvalidInput` have `cause: BrokerRefusalCause`
+  (new: `Check`, `JsonUnreadable(String)` or `ValueRule(String)`).
+  `BrokerOperationError` is no longer `Clone`, and its `Error::source` is
+  the cause. Constructors per operation code build Python's message:
+  `schema_init_failed`, `task_info_query_failed`, `task_info_invalid_json`,
   `raw_result_query_failed`, `monitoring_query_failed`,
   `monitoring_query_refused`, `db_ping_failed`, `worker_ping_failed`
-  (with `WorkerPingStep`, new), `invalid_input`, `operation_failed`. The
-  messages of the health reads, `get_task_info` and the result reads gain
-  the operation's prefix, as Python's.
+  (with `WorkerPingStep`, new), `invalid_input`, `operation_failed`,
+  `enqueue_error` (the code of a failed enqueue), `enqueue_refused`,
+  `enqueue_failed`. The messages of the health reads, `get_task_info` and
+  the result reads gain the operation's prefix, as Python's.
+  `BrokerError::RetentionClassKey` (new) is a retention class key that no
+  class derives, which a client that takes the key as text refuses before
+  any statement.
 - **`MonitoringQueryError` and `TaskActionError` are enums with one
   variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
   `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,

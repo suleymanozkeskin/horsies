@@ -32,7 +32,10 @@
 //! (`#[derive(horsies_core_derive::ErrorClassValues)]`): the values of the
 //! instance slots, by name, in the class's order. The `exception` slot is
 //! built from the variant's typed cause (`#[error_slot(cause)]`, an
-//! [`ExceptionCause`]), so the exception keeps the cause's own text.
+//! [`ExceptionCause`]), so the exception keeps the cause's own text. A
+//! refusal whose Python exception is a class that the client defines (a
+//! `ValueError` of a rule, a `SerializationError` of a JSON text) names
+//! that class ([`ClientExceptionClass`]).
 //!
 //! [`EXCEPTION_CLASSES`] are the exception classes that the core defines
 //! for its clients (for example `OutcomeDecodeError`): `Exception`
@@ -40,7 +43,7 @@
 
 use uuid::Uuid;
 
-use crate::broker::{BrokerCheckCause, BrokerError, BrokerOperationSource};
+use crate::broker::{BrokerCheckCause, BrokerError, BrokerOperationSource, BrokerRefusalCause};
 use crate::catalog::{CodeCatalog, CodeEnum};
 use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
 use crate::core::lifecycle::OutcomeDecodeError;
@@ -81,9 +84,11 @@ pub enum SlotRepr {
     Hidden,
 }
 
-/// The Python type of the `exception` slot. The runtime class is the core's
-/// exception class of the cause (`horsies._core.CoreFailure` and its
-/// subclasses); the declared type is Python's.
+/// The Python type of the `exception` slot. The runtime class is the class
+/// that the cause names ([`ExceptionValue`]): the core's exception class of
+/// the cause (`horsies._core.CoreFailure` and its subclasses), a generated
+/// exception class, or a class that the client defines; the declared type
+/// is Python's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExceptionType {
     /// `BaseException`.
@@ -219,10 +224,30 @@ pub enum ExceptionValue {
     /// An instance of a generated exception class with `text` as its one
     /// argument.
     Generated { class: ExceptionClass, text: String },
+    /// An instance of an exception class that the client defines, not the
+    /// core, with `text` as its one argument: the exception of a refusal
+    /// that the client's reference raised itself.
+    ClientClass {
+        class: ClientExceptionClass,
+        text: String,
+    },
     /// No exception: a check of the core found the failure (Python:
     /// `horsies._catalog.error_detail.NoCause()`). Only a slot of the type
     /// `BaseException | NoCause` holds it.
     NoCause,
+}
+
+/// An exception class that the client defines, which the cause of a
+/// refusal names. The core holds no definition of it: the client maps each
+/// member to its own class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientExceptionClass {
+    /// A rule refused a value; the text is the rule (Python: the built-in
+    /// `ValueError`).
+    ValueError,
+    /// A text does not read as JSON; the text is the reader's error
+    /// (Python: `horsies.core.codec.json_io.SerializationError`).
+    SerializationError,
 }
 
 /// The typed cause of a variant with an `exception` slot: the value that
@@ -307,6 +332,25 @@ impl ExceptionCause for BrokerCheckCause {
         match self {
             Self::Error(error) => error.exception_value(),
             Self::Check => ExceptionValue::NoCause,
+        }
+    }
+}
+
+/// A check of the core is `NoCause()`; a text that does not read as JSON
+/// is the client's JSON error with the reader's text; a rule is the
+/// client's value error with the rule's text.
+impl ExceptionCause for BrokerRefusalCause {
+    fn exception_value(&self) -> ExceptionValue {
+        match self {
+            Self::Check => ExceptionValue::NoCause,
+            Self::JsonUnreadable(reader_error) => ExceptionValue::ClientClass {
+                class: ClientExceptionClass::SerializationError,
+                text: reader_error.clone(),
+            },
+            Self::ValueRule(rule) => ExceptionValue::ClientClass {
+                class: ClientExceptionClass::ValueError,
+                text: rule.clone(),
+            },
         }
     }
 }
@@ -1629,7 +1673,7 @@ mod tests {
             ),
             BrokerOperationError::InvalidTaskOptions {
                 message: "options refused".to_owned(),
-                cause: BrokerCheckCause::Check,
+                cause: BrokerRefusalCause::Check,
             },
             BrokerOperationError::invalid_input(
                 "limit must be positive when set, got 0".to_owned(),
@@ -1813,6 +1857,325 @@ mod tests {
         assert_eq!(
             unreadable.message(),
             format!("get_task_info failed for {TASK}: serialization error")
+        );
+    }
+
+    /// The task name of the enqueue tests.
+    const SENT_TASK: &str = "send.task";
+
+    /// The values of a refused or failed enqueue: its class, its message
+    /// and the exception of its cause.
+    fn enqueue_values(error: &BrokerOperationError) -> (&'static str, &str, ExceptionValue) {
+        let exception = match error.slot_values().pop() {
+            Some(SlotValue {
+                name: "exception",
+                value: SlotData::Exception(exception),
+            }) => exception,
+            other => panic!("{} ends with {other:?}", error.python_class()),
+        };
+        (error.python_class(), error.message(), exception)
+    }
+
+    /// Python's refusal of a send before any statement: the code of the
+    /// refused part, Python's message of a rule of the version-1
+    /// command or of the scoped idempotency key, and the cause that
+    /// Python's broker gave: the reader's `SerializationError`, `NoCause()`
+    /// for a rule that refused a value that reads, the rule's `ValueError`.
+    #[test]
+    fn an_enqueue_refusal_has_the_code_of_its_part_and_python_s_cause() {
+        use crate::broker::{EnqueueRefusal, EnqueueRefusalCause};
+        use crate::core::history::enqueue::SendPart;
+
+        let serialization = |text: &str| ExceptionValue::ClientClass {
+            class: ClientExceptionClass::SerializationError,
+            text: text.to_owned(),
+        };
+        let value_error = |text: &str| ExceptionValue::ClientClass {
+            class: ClientExceptionClass::ValueError,
+            text: text.to_owned(),
+        };
+        for (part, class) in [
+            (SendPart::Input, "BrokerInvalidInput"),
+            (SendPart::TaskOptions, "BrokerInvalidTaskOptions"),
+        ] {
+            let cases = [
+                (
+                    EnqueueRefusalCause::JsonUnreadable("trailing characters".to_owned()),
+                    "enqueue contract violation: the text was refused",
+                    serialization("trailing characters"),
+                ),
+                (
+                    EnqueueRefusalCause::RuleRefused,
+                    "enqueue contract violation: the text was refused",
+                    ExceptionValue::NoCause,
+                ),
+                (
+                    EnqueueRefusalCause::CommandRuleRefused(
+                        "priority must be between 1 and 100".to_owned(),
+                    ),
+                    "enqueue input refused for send.task: priority must be between 1 and 100",
+                    value_error("priority must be between 1 and 100"),
+                ),
+                (
+                    EnqueueRefusalCause::KeyRuleRefused(
+                        "idempotency key must be non-empty".to_owned(),
+                    ),
+                    "idempotency key refused for send.task: idempotency key must be non-empty",
+                    value_error("idempotency key must be non-empty"),
+                ),
+            ];
+            for (cause, message, exception) in cases {
+                let refusal = EnqueueRefusal {
+                    part,
+                    message: "the text was refused".to_owned(),
+                    cause,
+                };
+                let refused = BrokerOperationError::enqueue_error(
+                    SENT_TASK,
+                    BrokerError::EnqueueContract(refusal.clone()),
+                );
+                assert_eq!(
+                    enqueue_values(&refused),
+                    (class, message, exception),
+                    "{refusal:?}"
+                );
+                assert!(!refused.retryable(), "{refusal:?}");
+                assert_eq!(refused.failure_cause(), FailureCause::PreconditionFailed);
+                assert!(std::error::Error::source(&refused).is_none());
+            }
+        }
+    }
+
+    /// Python's `EnqueueCommandV1` refuses an empty retention class key with
+    /// its rule; a key that is not empty and that no class derives reached
+    /// the CHECK of the insert in Python and failed the enqueue, not
+    /// retryable. The exception of that failure is the core's class of the
+    /// refusal, with the refusal's own text.
+    #[test]
+    fn an_empty_retention_key_is_invalid_input_and_an_underived_one_a_failed_enqueue() {
+        let empty = BrokerOperationError::enqueue_error(
+            SENT_TASK,
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::empty_retention_class_key()),
+        );
+        assert_eq!(
+            enqueue_values(&empty),
+            (
+                "BrokerInvalidInput",
+                "enqueue input refused for send.task: retention_class_key must be non-empty",
+                ExceptionValue::ClientClass {
+                    class: ClientExceptionClass::ValueError,
+                    text: "retention_class_key must be non-empty".to_owned(),
+                },
+            )
+        );
+
+        let refused_key = crate::EnqueueRetention::from_class_key("standard_0d")
+            .expect_err("a period of 0 days is below the bounds");
+        let refused_text = refused_key.to_string();
+        let underived = BrokerOperationError::enqueue_error(
+            SENT_TASK,
+            BrokerError::RetentionClassKey(refused_key),
+        );
+        let message = format!("Failed to enqueue task send.task: {refused_text}");
+        assert!(
+            message.starts_with(
+                "Failed to enqueue task send.task: retention class key \"standard_0d\""
+            ),
+            "{message}"
+        );
+        assert_eq!(
+            enqueue_values(&underived),
+            (
+                "BrokerEnqueueFailed",
+                message.as_str(),
+                ExceptionValue::CoreFailure {
+                    text: refused_text,
+                    retryable: false,
+                    cause: FailureCause::PreconditionFailed,
+                },
+            )
+        );
+        assert!(!underived.retryable());
+    }
+
+    /// A value that does not serialize and a reservation window out of
+    /// range refuse a fact of the call: `INVALID_INPUT` with the error's
+    /// text and `NoCause()`.
+    #[test]
+    fn an_unserializable_value_and_a_window_out_of_range_are_invalid_input_with_no_cause() {
+        let parse_error =
+            serde_json::from_str::<serde_json::Value>("{").expect_err("the text is not JSON");
+        for error in [
+            BrokerError::Serialization(parse_error),
+            BrokerError::InvalidIdempotencyReservationWindow("0 s".to_owned()),
+        ] {
+            let text = error.to_string();
+            let refused = BrokerOperationError::enqueue_error(SENT_TASK, error);
+            assert_eq!(
+                enqueue_values(&refused),
+                ("BrokerInvalidInput", text.as_str(), ExceptionValue::NoCause)
+            );
+            assert!(!refused.retryable(), "{text}");
+        }
+    }
+
+    /// A task id that holds another command is `PAYLOAD_MISMATCH` with the
+    /// error's text; a key that another task holds is
+    /// `IDEMPOTENCY_KEY_CONFLICT` with Python's text and the owner.
+    #[test]
+    fn a_payload_mismatch_and_a_key_conflict_keep_the_error_s_text_and_the_owner() {
+        let mismatch = BrokerOperationError::enqueue_error(
+            SENT_TASK,
+            BrokerError::PayloadMismatch { task_id: TASK },
+        );
+        assert_eq!(mismatch.python_class(), "BrokerPayloadMismatch");
+        assert_eq!(
+            mismatch.slot_values(),
+            vec![SlotValue {
+                name: "message",
+                value: SlotData::Str(&format!(
+                    "payload mismatch for task_id {TASK}: the existing task has a different \
+                     command or idempotency key"
+                )),
+            }]
+        );
+        assert!(!mismatch.retryable());
+
+        let owner = Uuid::from_u128(0x0198_c0de_0000_7000_8000_0000_0000_00ff);
+        let conflict = BrokerOperationError::enqueue_error(
+            SENT_TASK,
+            BrokerError::IdempotencyKeyConflict {
+                task_name: SENT_TASK.to_owned(),
+                task_id: owner,
+            },
+        );
+        assert_eq!(conflict.python_class(), "BrokerIdempotencyKeyConflict");
+        assert_eq!(
+            conflict.slot_values(),
+            vec![
+                SlotValue {
+                    name: "message",
+                    value: SlotData::Str(&format!(
+                        "idempotency key for send.task is reserved by task {owner} with a \
+                         different command"
+                    )),
+                },
+                SlotValue {
+                    name: "owner_task_id",
+                    value: SlotData::Uuid(owner),
+                },
+            ]
+        );
+        assert!(!conflict.retryable());
+    }
+
+    /// Python's broker found a conflicting row gone before the compare by a
+    /// data check: `ENQUEUE_FAILED` with Python's text, not retryable, and
+    /// `NoCause()`.
+    #[test]
+    fn a_conflict_whose_row_was_gone_is_a_failed_enqueue_with_no_cause() {
+        let gone = BrokerOperationError::enqueue_error(
+            SENT_TASK,
+            BrokerError::EnqueueConflictUnverifiable {
+                task_id: TASK,
+                task_name: SENT_TASK.to_owned(),
+            },
+        );
+        let message = format!(
+            "task_id {TASK} conflict detected but row disappeared before verification for \
+             send.task; cannot verify payload identity"
+        );
+        assert_eq!(
+            enqueue_values(&gone),
+            (
+                "BrokerEnqueueFailed",
+                message.as_str(),
+                ExceptionValue::NoCause
+            )
+        );
+        assert!(!gone.retryable());
+        assert_eq!(gone.failure_cause(), FailureCause::PreconditionFailed);
+    }
+
+    /// Every other error of an enqueue is `ENQUEUE_FAILED` with Python's
+    /// message (`Failed to enqueue task <name>: <error>`), the error's retry
+    /// rule, and the core's class of the error with its own text.
+    #[test]
+    fn another_enqueue_error_is_a_failed_enqueue_with_python_s_message_and_its_class() {
+        let cases = [
+            (refused(), FailureCause::Connection, true),
+            (
+                BrokerError::Database(sqlx::Error::Database(Box::new(ServerError {
+                    code: "57014",
+                    message: "canceling statement due to statement timeout",
+                }))),
+                FailureCause::Server(crate::ServerErrorFacts::of_code(
+                    "57014",
+                    "canceling statement due to statement timeout".to_owned(),
+                )),
+                true,
+            ),
+            (
+                BrokerError::ClaimContract("ordinality 3 has no answer".to_owned()),
+                FailureCause::ContractViolation,
+                false,
+            ),
+        ];
+        for (error, cause, retryable) in cases {
+            let text = error.to_string();
+            let failed = BrokerOperationError::enqueue_error(SENT_TASK, error);
+            let message = format!("Failed to enqueue task send.task: {text}");
+            assert_eq!(
+                failed.slot_values(),
+                vec![
+                    SlotValue {
+                        name: "message",
+                        value: SlotData::Str(&message),
+                    },
+                    SlotValue {
+                        name: "retryable",
+                        value: SlotData::Bool(retryable),
+                    },
+                    SlotValue {
+                        name: "exception",
+                        value: SlotData::Exception(ExceptionValue::CoreFailure {
+                            text: text.clone(),
+                            retryable,
+                            cause: cause.clone(),
+                        }),
+                    },
+                ],
+                "{text}"
+            );
+            assert_eq!(failed.python_class(), "BrokerEnqueueFailed");
+            assert_eq!(failed.failure_cause(), cause, "{text}");
+            assert!(std::error::Error::source(&failed).is_some());
+        }
+    }
+
+    /// The cause of a refusal builds Python's exception of it: `NoCause()`
+    /// for a check, `SerializationError` with the reader's text, and
+    /// `ValueError` with the rule's text.
+    #[test]
+    fn a_refusal_cause_builds_python_s_exception_of_it() {
+        assert_eq!(
+            BrokerRefusalCause::Check.exception_value(),
+            ExceptionValue::NoCause
+        );
+        assert_eq!(
+            BrokerRefusalCause::JsonUnreadable("expected value".to_owned()).exception_value(),
+            ExceptionValue::ClientClass {
+                class: ClientExceptionClass::SerializationError,
+                text: "expected value".to_owned(),
+            }
+        );
+        assert_eq!(
+            BrokerRefusalCause::ValueRule("task_name must be non-empty".to_owned())
+                .exception_value(),
+            ExceptionValue::ClientClass {
+                class: ClientExceptionClass::ValueError,
+                text: "task_name must be non-empty".to_owned(),
+            }
         );
     }
 }

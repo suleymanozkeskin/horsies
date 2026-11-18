@@ -269,8 +269,9 @@ impl BrokerError {
     /// - A lost connection or a stopped listener: [`FailureCause::Connection`].
     /// - Stored data or rows that break their reader: [`FailureCause::ContractViolation`].
     /// - Refused settings, a database of another family or schema, a send
-    ///   that another command holds, a claim argument out of range, a held
-    ///   install lock, a process runtime that refused the call:
+    ///   that another command holds, a retention class key that no class
+    ///   derives, a claim argument out of range, a held install lock, a
+    ///   process runtime that refused the call:
     ///   [`FailureCause::PreconditionFailed`].
     pub fn failure_cause(&self) -> FailureCause {
         match self {
@@ -293,6 +294,7 @@ impl BrokerError {
             | Self::EnqueueConflictUnverifiable { .. }
             | Self::IdempotencyKeyConflict { .. }
             | Self::EnqueueContract(_)
+            | Self::RetentionClassKey(_)
             | Self::InvalidIdempotencyReservationWindow(_)
             | Self::ClientFamilyMismatch { .. }
             | Self::SchemaRefused(_)

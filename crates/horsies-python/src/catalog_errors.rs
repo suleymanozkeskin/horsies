@@ -9,7 +9,9 @@
 //! called with the payload's fields. The `exception`
 //! slot is built from the variant's typed cause: the core's class of the
 //! cause (`core_failures`), with the operation that failed as its subject,
-//! or a generated exception class such as `OutcomeDecodeError`.
+//! a generated exception class such as `OutcomeDecodeError`, or a class
+//! that the Python client defines: the built-in `ValueError`, or
+//! `SerializationError` of `horsies.core.codec.json_io`.
 //!
 //! Each class is imported once per process, at its first use, and kept
 //! (`PyOnceLock`). The instance is built on the thread that hands the
@@ -19,9 +21,11 @@
 //! build, not an outcome.
 
 use horsies_core::error_catalog::{
-    ErrorClassValues, ErrorEnum, ExceptionValue, RecordValue, SlotData, TASK_SEND_PAYLOAD,
+    ClientExceptionClass, ErrorClassValues, ErrorEnum, ExceptionValue, RecordValue, SlotData,
+    TASK_SEND_PAYLOAD,
 };
 use horsies_core::TaskSendPayload;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
@@ -39,6 +43,15 @@ const NO_CAUSE_CLASS: &str = "NoCause";
 
 /// The imported classes of `horsies._catalog`, keyed by `(module, class)`.
 static CATALOG_CLASSES: PyOnceLock<Py<PyDict>> = PyOnceLock::new();
+
+/// The module and the class of the client's error of a JSON text that does
+/// not read.
+const SERIALIZATION_ERROR_MODULE: &str = "horsies.core.codec.json_io";
+const SERIALIZATION_ERROR_CLASS: &str = "SerializationError";
+
+/// `SerializationError` of [`SERIALIZATION_ERROR_MODULE`], imported at its
+/// first use and kept.
+static SERIALIZATION_ERROR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// The class `class` of `horsies._catalog.<module>`. The first call for a
 /// class imports it and keeps it; later calls read the kept class.
@@ -145,8 +158,8 @@ fn record_value_object<'py>(
 }
 
 /// The exception of the `exception` slot: the core's class of the cause
-/// with `subject`, the generated exception class with its message, or
-/// `NoCause()` for a check of the core.
+/// with `subject`, the generated exception class with its message, the
+/// client's class with its text, or `NoCause()` for a check of the core.
 fn exception_object<'py>(
     py: Python<'py>,
     subject: &'static str,
@@ -161,7 +174,22 @@ fn exception_object<'py>(
         ExceptionValue::Generated { class, text } => {
             catalog_class(py, class.python_module, class.python_class)?.call1((text,))
         }
+        ExceptionValue::ClientClass { class, text } => client_class(py, class)?.call1((text,)),
         ExceptionValue::NoCause => catalog_class(py, NO_CAUSE_MODULE, NO_CAUSE_CLASS)?.call0(),
+    }
+}
+
+/// The Python class of a class that the client defines: the built-in
+/// `ValueError`, or `SerializationError`, imported once and kept.
+///
+/// Failure exits: the `ImportError` or `AttributeError` of a module or a
+/// class that does not exist.
+fn client_class<'py>(py: Python<'py>, class: ClientExceptionClass) -> PyResult<Bound<'py, PyAny>> {
+    match class {
+        ClientExceptionClass::ValueError => Ok(py.get_type::<PyValueError>().into_any()),
+        ClientExceptionClass::SerializationError => Ok(SERIALIZATION_ERROR
+            .import(py, SERIALIZATION_ERROR_MODULE, SERIALIZATION_ERROR_CLASS)?
+            .clone()),
     }
 }
 
@@ -220,6 +248,29 @@ mod tests {
                     .and_then(|sqlstate| sqlstate.extract::<String>())
                     .expect("sqlstate"),
                 "57014"
+            );
+        });
+    }
+
+    /// The rule of a refusal is the built-in `ValueError` itself, with the
+    /// rule as its one argument and its text, as Python's broker gave it.
+    #[test]
+    fn a_rule_is_a_value_error_with_the_rule_s_text() {
+        Python::initialize();
+        Python::attach(|py| {
+            let rule = exception_object(
+                py,
+                "enqueue",
+                ExceptionValue::ClientClass {
+                    class: ClientExceptionClass::ValueError,
+                    text: "priority must be between 1 and 100".to_owned(),
+                },
+            )
+            .expect("the exception is built");
+            assert!(rule.get_type().is(py.get_type::<PyValueError>().as_any()));
+            assert_eq!(
+                rule.str().expect("str").to_string(),
+                "priority must be between 1 and 100"
             );
         });
     }

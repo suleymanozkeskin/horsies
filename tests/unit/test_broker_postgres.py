@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
@@ -26,15 +26,6 @@ from horsies._core import (
     DatabasePingRecord,
     Enqueued,
     HandleClosed,
-    SendEnqueueFailed,
-    SendKeyConflict,
-    SendPayloadMismatch,
-    SendPayloadTooLarge,
-    SendRefusalByRule,
-    SendRefusalByValueRule,
-    SendRefusalUnreadableJson,
-    SendSuppressed,
-    SendValidationFailed,
     StartAfterDelay as CoreStartAfterDelay,
     StartAt as CoreStartAt,
     SchemaInstalled,
@@ -60,6 +51,7 @@ from horsies._core import (
 )
 from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SIGNED_64_BIT_MIN
 from horsies.core.brokers.result_types import (
+    BrokerAsyncContext,
     BrokerEnqueueFailed,
     BrokerErrorCode,
     BrokerIdempotencyKeyConflict,
@@ -348,22 +340,11 @@ class TestEnqueueAsync:
 SEND_TASK_ID = UUID('0198c0de-0000-7000-8000-000000000017')
 
 
-def _stand_in_named_as(record_class: type) -> MagicMock:
-    """A stand-in for a core record whose type has the record's class name.
-
-    A native record has no Python constructor, and the facade names a record
-    by ``type(outcome).__name__``: a plain ``MagicMock(spec=...)`` is of type
-    ``MagicMock``. The stand-in is an instance of ``record_class`` for a
-    class pattern, as with ``spec``.
-    """
-    named = cast(type[MagicMock], type(record_class.__name__, (MagicMock,), {}))
-    return named(spec=record_class)
-
-
 @pytest.mark.unit
 class TestEnqueueThroughCore:
     """enqueue_async and enqueue build the core's request with the client
-    rules, and map the record of one core send to their result."""
+    rules, and return the outcome of one core send: the sent id, or the
+    broker class that the core built, as it is."""
 
     @staticmethod
     def _broker_answering(outcome: object) -> Any:
@@ -479,93 +460,75 @@ class TestEnqueueThroughCore:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('code', 'error_class'),
-        [
-            ('INVALID_INPUT', BrokerInvalidInput),
-            ('INVALID_TASK_OPTIONS', BrokerInvalidTaskOptions),
-        ],
-    )
-    @pytest.mark.parametrize(
-        ('cause', 'cause_class'),
+        'outcome',
         [
             pytest.param(
-                MagicMock(spec=SendRefusalUnreadableJson, reader_error='expected value at line 1'),
-                SerializationError,
-                id='unreadable-json',
-            ),
-            pytest.param(MagicMock(spec=SendRefusalByRule), NoCause, id='by-rule'),
-            pytest.param(
-                MagicMock(spec=SendRefusalByValueRule, rule='priority must be between 1 and 100'),
-                ValueError,
-                id='by-value-rule',
-            ),
-        ],
-    )
-    async def test_a_core_refusal_keeps_its_code_and_cause(
-        self, code: str, error_class: type, cause: MagicMock, cause_class: type,
-    ) -> None:
-        broker = self._broker_answering(
-            MagicMock(spec=SendValidationFailed, code=code, message='refused', cause=cause),
-        )
-
-        result = await self._send(broker)
-
-        assert is_err(result)
-        assert isinstance(result.err_value, error_class)
-        assert isinstance(result.err_value.exception, cause_class)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize('retryable', [True, False])
-    async def test_a_failed_enqueue_keeps_the_core_classification(self, retryable: bool) -> None:
-        cause = CoreConnectionError('enqueue', 'connection lost', retryable)
-        broker = self._broker_answering(
-            MagicMock(
-                spec=SendEnqueueFailed,
-                task_id=SEND_TASK_ID,
-                message='Failed to enqueue task my_task: connection lost',
-                retryable=retryable,
-                exception=cause,
-            ),
-        )
-
-        result = await self._send(broker)
-
-        assert is_err(result)
-        failed = result.err_value
-        assert isinstance(failed, BrokerEnqueueFailed)
-        assert failed.retryable is retryable
-        assert failed.exception is cause
-
-    @pytest.mark.asyncio
-    async def test_a_payload_mismatch_and_a_key_conflict_keep_their_facts(self) -> None:
-        owner = UUID('0198c0de-0000-7000-8000-0000000000ff')
-        mismatch = await self._send(
-            self._broker_answering(
-                MagicMock(spec=SendPayloadMismatch, task_id=SEND_TASK_ID, message='mismatch'),
-            ),
-        )
-        conflict = await self._send(
-            self._broker_answering(
-                MagicMock(
-                    spec=SendKeyConflict,
-                    task_id=SEND_TASK_ID,
-                    owner_task_id=owner,
-                    message='conflict',
+                BrokerInvalidInput(
+                    message='enqueue input refused for my_task: priority must be between 1 and 100',
+                    exception=ValueError('priority must be between 1 and 100'),
                 ),
+                id='invalid-input',
             ),
-        )
+            pytest.param(
+                BrokerInvalidTaskOptions(
+                    message='enqueue contract violation: task_options JSON is refused: x',
+                    exception=SerializationError('x'),
+                ),
+                id='invalid-task-options',
+            ),
+            pytest.param(
+                BrokerEnqueueFailed(
+                    message='Failed to enqueue task my_task: connection lost',
+                    retryable=True,
+                    exception=CoreConnectionError('enqueue', 'connection lost', True),
+                ),
+                id='enqueue-failed-retryable',
+            ),
+            pytest.param(
+                BrokerEnqueueFailed(
+                    message='task_id conflict detected but row disappeared',
+                    retryable=False,
+                    exception=NoCause(),
+                ),
+                id='enqueue-failed-not-retryable',
+            ),
+            pytest.param(BrokerPayloadMismatch(message='mismatch'), id='payload-mismatch'),
+            pytest.param(
+                BrokerIdempotencyKeyConflict(
+                    message='conflict',
+                    owner_task_id=UUID('0198c0de-0000-7000-8000-0000000000ff'),
+                ),
+                id='key-conflict',
+            ),
+        ],
+    )
+    async def test_a_class_that_the_core_built_is_returned_as_it_is(
+        self, outcome: object,
+    ) -> None:
+        """The core decides the code, the message and the cause of a failed
+        send (``BrokerOperationError::enqueue_error``); the facade adds
+        nothing."""
+        broker = self._broker_answering(outcome)
 
-        assert mismatch == Err(BrokerPayloadMismatch(message='mismatch'))
-        assert conflict == Err(BrokerIdempotencyKeyConflict(message='conflict', owner_task_id=owner))
+        result = await self._send(broker)
+
+        assert is_err(result)
+        assert result.err_value is outcome
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('outcome_class', [SendSuppressed, SendPayloadTooLarge])
-    async def test_a_record_the_core_send_never_answers_is_a_defect(
-        self, outcome_class: type,
+    @pytest.mark.parametrize(
+        'outcome',
+        [
+            pytest.param(BrokerAsyncContext(message='loop'), id='async-context'),
+            pytest.param(BrokerListenerDisabled(message='no listener'), id='listener-disabled'),
+        ],
+    )
+    async def test_a_class_that_the_core_send_never_answers_is_a_defect(
+        self, outcome: object,
     ) -> None:
-        broker = self._broker_answering(_stand_in_named_as(outcome_class))
+        broker = self._broker_answering(outcome)
 
-        with pytest.raises(AssertionError, match=outcome_class.__name__):
+        with pytest.raises(AssertionError, match=type(outcome).__name__):
             await self._send(broker)
 
     @pytest.mark.asyncio

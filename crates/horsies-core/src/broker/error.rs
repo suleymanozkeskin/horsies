@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::pools::PoolSettingsError;
 use crate::core::codec::JsonReadError;
+use crate::core::config::RetentionClassKeyRefused;
 use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::identity::fingerprint::FingerprintError;
@@ -184,6 +185,14 @@ pub enum BrokerError {
     #[error("enqueue contract violation: {0}")]
     EnqueueContract(EnqueueRefusal),
 
+    /// The retention class key of a send is not empty, and no retention
+    /// class derives it ([`crate::EnqueueRetention::from_class_key`]). A
+    /// client that takes the key as text refuses it before any statement:
+    /// nothing was written. Not retryable: the same key is refused again.
+    /// An empty key is [`EnqueueRefusal::empty_retention_class_key`].
+    #[error(transparent)]
+    RetentionClassKey(RetentionClassKeyRefused),
+
     /// The broker's keyed-enqueue reservation window is outside `(0, 30d]`.
     #[error("invalid idempotency reservation window: {0}")]
     InvalidIdempotencyReservationWindow(String),
@@ -327,6 +336,7 @@ impl BrokerError {
             | Self::EnqueueConflictUnverifiable { .. }
             | Self::IdempotencyKeyConflict { .. }
             | Self::EnqueueContract(_)
+            | Self::RetentionClassKey(_)
             | Self::InvalidIdempotencyReservationWindow(_)
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)

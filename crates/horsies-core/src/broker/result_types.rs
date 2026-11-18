@@ -7,8 +7,9 @@ use uuid::Uuid;
 use crate::broker::class_coverage::ClassReadRefused;
 use crate::broker::health::WorkerStateUnreadable;
 use crate::broker::process_listener::ListenError;
-use crate::broker::BrokerError;
+use crate::broker::{BrokerError, EnqueueRefusal, EnqueueRefusalCause};
 use crate::core::codec::{check_json_text, StrictJsonError};
+use crate::core::history::enqueue::SendPart;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::{TaskInfo, TaskStatus};
 use crate::error_catalog::ErrorEnum;
@@ -130,11 +131,13 @@ impl BrokerOperationFailedCode {
 ///
 /// `cause` is the typed cause of the variant's `exception`
 /// (`ErrorClassValues`): the [`BrokerOperationSource`] that a failed
-/// operation met, or the [`BrokerCheckCause`] of a variant whose
-/// `exception` may be `NoCause()`. A variant without `cause` has the cause
-/// of its state ([`Self::failure_cause`]). A variant without `retryable`
-/// never clears. The constructors of the operation codes build Python's
-/// message of each operation.
+/// operation met, the [`BrokerCheckCause`] of a failed enqueue or of stored
+/// JSON that does not read, or the [`BrokerRefusalCause`] of a refused
+/// argument, input or task options. A variant without `cause` has the
+/// cause of its state ([`Self::failure_cause`]). A variant without
+/// `retryable` never clears. The constructors of the operation codes build
+/// Python's message of each operation; [`Self::enqueue_error`] decides the
+/// code of a failed enqueue.
 #[derive(Debug, horsies_core_derive::ErrorCatalog, horsies_core_derive::ErrorClassValues)]
 #[error_catalog(
     module = "broker_errors",
@@ -247,9 +250,10 @@ pub enum BrokerOperationError {
     InvalidTaskOptions {
         #[error_slot(python = "Str", hidden)]
         message: String,
-        /// The error that refused the value, or the check of the core.
+        /// The check of the core, the text that does not read as JSON, or
+        /// the rule that refused the value.
         #[error_slot(cause)]
-        cause: BrokerCheckCause,
+        cause: BrokerRefusalCause,
     },
     /// An argument of the call was refused before anything ran. Nothing was written.
     ///
@@ -265,9 +269,10 @@ pub enum BrokerOperationError {
     InvalidInput {
         #[error_slot(python = "Str", hidden)]
         message: String,
-        /// The error that refused the value, or the check of the core.
+        /// The check of the core, the text that does not read as JSON, or
+        /// the rule that refused the value.
         #[error_slot(cause)]
-        cause: BrokerCheckCause,
+        cause: BrokerRefusalCause,
     },
     /// A sync facade was called on a thread that runs an event loop. Nothing ran.
     ///
@@ -355,22 +360,22 @@ impl BrokerOperationError {
 
     /// The cause of the failure: the cause of the variant's `cause`, else
     /// the cause of its state. A check of the core that refused stored JSON
-    /// is a broken read contract; a check that refused an argument, the task
-    /// options or an enqueue whose row was gone is a failed precondition. A
-    /// refused key, a refused thread, a missing listener and a wait in a
-    /// task process are failed preconditions. Pure.
+    /// is a broken read contract; a check that found an enqueue whose row
+    /// was gone is a failed precondition. A refused argument, input or task
+    /// options, a refused key, a refused thread, a missing listener and a
+    /// wait in a task process are failed preconditions. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
             Self::OperationFailed { cause, .. } => cause.failure_cause(),
             Self::InvalidJsonPayload { cause, .. } => {
                 cause.failure_cause_or(FailureCause::ContractViolation)
             }
-            Self::EnqueueFailed { cause, .. }
-            | Self::InvalidTaskOptions { cause, .. }
-            | Self::InvalidInput { cause, .. } => {
+            Self::EnqueueFailed { cause, .. } => {
                 cause.failure_cause_or(FailureCause::PreconditionFailed)
             }
-            Self::PayloadMismatch { .. }
+            Self::InvalidTaskOptions { .. }
+            | Self::InvalidInput { .. }
+            | Self::PayloadMismatch { .. }
             | Self::IdempotencyKeyConflict { .. }
             | Self::AsyncContext { .. }
             | Self::ListenerDisabled { .. }
@@ -392,15 +397,17 @@ impl std::fmt::Display for BrokerOperationError {
 }
 
 impl std::error::Error for BrokerOperationError {
-    /// The variant's `cause`, when it has one and it is an error.
+    /// The variant's `cause`, when it has one and it is an error. A refused
+    /// argument, input or task options has no error.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::OperationFailed { cause, .. } => Some(cause),
-            Self::EnqueueFailed { cause, .. }
-            | Self::InvalidJsonPayload { cause, .. }
-            | Self::InvalidTaskOptions { cause, .. }
-            | Self::InvalidInput { cause, .. } => cause.error(),
-            Self::PayloadMismatch { .. }
+            Self::EnqueueFailed { cause, .. } | Self::InvalidJsonPayload { cause, .. } => {
+                cause.error()
+            }
+            Self::InvalidTaskOptions { .. }
+            | Self::InvalidInput { .. }
+            | Self::PayloadMismatch { .. }
             | Self::IdempotencyKeyConflict { .. }
             | Self::AsyncContext { .. }
             | Self::ListenerDisabled { .. }
@@ -518,7 +525,118 @@ impl BrokerOperationError {
     pub fn invalid_input(message: String) -> Self {
         Self::InvalidInput {
             message,
-            cause: BrokerCheckCause::Check,
+            cause: BrokerRefusalCause::Check,
+        }
+    }
+
+    /// The class of a failed enqueue of the task `task_name`: the code that
+    /// Python's broker gave `error`, with its message and its cause. Pure.
+    ///
+    /// - The core refused the send before any statement: by the refused
+    ///   part ([`Self::enqueue_refused`]).
+    /// - A value that does not serialize, or a reservation window out of
+    ///   range: `INVALID_INPUT` with the error's text and no exception (a
+    ///   check of the core).
+    /// - The task id holds another command or key: `PAYLOAD_MISMATCH` with
+    ///   the error's text.
+    /// - Another task holds the key with another command:
+    ///   `IDEMPOTENCY_KEY_CONFLICT` with the error's text and the owner.
+    /// - The conflicting row was gone before the compare: `ENQUEUE_FAILED`,
+    ///   not retryable, with the error's text (Python's) and no exception:
+    ///   the broker found it by a data check.
+    /// - Every other error: [`Self::enqueue_failed`].
+    pub fn enqueue_error(task_name: &str, error: BrokerError) -> Self {
+        match error {
+            BrokerError::EnqueueContract(refusal) => Self::enqueue_refused(task_name, &refusal),
+            BrokerError::Serialization(_) | BrokerError::InvalidIdempotencyReservationWindow(_) => {
+                Self::InvalidInput {
+                    message: error.to_string(),
+                    cause: BrokerRefusalCause::Check,
+                }
+            }
+            BrokerError::PayloadMismatch { .. } => Self::PayloadMismatch {
+                message: error.to_string(),
+            },
+            BrokerError::IdempotencyKeyConflict {
+                task_id: owner_task_id,
+                ..
+            } => Self::IdempotencyKeyConflict {
+                message: error.to_string(),
+                owner_task_id,
+            },
+            BrokerError::EnqueueConflictUnverifiable { .. } => Self::EnqueueFailed {
+                message: error.to_string(),
+                retryable: false,
+                cause: BrokerCheckCause::Check,
+            },
+            BrokerError::Database(_)
+            | BrokerError::InvalidWorkflowNodeStatus
+            | BrokerError::IncompleteTaskHistoryCutover
+            | BrokerError::InvalidStatus(_)
+            | BrokerError::InvalidExecutionClass(_)
+            | BrokerError::ConnectionFailed(_)
+            | BrokerError::InvalidConnectionSettings(_)
+            | BrokerError::RetentionClassKey(_)
+            | BrokerError::ClientFamilyMismatch { .. }
+            | BrokerError::UnknownStoredFamily(_)
+            | BrokerError::SchemaRefused(_)
+            | BrokerError::InstallLock(_)
+            | BrokerError::InstallCoverage(_)
+            | BrokerError::ListenerClosed
+            | BrokerError::TerminalizationContract(_)
+            | BrokerError::HistoryReadContract(_)
+            | BrokerError::InvalidClaimArgument(_)
+            | BrokerError::ClaimContract(_)
+            | BrokerError::Statement(_)
+            | BrokerError::PoolSettings(_)
+            | BrokerError::RowDecode(_)
+            | BrokerError::ProcessRuntime(_) => Self::enqueue_failed(task_name, error),
+        }
+    }
+
+    /// `INVALID_INPUT` (the input, or a fact of the call that the input
+    /// carries) or `INVALID_TASK_OPTIONS`, by the part that the core refused
+    /// before any statement. Nothing was written. Pure.
+    ///
+    /// A rule of the version-1 command or of the scoped idempotency key has
+    /// Python's message (`enqueue input refused for {task_name}: {rule}`,
+    /// `idempotency key refused for {task_name}: {rule}`) and the rule as
+    /// the cause (Python: `ValueError`). A text that does not read as JSON
+    /// has the reader's error as the cause (Python: `SerializationError`),
+    /// and a rule that refused a value that reads has no exception; both
+    /// have the text of the core's error.
+    pub fn enqueue_refused(task_name: &str, refusal: &EnqueueRefusal) -> Self {
+        let contract_text = || BrokerError::EnqueueContract(refusal.clone()).to_string();
+        let (message, cause) = match &refusal.cause {
+            EnqueueRefusalCause::JsonUnreadable(reader_error) => (
+                contract_text(),
+                BrokerRefusalCause::JsonUnreadable(reader_error.clone()),
+            ),
+            EnqueueRefusalCause::RuleRefused => (contract_text(), BrokerRefusalCause::Check),
+            EnqueueRefusalCause::CommandRuleRefused(rule) => (
+                format!("enqueue input refused for {task_name}: {rule}"),
+                BrokerRefusalCause::ValueRule(rule.clone()),
+            ),
+            EnqueueRefusalCause::KeyRuleRefused(rule) => (
+                format!("idempotency key refused for {task_name}: {rule}"),
+                BrokerRefusalCause::ValueRule(rule.clone()),
+            ),
+        };
+        match refusal.part {
+            SendPart::Input => Self::InvalidInput { message, cause },
+            SendPart::TaskOptions => Self::InvalidTaskOptions { message, cause },
+        }
+    }
+
+    /// `ENQUEUE_FAILED` of the task `task_name` with `error`: Python's
+    /// message (`Failed to enqueue task {task_name}: {error}`), the error's
+    /// retry rule, and the error as the cause. The row may or may not
+    /// exist. Pure.
+    pub fn enqueue_failed(task_name: &str, error: BrokerError) -> Self {
+        Self::EnqueueFailed {
+            message: format!("Failed to enqueue task {task_name}: {error}"),
+            retryable: error.is_retryable(),
+            cause: BrokerCheckCause::Error(error),
         }
     }
 }
@@ -602,9 +720,10 @@ impl BrokerOperationSource {
     }
 }
 
-/// The cause of a broker failure whose `exception` may be `NoCause()`: the
-/// broker error that refused the value, or a check of the core that found
-/// the failure with no error. Python builds `NoCause()` for a check.
+/// The cause of a failed enqueue or of stored JSON that does not read,
+/// whose `exception` may be `NoCause()`: the broker error that the
+/// operation met, or a check of the core that found the failure with no
+/// error. Python builds `NoCause()` for a check.
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerCheckCause {
     /// The error that refused the value.
@@ -631,6 +750,23 @@ impl BrokerCheckCause {
             Self::Check => None,
         }
     }
+}
+
+/// The cause of a refused argument, input or task options: what the client
+/// builds the `exception` of `INVALID_INPUT` and `INVALID_TASK_OPTIONS`
+/// from. Python's broker gave `NoCause()` for a check, the JSON reader's
+/// `SerializationError` for a text that does not read, and the
+/// `ValueError` of the version-1 command or of the scoped idempotency key
+/// for a rule of either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerRefusalCause {
+    /// A check of the core refused the value; no error was raised.
+    Check,
+    /// The refused text does not read as JSON: the reader's error text.
+    JsonUnreadable(String),
+    /// A rule of the version-1 command or of the scoped idempotency key
+    /// refused a value: the rule's text.
+    ValueRule(String),
 }
 
 /// Result type for broker operations.
@@ -813,14 +949,14 @@ mod tests {
             (
                 BrokerOperationError::InvalidTaskOptions {
                     message: message(),
-                    cause: BrokerCheckCause::Check,
+                    cause: BrokerRefusalCause::Check,
                 },
                 BrokerErrorCode::InvalidTaskOptions,
             ),
             (
                 BrokerOperationError::InvalidInput {
                     message: message(),
-                    cause: BrokerCheckCause::Check,
+                    cause: BrokerRefusalCause::Check,
                 },
                 BrokerErrorCode::InvalidInput,
             ),
