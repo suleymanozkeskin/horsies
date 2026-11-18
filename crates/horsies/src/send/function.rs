@@ -31,8 +31,8 @@ use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::WholeSeconds;
 use horsies_core::{
-    child_producer, mint_task_id, ChildProducer, Execution, PayloadPolicy, RetentionConfig,
-    SendKind, TaskOptions, TaskSendError, TaskSendPayload,
+    child_producer, mint_task_id, ChildProducer, Execution, FailureCause, PayloadPolicy,
+    RetentionConfig, SendKind, TaskOptions, TaskSendError, TaskSendPayload,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -466,6 +466,7 @@ where
     fn validation_failed(&self, message: String) -> TaskSendError {
         TaskSendError::ValidationFailed {
             message: format!("{message} (task {})", self.task_name),
+            cause: FailureCause::PreconditionFailed,
         }
     }
 }
@@ -676,7 +677,7 @@ mod tests {
 
     fn validation_message(error: TaskSendError) -> String {
         match error {
-            TaskSendError::ValidationFailed { message } => message,
+            TaskSendError::ValidationFailed { message, .. } => message,
             other => panic!("expected VALIDATION_FAILED, got {other}"),
         }
     }
@@ -868,6 +869,7 @@ mod tests {
             payload: Box::new(payload),
             message: "connection refused".to_owned(),
             retryable: true,
+            cause: FailureCause::Connection,
         }
     }
 
@@ -910,6 +912,7 @@ mod tests {
             (
                 TaskSendError::ValidationFailed {
                     message: "bad".to_owned(),
+                    cause: FailureCause::PreconditionFailed,
                 },
                 RetryOf::Send,
                 "VALIDATION_FAILED",
@@ -988,12 +991,14 @@ mod tests {
                 task_id,
                 payload,
                 message,
+                cause,
                 ..
             } => TaskSendError::EnqueueFailed {
                 task_id,
                 payload,
                 message,
                 retryable,
+                cause,
             },
             other => panic!("expected ENQUEUE_FAILED, got {other}"),
         }
@@ -1038,6 +1043,7 @@ mod tests {
             failed_enqueue(false),
             TaskSendError::ValidationFailed {
                 message: "bad input".to_owned(),
+                cause: FailureCause::PreconditionFailed,
             },
         ] {
             let mut kinds = Vec::new();

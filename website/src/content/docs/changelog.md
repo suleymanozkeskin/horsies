@@ -673,10 +673,11 @@ unless it starts with "Added".
 - **`TaskSendError` is the closed catalog of Python's send codes:**
   `SendSuppressed`, `AsyncContext { task_id, payload }` (a blocking send on
   a thread that runs a tokio runtime; nothing was written),
-  `ValidationFailed`, `EnqueueFailed { retryable }` (the row may or may not
-  exist), `PayloadMismatch`, `IdempotencyKeyConflict { owner_task_id }` and
-  `PayloadTooLarge { size_bytes, limit_bytes }`, each with only the facts of
-  its state. `retry_send` and `retry_schedule` accept only `AsyncContext`,
+  `ValidationFailed { cause }`, `EnqueueFailed { retryable, cause }` (the
+  row may or may not exist), `PayloadMismatch`, `IdempotencyKeyConflict {
+  owner_task_id }` and `PayloadTooLarge { size_bytes, limit_bytes }`, each
+  with only the facts of its state. `cause` is what the send met
+  (`failure_cause()`, Python's `exception`). `retry_send` and `retry_schedule` accept only `AsyncContext`,
   `EnqueueFailed` and `IdempotencyKeyConflict`, send the same task id and
   payload, and refuse the error of another task or of the other method.
 - **A resend is a repeat.** With `resend_on_transient_err`, a retryable
@@ -850,13 +851,15 @@ unless it starts with "Added".
   `retryable` and `cause` become the methods `code()`, `message()`,
   `retryable()` and `failure_cause()`.
 - **`WorkflowStartError` is an enum with one variant per state.**
-  `ValidationFailed` (with `workflow_id: Option<Uuid>`), `IdConflict` (with
+  `ValidationFailed` (with `workflow_id` and `cause`), `IdConflict` (with
   `workflow_id` and `existing_workflow_name`, the name that holds the id),
-  `EnqueueFailed` (with `workflow_id` and `retryable`) and `AsyncContext`
-  (with `workflow_id`); each has `message` and `workflow_name`. The fields
-  become the methods `code()`, `message()`, `retryable()`,
-  `workflow_name()` and `workflow_id()`. Only `ValidationFailed` can lack
-  a workflow id, so `retry_start` no longer refuses an error without one.
+  `EnqueueFailed` (with `workflow_id`, `retryable` and `cause`) and
+  `AsyncContext` (with `workflow_id`); each has `message` and
+  `workflow_name`. The fields become the methods `code()`, `message()`,
+  `retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()`.
+  Every variant has the id of its start, as in Python: a start mints its id
+  before its checks, so `start_workflow::<D>()` before the registration of
+  `D` names the id it minted.
 - **`HandleOperationError` is an enum with one variant per state.**
   `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`),
   `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and

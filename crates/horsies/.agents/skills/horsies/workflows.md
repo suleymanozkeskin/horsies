@@ -358,11 +358,13 @@ async fn run_checkout(
 ### `WorkflowStartError`
 
 An enum with one variant per state: `ValidationFailed { message,
-workflow_name, workflow_id: Option<Uuid> }`, `IdConflict { message,
+workflow_name, workflow_id, cause }`, `IdConflict { message,
 workflow_name, workflow_id, existing_workflow_name }`, `EnqueueFailed {
-message, retryable, workflow_name, workflow_id }` and `AsyncContext {
+message, retryable, workflow_name, workflow_id, cause }` and `AsyncContext {
 message, workflow_name, workflow_id }`. The methods `code()`, `message()`,
-`retryable()`, `workflow_name()` and `workflow_id()` read every variant.
+`retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()` read
+every variant. `workflow_id` is the id of the start: the caller's, or the
+id minted for it before the checks.
 
 | `WorkflowStartErrorCode` | When |
 |---|---|
