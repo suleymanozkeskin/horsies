@@ -80,6 +80,7 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
         &mut next_retention_cleanup,
         &mut next_partition_maintenance,
         &mut orphan_state,
+        &mut UnheldOwners::default(),
     )
     .await;
     let snapshot = health.read().await.clone();

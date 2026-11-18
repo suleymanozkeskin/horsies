@@ -267,6 +267,7 @@ mod p7_maintenance_tests {
             &mut next_retention_cleanup,
             &mut next_partition_maintenance,
             &mut orphan_state,
+            &mut UnheldOwners::default(),
         )
         .await;
 
@@ -364,6 +365,7 @@ mod p7_maintenance_tests {
             &mut next_retention_cleanup,
             &mut next_partition_maintenance,
             &mut orphan_state,
+            &mut UnheldOwners::default(),
         )
         .await;
 
@@ -424,6 +426,7 @@ mod p7_maintenance_tests {
             &mut next_retention_cleanup,
             &mut next_partition_maintenance,
             &mut orphan_state,
+            &mut UnheldOwners::default(),
         )
         .await;
 
@@ -615,6 +618,7 @@ mod p7_maintenance_tests {
             &mut next_retention_cleanup,
             &mut next_partition_maintenance,
             &mut orphan_state,
+            &mut UnheldOwners::default(),
         )
         .await;
 
@@ -2325,6 +2329,7 @@ mod tests {
                     &mut next_retention_cleanup,
                     &mut next_partition_maintenance,
                     &mut orphan_state,
+                    &mut UnheldOwners::default(),
                 ),
             ),
         )
