@@ -36,9 +36,12 @@ from horsies.core.brokers.postgres import (
     _async_context_err,
     _enqueue_failed,
     _loop_limit_err,
-    _loop_runner_err,
 )
-from horsies.core.brokers.result_types import BrokerEnqueueError, BrokerSyncCallError
+from horsies.core.brokers.result_types import (
+    BrokerEnqueueError,
+    BrokerLoopRunnerFailed,
+    BrokerSyncCallError,
+)
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     resolve_retention_class_key,
@@ -46,6 +49,23 @@ from horsies.core.history.ddl.classes import (
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.utils.loop_runner import LoopRunnerError, in_running_event_loop
+
+
+def _loop_runner_err(
+    sync_call: str, exc: LoopRunnerError,
+) -> Err[BrokerLoopRunnerFailed]:
+    """Build the broker error for a sync facade whose runner could not run the call.
+
+    Nothing ran. Not retryable: a stopped runner does not start again. The
+    helper of ``postgres.py`` before the sync facades moved to the blocking
+    forms of the core (#1953).
+    """
+    return Err(
+        BrokerLoopRunnerFailed(
+            message=f'Loop runner failed for {sync_call}: {exc}',
+            exception=exc,
+        )
+    )
 
 
 async def enqueue_async(
