@@ -1,6 +1,6 @@
 //! The closed code catalogs of the core, as static data for clients.
 //!
-//! Each catalog is a code enum with `#[derive(horsies_macros::CodeCatalog)]`.
+//! Each catalog is a code enum with `#[derive(horsies_core_derive::CodeCatalog)]`.
 //! The derive records the members, their wire values and their docs.
 //! `horsies-codegen` reads [`CODE_CATALOGS`] and renders the Python enum
 //! classes, so a code is defined once, here in Rust.

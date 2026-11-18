@@ -1,0 +1,16 @@
+[package]
+name = "horsies-core-derive"
+version = "0.1.0-alpha.36"
+edition = "2021"
+description = "Derives of horsies-core for its code catalogs and manifest types"
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies"
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

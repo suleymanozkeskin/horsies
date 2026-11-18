@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-// `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
-// and `#[derive(horsies_macros::ManifestSchema)]` names
+// `#[derive(horsies_core_derive::CodeCatalog)]` names `::horsies_core::catalog`,
+// and `#[derive(horsies_core_derive::ManifestSchema)]` names
 // `::horsies_core::manifest_schema`; this crate reaches both through its own
 // name.
 extern crate self as horsies_core;

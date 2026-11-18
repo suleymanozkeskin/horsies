@@ -18,7 +18,7 @@ use crate::failure_cause::FailureCause;
 ///    `HandleResult::Err(...)`.
 ///
 /// Categorized handle operation failure codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "workflow_handle", base = "str_enum")]
 pub enum HandleErrorCode {
     /// Workflow ID does not exist in the database.

@@ -14,7 +14,7 @@ use crate::broker::BrokerError;
 /// (`python/horsies/core/models/task_send_types.py`). `EVENT_LOOP_LIMIT`
 /// and `LOOP_RUNNER_FAILED` are produced by the Python client only;
 /// [`TaskSendError`] has no variant for them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,

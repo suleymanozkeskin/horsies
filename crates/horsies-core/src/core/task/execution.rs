@@ -33,7 +33,7 @@ pub const MAX_CANCEL_GRACE_MS: i64 = 10_000;
     Ord,
     Serialize,
     Deserialize,
-    horsies_macros::ManifestSchema,
+    horsies_core_derive::ManifestSchema,
 )]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
