@@ -1033,9 +1033,8 @@ async fn a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried() {
 /// `a_transient_error_at_the_consume_is_a_retryable_phase_two_error`, as the
 /// URL parameter `options=-c lock_timeout=100ms`: the bound of their wait for
 /// the workflow row that the test holds. It goes into the URL that the
-/// broker connects with: phase 2 runs on the core pools, and a broker built
-/// from a sqlx pool opens those from the pool's URL, which does not carry the
-/// pool's `options` (`broker::pools::test_url_of`).
+/// broker connects with: phase 2 runs on the core pools, which the broker
+/// opens from that URL.
 const CONSUME_LOCK_TIMEOUT_PARAMETER: &str = "options=-c%20lock_timeout%3D100ms";
 
 /// The bound of the test's wait for that phase 2: a lock timeout that does

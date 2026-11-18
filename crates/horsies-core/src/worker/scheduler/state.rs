@@ -607,8 +607,8 @@ fn fired_slot(fire: &ScheduleFire<'_>, row: &Row) -> Result<FiredSlot, RowDecode
     })
 }
 
-/// Test rows of `horsies_schedule_state`, written and read with sqlx on the
-/// test database (seeds and checks of the tests, not scheduler statements).
+/// Test rows of `horsies_schedule_state`, written and read with the test
+/// client on the test database (seeds and checks of the tests, not scheduler statements).
 #[cfg(test)]
 pub(crate) mod test_rows {
     use crate::test_support::sql::{self, TestPool};

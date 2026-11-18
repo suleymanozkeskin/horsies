@@ -483,18 +483,21 @@ async fn a_connection_loss_counts_no_candidate_of_the_pass() {
 #[serial]
 async fn the_real_raise_after_a_connection_loss_is_transient() {
     let db = IsolatedDatabase::create().await;
-    // `WorkflowError::Database` holds a sqlx error: the lost session is a
-    // sqlx connection, so the classifier sees the error that sqlx gives.
-    let mut connection = {
-        use sqlx::Connection;
-        sqlx::PgConnection::connect(db.pool.url())
-            .await
-            .expect("connect a sqlx session")
-    };
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut connection)
+    // The lost session is a core connection, so the classifier sees the
+    // statement failure that the statement layer gives.
+    let core = crate::broker::pools::unpinged_single_connection_core_pool_for_url(db.pool.url());
+    let mut connection = core
+        .checkout(crate::db::CheckoutClass::Reserved)
+        .await
+        .expect("check out the core connection");
+    let rows = connection
+        .query(
+            &BACKEND_PID.bind().finish(),
+            crate::db::StatementBound::ConnectionTimeouts,
+        )
         .await
         .expect("read the backend pid");
+    let pid: i32 = rows.first().expect("one row").get(0);
     let terminated: bool = sql::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(pid)
         .fetch_one(&db.pool)
@@ -502,16 +505,26 @@ async fn the_real_raise_after_a_connection_loss_is_transient() {
         .expect("terminate the backend");
     assert!(terminated);
 
-    let error = sqlx::query("SELECT 1")
-        .execute(&mut connection)
+    let error = connection
+        .query(
+            &BACKEND_PID.bind().finish(),
+            crate::db::StatementBound::ConnectionTimeouts,
+        )
         .await
         .expect_err("a statement on a terminated backend fails");
     drop(connection);
+    core.close();
 
-    let failure = CandidateFailure::Error(WorkflowError::Database(error));
+    let failure = CandidateFailure::Error(WorkflowError::Broker(
+        crate::broker::BrokerError::Statement(error),
+    ));
     assert_eq!(failure.class(), FailureClass::Transient, "{failure:?}");
     db.drop().await;
 }
+
+/// The backend pid of a core connection.
+static BACKEND_PID: crate::db::TypedStatement =
+    crate::db::TypedStatement::new("test_backend_pid", "SELECT pg_backend_pid()", &[]);
 
 /// `test_the_resume_pass_logs_and_does_not_count`
 #[tokio::test]

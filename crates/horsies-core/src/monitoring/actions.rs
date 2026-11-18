@@ -183,8 +183,7 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
 fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
     match error {
         WorkflowError::WorkflowNotFound { .. } => workflow_not_found(workflow_id),
-        WorkflowError::Database(_)
-        | WorkflowError::Broker(_)
+        WorkflowError::Broker(_)
         | WorkflowError::Serialization(_)
         | WorkflowError::InvalidStatus(_)
         | WorkflowError::Validation(_)

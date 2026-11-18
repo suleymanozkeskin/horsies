@@ -115,10 +115,6 @@ impl From<EnqueuePreparationError> for EnqueueRefusal {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
-    /// Database connection or query error.
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
-
     /// Existing workflow nodes contain a status outside the typed node enum.
     #[error("migration refused: workflow nodes contain an unsupported status; repair these rows before retrying")]
     InvalidWorkflowNodeStatus,
@@ -294,9 +290,6 @@ impl BrokerError {
     /// Whether this error is PostgreSQL's nonblocking lock refusal.
     pub fn is_lock_not_available(&self) -> bool {
         match self {
-            Self::Database(sqlx::Error::Database(error)) => {
-                error.code().is_some_and(|code| code.as_ref() == "55P03")
-            }
             Self::Statement(StatementFailure::StatementRefused { cause, .. }) => {
                 cause.server_error().code().code() == "55P03"
             }
@@ -306,15 +299,13 @@ impl BrokerError {
 
     /// Whether this error is transient and the operation can be retried.
     ///
-    /// Retryable: `Database` when the driver error is retryable (see
-    /// [`is_retryable_sqlx_error`]), `Statement` when its cause is transient
-    /// (see [`is_retryable_statement_failure`]), `ConnectionFailed`,
+    /// Retryable: `Statement` when its cause is transient (see
+    /// [`is_retryable_statement_failure`]), `ConnectionFailed`,
     /// `ListenerClosed`, and `ProcessRuntime`, `InstallLock` and
     /// `InstallCoverage` by their own rules. Every other variant is a refusal or a broken contract, which
     /// the same call meets again.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Database(e) => is_retryable_sqlx_error(e),
             Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::ProcessRuntime(refusal) => match refusal {
@@ -351,8 +342,8 @@ impl BrokerError {
 /// Whether a failed core statement can be retried: its cause may clear.
 ///
 /// The rule is the statement layer's [`Transience`]: SQLSTATE classes 08,
-/// 40, 53, 55 and 57 ([`crate::db::TRANSIENT_SQLSTATE_CLASSES`], the same
-/// set as [`RETRYABLE_SQLSTATE_CLASSES`]) and lost connections are
+/// 40, 53, 55 and 57 ([`crate::db::TRANSIENT_SQLSTATE_CLASSES`]) and lost
+/// connections are
 /// transient; a closed pool and a statement-pooled URL are not. For
 /// `OutcomeUnknown` the flag says nothing about whether a replay is safe.
 pub fn is_retryable_statement_failure(failure: &StatementFailure) -> bool {
@@ -387,189 +378,86 @@ impl InstallLockFailure {
     }
 }
 
-/// SQLSTATE classes whose condition may clear, so a repeat of the operation
-/// can succeed. The set is Python's rule (`core/utils/db.py`,
-/// `is_retryable_connection_error`: psycopg's `OperationalError` family)
-/// written as classes: 08 connection exception, 40 transaction rollback
-/// (40001 serialization failure, 40P01 deadlock), 53 insufficient resources
-/// (53300 too many connections), 55 object not in prerequisite state (55P03
-/// lock not available), 57 operator intervention (57014 query cancelled by a
-/// statement timeout, 57P01 to 57P03 shutdown).
-pub const RETRYABLE_SQLSTATE_CLASSES: [&str; 5] = ["08", "40", "53", "55", "57"];
-
-/// Whether a SQLSTATE belongs to a class of [`RETRYABLE_SQLSTATE_CLASSES`].
-pub fn is_retryable_sqlstate(code: &str) -> bool {
-    match code.get(..2) {
-        Some(class) => RETRYABLE_SQLSTATE_CLASSES.contains(&class),
-        None => false,
-    }
-}
-
-/// Whether a raw `sqlx::Error` is a transient failure.
-///
-/// Retryable:
-/// - a database error whose SQLSTATE is in [`RETRYABLE_SQLSTATE_CLASSES`];
-/// - a lost or failed connection: I/O, TLS, protocol, a crashed pool
-///   worker, a pool checkout that timed out.
-///
-/// Not retryable: `PoolClosed`. The handle was closed on purpose, and a
-/// repeat on the same closed pool meets the same refusal. Every other driver
-/// error (a decode error, a missing row, a configuration error) is not
-/// retryable either.
-pub fn is_retryable_sqlx_error(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Io(_)
-        | sqlx::Error::PoolTimedOut
-        | sqlx::Error::WorkerCrashed
-        | sqlx::Error::Protocol(_)
-        | sqlx::Error::Tls(_) => true,
-        sqlx::Error::Database(db_err) => match db_err.code() {
-            Some(code) => is_retryable_sqlstate(code.as_ref()),
-            None => false,
-        },
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
+    use serial_test::serial;
+    use tokio_postgres::error::DbError;
 
     use super::*;
+    use crate::db::{CheckoutFailure, NotSentCause, PoolRole, RefusalCause};
 
-    /// A database error that carries only a SQLSTATE, as the server sends it.
-    #[derive(Debug)]
-    struct ServerError {
-        code: &'static str,
+    /// The server error of a statement that raises SQLSTATE `code`.
+    async fn server_error(code: &str) -> DbError {
+        crate::test_support::raised_server_error(code, "test refusal").await
     }
 
-    impl std::fmt::Display for ServerError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "server error {}", self.code)
-        }
-    }
-
-    impl std::error::Error for ServerError {}
-
-    impl sqlx::error::DatabaseError for ServerError {
-        fn message(&self) -> &str {
-            "server error"
-        }
-
-        fn code(&self) -> Option<Cow<'_, str>> {
-            Some(Cow::Borrowed(self.code))
-        }
-
-        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
-            self
-        }
-
-        fn kind(&self) -> sqlx::error::ErrorKind {
-            sqlx::error::ErrorKind::Other
-        }
-    }
-
-    fn server_error(code: &'static str) -> sqlx::Error {
-        sqlx::Error::Database(Box::new(ServerError { code }))
+    fn refused(error: DbError) -> BrokerError {
+        BrokerError::Statement(StatementFailure::StatementRefused {
+            statement: "test_statement",
+            cause: RefusalCause::Server(error),
+        })
     }
 
     /// Python `test_broker_error_variants.py::TestProcessBoundaries::test_reaper_sqlstate_reads_the_driver_cause`
     /// and `::test_reaper_sqlstate_of_an_error_without_a_cause_is_none`: the
-    /// reaper reads the SQLSTATE that the server error of the driver
-    /// carries; 55P03 is the lock refusal (the orphan audit reports it as
+    /// reaper reads the SQLSTATE of the server error behind a refused
+    /// statement; 55P03 is the lock refusal (the orphan audit reports it as
     /// `refused`, `worker::recovery`). Another SQLSTATE, and an error with no
     /// server cause, are not.
-    #[test]
-    fn the_lock_refusal_is_read_from_the_server_cause() {
-        assert!(BrokerError::Database(server_error("55P03")).is_lock_not_available());
-        assert!(!BrokerError::Database(server_error("40001")).is_lock_not_available());
-        assert!(!BrokerError::Database(sqlx::Error::PoolClosed).is_lock_not_available());
+    #[tokio::test]
+    #[serial]
+    async fn the_lock_refusal_is_read_from_the_server_cause() {
+        assert!(refused(server_error("55P03").await).is_lock_not_available());
+        assert!(!refused(server_error("40001").await).is_lock_not_available());
+        assert!(
+            !not_sent(NotSentCause::Checkout(CheckoutFailure::PoolClosed {
+                role: PoolRole::Main,
+            }))
+            .is_lock_not_available()
+        );
         assert!(!BrokerError::ListenerClosed.is_lock_not_available());
     }
 
     /// Python's rule: the `OperationalError` family of psycopg is retryable.
     /// It holds serialization failure, too many connections and a statement
-    /// timeout, which the earlier Rust list left out.
-    #[test]
-    fn every_sqlstate_of_the_five_classes_is_retryable() {
+    /// timeout. A statement that the server refuses with one of them is
+    /// retryable.
+    #[tokio::test]
+    #[serial]
+    async fn every_sqlstate_of_the_five_classes_is_retryable() {
         for code in [
             "08000", "08006", "08P01", "40001", "40P01", "53000", "53300", "55P03", "55006",
             "57014", "57P01", "57P02", "57P03",
         ] {
             assert!(
-                is_retryable_sqlx_error(&server_error(code)),
+                refused(server_error(code).await).is_retryable(),
                 "{code} must be retryable"
             );
         }
     }
 
-    #[test]
-    fn a_sqlstate_outside_the_five_classes_is_not_retryable() {
+    #[tokio::test]
+    #[serial]
+    async fn a_sqlstate_outside_the_five_classes_is_not_retryable() {
         for code in [
             "23505", "23514", "22P02", "42P01", "42883", "P0001", "XX000", "58030", "54000",
         ] {
             assert!(
-                !is_retryable_sqlx_error(&server_error(code)),
+                !refused(server_error(code).await).is_retryable(),
                 "{code} must not be retryable"
             );
         }
     }
 
-    #[test]
-    fn a_sqlstate_shorter_than_its_class_is_not_retryable() {
-        assert!(!is_retryable_sqlstate(""));
-        assert!(!is_retryable_sqlstate("0"));
-    }
-
-    #[test]
-    fn a_lost_connection_is_retryable() {
-        let io = sqlx::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::ConnectionReset,
-            "reset",
-        ));
-        assert!(is_retryable_sqlx_error(&io));
-        assert!(is_retryable_sqlx_error(&sqlx::Error::PoolTimedOut));
-        assert!(is_retryable_sqlx_error(&sqlx::Error::WorkerCrashed));
-        assert!(is_retryable_sqlx_error(&sqlx::Error::Protocol(
-            "unexpected message".to_owned()
-        )));
-    }
-
-    /// A closed pool was closed on purpose; a repeat on it meets the same
-    /// refusal.
-    #[test]
-    fn a_closed_pool_is_not_retryable() {
-        assert!(!is_retryable_sqlx_error(&sqlx::Error::PoolClosed));
-        assert!(!BrokerError::Database(sqlx::Error::PoolClosed).is_retryable());
-    }
-
-    fn not_sent(cause: crate::db::NotSentCause) -> BrokerError {
+    fn not_sent(cause: NotSentCause) -> BrokerError {
         BrokerError::Statement(StatementFailure::NotSent {
             statement: "test_statement",
             cause,
         })
     }
 
-    /// The statement layer and the sqlx rule read the same SQLSTATE classes.
-    #[test]
-    fn the_statement_layer_retries_the_same_sqlstate_classes() {
-        assert_eq!(
-            RETRYABLE_SQLSTATE_CLASSES,
-            crate::db::TRANSIENT_SQLSTATE_CLASSES
-        );
-    }
-
     #[test]
     fn a_core_statement_that_may_clear_is_retryable() {
-        use crate::db::{CheckoutFailure, NotSentCause, PoolRole};
         assert!(not_sent(NotSentCause::Checkout(CheckoutFailure::TimedOut {
             role: PoolRole::Main,
             waited: std::time::Duration::from_secs(30),
@@ -581,7 +469,7 @@ mod tests {
     /// A closed pool and a statement-pooled URL meet the same refusal again.
     #[test]
     fn a_closed_core_pool_and_a_statement_pooled_url_are_not_retryable() {
-        use crate::db::{CheckoutFailure, MaskedUrl, NotSentCause, PoolRole};
+        use crate::db::MaskedUrl;
         assert!(
             !not_sent(NotSentCause::Checkout(CheckoutFailure::PoolClosed {
                 role: PoolRole::Main,

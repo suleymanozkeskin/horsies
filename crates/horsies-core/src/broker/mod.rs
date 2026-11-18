@@ -66,10 +66,7 @@ pub use class_coverage::{
 pub use class_coverage_reads::{LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT};
 pub use core_rows::RowDecodeError;
 pub use enqueue_task::SendKind;
-pub use error::{
-    is_retryable_sqlx_error, is_retryable_statement_failure, BrokerError, EnqueueRefusal,
-    EnqueueRefusalCause,
-};
+pub use error::{is_retryable_statement_failure, BrokerError, EnqueueRefusal, EnqueueRefusalCause};
 pub use health::{
     checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
     ping_timeout_refused, worker_history_limit_refused, DatabasePing, WorkerPingRequest,

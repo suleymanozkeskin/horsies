@@ -10,7 +10,7 @@ use crate::test_support::sql::{TestPool, TestPoolOptions};
 use crate::test_support::TestDatabase;
 
 /// One copy of the installed test template (`crate::test_support`) with a
-/// sqlx pool for the broker reads that still take one.
+/// test-client pool for the seeds and the probes of the tests.
 /// [`MonitoringTestDatabase::drop`] removes it; a test that panics before the
 /// drop leaves it to the drop at the shutdown of its runtime.
 pub(crate) struct MonitoringTestDatabase {

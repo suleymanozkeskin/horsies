@@ -746,10 +746,7 @@ async fn a_lost_database_makes_the_result_read_fail_retryably() {
         .await
         .expect_err("the result read with no database");
 
-    assert!(
-        matches!(error, WorkflowError::Database(_) | WorkflowError::Broker(_)),
-        "{error:?}"
-    );
+    assert!(matches!(error, WorkflowError::Broker(_)), "{error:?}");
     assert!(error.is_retryable(), "{error:?}");
 }
 

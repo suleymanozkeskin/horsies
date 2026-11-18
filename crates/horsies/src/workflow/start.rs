@@ -198,8 +198,7 @@ fn start_error(
         }
         ClientStartError::SchemaInstall(_)
         | ClientStartError::Start(
-            WorkflowError::Database(_)
-            | WorkflowError::Broker(_)
+            WorkflowError::Broker(_)
             | WorkflowError::StepContract(_)
             | WorkflowError::ChildSpecSource(_),
         ) => WorkflowStartError::EnqueueFailed {
