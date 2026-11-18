@@ -16,7 +16,7 @@ The crate runs on `horsies-core`, the engine that the Python package `horsies` a
 - One binary is the producer, the worker, each child and the scheduler: `main` builds the app and hands the command line to `horsies::cli::run`.
 - A database belongs to one client: the core refuses a database that the Python client installed, and a database of `0.1.0-alpha`.
 
-From 0.8.0, `horsies`, `horsies-core`, `horsies-macros` and the Python package carry one version number.
+From 0.8.0, `horsies`, `horsies-macros`, `horsies-core`, `horsies-core-derive` and the Python package carry one version number.
 
 ## Quick Start
 

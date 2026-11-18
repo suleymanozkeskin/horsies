@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// The members are Python's, in Python's order
 /// (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`
 /// and `EVENT_LOOP_LIMIT` are produced by the Python client only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "workflow_start", base = "str_enum")]
 pub enum WorkflowStartErrorCode {
     /// Config error: no broker attached.

@@ -744,7 +744,7 @@ impl ChildPreload {
     Eq,
     Serialize,
     Deserialize,
-    horsies_macros::ManifestSchema,
+    horsies_core_derive::ManifestSchema,
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ParentCpu {
@@ -1348,7 +1348,9 @@ pub struct SelectedProfile {
 
 /// The profile that a worker start asks for: the `--profile` value of
 /// `horsies worker`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum ProfileRequest {
     /// The profile of this name.

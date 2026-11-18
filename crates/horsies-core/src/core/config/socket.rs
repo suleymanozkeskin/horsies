@@ -153,7 +153,7 @@ impl ManifestValue for TcpUserTimeoutMs {
 /// TCP keepalives of every core connection. Python's
 /// `tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TcpKeepalivesConfig {
@@ -201,7 +201,7 @@ impl TcpKeepalivesConfig {
 /// The TCP user timeout of every core connection. Python's
 /// `tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TcpUserTimeoutConfig {

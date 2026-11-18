@@ -4,7 +4,7 @@ Hi agent! If you need to work with the horsies Rust crate, consider using the do
 > The Rust client of the horsies core: a PostgreSQL-backed background task queue and workflow engine.
 > Docs: https://suleymanozkeskin.github.io/horsies/rust/
 > Source: https://github.com/suleymanozkeskin/horsies/tree/main/crates/horsies
-> Crates: horsies, horsies-macros, horsies-core
+> Crates: horsies, horsies-macros, horsies-core, horsies-core-derive
 
 The Python client and the Rust client run on one core (horsies-core). Behaviour and guarantees are on the shared pages, for both clients. The Rust pages state the API of the crate. A database belongs to one client: the core refuses a database that the Python client installed.
 

@@ -59,7 +59,7 @@ pub struct HistoryTaskDetail {
 
 /// What a read knows about a task id that neither the live table nor the
 /// task history holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_macros::CodeCatalog)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "history", base = "str_enum")]
 pub enum TaskAbsenceReason {
     /// The UUIDv7 birth, plus the clock bound, is before the latest upper

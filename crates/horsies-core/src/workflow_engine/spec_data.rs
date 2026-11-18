@@ -118,7 +118,7 @@ impl ManifestValue for MinSuccess {
 
 /// A built workflow spec: the facts that its workflow row and its node rows
 /// store.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowSpecData {
     /// Always `SPEC_DATA_VERSION`, the one version this core reads.
@@ -138,7 +138,7 @@ pub struct WorkflowSpecData {
 }
 
 /// The stable definition key of the workflow.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SpecDefinitionKey {
     /// The spec has a definition key.
@@ -149,7 +149,7 @@ pub enum SpecDefinitionKey {
 }
 
 /// What a failed node does to its workflow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SpecOnError {
     /// The workflow fails.
@@ -159,7 +159,7 @@ pub enum SpecOnError {
 }
 
 /// The node whose result is the workflow's result.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SpecOutput {
     /// The result of the node at `index`.
@@ -169,7 +169,7 @@ pub enum SpecOutput {
 }
 
 /// When the workflow succeeds.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SpecSuccessPolicy {
     /// The workflow succeeds when one case has every required node
@@ -183,7 +183,7 @@ pub enum SpecSuccessPolicy {
 }
 
 /// One case of a success policy.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpecSuccessCase {
     /// The nodes that must be COMPLETED.
@@ -191,7 +191,7 @@ pub struct SpecSuccessCase {
 }
 
 /// One node of the spec.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpecNode {
     /// The position of the node in the spec.
@@ -219,7 +219,7 @@ pub struct SpecNode {
 }
 
 /// When a node with dependencies becomes ready.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SpecJoin {
     /// Every dependency is terminal.
@@ -231,7 +231,7 @@ pub enum SpecJoin {
 }
 
 /// What a node runs.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SpecNodeBody {
     /// A task.
@@ -251,7 +251,7 @@ pub enum SpecNodeBody {
 }
 
 /// The task options of a task node.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SpecTaskOptions {
     /// The options text as the node row stores it: the text that the client
@@ -263,7 +263,7 @@ pub enum SpecTaskOptions {
 
 /// Whether a sub-workflow node gives its child params for the child's
 /// build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SpecSubWorkflowParams {
     /// The node gives params.
