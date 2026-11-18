@@ -186,9 +186,13 @@ mod tests {
         });
         let results: OutputlessResults = serde_json::from_value(stored).unwrap();
         assert_eq!(results.len(), 2);
+        let Some(TaskOutcome::Succeeded(rows)) = results.get("a") else {
+            panic!("a stored value reads as Succeeded");
+        };
         assert_eq!(
-            results.get("a"),
-            Some(&TaskOutcome::Succeeded(json!({"rows": 2})))
+            rows.decode::<serde_json::Value>()
+                .expect("the stored value decodes"),
+            json!({"rows": 2})
         );
         let Some(TaskOutcome::Failed(error)) = results.get("b") else {
             panic!("a stored error reads as Failed");

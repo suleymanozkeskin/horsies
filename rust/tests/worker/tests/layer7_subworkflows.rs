@@ -418,9 +418,14 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
     let handle = start::<OutputlessResults>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
     let results = output(&handle).await;
+    let Some(TaskOutcome::Succeeded(required)) = results.get("e2e_sub_outputless_ok") else {
+        panic!("the required child reads as Succeeded");
+    };
     assert_eq!(
-        results.get("e2e_sub_outputless_ok"),
-        Some(&TaskOutcome::Succeeded(json!("required_ok")))
+        required
+            .decode::<String>()
+            .expect("the required child's value decodes"),
+        "required_ok"
     );
     let failed = results
         .get("e2e_sub_outputless_fail_child")
