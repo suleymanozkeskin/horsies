@@ -5,7 +5,8 @@ its statement; a step that promotes a sub-workflow node builds its child
 before it calls ``horsies_workflow_child_start``. Both take the same steps,
 in the order of ``enqueue_subworkflow_task`` (``core/workflows/engine.py``):
 
-1. the depth limit (``MAX_SUBWORKFLOW_DEPTH``);
+1. the depth limit (``MAX_SUBWORKFLOW_DEPTH``), which the core checks before
+   it asks for the child;
 2. the load of the child definition by its ``definition_key``;
 3. the node input: the stored kwargs, decoded against the child's
    ``build_with`` signature;
@@ -424,12 +425,16 @@ def _built_spec(
     return child_spec
 
 
-def build_child(
+def build_child_within_depth(
     broker: PostgresBroker,
     node: ChildOfNode,
     dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    child_depth: int,
 ) -> ChildBuild:
-    """Build the child of ``node``. Does no I/O; it runs the child's ``build_with``.
+    """The child of ``node`` at ``child_depth``, which the core checked against
+    ``MAX_SUBWORKFLOW_DEPTH`` before it asks: the load of the definition, the
+    input, ``build_with``, then the node rows. Does no I/O; it runs the child's
+    ``build_with``.
 
     ``dependency_results`` holds the result of each terminal dependency of
     the node, by index; an ``args_from`` key whose dependency has no entry
@@ -440,34 +445,6 @@ def build_child(
             a value of a child node row does not serialize. These come from
             the task function and from a spec that ``build_with`` proved, so
             this is a defect.
-    """
-    child_depth = node.parent_depth + 1
-    if child_depth > MAX_SUBWORKFLOW_DEPTH:
-        return _failed(
-            node,
-            (
-                f'Subworkflow not started: the child workflow would have depth '
-                f'{child_depth}, and the limit is {MAX_SUBWORKFLOW_DEPTH} '
-                f'(workflow {node.workflow_name}:{node.task_index})'
-            ),
-            OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED,
-        )
-    return build_child_within_depth(broker, node, dependency_results, child_depth)
-
-
-def build_child_within_depth(
-    broker: PostgresBroker,
-    node: ChildOfNode,
-    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
-    child_depth: int,
-) -> ChildBuild:
-    """``build_child`` after its depth check, for a child at ``child_depth``,
-    which is within ``MAX_SUBWORKFLOW_DEPTH``: the load of the definition,
-    the input, ``build_with``, then the node rows. Does no I/O; it runs the
-    child's ``build_with``.
-
-    Raises:
-        SerializationError: as ``build_child``.
     """
     assert child_depth <= MAX_SUBWORKFLOW_DEPTH, (
         f'the child of {node.workflow_name}:{node.task_index} is at depth {child_depth}, '

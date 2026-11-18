@@ -93,6 +93,14 @@ before you upgrade a 0.7 deployment.
   nothing. A refused orphan cursor is `CoreServerError` with `sqlstate`
   `'55P03'`.
 
+- **`PostgresBroker.mark_stale_tasks_as_failed` reads at most 1,000 stale
+  tasks per call.** It runs the core's stale RUNNING pass, the pass that the
+  reaper runs when `RecoveryConfig.auto_fail_stale_running` is on. When a
+  call reads 1,000 tasks, it logs a warning, and the next call or the next
+  reaper pass recovers the rest; 0.7 recovered every stale task in one call.
+  A threshold outside 0 to 2,147,483,647 ms is `CLEANUP_FAILED`, not
+  retryable.
+
 - **A process forked without exec after the core started cannot call
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
@@ -662,16 +670,22 @@ before you upgrade a 0.7 deployment.
   `PostgresBroker.validate_worker_database_paths` and `send_route`;
   `PartitionMaintenanceDatabase.coverage_gate_enabled`.
 
-- **`PostgresBroker.mark_stale_tasks_as_failed` and
-  `terminate_orphaned_workflow_tasks`.** The reaper of each worker runs both
-  passes in the core: the stale RUNNING pass every
-  `RecoveryConfig.check_interval_ms` (default 30 s) when
-  `auto_fail_stale_running` is on, and one orphan audit page every
-  `orphan_task_audit_interval_ms` (default 60 s) when
-  `auto_terminate_orphaned_workflow_tasks` is on. Both settings are on by
-  default. `PostgresBroker.audit_orphaned_workflow_tasks` stays. Also
-  removed: `PostgresBroker.create_single_connection_engine` and
-  `BrokerResources.session_async_engine`.
+- **`PostgresBroker.create_single_connection_engine` and
+  `BrokerResources.session_async_engine` are removed.**
+
+- **Client helpers with no caller in the library.** From
+  `horsies.core.types.result`: `do`, `do_async`, `as_result`,
+  `as_async_result` and `OkErr`. From `horsies.core.errors`:
+  `workflow_validation_error` and `task_definition_error` (construct
+  `WorkflowValidationError` or `TaskDefinitionError`). From
+  `horsies.core.utils.imports`: `unload_file_path` and
+  `compute_package_path_from_fs`. From `horsies.core.workflows.registry`:
+  `get_task_node`, `get_subworkflow_node`, `get_node` and
+  `is_workflow_registered`. Also `TaskRegistry.unregister` (use
+  `del app.tasks[name]`, which raises `NotRegistered` for a name that is not
+  registered), `WF_TASK_TERMINAL_VALUES` of `horsies.core.models.workflow`
+  (use `WORKFLOW_TASK_TERMINAL_STATES`), and `BANNER` and `format_banner`
+  of `horsies.core.banner`. The package `horsies` exports none of them.
 
 ### Rust client (crate `horsies`)
 

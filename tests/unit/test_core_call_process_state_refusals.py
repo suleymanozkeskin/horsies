@@ -190,6 +190,9 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
 _TASK_LISTS_AND_PASSES: Final[dict[str, tuple[str, BrokerCall]]] = {
     'get_stale_tasks': ('stale_tasks_async', lambda b: asyncio.run(b.get_stale_tasks())),
     'get_expired_tasks': ('expired_tasks_async', lambda b: asyncio.run(b.get_expired_tasks())),
+    'mark_stale_tasks_as_failed': (
+        'mark_stale_running_async', lambda b: asyncio.run(b.mark_stale_tasks_as_failed()),
+    ),
     'expire_pending_tasks': (
         'expire_pending_tasks_async', lambda b: asyncio.run(b.expire_pending_tasks()),
     ),
@@ -199,6 +202,10 @@ _TASK_LISTS_AND_PASSES: Final[dict[str, tuple[str, BrokerCall]]] = {
     'audit_orphaned_workflow_tasks': (
         'audit_orphaned_workflow_tasks_async',
         lambda b: asyncio.run(b.audit_orphaned_workflow_tasks()),
+    ),
+    'terminate_orphaned_workflow_tasks': (
+        'audit_orphaned_workflow_tasks_async',
+        lambda b: asyncio.run(b.terminate_orphaned_workflow_tasks()),
     ),
 }
 

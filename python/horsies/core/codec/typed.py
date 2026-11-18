@@ -80,33 +80,6 @@ __all__ = [
 _TASK_RESULT_ENVELOPE_KEY = '__h_task_result__'
 
 
-# Reserved internal `__h_*` keys that survive strict-serde phase 6.
-# These never appear in user-originated dumps — the engine emits them
-# directly (bypassing `encode_value`) for engine-internal transport
-# and storage. User data carrying any of these is rejected by
-# `_scan_reserved_keys` via the `__h_` prefix.
-#
-# Surviving set:
-# - `__h_task_result__`        — TaskResult envelope marker.
-# - `__h_workflow_ctx__`       — engine-injected ``workflow_ctx`` kwarg.
-# - `__h_workflow_meta__`      — engine-injected ``workflow_meta`` kwarg.
-# - `__h_taskresult_envelope__` — args_from envelope wrapping a
-#   ``__h_task_result__`` with ``source_task_name`` metadata.
-# - `__h_outputless_terminals__` — flag on the workflow's final-result
-#   envelope when the workflow has no explicit output node; signals
-#   the handle's outputless decode path which walks per-node entries
-#   via the embedded ``task_name_by_id`` map.
-#
-# Phase 7 reviews and tightens this list further.
-_RESERVED_INTERNAL_KEYS: frozenset[str] = frozenset({
-    '__h_task_result__',
-    '__h_workflow_ctx__',
-    '__h_workflow_meta__',
-    '__h_taskresult_envelope__',
-    '__h_outputless_terminals__',
-})
-
-
 # ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------

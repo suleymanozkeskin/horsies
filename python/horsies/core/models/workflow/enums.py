@@ -28,8 +28,6 @@ OutT = TypeVar('OutT')
 # Enums
 # =============================================================================
 
-WF_TASK_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TASK_TERMINAL_STATES]
-
 _NODE_STATUS_BY_STORED_VALUE: dict[str, WorkflowTaskStatus] = {
     status.value: status for status in WorkflowTaskStatus
 }

@@ -290,10 +290,6 @@ def test_is_terminal_holds_exactly_for_the_terminal_members(
         assert getattr(member, 'is_terminal') is (member in public), member
 
 
-def test_workflow_task_terminal_values_are_the_terminal_member_values() -> None:
-    assert sorted(enums.WF_TASK_TERMINAL_VALUES) == ['COMPLETED', 'FAILED', 'SKIPPED']
-
-
 def test_the_built_in_registry_holds_every_generated_member() -> None:
     # `BUILTIN_CODE_REGISTRY` is built from the four re-exported families;
     # `WORKFLOW_START_INCOMPLETE` is a built-in name, so a user code cannot
