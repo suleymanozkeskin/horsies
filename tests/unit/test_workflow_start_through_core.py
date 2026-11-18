@@ -293,3 +293,49 @@ class TestStartAnswers:
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartValidationFailed)
         broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
+
+
+class TestNodeRowAsserts:
+    """The node rows assert what spec construction guarantees, before any core
+    call (``top_node_rows``). The tests of the reference caller were
+    ``test_workflow_start_catches.py::TestTransactionAsserts``."""
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_task_node_with_positional_args_fails_an_assert_that_names_it(
+        self,
+    ) -> None:
+        broker = _broker(_record(core.WorkflowStarted))
+        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        spec = APP.workflow(
+            'start_core.task_args', [node], output=node,
+            definition_key='start_core.task_args.v1',
+        )
+        object.__setattr__(spec.tasks[0], 'args', (1,))
+
+        with pytest.raises(AssertionError) as exc_info:
+            await start_workflow_async(spec, broker, WORKFLOW_ID, SENT_AT)
+
+        message = str(exc_info.value)
+        assert "TaskNode 'start_core.value'" in message
+        assert '1 positional args' in message
+        broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_subworkflow_node_with_positional_args_fails_an_assert_that_names_it(
+        self,
+    ) -> None:
+        broker = _broker(_record(core.WorkflowStarted))
+        spec = APP.workflow(
+            'start_core.subworkflow_args',
+            [SubWorkflowNode(workflow_def=StartCoreChild)],
+            definition_key='start_core.subworkflow_args.v1',
+        )
+        object.__setattr__(spec.tasks[0], 'args', (1, 2))
+
+        with pytest.raises(AssertionError) as exc_info:
+            await start_workflow_async(spec, broker, WORKFLOW_ID, SENT_AT)
+
+        message = str(exc_info.value)
+        assert "SubWorkflowNode 'start_core.child'" in message
+        assert '2 positional args' in message
+        broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]

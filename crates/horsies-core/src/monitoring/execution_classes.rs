@@ -100,6 +100,14 @@ mod tests {
     use chrono::{TimeDelta, TimeZone, Utc};
     use serde_json::json;
 
+    /// Python `tests/unit/test_monitoring_execution_classes.py::TestSlotHealthInfo::test_all_serving_has_no_down_slot`.
+    #[test]
+    fn all_slots_serving_has_no_down_slot() {
+        let (kind, down) = slot_health_info(&SlotHealth::AllSlotsServing);
+        assert_eq!(kind, SlotHealthKind::AllServing);
+        assert_eq!(down.len(), 0);
+    }
+
     #[test]
     fn a_report_serializes_with_tagged_coverage_and_wait() {
         let at = Utc.with_ymd_and_hms(2026, 11, 10, 12, 0, 0).unwrap();
