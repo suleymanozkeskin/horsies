@@ -35,7 +35,13 @@ use crate::{
 const NANOS_PER_MILLI: u128 = 1_000_000;
 
 /// A config value that the config validation accepted and that is outside
-/// the bound of its manifest field (Python `ValueAboveManifestBound`).
+/// the bound of its manifest field.
+///
+/// Python has no such error: its `AppConfig` validation refuses a claim
+/// value above its manifest bound (`CONFIG_INVALID_PREFETCH`,
+/// `CONFIG_INVALID_CLUSTER_CAP`, `CONFIG_INVALID_QUEUE_MODE`) and a payload
+/// limit above `PAYLOAD_BYTES_MAX`, and `to_worker_manifest` asserts each
+/// bound.
 ///
 /// `path` names the field as `AppConfig` writes it, for example
 /// `custom_queues[0].max_concurrency`. The value itself is not kept.
