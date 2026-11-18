@@ -25,7 +25,7 @@ use crate::core::lifecycle::{
     WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
-use crate::test_support::terminal_writes::{self, StaleFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, StaleFailure};
 
 const STALE_AFTER_MS: i32 = 60_000;
 const FINALIZING_STALE_AFTER_MS: i32 = 30_000;

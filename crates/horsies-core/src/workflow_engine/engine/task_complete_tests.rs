@@ -14,7 +14,7 @@ use crate::broker::PostgresBroker;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::{TaskError, TaskResult};
 use crate::test_support::child_specs::TestChildSpecs;
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 use crate::workflow_engine::engine::{
     on_workflow_task_complete, SourceFailure, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };

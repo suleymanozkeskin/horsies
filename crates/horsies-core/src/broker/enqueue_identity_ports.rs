@@ -24,7 +24,7 @@ use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::terminal_writes;
+use crate::test_support::sqlx_terminal_writes as terminal_writes;
 
 const TASK_NAME: &str = "port.identity";
 const INPUT: &str = "{\"order_id\":\"order-1\"}";

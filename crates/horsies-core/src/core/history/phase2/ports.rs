@@ -15,7 +15,7 @@ use super::consumption::{consume_phase2, Phase2DispositionKind};
 use super::quarantine::{quarantine_one, QuarantineVerdict};
 use crate::core::history::errors::HistoryError;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 
 const PORT_WORKER: &str = "port-phase2-worker";
 const CLASS_KEY: &str = "standard_30d";

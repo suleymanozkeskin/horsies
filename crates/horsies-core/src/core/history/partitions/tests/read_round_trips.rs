@@ -13,7 +13,7 @@ use crate::broker::history_reads::{read_task_result, ResultReaderSeen};
 use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::core::history::reads::result::TaskResultRead;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::terminal_writes;
+use crate::test_support::sqlx_terminal_writes as terminal_writes;
 
 const PORT_WORKER: &str = "port-round-trip-worker";
 

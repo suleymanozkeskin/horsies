@@ -508,12 +508,20 @@ pub(crate) fn test_url_of(options: &sqlx::postgres::PgConnectOptions) -> String 
 /// carry their password.
 #[cfg(test)]
 pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
+    handle_for_test_url(&test_url_of(&pool.connect_options()))
+}
+
+/// The core handle (producer pools) on the test database of `url`, for
+/// brokers that tests build from the URL. The environment is isolated: test
+/// URLs carry their password.
+#[cfg(test)]
+pub(crate) fn handle_for_test_url(url: &str) -> CoreHandle {
     CoreHandle::open_with_environment(
-        &PostgresConfig::from_url(test_url_of(&pool.connect_options())),
+        &PostgresConfig::from_url(url),
         PoolProfile::Producer,
         ConnectionEnvironment::isolated(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer")
+    .expect("the URL of a test database is accepted by the statement layer")
 }
 
 /// A main core pool on the database of a test's sqlx pool, for the free
@@ -522,7 +530,16 @@ pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
 /// the first checkout.
 #[cfg(test)]
 pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
-    let config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    core_pool_for_test_url(&test_url_of(&pool.connect_options()))
+}
+
+/// A main core pool on the test database of `url`, for the free lifecycle
+/// writers that tests call with a pool of their own. The same pool as the
+/// main pool of [`handle_for_test_url`]; connects to nothing until the first
+/// checkout.
+#[cfg(test)]
+pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
+    let config = PostgresConfig::from_url(url);
     let plan = pool_plan(
         &config,
         PoolRole::Main,
@@ -546,7 +563,16 @@ pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
 /// checkout.
 #[cfg(test)]
 pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    worker_core_pool_for_test_url(&test_url_of(&pool.connect_options()), size)
+}
+
+/// A worker profile core pool of `size` connections on the test database of
+/// `url`: it keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch
+/// checkouts, as the pool of a worker. Connects to nothing until the first
+/// checkout.
+#[cfg(test)]
+pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -571,7 +597,15 @@ pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> 
 /// session pool of a broker. Connects to nothing until the first checkout.
 #[cfg(test)]
 pub(crate) fn session_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    session_core_pool_for_test_url(&test_url_of(&pool.connect_options()), size)
+}
+
+/// A session pool of `size` connections on the test database of `url`: no
+/// reserve, statements prepared per connection, as the separate session pool
+/// of a broker. Connects to nothing until the first checkout.
+#[cfg(test)]
+pub(crate) fn session_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -604,6 +638,12 @@ const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
 pub(crate) fn unpinged_single_connection_core_pool(
     options: &sqlx::postgres::PgConnectOptions,
 ) -> CorePool {
+    unpinged_single_connection_core_pool_for_url(&test_url_of(options))
+}
+
+/// [`unpinged_single_connection_core_pool`] on the test database of `url`.
+#[cfg(test)]
+pub(crate) fn unpinged_single_connection_core_pool_for_url(url: &str) -> CorePool {
     let plan = PoolPlan {
         role: PoolRole::Main,
         sizing: PoolSizing::new(1, Reserve::NoReserve)
@@ -614,7 +654,7 @@ pub(crate) fn unpinged_single_connection_core_pool(
         protocol: StatementProtocol::PreparedPerConnection,
     };
     let (core_pool, _masked_url) = open_pool(
-        &test_url_of(options),
+        url,
         plan,
         &ConnectionEnvironment::isolated(),
         &crate::db::DEFAULT_SOCKET_SETTINGS,

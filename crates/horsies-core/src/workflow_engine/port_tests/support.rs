@@ -41,7 +41,7 @@ use crate::core::{
 };
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::TestChildSpecs;
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::worker::execution::{
     finalize_workflow_phase, persist_failed_attempt, persist_ok_result, FinalizeOutcome,

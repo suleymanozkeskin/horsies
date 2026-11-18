@@ -27,7 +27,9 @@ use crate::core::lifecycle::{
     TerminalizationOutcome, WorkerOwned,
 };
 use crate::core::types::status::TaskStatus;
-use crate::test_support::terminal_writes::{self, StaleFailure, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{
+    self as terminal_writes, StaleFailure, TerminalFailure,
+};
 
 pub(super) const WIRE_PHASE2_EXPECTATIONS: [(&str, bool); 15] = [
     ("COMPLETE_LOCKED", true),

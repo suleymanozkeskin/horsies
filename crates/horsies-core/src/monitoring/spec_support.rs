@@ -24,7 +24,7 @@ use crate::core::history::reads::pages::HistoryWindow;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::monitoring::resolve_monitoring_window;
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 use crate::test_support::TestDatabase;
 
 /// The worker that moves a row when the seed names none: the move fences on

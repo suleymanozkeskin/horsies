@@ -69,7 +69,7 @@ mod p7_maintenance_tests {
     use crate::core::history::periods::RetentionDays;
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::lifecycle::TerminalizationOutcome;
-    use crate::test_support::terminal_writes;
+    use crate::test_support::sqlx_terminal_writes as terminal_writes;
     use chrono::Timelike;
     use serial_test::serial;
     use uuid::Uuid;

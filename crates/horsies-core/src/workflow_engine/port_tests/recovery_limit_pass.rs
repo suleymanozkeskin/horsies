@@ -29,7 +29,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::{TaskError, TaskResult};
 use crate::test_support::child_specs::TestChildSpecs;
-use crate::test_support::terminal_writes;
+use crate::test_support::sqlx_terminal_writes as terminal_writes;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::phase2_recovery::{drive_phase2_recovery_with, Phase2RecoverySummary};
 use crate::workflow_engine::recovery::{
