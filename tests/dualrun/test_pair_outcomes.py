@@ -43,6 +43,7 @@ from tests.dualrun.cells import (
 )
 from tests.dualrun.compare import ExtraRow, compare_snapshots
 from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
+from tests.dualrun.operations.table import WholeSnapshot
 from tests.dualrun.pair_outcomes import (
     ClockBoundaryStraddle,
     CompareSnapshots,
@@ -356,11 +357,11 @@ def test_judge_pair_names_equal_mismatch_and_straddle() -> None:
     same = _run([('b1', 'first')], [('task_done', 'b1')])
     other = _run([('b1', 'first')], [])
 
-    assert judge_pair(reference, same, WITHIN_HOUR) == PairEqual()
-    mismatch = judge_pair(reference, other, WITHIN_HOUR)
+    assert judge_pair(reference, same, WITHIN_HOUR, WholeSnapshot()) == PairEqual()
+    mismatch = judge_pair(reference, other, WITHIN_HOUR, WholeSnapshot())
     assert isinstance(mismatch, DualRunMismatch)
     assert len(mismatch.diff.entries) == 1
-    straddle = judge_pair(reference, other, ACROSS_HOUR)
+    straddle = judge_pair(reference, other, ACROSS_HOUR, WholeSnapshot())
     assert isinstance(straddle, ClockBoundaryStraddle)
     assert straddle.candidate_window == ACROSS_HOUR
-    assert judge_pair(reference, same, ACROSS_HOUR) == PairEqual()
+    assert judge_pair(reference, same, ACROSS_HOUR, WholeSnapshot()) == PairEqual()
