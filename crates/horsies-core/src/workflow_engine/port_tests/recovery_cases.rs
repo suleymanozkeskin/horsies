@@ -22,7 +22,7 @@ const LIMIT: u32 = 3;
 
 async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         child_specs,
         LIMIT,
     )
@@ -517,7 +517,7 @@ async fn a_dependency_with_no_stored_result_gives_its_consumer_the_missing_resul
 /// the nodes it advanced.
 async fn phase2_pass(pool: &PgPool) -> u64 {
     drive_phase2_recovery_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         0,
         100,

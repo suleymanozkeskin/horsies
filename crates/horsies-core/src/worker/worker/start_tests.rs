@@ -132,7 +132,7 @@ fn unreachable_broker() -> Arc<PostgresBroker> {
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(100))
         .connect_lazy_with(options);
-    Arc::new(PostgresBroker::from_pool(pool))
+    Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust))
 }
 
 /// Python `TestStartWithResilienceConfig::test_success_returns_immediately`.
@@ -141,7 +141,7 @@ fn unreachable_broker() -> Arc<PostgresBroker> {
 async fn a_start_on_a_ready_database_starts_with_no_retry() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let worker = worker_on(
-        Arc::new(PostgresBroker::from_pool(pool)),
+        Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
         resilience(60_000, 0),
     );
     let started = Instant::now();
@@ -195,7 +195,7 @@ async fn a_start_error_that_cannot_clear_is_returned_at_once() {
         .acquire_timeout(Duration::from_secs(10))
         .connect_lazy_with(missing);
     let worker = worker_on(
-        Arc::new(PostgresBroker::from_pool(pool)),
+        Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
         resilience(60_000, 0),
     );
     let started = Instant::now();
@@ -311,6 +311,7 @@ async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
     let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
         crate::broker::terminalization_matrix::migrated_pool().await,
         &session_url,
+        crate::ClientFamily::Rust,
     ));
     let worker = worker_with(
         Arc::clone(&broker),

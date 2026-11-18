@@ -204,7 +204,7 @@ async fn recovery_pass_with_a_case_zero_candidate(pool: &PgPool) {
         )
         .await;
     }
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let child_specs = TestChildSpecs::empty();
 
     let report = probe_step(
@@ -258,7 +258,7 @@ async fn finish_through_the_worker(
     child_specs: &TestChildSpecs,
     name: &str,
 ) {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let done = worker_phase_one(&broker, task, NodeReport::Success).await;
 
     probe_step(
@@ -324,7 +324,7 @@ async fn phase_two_with_a_parent_advance(
 /// The monitoring pause, resume and cancel of the parent: the resume runs its
 /// step, the parent advances and the recovery pass of the tree.
 async fn monitoring_actions(pool: &PgPool, parent_id: Uuid, child_specs: TestChildSpecs) {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     let paused = probe_step(
         "pause_workflow_action",

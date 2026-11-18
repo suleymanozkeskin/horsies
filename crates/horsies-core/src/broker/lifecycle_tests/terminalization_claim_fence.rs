@@ -53,7 +53,7 @@ async fn t03_stale_generation_does_not_cancel_reclaimed_task() {
     let task_id = seed_task(&pool, &workflow_task_claimed_at(reclaimed)).await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "CANCELLED").await;
 
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(task_id, dispatched)], WORKER)
         .await
         .expect("post-claim workflow check");
@@ -79,7 +79,7 @@ async fn batch_fences_each_task_on_its_own_generation() {
     let fresh_workflow = link_workflow_task(&pool, fresh, "ENQUEUED", "PAUSED").await;
     let stale_workflow = link_workflow_task(&pool, stale, "ENQUEUED", "PAUSED").await;
 
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(fresh, dispatched), (stale, dispatched)], WORKER)
         .await
         .expect("post-claim workflow check");
@@ -106,7 +106,7 @@ async fn real_claim_path_arms_the_fence() {
     )
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "PAUSED").await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     let pass = claim_pass(
         &core_pool_for_test_pool(&pool),

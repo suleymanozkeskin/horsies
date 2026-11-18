@@ -65,7 +65,7 @@ fn slow_parent(name: &str, value: &str) -> WorkflowSpec {
 /// One recovery pass; returns the work it applied.
 async fn recovery_pass(pool: &PgPool, child_specs: &TestChildSpecs) -> u64 {
     let phase2 = drive_phase2_recovery_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         child_specs,
         0,
         GLOBAL_SCAN_ROW_CAP,
@@ -74,7 +74,7 @@ async fn recovery_pass(pool: &PgPool, child_specs: &TestChildSpecs) -> u64 {
     .await
     .expect("the phase-2 drain");
     let report = recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         child_specs,
         FAILURE_LIMIT,
     )
@@ -582,7 +582,7 @@ async fn a_child_task_that_spends_its_retries_fails_the_parent() {
     }
     let _ = ended.expect("the retries end");
     on_workflow_task_complete_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         task_id,
         &child_specs,
     )

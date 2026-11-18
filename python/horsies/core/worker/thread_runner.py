@@ -15,7 +15,7 @@ marker after the return, when the run table asks for it.
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Any, Final, assert_never
+from typing import Any, assert_never
 
 from horsies import _core as core
 from horsies.core.logging import get_logger
@@ -42,7 +42,6 @@ from horsies.core.worker.child_runner import (
     mark_run_finalizing,
     set_running_or_end_child,
 )
-from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
 
 logger = get_logger('worker')
 
@@ -90,13 +89,6 @@ def _thread_call_result(
                 f'task wrapper of {task_name!r} returned {type(called).__name__} '
                 'on a shared thread seat',
             )
-
-
-THREAD_REFUSAL_WRITES_BOUND_S: Final = REFUSAL_WRITES_BOUND_S
-"""The longest time that the writes of a refusal take on a shared thread
-child: the writes of a shared async child (``REFUSAL_WRITES_BOUND_S``),
-through the same core handle with the same bounds. The refusal backstop of
-the parent (``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
 
 
 def run_thread_seat_task(

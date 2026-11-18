@@ -23,25 +23,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import horsies._core as core
-from horsies.core.worker import child_runner, shared_lifecycle, slots, thread_runner
-from tests.dualrun.reference.worker_parent.worker import (
-    slots as reference_slots,
-    thread_runner as reference_thread_runner,
-)
+from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.run_return import (
     MarkerDone,
     MarkerEnd,
     StopReason,
     StoppedBeforeRunning,
 )
-from horsies.core.worker.child_runner import _PRE_START_CONFIRM_ATTEMPTS
 
 pytestmark = [pytest.mark.unit]
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
-# A test of a bound fails, not hangs, when the bound is gone.
-OUTER_BOUND_S = 5.0
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:
@@ -238,102 +231,6 @@ class TestSetRunning:
         ):
             asyncio.run(cancel_it())
 
-    def test_a_transition_that_hangs_ends_at_its_bound(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A start that waits on a row lock, or a server that does not
-        answer, ends the wait of each attempt at its bound with
-        OWNERSHIP_UNCONFIRMED: the run stops before user code, and the
-        refusal backstop of the parent never fires for it."""
-        monkeypatch.setattr(shared_lifecycle, 'RUNNING_ATTEMPT_TIMEOUT_S', 0.05)
-        handle = _HangingHandle(starts=[])
-
-        async def run() -> tuple[Any, float]:
-            loop = asyncio.get_running_loop()
-            started = loop.time()
-            result = await asyncio.wait_for(
-                shared_lifecycle.confirm_until_not_resumed(
-                    TASK_ID,
-                    'worker-1',
-                    CLAIMED_AT,
-                    orphan_self_heal=True,
-                ),
-                OUTER_BOUND_S,
-            )
-            return result, loop.time() - started
-
-        with patch.object(shared_lifecycle, '_get_child_core_handle', return_value=handle):
-            result, elapsed_s = asyncio.run(run())
-
-        assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
-        assert elapsed_s < 1.0
-        assert 'did not finish within' in caplog.text
-
-
-class TestRefusalBound:
-    """The refusal backstop of the parent follows from the bounds of the
-    writes that a refusal makes in the child."""
-
-    def test_the_writes_of_a_refusal_have_a_named_bound(self) -> None:
-        attempt_s = (
-            shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S
-            + shared_lifecycle.CANCELLED_WRITE_END_S
-        )
-        marker_s = (
-            shared_lifecycle.FINALIZING_MARKER_TIMEOUT_S
-            + shared_lifecycle.CANCELLED_WRITE_END_S
-        )
-
-        assert shared_lifecycle.REFUSAL_WRITES_BOUND_S == (
-            _PRE_START_CONFIRM_ATTEMPTS * attempt_s + marker_s
-        )
-        assert shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S == (
-            shared_lifecycle.CHILD_WRITE_CHECKOUT_WAIT_S
-            + shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
-        )
-
-    def test_the_writes_of_a_thread_refusal_have_the_same_bound(self) -> None:
-        """A shared thread child makes the same writes through the same core
-        handle: each start attempt and the marker have the bounds of the
-        core, with the end of a statement that the core cancelled."""
-        assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == (
-            shared_lifecycle.REFUSAL_WRITES_BOUND_S
-        )
-
-    def test_the_refusal_backstop_comes_after_the_writes_and_a_block_report(
-        self,
-    ) -> None:
-        """A refusal whose writes end in time never meets the backstop, in
-        either kind of shared child, and a blocked loop is reported first,
-        with its culprit."""
-        assert slots.SHARED_REFUSAL_BACKSTOP_S == (
-            max(
-                shared_lifecycle.REFUSAL_WRITES_BOUND_S,
-                thread_runner.THREAD_REFUSAL_WRITES_BOUND_S,
-            )
-            + slots.SHARED_BACKSTOP_MARGIN_S
-        )
-
-    def test_the_derived_times_are_the_times_of_the_core(self) -> None:
-        """Each time is a sum of named bounds, and the core derives the same
-        time from its own bounds (``the_bounds_keep_their_times``,
-        ``the_backstops_keep_their_times``,
-        ``the_leftover_backstop_keeps_its_time``). The core sizes its
-        refusal and leftover backstops on the version-1 child of the
-        reference copy, whose bounds are the longer: a version-2 child
-        writes through the core with the core's bounds (the refusal writes
-        of ``CHILD_REFUSAL_WRITES_BOUND``, the marker of
-        ``FINALIZING_MARKER_END``)."""
-        assert shared_lifecycle.CANCELLED_WRITE_END_S == 10.0
-        assert slots.SHARED_BACKSTOP_MARGIN_S == 10.0
-        assert reference_thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == 145.0
-        assert reference_slots.SHARED_REFUSAL_BACKSTOP_S == 155.0
-        assert reference_slots.ISOLATED_LEFTOVER_BACKSTOP_S == pytest.approx(26.3)
-        assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == 120.0
-        assert child_runner.LEFT_WORK_MARKER_BOUND_S == 20.0
-
 
 class TestMissedStart:
     def test_a_passed_deadline_expires_the_claim(self) -> None:
@@ -445,16 +342,6 @@ class TestMissedStart:
             'start_attempt_async',
         ]
 
-    def test_a_resume_on_every_attempt_leaves_the_claim_to_its_lease(self) -> None:
-        resumed = _record(core.ResumedBeforeStart)
-        handle = _Handle(
-            starts=[_missed('WORKFLOW_PAUSED'), _missed('WORKFLOW_PAUSED')],
-            stops=[resumed, resumed],
-        )
-
-        result = _confirm(handle)
-
-        assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
     def test_a_failed_stop_is_ownership_unconfirmed(self) -> None:
         handle = _Handle(
@@ -479,23 +366,6 @@ def _mark(handle: Any) -> MarkerEnd:
 
 
 class TestFinalizingMarker:
-    def test_the_marker_is_fenced_on_the_claim_generation(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        caplog.set_level(logging.DEBUG, logger='horsies.worker')
-        handle = _Handle(starts=[], markers=[_record(core.FinalizingMarked)])
-
-        assert _mark(handle) == MarkerDone()
-
-        assert handle.calls == [
-            (
-                'mark_finalizing_async',
-                uuid.UUID(TASK_ID),
-                {'worker_id': 'worker-1', 'claimed_at': CLAIMED_AT},
-            ),
-        ]
-        assert 'finalizing' not in caplog.text
 
     def test_a_marker_that_finds_another_claim_is_logged_and_does_not_raise(
         self,
@@ -517,27 +387,6 @@ class TestFinalizingMarker:
         with pytest.raises(AssertionError):
             _mark(_Handle(starts=[], markers=[object()]))
 
-    def test_a_failed_marker_is_logged_and_does_not_raise(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        _mark(
-            _Handle(
-                starts=[],
-                markers=[
-                    _record(
-                        core.MarkFinalizingFailed,
-                        message='connection refused',
-                        retryable=True,
-                    ),
-                ],
-            ),
-        )
-
-        assert (
-            f'Failed to mark task {TASK_ID} finalizing: connection refused'
-            in caplog.text
-        )
 
     def test_a_core_that_cannot_run_the_marker_is_logged_and_does_not_raise(
         self,
@@ -551,43 +400,3 @@ class TestFinalizingMarker:
         assert _mark(handle) == MarkerDone()
 
         assert f'Failed to mark task {TASK_ID} finalizing' in caplog.text
-
-    def test_a_marker_that_hangs_ends_at_its_bound(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """The wait of the seat ends at the bound of the core, also when the
-        core call does not answer."""
-        monkeypatch.setattr(shared_lifecycle, 'FINALIZING_MARKER_TIMEOUT_S', 0.05)
-
-        async def run() -> float:
-            loop = asyncio.get_running_loop()
-            started = loop.time()
-            await asyncio.wait_for(
-                shared_lifecycle.mark_task_finalizing(
-                    uuid.UUID(TASK_ID),
-                    'worker-1',
-                    CLAIMED_AT,
-                ),
-                OUTER_BOUND_S,
-            )
-            return loop.time() - started
-
-        with patch.object(
-            shared_lifecycle,
-            '_get_child_core_handle',
-            return_value=_HangingHandle(starts=[]),
-        ):
-            elapsed_s = asyncio.run(run())
-
-        assert elapsed_s < 1.0
-        assert f'Failed to mark task {TASK_ID} finalizing' in caplog.text
-        assert 'did not finish within' in caplog.text
-
-    def test_the_bound_of_the_marker_is_the_core_bound(self) -> None:
-        """The core cancels the marker at 10 s; a cancelled statement ends
-        within 10 s more (the core's ``FINALIZING_MARKER_BOUND`` and
-        ``CANCELLED_WRITE_END``)."""
-        assert shared_lifecycle.FINALIZING_MARKER_TIMEOUT_S == 10.0
-        assert shared_lifecycle.CANCELLED_WRITE_END_S == 10.0

@@ -36,7 +36,6 @@ from horsies.core.lifecycle.core_records import task_row_end_of
 from horsies.core.logging import get_logger
 from horsies.core.worker.child_pool import _get_child_core_handle
 from horsies.core.worker.child_runner import (
-    CANCELLED_WRITE_END_S as CANCELLED_WRITE_END_S,
     FINALIZING_MARKER_TIMEOUT_S as FINALIZING_MARKER_TIMEOUT_S,
     _PRE_START_CONFIRM_ATTEMPTS,
     StartMissReason,
@@ -77,17 +76,6 @@ core ends each write of the attempt by it, and a statement past it gets a
 cancel request, so the start does not commit after the bound. A seat also
 ends its wait for the attempt here; past it the attempt ends with
 ``OWNERSHIP_UNCONFIRMED``."""
-
-
-REFUSAL_WRITES_BOUND_S: Final = (
-    _PRE_START_CONFIRM_ATTEMPTS * (RUNNING_ATTEMPT_TIMEOUT_S + CANCELLED_WRITE_END_S)
-    + FINALIZING_MARKER_TIMEOUT_S
-    + CANCELLED_WRITE_END_S
-)
-"""The longest time that the writes of a run take in a shared async child
-before it reports a refusal: each attempt of the RUNNING transition and the
-finalizing marker, each with the end of a cancelled write. The refusal
-backstop of the parent (``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
 
 
 async def _after_missed_start(

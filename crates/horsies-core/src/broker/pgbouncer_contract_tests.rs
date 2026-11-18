@@ -210,10 +210,13 @@ async fn direct_pool(url: &str) -> PgPool {
 #[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqueues() {
     let urls = PgbouncerUrls::create("transaction").await;
-    let broker = PostgresBroker::connect_with(&sized(PostgresConfig::from_pgbouncer_urls(
-        urls.transaction.clone(),
-        urls.direct.clone(),
-    )))
+    let broker = PostgresBroker::connect_with(
+        &sized(PostgresConfig::from_pgbouncer_urls(
+            urls.transaction.clone(),
+            urls.direct.clone(),
+        )),
+        crate::ClientFamily::Rust,
+    )
     .await
     .expect("connect the broker");
 
@@ -290,10 +293,13 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
         &urls.transaction,
         "application_name=horsies_bad_session_probe",
     );
-    let broker = PostgresBroker::connect_with(&sized(PostgresConfig::from_pgbouncer_urls(
-        urls.transaction.clone(),
-        session_url,
-    )))
+    let broker = PostgresBroker::connect_with(
+        &sized(PostgresConfig::from_pgbouncer_urls(
+            urls.transaction.clone(),
+            session_url,
+        )),
+        crate::ClientFamily::Rust,
+    )
     .await
     .expect("connect the broker");
 
@@ -315,10 +321,12 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
 #[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
     let urls = PgbouncerUrls::create("session").await;
-    let broker =
-        PostgresBroker::connect_with(&sized(PostgresConfig::from_url(urls.session.clone())))
-            .await
-            .expect("connect the broker");
+    let broker = PostgresBroker::connect_with(
+        &sized(PostgresConfig::from_url(urls.session.clone())),
+        crate::ClientFamily::Rust,
+    )
+    .await
+    .expect("connect the broker");
     broker.migrate().await.expect("install the schema");
     let task_id = mint_task_id().expect("mint a task id");
 
@@ -353,10 +361,13 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
 #[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_statement_pooled_runtime_url_fails_the_send_as_not_retryable() {
     let urls = PgbouncerUrls::create("statement").await;
-    let broker = PostgresBroker::connect_with(&sized(PostgresConfig::from_pgbouncer_urls(
-        urls.statement.clone(),
-        urls.direct.clone(),
-    )))
+    let broker = PostgresBroker::connect_with(
+        &sized(PostgresConfig::from_pgbouncer_urls(
+            urls.statement.clone(),
+            urls.direct.clone(),
+        )),
+        crate::ClientFamily::Rust,
+    )
     .await
     .expect("connect the broker");
     broker

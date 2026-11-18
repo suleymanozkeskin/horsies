@@ -51,7 +51,7 @@ fn unreachable_broker() -> Arc<PostgresBroker> {
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(100))
         .connect_lazy_with(options);
-    Arc::new(PostgresBroker::from_pool(pool))
+    Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust))
 }
 
 /// A claimed task with its own id and claim generation, no retry policy.
@@ -333,12 +333,15 @@ async fn a_task_that_never_reached_a_child_goes_back_to_the_queue() {
     let claimed = claimed_now();
     seed_claimed(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(
-            &claimed,
-            AttemptEnd::NotDispatched(NotRunCause::PoolStopping),
-        )
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(
+        &claimed,
+        AttemptEnd::NotDispatched(NotRunCause::PoolStopping),
+    )
+    .await;
 
     assert_eq!(settled, Settlement::Written);
     assert_eq!(
@@ -372,14 +375,17 @@ async fn a_reported_value_completes_the_task() {
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(
-            &claimed,
-            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-                r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
-            ))),
-        )
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(
+        &claimed,
+        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
+        ))),
+    )
+    .await;
 
     assert_eq!(settled, Settlement::Written);
     assert_eq!(live_row_count(&pool, claimed.task_id).await, 0);
@@ -399,9 +405,12 @@ async fn a_lost_child_fails_its_running_task_as_crashed() {
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(&claimed, crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed, crashed())
+    .await;
 
     assert_eq!(settled, Settlement::Written);
     assert_eq!(
@@ -427,9 +436,12 @@ async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
     seed_running_workflow_task(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
     let refusal = refuse_node_updates(&pool, claimed.task_id, 2).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(&claimed, crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed, crashed())
+    .await;
     let updates_seen = refusal.updates_seen(&pool).await;
     refusal.remove(&pool).await;
 
@@ -460,9 +472,12 @@ async fn a_crash_write_on_a_row_this_claim_does_not_hold_writes_nothing() {
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, OTHER_WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(&claimed, crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed, crashed())
+    .await;
 
     assert_eq!(settled, Settlement::NotHeld);
     assert_eq!(
@@ -524,9 +539,12 @@ async fn a_write_error_that_cannot_clear_is_not_sent_again() {
         .acquire_timeout(Duration::from_secs(10))
         .connect_lazy_with(missing);
     let started = std::time::Instant::now();
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool)))
-        .settle(&claimed_now(), crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_pool(
+        pool,
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed_now(), crashed())
+    .await;
     assert_ne!(settled, Settlement::Written);
     assert!(
         started.elapsed() < Duration::from_secs_f64(phase_retry_delay(1)),

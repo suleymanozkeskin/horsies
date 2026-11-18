@@ -34,13 +34,14 @@ fn context(pool: PgPool) -> (HostContext, UnixStream) {
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
     let writer = FrameWriter::start(ours, 16).expect("the frame writer starts");
     let context = HostContext {
-        broker: Arc::new(PostgresBroker::from_pool(pool)),
+        broker: Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
         app: Arc::new(ChildApp {
             registry: Arc::new(TaskRegistry::new()),
             hostname: "h1".to_owned(),
             start_hook: ChildStartHook::NoHook,
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
+            family: crate::ClientFamily::Rust,
         }),
         pid: 1,
         writer,

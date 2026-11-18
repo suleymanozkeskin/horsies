@@ -156,7 +156,10 @@ fn failure_error(kind: ChildStartKind) -> crate::core::TaskError {
 }
 
 async fn test_broker() -> PostgresBroker {
-    PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await)
+    PostgresBroker::from_pool(
+        crate::broker::terminalization_matrix::migrated_pool().await,
+        crate::ClientFamily::Rust,
+    )
 }
 
 /// A workflow row; a child names its parent, the node index 0 and depth 1.
@@ -990,7 +993,10 @@ async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
 #[serial]
 async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let workflow_id = Uuid::new_v4();
     let unloadable = sub_workflow_node(0, "child_start_missing", "tests.child_start.missing.v1");
     let mut dependent = sub_workflow_node(1, CHILD_NAME, CHILD_KEY);

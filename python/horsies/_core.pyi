@@ -692,15 +692,34 @@ class SendAsyncContext:
 
 @final
 class SendValidationFailed:
-    """The core refused the send before any statement. Nothing was written. cause_text is the
-    JSON reader's error when the refused text does not read.
-    """
+    """The core refused the send before any statement. Nothing was written."""
     @property
     def code(self) -> Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']: ...
     @property
     def message(self) -> str: ...
     @property
-    def cause_text(self) -> str | None: ...
+    def cause(self) -> SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule: ...
+
+
+@final
+class SendRefusalUnreadableJson:
+    """The refused text does not read as JSON. reader_error is the JSON reader's error."""
+    @property
+    def reader_error(self) -> str: ...
+
+
+@final
+class SendRefusalByRule:
+    """A rule refused a value that reads. The message is the only fact."""
+
+
+@final
+class SendRefusalByValueRule:
+    """A rule of the version-1 command or of the scoped idempotency key refused a value. rule is
+    the rule's text.
+    """
+    @property
+    def rule(self) -> str: ...
 
 
 @final

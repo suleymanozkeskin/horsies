@@ -1454,13 +1454,37 @@ const RECORD_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "SendValidationFailed",
-        doc: "The core refused the send before any statement. Nothing was written. cause_text is the\nJSON reader's error when the refused text does not read.",
+        doc: "The core refused the send before any statement. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("code", "Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']"),
             property("message", "str"),
-            property("cause_text", "str | None"),
+            property(
+                "cause",
+                "SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule",
+            ),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalUnreadableJson",
+        doc: "The refused text does not read as JSON. reader_error is the JSON reader's error.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("reader_error", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalByRule",
+        doc: "A rule refused a value that reads. The message is the only fact.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalByValueRule",
+        doc: "A rule of the version-1 command or of the scoped idempotency key refused a value. rule is\nthe rule's text.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rule", "str")],
         methods: &[],
     },
     StubClass {
