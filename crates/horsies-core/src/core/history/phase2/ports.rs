@@ -8,28 +8,24 @@
 //! database.
 
 use serial_test::serial;
-use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::consumption::{consume_phase2, Phase2DispositionKind};
+use super::consumption::{consume_phase2, Phase2CallError, Phase2DispositionKind};
 use super::quarantine::{quarantine_one, QuarantineVerdict};
 use crate::core::history::errors::HistoryError;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
+use crate::test_support::sql::{self, TestPool, TestTransaction};
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 const PORT_WORKER: &str = "port-phase2-worker";
 const CLASS_KEY: &str = "standard_30d";
 
-async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::sqlx_migrated_pool().await
+async fn shared_pool() -> TestPool {
+    crate::test_support::migrated_pool().await
 }
 
-async fn seed_workflow(
-    transaction: &mut Transaction<'_, Postgres>,
-    workflow_id: Uuid,
-    status: &str,
-) {
-    sqlx::query(
+async fn seed_workflow(transaction: &mut TestTransaction<'_>, workflow_id: Uuid, status: &str) {
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, output_task_index,
              success_policy, result, error, parent_workflow_id, parent_task_index,
@@ -44,18 +40,18 @@ async fn seed_workflow(
     )
     .bind(workflow_id)
     .bind(status)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert workflow");
 }
 
 async fn seed_node(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     node_id: Uuid,
     workflow_id: Uuid,
     task_id: Uuid,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow,
              id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
@@ -77,13 +73,13 @@ async fn seed_node(
     .bind(workflow_id)
     .bind(task_id)
     .bind(CLASS_KEY)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert workflow node");
 }
 
-async fn seed_running_workflow_task(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) {
-    sqlx::query(
+async fn seed_running_workflow_task(transaction: &mut TestTransaction<'_>, task_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at,
@@ -107,7 +103,7 @@ async fn seed_running_workflow_task(transaction: &mut Transaction<'_, Postgres>,
     .bind(task_id)
     .bind(CLASS_KEY)
     .bind(PORT_WORKER)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert running workflow task");
 }
@@ -121,7 +117,7 @@ struct PendingEvidence {
 }
 
 async fn seed_pending(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     workflow_status: &str,
 ) -> PendingEvidence {
     let evidence = PendingEvidence {
@@ -139,7 +135,7 @@ async fn seed_pending(
     )
     .await;
     let outcomes = terminal_writes::fail_running_task(
-        transaction.as_mut(),
+        &mut *transaction,
         evidence.task_id,
         PORT_WORKER,
         &TerminalFailure::of_task(
@@ -166,36 +162,33 @@ async fn seed_pending(
     evidence
 }
 
-async fn pending_source(
-    transaction: &mut Transaction<'_, Postgres>,
-    task_id: Uuid,
-) -> Option<String> {
-    sqlx::query_scalar(
+async fn pending_source(transaction: &mut TestTransaction<'_>, task_id: Uuid) -> Option<String> {
+    sql::query_scalar(
         "SELECT recovery_source FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(task_id)
-    .fetch_optional(transaction.as_mut())
+    .fetch_optional(&mut *transaction)
     .await
     .expect("read pending row")
 }
 
-async fn history_result_text(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) -> String {
-    sqlx::query_scalar(
+async fn history_result_text(transaction: &mut TestTransaction<'_>, task_id: Uuid) -> String {
+    sql::query_scalar(
         "SELECT convert_from(result_payload, 'UTF8') FROM horsies_task_history WHERE task_id = $1",
     )
     .bind(task_id)
-    .fetch_one(transaction.as_mut())
+    .fetch_one(&mut *transaction)
     .await
     .expect("read history result")
 }
 
 async fn node_state(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     node_id: Uuid,
 ) -> (String, Option<String>) {
-    sqlx::query_as("SELECT status, result FROM horsies_workflow_tasks WHERE id = $1")
+    sql::query_as("SELECT status, result FROM horsies_workflow_tasks WHERE id = $1")
         .bind(node_id)
-        .fetch_one(transaction.as_mut())
+        .fetch_one(&mut *transaction)
         .await
         .expect("read node")
 }
@@ -207,8 +200,8 @@ async fn node_state(
 async fn the_caller_plan_setting_survives_the_consume_call() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
-    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
-        .execute(transaction.as_mut())
+    sql::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(&mut *transaction)
         .await
         .expect("set the caller plan mode");
     let disposition = consume_phase2(&mut transaction, Uuid::new_v4(), "FAILED")
@@ -218,8 +211,8 @@ async fn the_caller_plan_setting_survives_the_consume_call() {
         disposition.disposition,
         Phase2DispositionKind::PendingAbsent
     );
-    let setting: String = sqlx::query_scalar("SHOW plan_cache_mode")
-        .fetch_one(transaction.as_mut())
+    let setting: String = sql::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(&mut *transaction)
         .await
         .expect("read the caller plan mode");
     assert_eq!(setting, "force_custom_plan");
@@ -313,7 +306,7 @@ async fn deleting_a_workflow_removes_the_pending_row_and_the_quarantine_copy() {
     let evidence = seed_pending(&mut transaction, "RUNNING").await;
     // The repoint that `horsies_phase2_quarantine_one` performs, written out:
     // copy the history row, then point the pending row at the copy.
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_phase2_quarantine (
              task_id, workflow_id, workflow_node_row_id, terminalization_kind, terminal_at,
              retention_class_key, history_schema_version, result_envelope_version,
@@ -328,33 +321,33 @@ async fn deleting_a_workflow_removes_the_pending_row_and_the_quarantine_copy() {
          WHERE p.task_id = $1",
     )
     .bind(evidence.task_id)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("copy the evidence");
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_phase2_pending
          SET recovery_source = 'QUARANTINE', quarantine_task_id = task_id,
              history_class = NULL, history_anchor = NULL
          WHERE task_id = $1",
     )
     .bind(evidence.task_id)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("repoint the pending row");
 
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(evidence.workflow_id)
-        .execute(transaction.as_mut())
+        .execute(&mut *transaction)
         .await
         .expect("delete the workflow");
 
-    let (pending, copies): (i64, i64) = sqlx::query_as(
+    let (pending, copies): (i64, i64) = sql::query_as(
         "SELECT
              (SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1),
              (SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1)",
     )
     .bind(evidence.task_id)
-    .fetch_one(transaction.as_mut())
+    .fetch_one(&mut *transaction)
     .await
     .expect("count evidence");
     assert_eq!((pending, copies), (0, 0));
@@ -372,12 +365,12 @@ async fn the_pending_locator_pins_its_node_to_its_workflow() {
     let evidence = seed_pending(&mut transaction, "RUNNING").await;
     let other_workflow = Uuid::new_v4();
     seed_workflow(&mut transaction, other_workflow, "RUNNING").await;
-    let refused = sqlx::query(
+    let refused = sql::query(
         "UPDATE horsies_workflow_phase2_pending SET workflow_id = $2 WHERE task_id = $1",
     )
     .bind(evidence.task_id)
     .bind(other_workflow)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect_err("a node of another workflow is refused");
     assert_eq!(
@@ -402,7 +395,7 @@ async fn a_locator_is_copied_verified_and_repointed() {
         .await
         .expect("quarantine");
     assert_eq!(outcome.verdict, QuarantineVerdict::Repointed);
-    let copy_matches: bool = sqlx::query_scalar(
+    let copy_matches: bool = sql::query_scalar(
         "SELECT q.terminalization_kind = h.terminalization_kind
                 AND q.retention_class_key = h.retention_class_key
                 AND q.result_payload = h.result_payload
@@ -412,7 +405,7 @@ async fn a_locator_is_copied_verified_and_repointed() {
          WHERE q.task_id = $1",
     )
     .bind(evidence.task_id)
-    .fetch_one(transaction.as_mut())
+    .fetch_one(&mut *transaction)
     .await
     .expect("compare the copy");
     assert!(copy_matches);
@@ -434,13 +427,13 @@ async fn a_broken_locator_refuses_and_keeps_its_history_source() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
     let evidence = seed_pending(&mut transaction, "RUNNING").await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_phase2_pending
          SET history_anchor = history_anchor + interval '1 second'
          WHERE task_id = $1",
     )
     .bind(evidence.task_id)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("break the locator");
     let outcome = quarantine_one(&mut transaction, evidence.task_id)
@@ -488,22 +481,16 @@ async fn consumption_refuses_a_node_status_that_is_not_terminal() {
         "terminal node status must be COMPLETED or FAILED"
     );
     match &refused {
-        HistoryError::Database(error) => assert_eq!(
-            error
-                .as_database_error()
-                .and_then(|database| database.code())
-                .as_deref(),
-            Some("22023")
-        ),
+        Phase2CallError::Database(error) => assert_eq!(error.sqlstate(), Some("22023")),
         other => panic!("expected a database refusal, got {other:?}"),
     }
     transaction.rollback().await.expect("rollback");
 }
 
 /// The primary message of a database refusal.
-fn refusal_message(error: &HistoryError) -> String {
+fn refusal_message(error: &Phase2CallError) -> String {
     match error {
-        HistoryError::Database(error) => error
+        Phase2CallError::Database(error) => error
             .as_database_error()
             .map(|database| database.message().to_owned())
             .expect("the refusal comes from the database"),
@@ -531,38 +518,38 @@ impl PendingWrite {
 /// touches and `condition` (the trigger's `WHEN` clause) selects, until
 /// `transaction` ends.
 async fn refuse_pending_rows(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     name: &str,
     write: PendingWrite,
     condition: &str,
     message: &str,
 ) {
-    sqlx::query(&format!(
+    sql::query(&format!(
         "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $function$
          BEGIN
              RAISE EXCEPTION '{message}';
          END
          $function$"
     ))
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("create the refusing function");
-    sqlx::query(&format!(
+    sql::query(&format!(
         "CREATE TRIGGER {name}
          BEFORE {} ON horsies_workflow_phase2_pending
          FOR EACH ROW WHEN ({condition})
          EXECUTE FUNCTION {name}()",
         write.event()
     ))
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("create the refusing trigger");
 }
 
-async fn quarantine_copies(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1")
+async fn quarantine_copies(transaction: &mut TestTransaction<'_>, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1")
         .bind(task_id)
-        .fetch_one(transaction.as_mut())
+        .fetch_one(&mut *transaction)
         .await
         .expect("count quarantine copies")
 }

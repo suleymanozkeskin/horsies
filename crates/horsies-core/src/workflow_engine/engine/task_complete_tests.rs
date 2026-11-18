@@ -7,14 +7,14 @@
 //! record whose evidence is in quarantine.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::{TaskError, TaskResult};
 use crate::test_support::child_specs::TestChildSpecs;
-use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
+use crate::test_support::sql::{self, TestPool};
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::workflow_engine::engine::{
     on_workflow_task_complete, SourceFailure, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
@@ -23,8 +23,8 @@ use crate::workflow_engine::lifecycle::cancel_workflow;
 const WORKER: &str = "task-complete-worker";
 
 async fn test_broker() -> PostgresBroker {
-    PostgresBroker::from_pool(
-        crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
+    PostgresBroker::from_test_url(
+        crate::test_support::migrated_pool().await.url(),
         crate::ClientFamily::Rust,
     )
 }
@@ -32,8 +32,8 @@ async fn test_broker() -> PostgresBroker {
 /// A RUNNING workflow with node 0 RUNNING behind a RUNNING task claimed by
 /// [`WORKER`] (with the process facts of its start), and node 1, a task node
 /// that waits for node 0, PENDING.
-async fn seed_chain(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
-    sqlx::query(
+async fn seed_chain(pool: &TestPool, workflow_id: Uuid, task_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -45,7 +45,7 @@ async fn seed_chain(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
     .execute(pool)
     .await
     .expect("seed workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
              started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
@@ -63,7 +63,7 @@ async fn seed_chain(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
     .execute(pool)
     .await
     .expect("seed task");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -80,7 +80,7 @@ async fn seed_chain(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
     .execute(pool)
     .await
     .expect("seed task node");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -98,7 +98,7 @@ async fn seed_chain(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
 }
 
 /// Completes the task: phase 1 of a worker, which writes its phase-2 record.
-async fn complete_task(pool: &PgPool, task_id: Uuid) {
+async fn complete_task(pool: &TestPool, task_id: Uuid) {
     let result = serde_json::to_string(&TaskResult::Ok(serde_json::json!({"value": 7}))).unwrap();
     let outcomes = terminal_writes::complete_workflow_task(pool, task_id, WORKER, &result)
         .await
@@ -111,8 +111,8 @@ async fn complete_task(pool: &PgPool, task_id: Uuid) {
 
 /// Per node, in index order: the index, the status, whether a task is linked,
 /// and whether a result is stored.
-async fn nodes(pool: &PgPool, workflow_id: Uuid) -> Vec<(i32, String, bool, bool)> {
-    sqlx::query_as(
+async fn nodes(pool: &TestPool, workflow_id: Uuid) -> Vec<(i32, String, bool, bool)> {
+    sql::query_as(
         "SELECT task_index, status, task_id IS NOT NULL, result IS NOT NULL
          FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
     )
@@ -122,16 +122,16 @@ async fn nodes(pool: &PgPool, workflow_id: Uuid) -> Vec<(i32, String, bool, bool
     .expect("read the nodes")
 }
 
-async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+async fn workflow_status(pool: &TestPool, workflow_id: Uuid) -> String {
+    sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .fetch_one(pool)
         .await
         .expect("read the workflow status")
 }
 
-async fn pending_records(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+async fn pending_records(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -152,7 +152,7 @@ async fn complete(
 #[serial]
 async fn a_node_of_a_live_workflow_completes_and_promotes_its_dependent() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_chain(&pool, workflow_id, task_id).await;
@@ -186,7 +186,7 @@ async fn a_node_of_a_live_workflow_completes_and_promotes_its_dependent() {
 async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
     for ended_as in ["CANCELLED", "FAILED"] {
         let broker = test_broker().await;
-        let pool = broker.pool().clone();
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         seed_chain(&pool, workflow_id, task_id).await;
@@ -196,7 +196,7 @@ async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
                 .await
                 .expect("cancel the workflow")),
             _ => {
-                sqlx::query(
+                sql::query(
                     "UPDATE horsies_workflows
                      SET status = 'FAILED', completed_at = NOW(), updated_at = NOW()
                      WHERE id = $1",
@@ -251,12 +251,12 @@ async fn a_task_without_a_record_is_pending_absent() {
 #[serial]
 async fn a_record_whose_result_fails_its_check_is_kept() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_chain(&pool, workflow_id, task_id).await;
     complete_task(&pool, task_id).await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_phase2_pending
          SET result_digest = decode(repeat('ff', 32), 'hex')
          WHERE task_id = $1",
@@ -288,12 +288,12 @@ async fn a_record_whose_result_fails_its_check_is_kept() {
 #[serial]
 async fn a_node_finish_that_raises_commits_nothing() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_chain(&pool, workflow_id, task_id).await;
     complete_task(&pool, task_id).await;
-    sqlx::query(&format!(
+    sql::query(&format!(
         "CREATE OR REPLACE FUNCTION task_complete_inject_raise() RETURNS trigger
          LANGUAGE plpgsql AS $body$
          BEGIN
@@ -307,7 +307,7 @@ async fn a_node_finish_that_raises_commits_nothing() {
     .execute(&pool)
     .await
     .expect("create the trigger function");
-    sqlx::query(
+    sql::query(
         "CREATE TRIGGER task_complete_inject_raise BEFORE UPDATE ON horsies_workflow_tasks
          FOR EACH ROW EXECUTE FUNCTION task_complete_inject_raise()",
     )
@@ -317,11 +317,11 @@ async fn a_node_finish_that_raises_commits_nothing() {
 
     let refused = complete(&broker, task_id).await;
 
-    sqlx::query("DROP TRIGGER task_complete_inject_raise ON horsies_workflow_tasks")
+    sql::query("DROP TRIGGER task_complete_inject_raise ON horsies_workflow_tasks")
         .execute(&pool)
         .await
         .expect("drop the trigger");
-    sqlx::query("DROP FUNCTION task_complete_inject_raise()")
+    sql::query("DROP FUNCTION task_complete_inject_raise()")
         .execute(&pool)
         .await
         .expect("drop the trigger function");
@@ -340,12 +340,12 @@ async fn a_node_finish_that_raises_commits_nothing() {
 /// dependency between them: node 0 FAILED earlier with the error
 /// `PRIOR_FAILURE` and no task, and node 1 RUNNING behind a RUNNING task
 /// claimed by [`WORKER`].
-async fn seed_after_a_failed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
+async fn seed_after_a_failed_node(pool: &TestPool, workflow_id: Uuid, task_id: Uuid) {
     let prior_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
         TaskError::new("PRIOR_FAILURE", "prior node failed").expect("a user error code"),
     ))
     .expect("encode the prior result");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -357,7 +357,7 @@ async fn seed_after_a_failed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uui
     .execute(pool)
     .await
     .expect("seed workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
              started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
@@ -375,7 +375,7 @@ async fn seed_after_a_failed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uui
     .execute(pool)
     .await
     .expect("seed task");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -392,7 +392,7 @@ async fn seed_after_a_failed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uui
     .execute(pool)
     .await
     .expect("seed the failed node");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -413,7 +413,7 @@ async fn seed_after_a_failed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uui
 
 /// Fails the task with `error`: phase 1 of a worker, which writes its
 /// phase-2 record.
-async fn fail_task(pool: &PgPool, task_id: Uuid, error: &TaskError) {
+async fn fail_task(pool: &TestPool, task_id: Uuid, error: &TaskError) {
     let result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error.clone()))
         .expect("encode the error result");
     let outcomes = terminal_writes::fail_running_task(
@@ -441,7 +441,7 @@ async fn fail_task(pool: &PgPool, task_id: Uuid, error: &TaskError) {
 #[serial]
 async fn a_pausing_workflow_records_the_error_of_the_node_that_phase_two_failed() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_after_a_failed_node(&pool, workflow_id, task_id).await;
@@ -453,12 +453,11 @@ async fn a_pausing_workflow_records_the_error_of_the_node_that_phase_two_failed(
 
     assert_eq!(completion, WorkflowTaskCompletion::Applied);
     assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
-    let error_json: String =
-        sqlx::query_scalar("SELECT error FROM horsies_workflows WHERE id = $1")
-            .bind(workflow_id)
-            .fetch_one(&pool)
-            .await
-            .expect("read the workflow error");
+    let error_json: String = sql::query_scalar("SELECT error FROM horsies_workflows WHERE id = $1")
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the workflow error");
     let stored: TaskError = serde_json::from_str(&error_json).expect("decode the workflow error");
     assert_eq!(stored.error_code, current_error.error_code);
     assert_eq!(stored.message, current_error.message);
@@ -479,13 +478,13 @@ async fn a_pausing_workflow_records_the_error_of_the_node_that_phase_two_failed(
 #[serial]
 async fn a_record_whose_evidence_is_in_quarantine_completes_the_node_and_drains_both_rows() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_chain(&pool, workflow_id, task_id).await;
     complete_task(&pool, task_id).await;
     let verdict: String =
-        sqlx::query_scalar("SELECT verdict FROM horsies_phase2_quarantine_one($1)")
+        sql::query_scalar("SELECT verdict FROM horsies_phase2_quarantine_one($1)")
             .bind(task_id)
             .fetch_one(&pool)
             .await
@@ -499,7 +498,7 @@ async fn a_record_whose_evidence_is_in_quarantine_completes_the_node_and_drains_
         nodes(&pool, workflow_id).await[0],
         (0, "COMPLETED".to_owned(), true, true)
     );
-    let evidence: (i64, i64) = sqlx::query_as(
+    let evidence: (i64, i64) = sql::query_as(
         "SELECT
              (SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1),
              (SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1)",

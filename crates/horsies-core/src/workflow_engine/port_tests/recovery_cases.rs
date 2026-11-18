@@ -3,7 +3,6 @@
 //! `test_orphaned_workflow_task_repro.py`.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -14,15 +13,16 @@ use super::support::{
 };
 use crate::core::{OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
 use crate::workflow_engine::recovery::{recover_stuck_workflows_observed_with, RecoveryReport};
 
 /// `workflow_recovery_failure_limit` of each pass.
 const LIMIT: u32 = 3;
 
-async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
+async fn pass(pool: &TestPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         child_specs,
         LIMIT,
     )
@@ -255,7 +255,7 @@ async fn a_ready_sub_workflow_node_with_no_child_starts_its_child() {
 /// A RUNNING parent whose sub-workflow node 0 is RUNNING and linked to a
 /// child that ended with `child_status`.
 async fn seed_parent_of_an_ended_child(
-    pool: &PgPool,
+    pool: &TestPool,
     child_status: &'static str,
     child_result: Option<String>,
 ) -> (Uuid, Uuid) {
@@ -374,7 +374,7 @@ async fn an_orphan_stays_claimed_when_self_heal_is_off() {
             crate::broker::claims::StartMiss::NodeNotLinked
         )
     );
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+    let status: String = sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&db.pool)
         .await
@@ -515,9 +515,9 @@ async fn a_dependency_with_no_stored_result_gives_its_consumer_the_missing_resul
 
 /// One phase-2 recovery pass with no grace, as the reaper runs it. Returns
 /// the nodes it advanced.
-async fn phase2_pass(pool: &PgPool) -> u64 {
+async fn phase2_pass(pool: &TestPool) -> u64 {
     drive_phase2_recovery_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         0,
         100,
@@ -531,7 +531,7 @@ async fn phase2_pass(pool: &PgPool) -> u64 {
 /// The task of node 0 of `workflow_id` ends FAILED with `WORKER_CRASHED` in
 /// phase 1 alone (Python `force_terminal`): the node stays RUNNING and its
 /// phase 2 stays owed. The phase-2 record is aged past any grace.
-async fn crash_the_task_of_node_0(pool: &PgPool, workflow_id: Uuid) {
+async fn crash_the_task_of_node_0(pool: &TestPool, workflow_id: Uuid) {
     let task_id = node(pool, workflow_id, 0)
         .await
         .task_id
@@ -542,7 +542,7 @@ async fn crash_the_task_of_node_0(pool: &PgPool, workflow_id: Uuid) {
     ));
     let _stored = finish_phase1(pool, task_id, &crashed).await;
     assert_eq!(node_status(pool, workflow_id, 0).await, "RUNNING");
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_phase2_pending
          SET created_at = NOW() - INTERVAL '1 hour'
          WHERE task_id = $1",

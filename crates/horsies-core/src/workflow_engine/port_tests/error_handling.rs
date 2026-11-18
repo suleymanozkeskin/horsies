@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -18,6 +17,7 @@ use super::support::{
 use crate::broker::workflow_start::ClientStartError;
 use crate::core::{AnyNode, HorsiesError, OnError, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildSpecs};
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::start_statement::{node_failure_result, subworkflow_load_failed_error};
 
@@ -35,7 +35,7 @@ fn recovery(index: usize, task_name: &str, source: usize) -> AnyNode {
     node
 }
 
-async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
+async fn succeed(pool: &TestPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
     let _task = finish_node(
         pool,
         workflow_id,
@@ -46,7 +46,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
     .await;
 }
 
-async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
+async fn fail(pool: &TestPool, workflow_id: Uuid, index: i32, error_code: &str) {
     let _task = finish_node(
         pool,
         workflow_id,
@@ -89,7 +89,7 @@ async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
         sub.result = Some(stored.clone());
         seed_node(&pool, &sub).await;
 
-        let disposition: String = sqlx::query_scalar(LOAD_FAILURE_MARK_SQL)
+        let disposition: String = sql::query_scalar(LOAD_FAILURE_MARK_SQL)
             .bind(workflow_id)
             .bind(0_i32)
             .bind(&failure)
@@ -351,8 +351,8 @@ async fn a_child_builder_failure_at_promotion_fails_the_node() {
 
 /// Stores `options` as the task options of node `task_index`: a node row whose stored data the promotion
 /// cannot read (the start refuses such options, so only a changed row holds them).
-async fn store_node_options(pool: &PgPool, workflow_id: Uuid, task_index: i32, options: &str) {
-    sqlx::query(
+async fn store_node_options(pool: &TestPool, workflow_id: Uuid, task_index: i32, options: &str) {
+    sql::query(
         "UPDATE horsies_workflow_tasks SET task_options = $3
          WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -467,7 +467,7 @@ async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibl
         "{}",
         sibling.status
     );
-    let live_sibling_rows: i64 = sqlx::query_scalar(
+    let live_sibling_rows: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_tasks WHERE task_name = 'unprepared_pause_sibling'",
     )
     .fetch_one(&db.pool)
@@ -719,7 +719,7 @@ async fn a_failure_in_the_middle_of_a_start_leaves_no_row() {
         "{error:?}"
     );
     let rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE name = 'rollback_wf'")
+        sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE name = 'rollback_wf'")
             .fetch_one(&db.pool)
             .await
             .expect("count the workflow rows");
@@ -754,7 +754,7 @@ async fn a_build_failure_mark_does_not_overwrite_a_terminal_task_node() {
         )
         .await;
 
-        let failed: Vec<i32> = sqlx::query_scalar(FAIL_UNBUILDABLE_SQL)
+        let failed: Vec<i32> = sql::query_scalar(FAIL_UNBUILDABLE_SQL)
             .bind(workflow_id)
             .fetch_one(&pool)
             .await
@@ -774,7 +774,7 @@ async fn a_build_failure_mark_does_not_overwrite_a_terminal_task_node() {
         &NodeSeed::task(workflow_id, 0, "ENQUEUED").options(POISON_TASK_OPTIONS),
     )
     .await;
-    let failed: Vec<i32> = sqlx::query_scalar(FAIL_UNBUILDABLE_SQL)
+    let failed: Vec<i32> = sql::query_scalar(FAIL_UNBUILDABLE_SQL)
         .bind(workflow_id)
         .fetch_one(&pool)
         .await
@@ -1047,7 +1047,7 @@ async fn a_workflow_resumed_after_a_failure_ends_failed_with_that_error() {
 /// Starts two independent roots `<name>_a` (0) and `<name>_b` (1), and a third
 /// root `<name>_c` (2) when `three` is set, with `policy`.
 async fn start_roots(
-    pool: &PgPool,
+    pool: &TestPool,
     name: &str,
     three: bool,
     policy: Option<crate::core::workflow::policy::SuccessPolicy>,
@@ -1137,7 +1137,7 @@ async fn the_promotion_refuses_a_negative_retry_limit_with_python_s_text() {
         "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["TRANSIENT"]}}"#;
 
     let refusal: Option<String> =
-        sqlx::query_scalar("SELECT horsies_workflow_task_options_refusal($1, 3)")
+        sql::query_scalar("SELECT horsies_workflow_task_options_refusal($1, 3)")
             .bind(options)
             .fetch_one(&pool)
             .await

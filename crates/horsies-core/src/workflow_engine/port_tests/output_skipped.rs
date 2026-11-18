@@ -13,7 +13,6 @@
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -25,6 +24,7 @@ use super::support::{
 use crate::core::workflow::node::JoinType;
 use crate::core::{OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::TestPool;
 
 /// The code of the failure that the driver gives a child node.
 const FAILED_CODE: &str = "DELIBERATE_FAIL";
@@ -109,7 +109,7 @@ impl Child {
     }
 
     /// Finishes the child's tasks the way the worker does.
-    async fn run(self, pool: &PgPool, child_id: Uuid, child_specs: &TestChildSpecs) {
+    async fn run(self, pool: &TestPool, child_id: Uuid, child_specs: &TestChildSpecs) {
         let (failing, passing) = match self {
             Self::SkippedOutput => (0, 2),
             Self::FailedOutput => (0, 1),
@@ -135,7 +135,7 @@ fn output_children() -> TestChildSpecs {
     ])
 }
 
-async fn get_code(pool: &PgPool, workflow_id: Uuid) -> Option<String> {
+async fn get_code(pool: &TestPool, workflow_id: Uuid) -> Option<String> {
     code(error_of(
         &handle(pool, workflow_id)
             .get(Some(GET_WAIT))
@@ -626,7 +626,7 @@ async fn an_outputless_parent_entry_holds_the_named_outcome() {
 /// A RUNNING parent whose node 0 is linked to a COMPLETED skipped-output child
 /// that stores `stored` as its result. Returns the parent and the child.
 async fn seed_parent_of_a_completed_child(
-    pool: &PgPool,
+    pool: &TestPool,
     parent: WorkflowSeed,
     stored: Option<&str>,
 ) -> (Uuid, Uuid) {
