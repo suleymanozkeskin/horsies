@@ -103,11 +103,13 @@ async def test_a_failed_worker_ping_is_worker_ping_failed(
 ) -> None:
     result = await unreachable_broker.ping_workers_async(timeout_seconds=0.5)
 
+    # The first step of a ping subscribes to the reply channel, as in 0.7, so
+    # an unreachable server fails it there.
     assert is_err(result)
     _assert_failed_connect(
         result.err_value,
         BrokerErrorCode.WORKER_PING_FAILED,
-        'ping_workers failed: ',
+        'ping_workers reply subscribe failed: ',
         'ping_workers',
     )
 
