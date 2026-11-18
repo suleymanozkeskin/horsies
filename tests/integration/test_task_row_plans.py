@@ -23,7 +23,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.integration.autocommit_support import QUEUE, TASK_NAME, WORKER_ID, psycopg_url
+from tests.integration.autocommit_support import QUEUE, TASK_NAME, WORKER_ID
 from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -42,7 +42,7 @@ claim generation, as the core handle of a child sends it."""
 
 @pytest_asyncio.fixture(loop_scope='function')
 async def probe(db_url: str) -> AsyncGenerator[psycopg.AsyncConnection[Any]]:
-    connection = await psycopg.AsyncConnection.connect(psycopg_url(db_url), autocommit=True)
+    connection = await psycopg.AsyncConnection.connect(db_url, autocommit=True)
     yield connection
     await connection.close()
 

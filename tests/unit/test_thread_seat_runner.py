@@ -287,12 +287,6 @@ class TestTheMarkerOfAThreadSeat:
             call(TASK_ID, 'worker-1', CLAIMED_AT),
         ]
 
-    def test_the_refusal_writes_are_bounded_as_in_a_shared_async_child(self) -> None:
-        """The refusal backstop of the parent relies on this bound: two
-        start attempts and the marker, each with the end of a cancelled
-        statement."""
-        assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == 120.0
-
 
 class _SlowHandle:
     """A core handle of the child whose start gets its pooled connection

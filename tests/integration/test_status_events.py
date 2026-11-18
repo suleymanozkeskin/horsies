@@ -5,9 +5,9 @@ pin which writes send it:
 
 - an insert and a status change send it, except the start (RUNNING): a task's
   start commit is one transaction per task, and a NOTIFY would make Postgres
-  commit it one at a time with every other notifying commit;
-- a terminal move sends it, for each task it moves: the move deletes the live
-  row, so no status change of the row is left to send it.
+  commit it one at a time with every other notifying commit.
+
+The terminal moves are pinned by the core tests of the status event.
 """
 
 from __future__ import annotations
@@ -22,20 +22,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.lifecycle.commands import CancelOrphanedTasks, CompleteTaskFused
-from horsies.core.lifecycle.fences import OwnedClaim
-from horsies.core.lifecycle.outcomes import Applied
-from horsies.core.lifecycle.persistence import apply_batch_async, apply_in_autocommit
-from tests.integration.autocommit_support import (
-    QUEUE,
-    WORKER_ID,
-    ProxiedWorker,
-    insert_task,
-    ok_result_json,
-    open_proxied_worker,
-    psycopg_url,
-)
+from tests.integration.autocommit_support import insert_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -44,20 +31,9 @@ NOTIFY_WAIT_S: Final = 5.0
 
 
 @pytest_asyncio.fixture(loop_scope='function')
-async def direct(
-    db_url: str,
-    broker: PostgresBroker,  # noqa: ARG001 - the schema and history leaves
-) -> AsyncGenerator[ProxiedWorker]:
-    """A worker on the database URL itself, as the CLI builds it."""
-    opened = await open_proxied_worker(db_url)
-    yield opened
-    await opened.close()
-
-
-@pytest_asyncio.fixture(loop_scope='function')
 async def status_listener(db_url: str) -> AsyncGenerator[psycopg.AsyncConnection[Any]]:
     connection = await psycopg.AsyncConnection.connect(
-        psycopg_url(db_url),
+        db_url,
         autocommit=True,
     )
     _ = await connection.execute(f'LISTEN {STATUS_CHANNEL}')
@@ -125,48 +101,3 @@ async def test_a_status_change_other_than_the_start_sends_the_event(
     await _set_status(session, task_id, 'PENDING')
 
     assert await _events_until_sentinel(status_listener, session) == [task_id]
-
-
-async def test_a_completion_sends_the_status_event(
-    direct: ProxiedWorker,
-    session: AsyncSession,
-    status_listener: psycopg.AsyncConnection[Any],
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    task_id, claimed_at = await insert_task(session, status='RUNNING')
-    assert await _events_until_sentinel(status_listener, session) == [task_id]
-
-    outcome = await apply_in_autocommit(
-        direct.worker.sf,
-        CompleteTaskFused(
-            task_id=task_id,
-            fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
-            result_json=ok_result_json(),
-        ),
-    )
-
-    assert isinstance(outcome, Applied)
-    assert await _events_until_sentinel(status_listener, session) == [task_id]
-
-
-async def test_a_batch_move_sends_one_status_event_per_task(
-    session: AsyncSession,
-    status_listener: psycopg.AsyncConnection[Any],
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """The orphan sweep cancels workflow tasks that have no node: one batch
-    move for all of them."""
-    orphans = [
-        (await insert_task(session, status='CLAIMED', is_workflow_task=True))[0]
-        for _ in range(3)
-    ]
-    assert sorted(await _events_until_sentinel(status_listener, session)) == sorted(orphans)
-
-    outcomes = await apply_batch_async(
-        await session.connection(),
-        CancelOrphanedTasks(batch_size=10),
-    )
-    await session.commit()
-
-    assert {outcome.task_id for outcome in outcomes} == set(orphans)
-    assert sorted(await _events_until_sentinel(status_listener, session)) == sorted(orphans)
