@@ -215,9 +215,11 @@ async fn a_registered_period_registers_again_as_already_registered() {
     database.drop().await;
 }
 
-/// `TestCreateAndCoverage.test_mismatched_request_is_a_catalog_conflict`: the
-/// cataloged name with bounds shifted by one day is a metadata conflict, and
-/// the leaf is unchanged.
+/// `TestCreateAndCoverage.test_mismatched_request_is_a_catalog_conflict`: a
+/// request for a cataloged leaf whose catalog row holds bounds one day
+/// earlier is a metadata conflict, and neither the catalog row nor the leaf
+/// changes. `horsies_create_history_leaf` names the leaf from the requested
+/// day, so the test shifts the catalog row, not the request.
 #[tokio::test]
 #[serial]
 async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() {
@@ -230,13 +232,17 @@ async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() 
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
-    let shifted = LeafRef::new(
-        leaf.leaf_name(),
-        class_key,
-        LeafBounds::new(lower - Duration::days(1), lower).expect("shifted bounds"),
-    )
-    .expect("shifted leaf ref");
-    let outcome = create_leaf(&database.pool, &shifted).await;
+    let shifted_lower = lower - Duration::days(1);
+    sql::query(&format!(
+        "UPDATE {LEAF_CATALOG} SET lower_anchor = $2, upper_anchor = $3 WHERE leaf_name = $1"
+    ))
+    .bind(leaf.leaf_name())
+    .bind(shifted_lower)
+    .bind(lower)
+    .execute(&database.pool)
+    .await
+    .expect("shift the catalog row by one day");
+    let outcome = create_leaf(&database.pool, &leaf).await;
     assert!(
         matches!(
             &outcome,
@@ -251,10 +257,9 @@ async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() 
     let row: (String, String, String, Option<DateTime<Utc>>, DateTime<Utc>) =
         sql::query_as(&format!(
             "SELECT leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor
-             FROM {LEAF_CATALOG} WHERE class_key = $1
-             ORDER BY lower_anchor, leaf_name LIMIT 1"
+             FROM {LEAF_CATALOG} WHERE leaf_name = $1"
         ))
-        .bind(class_key)
+        .bind(leaf.leaf_name())
         .fetch_one(&database.pool)
         .await
         .expect("read the catalog row");
@@ -264,10 +269,11 @@ async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() 
             leaf.leaf_name().to_owned(),
             class_key.to_owned(),
             AT_LOWER_BOUND_KIND.to_owned(),
-            Some(leaf.bounds().lower()),
-            leaf.bounds().upper(),
+            Some(shifted_lower),
+            lower,
         )
     );
+    assert!(is_attached(&database.pool, leaf.leaf_name()).await);
     database.drop().await;
 }
 
@@ -337,7 +343,11 @@ async fn a_detach_whose_bounds_differ_from_the_catalog_raises_and_frees_the_lock
     database.drop().await;
 }
 
-/// `TestInspection.test_unknown_class_and_forever_class`.
+/// `TestInspection.test_unknown_class_and_forever_class`, on
+/// `horsies_inspect_history_leaf`, which inspects one leaf by its name: a
+/// name that no catalog row holds (here of a class that does not exist) is
+/// missing and not cataloged, and the static forever leaf is refused, since
+/// retention never inspects a leaf of the forever class.
 #[tokio::test]
 #[serial]
 async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
@@ -345,12 +355,8 @@ async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
     let today = database_today(&database.pool).await;
     let bounds = LeafBounds::new(today, today + Duration::days(1)).expect("one day");
     let inspector = core_pool_for_test_url(database.pool.url());
-    let ghost = LeafRef::new(
-        "horsies_task_history_ghost_2026_01_01",
-        "ghost",
-        bounds.clone(),
-    )
-    .expect("ghost leaf ref");
+    let ghost_name = "horsies_task_history_ghost_2026_01_01";
+    let ghost = LeafRef::new(ghost_name, "ghost", bounds.clone()).expect("ghost leaf ref");
     assert_eq!(
         inspect_leaf_in_pool(
             &inspector,
@@ -359,23 +365,38 @@ async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
         )
         .await
         .expect("inspect an unknown class"),
-        LeafInspection::RetentionClassAbsent {
-            class_key: "ghost".to_owned(),
+        LeafInspection::Missing {
+            leaf_name: ghost_name.to_owned(),
+            cataloged: false,
+            eligible_at: None,
         }
     );
+    let forever_leaf: String = sql::query_scalar(&format!(
+        "SELECT leaf_name FROM {LEAF_CATALOG} WHERE class_key = $1"
+    ))
+    .bind(FOREVER_CLASS_KEY)
+    .fetch_one(&database.pool)
+    .await
+    .expect("read the static forever leaf");
     let forever =
-        LeafRef::new("horsies_task_history_forever_x", FOREVER_CLASS_KEY, bounds).expect("ref");
-    assert_eq!(
-        inspect_leaf_in_pool(
-            &inspector,
-            StatementLog::Off,
-            &InspectHistoryLeaf::new(forever)
-        )
-        .await
-        .expect("inspect the forever class"),
-        LeafInspection::ForeverClassLeaf {
-            class_key: FOREVER_CLASS_KEY.to_owned(),
-        }
+        LeafRef::new(forever_leaf.as_str(), FOREVER_CLASS_KEY, bounds).expect("forever leaf ref");
+    let refused = inspect_leaf_in_pool(
+        &inspector,
+        StatementLog::Off,
+        &InspectHistoryLeaf::new(forever),
+    )
+    .await
+    .expect_err("retention never inspects a leaf of the forever class");
+    let expected_message =
+        format!("leaf {forever_leaf} belongs to the forever class, which retention never detaches");
+    assert!(
+        matches!(
+            &refused,
+            crate::core::history::errors::HistoryError::Statement(
+                crate::db::StatementFailure::StatementRefused { cause, .. }
+            ) if cause.server_error().message() == expected_message
+        ),
+        "{refused:?}"
     );
     inspector.close();
     database.drop().await;

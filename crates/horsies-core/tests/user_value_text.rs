@@ -143,15 +143,6 @@ const KNOWN_SITES: &[Known] = &[
         allowed: Allowed::NotUserValue("a part of the class coverage read"),
     },
     Known {
-        file: "crates/horsies-core/src/broker/health.rs",
-        item: "StoredWorkerState",
-        kind: SiteKind::DeserializeField,
-        count: 5,
-        allowed: Allowed::NotUserValue(
-            "the queue settings, recovery config, slots and class capacity of a worker state",
-        ),
-    },
-    Known {
         file: "crates/horsies-core/src/broker/postgres.rs",
         item: "decode_pong",
         kind: SiteKind::FromValue,
@@ -164,20 +155,6 @@ const KNOWN_SITES: &[Known] = &[
         kind: SiteKind::TypedLetParse,
         count: 1,
         allowed: Allowed::NotUserValue("the payload of a worker pong"),
-    },
-    Known {
-        file: "crates/horsies-core/src/broker/row/workflow.rs",
-        item: "WorkflowRow",
-        kind: SiteKind::DeserializeField,
-        count: 1,
-        allowed: Allowed::NotUserValue("the success policy of a workflow"),
-    },
-    Known {
-        file: "crates/horsies-core/src/broker/row/workflow.rs",
-        item: "WorkflowTaskRow",
-        kind: SiteKind::DeserializeField,
-        count: 1,
-        allowed: Allowed::NotUserValue("the args_from map of a node: kwarg name to node index"),
     },
     Known {
         file: "crates/horsies-core/src/core/config/broker.rs",
@@ -970,7 +947,7 @@ fn every_read_into_value_of_the_core_and_the_rust_client_is_listed() {
 
 #[test]
 fn each_listed_site_has_a_reason_and_a_file_of_a_scanned_crate() {
-    assert_eq!(KNOWN_SITES.len(), 24);
+    assert_eq!(KNOWN_SITES.len(), 21);
     for site in KNOWN_SITES {
         assert!(!site.allowed.reason().is_empty(), "{}", site.file);
         assert!(site.count > 0, "{}", site.file);
