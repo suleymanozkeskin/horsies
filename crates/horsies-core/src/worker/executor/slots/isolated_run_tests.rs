@@ -16,9 +16,10 @@ use super::scripted::{
 };
 use super::*;
 use crate::worker::executor::protocol::{
-    encode_child_frame, BodyEnd, BodyReturnedFrame, ChildFrame, IsolatedWork, LeftWorkEnd,
-    LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverName, LoopHoldsTasks, NoLeftWork, ParentFrame,
-    ResultEnvelopeText, ResultFrame, RssReading, RunEnd, StopReason, TaskInputText,
+    encode_child_frame, BodyEnd, BodyReturnedFrame, ChildAfterFrame, ChildFrame, IsolatedWork,
+    LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverName, LoopHoldsTasks, NoLeftWork,
+    ParentFrame, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, StopReason, TaskInputText,
+    CORE_STOPPED_EXIT_CODE,
 };
 use crate::worker::executor::supervisor::Spawner;
 
@@ -158,6 +159,7 @@ fn write_result_file(path: &std::path::Path, task: &ClaimedTask, envelope: &Resu
         end: RunEnd::Result(envelope.clone()),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     });
     std::fs::write(path, encode_child_frame(&frame).unwrap().to_bytes()).unwrap();
 }
@@ -256,6 +258,7 @@ async fn a_result_with_no_left_work_keeps_the_child() {
         end: RunEnd::Result(ok_envelope(2)),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::LoopHoldsNoTask,
+        child: ChildAfterFrame::ServesOn,
     });
     let script = format!(
         "{}{}{}",
@@ -289,6 +292,7 @@ async fn a_run_stopped_before_running_is_answered_as_such() {
         end: RunEnd::StoppedBeforeRunning(StopReason::ClaimLost),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     });
     let script = format!(
         "{}{}",
@@ -304,6 +308,54 @@ async fn a_run_stopped_before_running_is_answered_as_such() {
         answer,
         AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::ClaimLost))
     );
+    stop_pool(pool, spawner).await;
+}
+
+/// A result frame that says the child ends itself (its core stopped)
+/// answers its task, and the slot sends that child no other task: the
+/// second task, queued at once, runs on a new child. The first child
+/// reports the release of its start, waits 0.5 s, notes its end in a file
+/// and exits with the core-stopped code. A run frame sent to it in that
+/// time is never read, and its task would take the crash path; a kill in
+/// that time would leave no note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_that_ends_itself_gets_no_next_task() {
+    let dir = TestDir::new();
+    let first = task(1, ExecutionClass::Isolated);
+    let second = task(2, ExecutionClass::Isolated);
+    let init = isolated_init();
+    let released = ChildFrame::Result(ResultFrame {
+        task_id: first.task_id,
+        end: RunEnd::StoppedBeforeRunning(StopReason::OwnershipUnconfirmed),
+        rss: RssReading::Unreadable,
+        task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::EndsItself,
+    });
+    let script = format!(
+        r#"{}case $n in 1) {}{}{}sleep 0.5; echo ended >> "{}"; exit {CORE_STOPPED_EXIT_CODE};; *) {}{};; esac"#,
+        ticket(&dir),
+        boot(&init),
+        read_frame(),
+        send(&[released]),
+        dir.file("first-child"),
+        boot(&init),
+        answer_runs(&[(&second, vec![result_frame(&second, 2)])], 1),
+    );
+    let spawner = Spawner::start().unwrap();
+    let (pool, _board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
+
+    let first_answer = submit_isolated(&pool, &first, IsolatedDeadline::NoDeadline);
+    let second_answer = submit_isolated(&pool, &second, IsolatedDeadline::NoDeadline);
+
+    assert_eq!(
+        answer_of(first_answer).await,
+        AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(
+            StopReason::OwnershipUnconfirmed
+        ))
+    );
+    assert_eq!(answer_of(second_answer).await, reported(2));
+    assert_eq!(dir.lines("first-child"), vec!["ended".to_owned()]);
+    assert_eq!(tickets(&dir), 2);
     stop_pool(pool, spawner).await;
 }
 

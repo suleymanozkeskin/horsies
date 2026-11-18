@@ -45,7 +45,13 @@ from horsies.core.worker.child_frames import (
     SharedResultFrame,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import (
+    CoreStoppedAfterBody,
+    MarkerDone,
+    MarkerEnd,
+    MarkerMetStoppedCore,
+    ResultEnvelope,
+)
 from horsies.core.worker.shared_child import (
     FRAMES_PER_SEAT,
     FrameWithResult,
@@ -126,7 +132,7 @@ class _ScriptedSeats:
     """Each run awaits the behavior registered for its task name, and sets
     its row RUNNING, but a task named in ``not_running``, which stops with
     ``CLAIM_LOST``. Each marker is recorded with its run, then awaits
-    ``marker`` when one is set."""
+    ``marker`` when one is set, and ends with ``marker_end``."""
 
     def __init__(self, behaviors: dict[str, Callable[[], Any]]) -> None:
         self._behaviors = behaviors
@@ -134,6 +140,7 @@ class _ScriptedSeats:
         self.not_running: set[str] = set()
         self.markers: list[int] = []
         self.marker: Callable[[], Any] | None = None
+        self.marker_end: MarkerEnd = MarkerDone()
 
     async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
         self.started.append(frame.dispatch)
@@ -142,10 +149,11 @@ class _ScriptedSeats:
             return StoppedBeforeRunning('CLAIM_LOST')
         return SetRunning(ResultEnvelope(str(value)))
 
-    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         self.markers.append(frame.dispatch)
         if self.marker is not None:
             await self.marker()
+        return self.marker_end
 
 
 def _task_id(dispatch: int) -> uuid.UUID:
@@ -1281,6 +1289,27 @@ class TestTheMarkerAtTheEnd:
 
         assert _kinds(writer, 1) == ['SharedResultFrame']
         assert _results(writer)[0].end == ResultEnvelope('1')
+
+    def test_a_marker_that_met_the_stopped_core_reports_the_result_of_the_body(
+        self,
+    ) -> None:
+        """The writer ends the child once this frame is written
+        (``test_child_core_refusals``)."""
+
+        async def quick() -> int:
+            return 1
+
+        stopped = core.CoreStopped('log forwarder', 'planned panic')
+        seats = _ScriptedSeats({'quick': quick})
+        seats.marker_end = MarkerMetStoppedCore(stopped)
+
+        writer = self._serve(seats, [_frame(1, 'quick')])
+
+        assert seats.markers == [1]
+        assert _results(writer)[0].end == CoreStoppedAfterBody(
+            result=ResultEnvelope('1'),
+            stopped=stopped,
+        )
 
     def test_a_refusal_writes_its_marker(self) -> None:
         async def refuse() -> str:

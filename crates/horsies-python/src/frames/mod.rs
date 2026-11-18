@@ -31,10 +31,10 @@ use horsies_core::frame_protocol::{
     decode_parent_frame as core_decode_parent_frame, encode_child_frame as core_encode_child_frame,
     encode_preload_frame as core_encode_preload_frame, EncodedFrame, FrameEncodeError,
     FrameOverBound, FrameReader, ParentFrame, ParentFrameRefusal, BAD_ARGUMENTS_EXIT_CODE,
-    BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE, CHILD_HOOK_FAILED_EXIT_CODE, MAX_BODY_BYTES,
-    MAX_LEFTOVER_TASK_NAMES, MAX_META_BYTES, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE,
-    PROTOCOL_VERSION, REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE,
-    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE, CHILD_HOOK_FAILED_EXIT_CODE,
+    CORE_STOPPED_EXIT_CODE, MAX_BODY_BYTES, MAX_LEFTOVER_TASK_NAMES, MAX_META_BYTES,
+    PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION,
+    REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE, STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -61,6 +61,9 @@ pub struct ProtocolNumbers {
     boot_failed_exit_code: i32,
     reparent_failed_exit_code: i32,
     protocol_mismatch_exit_code: i32,
+    /// The core of the child stopped, or the process is a fork of the
+    /// child: the child ends itself with this code.
+    core_stopped_exit_code: i32,
     child_hook_failed_exit_code: i32,
     spawn_request_byte: u8,
     /// A report of left work names `min(count, max_leftover_task_names)`
@@ -148,6 +151,7 @@ fn protocol_numbers() -> ProtocolNumbers {
         boot_failed_exit_code: BOOT_FAILED_EXIT_CODE,
         reparent_failed_exit_code: REPARENT_FAILED_EXIT_CODE,
         protocol_mismatch_exit_code: PROTOCOL_MISMATCH_EXIT_CODE,
+        core_stopped_exit_code: CORE_STOPPED_EXIT_CODE,
         child_hook_failed_exit_code: CHILD_HOOK_FAILED_EXIT_CODE,
         spawn_request_byte: SPAWN_REQUEST_BYTE,
         max_leftover_task_names: MAX_LEFTOVER_TASK_NAMES,

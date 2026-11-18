@@ -45,9 +45,16 @@ from horsies.core.worker.child_runner import (
     attempt_elapsed_ms,
     expired_before_start_of,
     log_finalizing_record,
+    marker_refused,
+    start_ended_by,
     stopped_before_start_of,
 )
-from horsies.core.worker.run_return import StoppedBeforeRunning
+from horsies.core.worker.run_return import (
+    CoreStoppedBeforeStart,
+    MarkerDone,
+    MarkerEnd,
+    StoppedBeforeRunning,
+)
 
 logger = get_logger('worker')
 
@@ -123,12 +130,13 @@ async def _confirm_ownership_and_set_running(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart:
+) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart | CoreStoppedBeforeStart:
     """Set the row RUNNING with its first runner heartbeat. None: started.
 
     Same contract as the sync function of this name in ``child_runner``. A
     failure record of the core and a ``CoreError`` of the core boundary
-    become ``OWNERSHIP_UNCONFIRMED``. The core bounds each write of the
+    become ``OWNERSHIP_UNCONFIRMED``, except ``CoreStopped`` and
+    ``ForkedAfterCoreStart`` (``start_ended_by``). The core bounds each write of the
     attempt by ``RUNNING_ATTEMPT_TIMEOUT_S`` (its ``START_ATTEMPT_BOUND``): a
     start that waits on a row lock gets a cancel request at its bound and
     ends with a failure record, and it does not commit after the bound. The
@@ -154,7 +162,7 @@ async def _confirm_ownership_and_set_running(
         )
         return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
     except (CoreError, CoreFailure) as exc:
-        return _start_unconfirmed(task_id, exc)
+        return start_ended_by(task_id, exc)
 
 
 async def _set_running(
@@ -216,11 +224,11 @@ async def confirm_until_not_resumed(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> StoppedBeforeRunning | None:
+) -> StoppedBeforeRunning | None | CoreStoppedBeforeStart:
     """Run the RUNNING transition, again when a resume came before the stop.
 
-    None: the task starts. ``StoppedBeforeRunning``: the task stops before
-    user code.
+    None: the task starts. ``StoppedBeforeRunning`` or
+    ``CoreStoppedBeforeStart``: the task stops before user code.
     Same contract as ``_confirm_until_not_resumed`` in ``child_runner``.
     """
     for _ in range(_PRE_START_CONFIRM_ATTEMPTS):
@@ -233,7 +241,7 @@ async def confirm_until_not_resumed(
         match result:
             case _WorkflowResumedBeforeStart():
                 continue
-            case None | StoppedBeforeRunning():
+            case None | StoppedBeforeRunning() | CoreStoppedBeforeStart():
                 return result
             case _ as unreachable:
                 assert_never(unreachable)
@@ -249,14 +257,16 @@ async def mark_task_finalizing(
     task_id: uuid.UUID,
     worker_id: str,
     claimed_at: datetime,
-) -> None:
+) -> MarkerEnd:
     """Mark the row of a task whose body ended as waiting for the parent.
 
     Same contract as ``mark_run_finalizing`` in ``child_runner``, through
     ``CoreChildHandle.mark_finalizing_async``. The core bounds the write by
     ``FINALIZING_MARKER_TIMEOUT_S``; the wait of the seat ends at that bound
     too, also when the core call does not answer. A failed or late write is
-    logged only. A cancel of the calling task propagates.
+    logged only (``MarkerDone``). ``CoreStopped`` returns
+    ``MarkerMetStoppedCore``, and ``ForkedAfterCoreStart`` ends the child at
+    once (``marker_refused``). A cancel of the calling task propagates.
     """
     try:
         async with asyncio.timeout(FINALIZING_MARKER_TIMEOUT_S):
@@ -272,8 +282,8 @@ async def mark_task_finalizing(
             task_id,
             FINALIZING_MARKER_TIMEOUT_S,
         )
-        return
+        return MarkerDone()
     except CoreError as exc:
-        logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
-        return
+        return marker_refused(task_id, exc)
     log_finalizing_record(record)
+    return MarkerDone()
