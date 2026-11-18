@@ -32,7 +32,6 @@
     "python/horsies/monitoring/task_actions.py",
     "tests/unit/test_monitoring_query_variants.py",
     "tests/unit/test_task_action_variants.py",
-    "tests/unit/test_history_detail_status_parse.py",
     "tests/docs_examples/extract.py",
     "tests/unit/test_docs_examples_extract.py",
     "python/horsies/core/worker/child_inbox.py",
