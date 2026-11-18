@@ -43,10 +43,11 @@ pub use horsies_core::manifest::PoolRecycle;
 pub use horsies_core::{
     mask_database_url, AppConfig, AppConfigError, CronEnumTerm, CronNumericTerm, CronOrdinal,
     CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
-    HourlySchedule, IntervalSchedule, Month, MonthlySchedule, PausedAgeRefused, PausedWorkflowAge,
-    PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig,
-    RecoveryConfigError, ResilienceConfigError, RetentionConfig, RetentionConfigError,
-    ScheduleConfig, SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    HourlySchedule, IntervalSchedule, JsonTextRefused, Month, MonthlySchedule, PausedAgeRefused,
+    PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
+    RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionConfig,
+    RetentionConfigError, ScheduleConfig, SchedulePattern, TaskSchedule, Weekday, WeeklySchedule,
+    WorkerResilienceConfig,
 };
 
 /// The reservation window of a keyed send: 24 hours, in microseconds

@@ -1,6 +1,7 @@
 //! Schedules: the scheduler sends a task on a pattern. A schedule's input is
-//! the task's stored input, one member per parameter; the check decodes it
-//! with the task's input type before the scheduler starts.
+//! the task's input value (the `Input` of a `#[task]`, one field per
+//! parameter), written as its stored text; the check decodes it with the
+//! task's input type before the scheduler starts.
 //!
 //! ```text
 //! cargo run -p horsies-examples --example schedules -- check
@@ -15,8 +16,8 @@ use std::convert::Infallible;
 use std::process::ExitCode;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, HourlySchedule, IntervalSchedule, ScheduleConfig,
-    SchedulePattern, TaskError, TaskSchedule,
+    task, AppConfig, Horsies, HorsiesError, HourlySchedule, IntervalSchedule, JsonText,
+    JsonTextRefused, ScheduleConfig, SchedulePattern, TaskError, TaskSchedule,
 };
 use horsies_examples::{
     app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
@@ -32,8 +33,8 @@ async fn compact_logs(keep_days: u32) -> Result<u32, TaskError<Infallible>> {
     Ok(keep_days)
 }
 
-fn schedules() -> ScheduleConfig {
-    ScheduleConfig::new(vec![
+fn schedules() -> Result<ScheduleConfig, JsonTextRefused> {
+    Ok(ScheduleConfig::new(vec![
         TaskSchedule::new(
             "heartbeat-every-10s",
             "record_heartbeat",
@@ -42,7 +43,9 @@ fn schedules() -> ScheduleConfig {
                 ..IntervalSchedule::default()
             }),
         )
-        .input(serde_json::json!({ "source": "scheduler" })),
+        .input(&record_heartbeat::Input {
+            source: "scheduler".to_owned(),
+        })?,
         TaskSchedule::new(
             "compact-hourly",
             "compact_logs",
@@ -51,13 +54,15 @@ fn schedules() -> ScheduleConfig {
                 second: 0,
             }),
         )
-        .input(serde_json::json!({ "keep_days": 7 })),
-    ])
+        .input(&compact_logs::Input { keep_days: 7 })?,
+    ]))
 }
 
 fn build_app() -> Result<Horsies, HorsiesError> {
+    let schedule = schedules()
+        .map_err(|refused| HorsiesError::new(format!("a schedule input is refused: {refused}")))?;
     let config = AppConfig {
-        schedule: Some(schedules()),
+        schedule: Some(schedule),
         worker_profiles: BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]),
         ..AppConfig::for_database_url(database_url())
     };
@@ -76,9 +81,10 @@ async fn demo(app: Horsies) -> DemoResult {
         .iter()
         .flat_map(|config| &config.schedules)
     {
+        let input = schedule.input.as_ref().map_or("no input", JsonText::get);
         println!(
-            "{} sends {} with {}",
-            schedule.name, schedule.task_name, schedule.input
+            "{} sends {} with {input}",
+            schedule.name, schedule.task_name
         );
     }
     Ok(())

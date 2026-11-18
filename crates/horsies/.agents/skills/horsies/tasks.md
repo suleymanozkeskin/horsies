@@ -656,7 +656,8 @@ node with the old key fails with `WORKER_SERIALIZATION_ERROR`.
 
 **Write the stored form in schedule input and `input_json`.** A task
 `fn validate_order(order: Order)` reads `{"order": {...}}`, not the fields
-of `Order`.
+of `Order`: a schedule's `.input` takes `validate_order::Input { order }`,
+not the `Order`.
 
 **Use the async forms on a runtime thread.** A blocking call on a thread
 that runs a tokio runtime returns `ASYNC_CONTEXT` and runs nothing.

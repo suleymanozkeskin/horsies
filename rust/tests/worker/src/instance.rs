@@ -214,7 +214,6 @@ pub fn fast_recovery() -> RecoveryConfig {
 
 /// The schedules of [`Instance::Scheduler`] (Python `instance_scheduler.py`).
 fn schedules() -> ScheduleConfig {
-    let no_input = || serde_json::json!({});
     let interval = |seconds: u32| {
         SchedulePattern::Interval(IntervalSchedule {
             seconds: Some(seconds),
@@ -227,27 +226,23 @@ fn schedules() -> ScheduleConfig {
             "e2e_scheduled_simple",
             interval(SCHEDULE_INTERVAL_SECONDS),
         )
-        .input(no_input())
         .timezone("UTC")
         .catch_up_missed(false),
-        TaskSchedule::new(SCHEDULE_DISABLED, "e2e_scheduled_simple", interval(1))
-            .input(no_input())
-            .enabled(false),
+        TaskSchedule::new(SCHEDULE_DISABLED, "e2e_scheduled_simple", interval(1)).enabled(false),
         TaskSchedule::new(
             SCHEDULE_WITH_ARGS,
             "e2e_scheduled_with_args",
             interval(SCHEDULE_INTERVAL_SECONDS),
         )
-        .input(serde_json::json!({ "value": SCHEDULED_VALUE })),
+        .input(&serde_json::json!({ "value": SCHEDULED_VALUE }))
+        .expect("an object of one integer writes as JSON"),
         TaskSchedule::new(SCHEDULE_CATCH_UP, "e2e_catch_up_task", interval(1))
-            .input(no_input())
             .catch_up_missed(true),
         TaskSchedule::new(
             SCHEDULE_CRON_EVERY_MINUTE,
             "e2e_cron_task",
             SchedulePattern::Cron(every_minute()),
         )
-        .input(no_input())
         .timezone("UTC")
         .catch_up_missed(false),
     ])

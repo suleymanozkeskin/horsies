@@ -344,7 +344,8 @@ fn schedules() -> ScheduleConfig {
         SLOT_TASK_NAME,
         every_hour,
     )
-    .input(serde_json::json!({"a": 2, "b": 3}))
+    .input(&serde_json::json!({"a": 2, "b": 3}))
+    .expect("an object of two integers writes as JSON")
     .timezone("UTC")
     .catch_up_missed(true)
     .max_catch_up_runs(SCHEDULE_MAX_CATCH_UP_RUNS)])
