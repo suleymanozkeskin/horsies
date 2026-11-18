@@ -702,8 +702,12 @@ before you upgrade a 0.7 deployment.
   helpers of `horsies.core.brokers.enqueue_task` (everything but
   `SendKind`), the command fingerprint module
   `horsies.core.history.identity.fingerprint` and `ScopedIdempotencyKey` of
-  `horsies.core.history.identity.keys`: the core runs the send. The package
-  `horsies` exports none of them.
+  `horsies.core.history.identity.keys`: the core runs the send. From
+  `horsies.core.codec.task_options`: `stored_retry_policy`,
+  `stored_max_retries`, `InvalidRetryPolicy` and `NoRetryPolicy` (the core
+  reads the stored retry policy). From `horsies.web.schema`:
+  `classify_without_migrations` and `classify_stored_version` (the core
+  classifies the schema). The package `horsies` exports none of them.
 
 ### Rust client (crate `horsies`)
 

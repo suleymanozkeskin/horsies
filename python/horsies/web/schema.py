@@ -46,13 +46,10 @@ SCHEMA_TTL_SECONDS = 60.0
 SCHEMA_INCOMPATIBLE = 'SCHEMA_INCOMPATIBLE'
 SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 
-BASELINE_VERSION: Final = 1000
-"""The version of the baseline migration in ``horsies_migrations``: the
-first version of this schema line (``BASELINE_MIGRATION_VERSION``,
-``crates/horsies-core/src/broker/migrations.rs``)."""
-
-EXPECTED_SCHEMA_VERSION = BASELINE_VERSION
-"""The schema version this build writes through. The core answers an
+EXPECTED_SCHEMA_VERSION: Final = 1000
+"""The schema version this build writes through: the version of the
+baseline migration (``BASELINE_MIGRATION_VERSION``,
+``crates/horsies-core/src/broker/migrations.rs``). The core answers an
 observed status with its own expected version (``SchemaStatusRecord``);
 this value fills the status of a probe that has never read one."""
 
@@ -177,8 +174,8 @@ class SchemaProbe:
 
         One call of ``CoreHandle.schema_status_async`` on the broker's core
         pool. The core reads the bookkeeping tables and the stored version
-        with the rules of ``classify_without_migrations`` and
-        ``classify_stored_version``. Reads only.
+        and classifies them (``crates/horsies-core/src/web/schema.rs``).
+        Reads only.
 
         A read fails when the core cannot connect or read (the core answers
         ``UNKNOWN`` and logs the cause at WARNING), or when the core of this
@@ -216,46 +213,3 @@ def schema_status_of(record: SchemaStatusRecord) -> SchemaStatus | None:
             )
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def classify_without_migrations(*, schema_version_table: bool) -> SchemaStatus:
-    """The verdict for a database without ``horsies_migrations``.
-
-    ``horsies_schema_version`` is the bookkeeping of horsies 0.x Python, so
-    with it the database holds a 0.x schema (ZERO_X); without it the database
-    has no horsies schema (ABSENT). The 0.x version is not read: this build
-    reports it as None.
-    """
-    return SchemaStatus(
-        state=SchemaState.ZERO_X if schema_version_table else SchemaState.ABSENT,
-        version=None,
-        expected_version=EXPECTED_SCHEMA_VERSION,
-    )
-
-
-def classify_stored_version(stored: int) -> SchemaStatus:
-    """The verdict for the highest successful version in ``horsies_migrations``.
-
-    ``stored`` is 0 when no row is recorded as successful: ABSENT. A version
-    below the baseline's is horsies-rust 0.x bookkeeping, since the first
-    version of this schema line is the baseline: ZERO_X. Otherwise the
-    version matches or differs from the one this build expects.
-    """
-    match stored:
-        case 0:
-            return SchemaStatus(
-                state=SchemaState.ABSENT,
-                version=None,
-                expected_version=EXPECTED_SCHEMA_VERSION,
-            )
-        case _ if stored < BASELINE_VERSION:
-            state = SchemaState.ZERO_X
-        case _ if stored == EXPECTED_SCHEMA_VERSION:
-            state = SchemaState.MATCH
-        case _:
-            state = SchemaState.MISMATCH
-    return SchemaStatus(
-        state=state,
-        version=stored,
-        expected_version=EXPECTED_SCHEMA_VERSION,
-    )
