@@ -10,7 +10,9 @@ import multiprocessing
 import os
 import subprocess
 import time
+from typing import Final
 
+from horsies._core import ForkedAfterCoreStart
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
@@ -18,7 +20,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, is_err
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES, preload_profiles
@@ -114,3 +116,47 @@ def run_multiprocessing(*, start_method: str) -> TaskResult[str, TaskError]:
     process.start()
     process.join(30)
     return TaskResult(ok=str(process.exitcode))
+
+
+FORK_POOL_BOUND_S: Final = 10.0
+"""The longest wait for the report of the fork pool worker; a worker that
+hangs fails the task with the pool's ``TimeoutError``."""
+
+
+def _send_in_pool_worker() -> dict[str, str]:
+    """How a send ends in a worker of a fork-start ``multiprocessing.Pool``.
+    Module level, so the pool can name it."""
+    pool_worker_pid = str(os.getpid())
+    try:
+        sent = healthcheck.send()
+    except ForkedAfterCoreStart as refused:
+        core_pid, this_pid, advice = (str(argument) for argument in refused.args)
+        return {
+            'ended': 'raised',
+            'class': type(refused).__name__,
+            'core_pid': core_pid,
+            'this_pid': this_pid,
+            'advice': advice,
+            'pool_worker_pid': pool_worker_pid,
+        }
+    match sent:
+        case Ok():
+            return {'ended': 'sent', 'pool_worker_pid': pool_worker_pid}
+        case Err(err_value=error):
+            return {
+                'ended': 'returned',
+                'class': type(error).__name__,
+                'message': error.message,
+                'pool_worker_pid': pool_worker_pid,
+            }
+
+
+@app.task(task_name='e2e_isolation_fork_pool_send')
+def send_from_fork_pool() -> TaskResult[dict[str, str], TaskError]:
+    """Open a fork-start ``multiprocessing.Pool`` in this task body and send
+    from its worker. The run started on the core of this child, so the pool
+    worker is a fork after the core started."""
+    context = multiprocessing.get_context('fork')
+    with context.Pool(processes=1) as pool:
+        report = pool.apply_async(_send_in_pool_worker).get(timeout=FORK_POOL_BOUND_S)
+    return TaskResult(ok={**report, 'child_pid': str(os.getpid())})
