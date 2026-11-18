@@ -2,27 +2,24 @@
 
 Owned expiry proves the deadline guard from a single locked capture —
 applied on an elapsed deadline, DEADLINE refusal with the capture's own
-facts otherwise. The discovery batch proves the set-wise move: mixed
-plain and workflow-backing rows in one sweep, only transitioned rows
-returned, oldest-first bound honored, SKIP LOCKED stepping around a
-concurrently held row, empty attempt snapshots for never-started tasks,
-set-wise pending creation, the batch deferred-result fence, and the
-non-positive batch-size raise.
+facts otherwise. The discovery batch proves the set-wise move: only
+transitioned rows returned, oldest-first bound honored, SKIP LOCKED
+stepping around a concurrently held row, the batch deferred-result fence,
+and the non-positive batch-size raise. The mixed sweep of plain and
+workflow rows (empty attempt snapshots, the phase-2 records) is a core
+test (``crates/horsies-core/src/broker/lifecycle_tests/
+task_history_terminalization_expiry.rs``, ``mixed_batch_moves_only_eligible_rows``).
 """
 
 from __future__ import annotations
 
 from datetime import timedelta, timezone
-from hashlib import sha256
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
-
-from horsies.core.history.archive.attempts import decode_attempt_snapshot
-from horsies.core.history.archive.versions import DecodedArchiveValue
 
 from tests.integration.task_history_harness import (
     HistorySchema,
@@ -161,127 +158,6 @@ class TestOwnedExpiry:
 
 
 class TestDiscoveryBatch:
-    @pytest.mark.asyncio
-    async def test_mixed_batch_moves_only_eligible_rows(
-        self, terminalization_schema: HistorySchema
-    ) -> None:
-        async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
-            expired_plain = [
-                await insert_live_task(
-                    connection,
-                    class_key=CLASS_KEY,
-                    status='PENDING',
-                    worker=None,
-                    good_until_offset=timedelta(minutes=-(index + 1)),
-                    # The first plain task retains its input, so the batch
-                    # proves policy-eligible carriage; the workflow task
-                    # below proves NEVER_ELIGIBLE despite the same policy
-                    # (eligibility precedes policy).
-                    retain=(index == 0),
-                )
-                for index in range(3)
-            ]
-            wf_task = await insert_live_task(
-                connection,
-                class_key=CLASS_KEY,
-                status='PENDING',
-                worker=None,
-                is_workflow_task=True,
-                retain=True,
-                good_until_offset=timedelta(minutes=-10),
-            )
-            workflow_id = await create_workflow(connection, status='RUNNING')
-            _ = await link_workflow_node(
-                connection,
-                wf_task,
-                workflow_id=workflow_id,
-                node_status='ENQUEUED',
-            )
-            not_expired = await insert_live_task(
-                connection,
-                class_key=CLASS_KEY,
-                status='PENDING',
-                worker=None,
-                good_until_offset=timedelta(minutes=30),
-            )
-            claimed = await insert_live_task(
-                connection,
-                class_key=CLASS_KEY,
-                status='CLAIMED',
-                worker=WORKER,
-                good_until_offset=timedelta(minutes=-5),
-            )
-
-            outcomes = await expire_pending(connection)
-            moved = {str(row.task_id) for row in outcomes}
-            assert moved == {*expired_plain, wf_task}
-            assert all(row.outcome == 'APPLIED' for row in outcomes)
-            assert all(
-                row.terminalization_kind == 'EXPIRE_PENDING'
-                for row in outcomes
-            )
-            assert all(row.observed_status == 'PENDING' for row in outcomes)
-
-            survivors = {
-                str(row.id)
-                for row in (
-                    await connection.execute(
-                        text('SELECT id FROM horsies_tasks')
-                    )
-                ).all()
-            }
-            assert survivors == {not_expired, claimed}
-
-            snapshot = (
-                await connection.execute(
-                    text(
-                        'SELECT attempt_snapshot, attempt_snapshot_digest, '
-                        'rerun_input_disposition '
-                        'FROM horsies_task_history '
-                        'WHERE task_id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': expired_plain[0]},
-                )
-            ).one()
-            decoded = decode_attempt_snapshot(
-                version=1,
-                payload=bytes(snapshot.attempt_snapshot),
-                digest=bytes(snapshot.attempt_snapshot_digest),
-            )
-            assert decoded == DecodedArchiveValue(())
-            assert snapshot.rerun_input_disposition == 'INLINE'
-
-            pending = (
-                await connection.execute(
-                    text(
-                        'SELECT workflow_id, recovery_source, '
-                        'terminalization_kind, result_digest '
-                        'FROM horsies_workflow_phase2_pending '
-                        'WHERE task_id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': wf_task},
-                )
-            ).one()
-            assert str(pending.workflow_id) == workflow_id
-            assert pending.recovery_source == 'HISTORY'
-            assert pending.terminalization_kind == 'EXPIRE_PENDING'
-            assert bytes(pending.result_digest) == sha256(
-                b'{"error":{"code":"TASK_EXPIRED"}}'
-            ).digest()
-
-            wf_disposition = (
-                await connection.execute(
-                    text(
-                        'SELECT rerun_input_disposition '
-                        'FROM horsies_task_history '
-                        'WHERE task_id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': wf_task},
-                )
-            ).scalar_one()
-            assert wf_disposition == 'NEVER_ELIGIBLE'
-
     @pytest.mark.asyncio
     async def test_outcomes_follow_ascending_deadlines(
         self, terminalization_schema: HistorySchema

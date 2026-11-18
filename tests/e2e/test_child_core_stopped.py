@@ -123,8 +123,7 @@ async def test_a_start_refused_by_a_stopped_core_is_released_and_a_new_child_run
 
     stopped_child = await _ok_pid(first)
     new_child = await _ok_pid(second)
-    async with session_factory() as session:
-        attempts = await read_attempts(session, str(second.task_id))
+    attempts = await read_attempts(core_stopped_broker, str(second.task_id))
 
     assert int(marker.read_text(encoding='ascii')) == stopped_child
     assert new_child != stopped_child
@@ -180,8 +179,7 @@ async def test_a_body_that_finished_keeps_its_result_and_a_new_child_serves_next
         log = worker_log_tail(worker)
 
     new_child = await _ok_pid(after)
-    async with session_factory() as session:
-        attempts = await read_attempts(session, str(handle.task_id))
+    attempts = await read_attempts(core_stopped_broker, str(handle.task_id))
 
     assert runs.read_text(encoding='ascii').splitlines() == [str(stopped_child)]
     assert int(marker.read_text(encoding='ascii')) == stopped_child
@@ -229,8 +227,7 @@ async def test_a_body_that_the_stopped_core_interrupted_takes_the_crash_path_and
 
     retried_in = await _ok_pid(handle)
     stopped_child = int(first_run.read_text(encoding='ascii'))
-    async with session_factory() as session:
-        attempts = await read_attempts(session, str(handle.task_id))
+    attempts = await read_attempts(core_stopped_broker, str(handle.task_id))
 
     assert retried_in != stopped_child
     assert [

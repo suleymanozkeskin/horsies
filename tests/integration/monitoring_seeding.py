@@ -30,11 +30,10 @@ from typing import Final, assert_never
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.history.archive.attempts import AttemptRecord
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.models.tasks import Execution
 from horsies.core.types.status import TaskStatus
-from tests.attempt_snapshot_support import encode_attempt_snapshot
+from tests.attempt_snapshot_support import AttemptRecord, encode_attempt_snapshot
 from tests.integration.history_seeding import (
     HISTORY_SEED_CLASS_KEY,
     ensure_history_seedable,

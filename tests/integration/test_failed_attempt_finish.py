@@ -22,8 +22,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from horsies import TaskAttemptInfo
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.archive.attempts import AttemptRecord
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
 
@@ -164,9 +164,8 @@ async def _live_row(engine: AsyncEngine, task_id: str) -> Any:
         ).one_or_none()
 
 
-async def _attempts(engine: AsyncEngine, task_id: str) -> tuple[AttemptRecord, ...]:
-    async with AsyncSession(engine) as session:
-        return await read_attempts(session, task_id)
+async def _attempts(broker: PostgresBroker, task_id: str) -> tuple[TaskAttemptInfo, ...]:
+    return await read_attempts(broker, task_id)
 
 
 _PARTIAL_RETRY_SQL = """
@@ -209,6 +208,7 @@ class TestArguments:
     async def test_a_wrong_argument_raises_and_writes_nothing(
         self,
         engine: AsyncEngine,
+        broker: PostgresBroker,
         seed: Any,
         count: int | None,
         delay: float | None,
@@ -243,4 +243,4 @@ class TestArguments:
 
         assert getattr(raised.value.orig, 'sqlstate', None) == sqlstate
         assert await _live_row(engine, seeded.task_id) == before
-        assert await _attempts(engine, seeded.task_id) == ()
+        assert await _attempts(broker, seeded.task_id) == ()
