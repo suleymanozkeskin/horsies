@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::codec::JsonText;
 use crate::core::task::error::TaskError;
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::node::NodeKey;
@@ -33,10 +34,11 @@ pub struct WorkflowContext {
     /// Registered task function name.
     pub task_name: String,
 
-    /// Upstream task results keyed by node_id.
-    /// Values are TaskResult JSON values (serialized task results).
+    /// Upstream task results keyed by node_id. Each value keeps its stored text, so
+    /// [`Self::result_for`] decodes it with the asked type: an integer outside the `i64` and `u64` range
+    /// reads as `u128` or `i128`.
     #[serde(default)]
-    results_by_id: HashMap<String, TaskResult<serde_json::Value>>,
+    results_by_id: HashMap<String, TaskResult<JsonText>>,
 
     /// Sub-workflow summaries keyed by node_id.
     #[serde(default)]
@@ -49,7 +51,7 @@ impl WorkflowContext {
         workflow_id: Uuid,
         task_index: i32,
         task_name: String,
-        results_by_id: HashMap<String, TaskResult<serde_json::Value>>,
+        results_by_id: HashMap<String, TaskResult<JsonText>>,
         summaries_by_id: HashMap<String, SubWorkflowSummary>,
     ) -> Self {
         Self {
@@ -63,7 +65,7 @@ impl WorkflowContext {
 
     /// Retrieve the typed result from an upstream node.
     ///
-    /// Deserializes the stored JSON value into `T`. Returns a `TaskError`
+    /// Decodes `T` from the stored text of the value. Returns a `TaskError`
     /// if the node_id is not found or deserialization fails.
     pub fn result_for<T: DeserializeOwned>(
         &self,
@@ -81,7 +83,7 @@ impl WorkflowContext {
 
         match value {
             TaskResult::Ok(ok_value) => {
-                let parsed = serde_json::from_value(ok_value.clone()).map_err(|e| {
+                let parsed = ok_value.decode::<T>().map_err(|e| {
                     TaskError::builtin(
                         crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
                         format!(
@@ -165,16 +167,21 @@ impl WorkflowContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::codec::JsonText;
     use crate::core::workflow::status::WorkflowStatus;
 
     fn make_ctx() -> WorkflowContext {
         let mut results = HashMap::new();
         results.insert(
             "fetch:0".to_owned(),
-            TaskResult::Ok(serde_json::json!({"url": "https://example.com", "body": "hello"})),
+            TaskResult::Ok(
+                JsonText::of(&serde_json::json!({"url": "https://example.com", "body": "hello"}))
+                    .unwrap(),
+            ),
         );
-        results.insert("count:1".to_owned(), TaskResult::Ok(serde_json::json!(42)));
+        results.insert(
+            "count:1".to_owned(),
+            TaskResult::Ok(JsonText::parse("42").unwrap()),
+        );
         WorkflowContext::new(
             Uuid::nil(),
             2,
@@ -405,6 +412,29 @@ mod tests {
                 label: "done".to_owned(),
             })
         );
+    }
+
+    /// A result read from its stored envelope decodes from the value's text: an integer outside the `i64` and
+    /// `u64` range reads as `u128` or `i128`.
+    #[test]
+    fn result_for_reads_an_integer_outside_i64_and_u64() {
+        let text = concat!(
+            r#"{"workflow_id": "00000000-0000-0000-0000-000000000000", "task_index": 1, "task_name": "t","#,
+            r#" "results_by_id": {"#,
+            r#""wide": {"__h_task_result__": true, "ok": 340282366920938463463374607431768211455, "err": null},"#,
+            r#""below": {"__h_task_result__": true, "ok": -9223372036854775809, "err": null}}}"#,
+        );
+        let ctx: WorkflowContext = serde_json::from_str(text).unwrap();
+        let wide: NodeKey<u128> = NodeKey::new("wide".to_owned());
+        assert_eq!(ctx.result_for(&wide).unwrap().unwrap(), u128::MAX);
+        let below: NodeKey<i128> = NodeKey::new("below".to_owned());
+        assert_eq!(
+            ctx.result_for(&below).unwrap().unwrap(),
+            i128::from(i64::MIN) - 1
+        );
+        assert!(serde_json::to_string(&ctx)
+            .unwrap()
+            .contains(r#""ok":340282366920938463463374607431768211455,"#));
     }
 
     /// The output of a summary read from its stored text decodes from that text: an integer outside the `i64`

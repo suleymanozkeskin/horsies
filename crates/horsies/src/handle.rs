@@ -28,7 +28,7 @@ use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
     process_role, wait_inside_task_message, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BuiltInTaskCode, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRead,
+    BuiltInTaskCode, JsonText, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRead,
     RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead, TaskResult,
 };
 use serde::de::DeserializeOwned;
@@ -46,10 +46,11 @@ pub use horsies_core::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_
 pub use horsies_core::{TaskAttemptInfo, TaskStatus};
 
 /// The info of a task. Its `result` is the stored result read as a
-/// `TaskResult`: the `ok` slot as JSON, the `err` slot as a stored task
-/// error. The core's read returns the envelope as stored, and the client
-/// reads it (Python `Horsies.get_task_info_async`).
-pub type TaskInfo = horsies_core::TaskInfo<TaskResult<serde_json::Value>>;
+/// `TaskResult`: the `ok` slot as its stored text (`JsonText::decode` reads
+/// it with the task's type), the `err` slot as a stored task error. The
+/// core's read returns the envelope as stored, and the client reads it
+/// (Python `Horsies.get_task_info_async`).
+pub type TaskInfo = horsies_core::TaskInfo<TaskResult<JsonText>>;
 
 /// What a task ended with.
 #[derive(Debug, Clone, PartialEq)]
@@ -334,7 +335,7 @@ fn task_info_of_stored(
 ) -> Result<TaskInfo, ReadError> {
     let task_id = info.task_id;
     info.try_map_result(|envelope| {
-        task_result_from_json_str::<serde_json::Value>(envelope.as_str()).map_err(|error| {
+        task_result_from_json_str::<JsonText>(envelope.as_str()).map_err(|error| {
             ReadError::StoredResultUnreadable {
                 task_id,
                 cause: unreadable_cause(&error),
@@ -949,7 +950,7 @@ mod tests {
         let Some(TaskResult::Ok(value)) = info.result else {
             panic!("a stored value is an ok result");
         };
-        assert_eq!(value, json!(3));
+        assert_eq!(value.get(), "3");
         assert_eq!(info.task_name, "charge");
         assert_eq!(info.retry_count, 1);
 
@@ -968,6 +969,22 @@ mod tests {
 
         let none = task_info_of_stored(stored_info(None)).expect("no result reads");
         assert!(none.result.is_none());
+
+        // The value keeps its stored text: an integer outside the `i64` and
+        // `u64` range keeps every digit.
+        for wide in [
+            "340282366920938463463374607431768211455",
+            "-9223372036854775809",
+        ] {
+            let text = format!(r#"{{"__h_task_result__":true,"ok":{wide},"err":null}}"#);
+            let mut stored = stored_info(None);
+            stored.result = StoredEnvelopeText::parse(text).unwrap();
+            let info = task_info_of_stored(stored).expect("a wide value reads");
+            let Some(TaskResult::Ok(value)) = info.result else {
+                panic!("a stored value is an ok result");
+            };
+            assert_eq!(value.get(), wide);
+        }
     }
 
     /// The core returns any stored object; the client's typed read refuses

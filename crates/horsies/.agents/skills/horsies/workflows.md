@@ -393,8 +393,9 @@ with the error's id.
   workflow is `Failed` with `WORKFLOW_PAUSED`; a resume can continue it.
 - A workflow with no output node is read as `OutputlessResults`: `get(id)`,
   `iter()`, `len()`, `is_empty()`, each outcome as
-  `TaskOutcome<serde_json::Value, UserCode>`.
-- `NodeResult` is `Outcome(TaskOutcome<serde_json::Value, UserCode>)` or
+  `TaskOutcome<JsonText, UserCode>`: the value as its stored text, read with
+  `decode::<T>()`.
+- `NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or
   `Unreadable { cause }`.
 - `WorkflowNodeInfo` has `node_id`, `index`, `name`, `status`
   (`WorkflowTaskStatus`), `result`, `started_at`, `completed_at`,
