@@ -157,6 +157,18 @@ from .core.models.task_send_types import (
     TaskSendEventLoopLimit,
     TaskSendLoopRunnerFailed,
 )
+from .core.brokers.enqueue_task import SendKind
+from ._core import (
+    CoreCallTimedOut,
+    CoreConnectionError,
+    CoreContractViolation,
+    CorePreconditionFailed,
+    CoreServerError,
+    CoreStartFailed,
+    CoreStopped,
+    ForkedAfterCoreStart,
+    TooManyPendingCalls,
+)
 from .core.brokers.result_types import (
     BrokerErrorCode,
     BrokerOperationError,
@@ -418,6 +430,18 @@ __all__ = [
     'BrokerListenerDisabled',
     'BrokerWaitInsideTask',
     'broker_error_cause',
+    'SendKind',
+    # Core errors: the exception of a failed database call, and the errors of a
+    # call that the core of the process cannot run
+    'CoreServerError',
+    'CoreConnectionError',
+    'CoreContractViolation',
+    'CorePreconditionFailed',
+    'ForkedAfterCoreStart',
+    'CoreStopped',
+    'TooManyPendingCalls',
+    'CoreCallTimedOut',
+    'CoreStartFailed',
     # Health / liveness API
     'DatabasePing',
     'WorkerPong',
