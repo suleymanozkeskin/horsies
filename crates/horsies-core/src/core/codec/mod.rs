@@ -9,7 +9,7 @@ mod strict;
 mod strict_read;
 pub mod user_value;
 pub use json_text::{JsonText, JsonTextRefused};
-pub(crate) use object_members::object_members;
+pub use object_members::object_members;
 pub use strict::{to_json_bytes_strict, to_json_value_strict};
 pub use strict_read::{
     check_json_bytes, check_json_bytes_with, check_json_text, check_json_text_with, JsonConstant,

@@ -561,6 +561,10 @@ unless it starts with "Added".
   the `i64` and `u64` range reads as `u128` or `i128`, as in Python. A
   dependency result (a `TaskOutcome<S, E>` input field) and
   `WorkflowContext::result_for` decode the value from its stored text too.
+  The reads with no type keep the value as its stored text, `JsonText`: the
+  `result` of `TaskInfo` is `TaskResult<JsonText>`, `NodeResult::Outcome`
+  and each entry of `OutputlessResults` are `TaskOutcome<JsonText,
+  UserCode>`.
   The worker's child and the sub-workflow child build pass each input member
   and each dependency result to the task or the builder as stored.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and

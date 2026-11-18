@@ -264,9 +264,9 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 - returns `Failed` with `WORKFLOW_PAUSED` for a PAUSED workflow, which a resume can continue;
 - in a worker child, is refused with `WaitInsideTask` before any statement.
 
-A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<serde_json::Value, UserCode>`. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
+A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<JsonText, UserCode>`. The value is its stored text: `get()` gives the text, `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
 
-`NodeResult` is `Outcome(TaskOutcome<serde_json::Value, UserCode>)` or `Unreadable { cause }`.
+`NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or `Unreadable { cause }`.
 
 `WorkflowNodeInfo`:
 
