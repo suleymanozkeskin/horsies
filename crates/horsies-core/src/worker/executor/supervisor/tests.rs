@@ -81,6 +81,52 @@ fn exit_codes_are_read_in_the_protocol() {
     );
     assert!(ReapedExit::KilledBySignal(libc::SIGKILL).is_sigkill());
     assert!(!ReapedExit::ExitedWith(libc::SIGKILL).is_sigkill());
+    assert_eq!(
+        ReapedExit::ExitedWith(80).meaning(),
+        ExitMeaning::Protocol(ChildExitCode::CoreStopped)
+    );
+}
+
+/// A child that held no task and ended with the core-stopped code is
+/// replaced with an error log; every other end keeps its path.
+#[test]
+fn an_end_without_a_task_names_a_stopped_core_only() {
+    assert_eq!(
+        EndWithoutTask::of(exited(ChildExitCode::CoreStopped.code())),
+        EndWithoutTask::CoreStopped
+    );
+    let others = [
+        exited(0),
+        exited(1),
+        exited(ChildExitCode::ParentGone.code()),
+        exited(ChildExitCode::BootFailed.code()),
+        exited(ChildExitCode::ChildHookFailed.code()),
+        killed(),
+        ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGSEGV)),
+        ChildExit::ReapedElsewhere,
+        ChildExit::ExitUnknown,
+    ];
+    for exit in others {
+        assert_eq!(EndWithoutTask::of(exit), EndWithoutTask::Other, "{exit}");
+    }
+}
+
+/// A child that dies with the core-stopped code before its ready frame is a
+/// boot failure lost before ready, as the other codes of a child.
+#[test]
+fn a_core_stopped_exit_before_ready_is_lost_before_ready() {
+    let exit = exited(ChildExitCode::CoreStopped.code());
+    let cause = cause_of(boot_end_of(BootReply::Lost(lost(
+        LossCause::ChildDied,
+        exit,
+    ))));
+    assert_eq!(
+        cause,
+        BootFailureCause::LostBeforeReady {
+            loss: LossCause::ChildDied,
+            exit,
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------

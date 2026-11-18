@@ -1,14 +1,14 @@
 //! Render integer constants of horsies-core as modules of `_catalog`
-//! (`release_bounds.py`, `monitoring_bounds.py`). Each constant is a
-//! `Final` integer whose value is the core's constant, so a Python bound
-//! cannot differ from the bound that the core enforces: `check` fails when a
-//! core value changes and the module is not written again.
+//! (`release_bounds.py`, `monitoring_bounds.py`, `broker_bounds.py`). Each
+//! constant is a `Final` integer whose value is the core's constant, so a
+//! Python bound cannot differ from the bound that the core enforces: `check`
+//! fails when a core value changes and the module is not written again.
 
 use horsies_core::monitoring::{
-    MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,
-    MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
+    LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
+    MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
-use horsies_core::MAX_RELEASED_CLAIMS;
+use horsies_core::{MAX_RELEASED_CLAIMS, TASK_LIST_BOUND};
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 
@@ -48,7 +48,7 @@ pub const RELEASE_BOUNDS: ConstantModule = ConstantModule {
     constants: &RELEASE_CONSTANTS,
 };
 
-const MONITORING_CONSTANTS: [CoreConstant; 6] = [
+const MONITORING_CONSTANTS: [CoreConstant; 7] = [
     CoreConstant {
         name: "MONITORING_WINDOW_DEFAULT_SECONDS",
         doc: "The span of the window of a read that gives no bound.",
@@ -79,6 +79,12 @@ const MONITORING_CONSTANTS: [CoreConstant; 6] = [
         doc: "The most runs of one workflow runs list.",
         value: MAX_WORKFLOW_RUNS_LIMIT,
     },
+    CoreConstant {
+        name: "LIST_ROW_BOUND",
+        doc: "The most rows of the workflow names list and of the schedules list; a\n\
+              longer list is cut at the bound.",
+        value: LIST_ROW_BOUND as i64,
+    },
 ];
 
 /// The bounds of the monitoring reads. The window spans are whole seconds.
@@ -89,8 +95,24 @@ pub const MONITORING_BOUNDS: ConstantModule = ConstantModule {
     constants: &MONITORING_CONSTANTS,
 };
 
+const BROKER_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
+    name: "TASK_LIST_ROW_BOUND",
+    doc: "The most rows of the stale task list and of the expired task list; a\n\
+          longer list is cut at the bound.",
+    value: TASK_LIST_BOUND as i64,
+}];
+
+/// The bound of the stale and expired task lists of the broker.
+pub const BROKER_BOUNDS: ConstantModule = ConstantModule {
+    file: "broker_bounds.py",
+    doc: "The bound of the task lists of the broker of horsies-core, generated from its\n\
+          Rust constant.",
+    constants: &BROKER_CONSTANTS,
+};
+
 /// Every generated module of core constants, in file order.
-pub const CONSTANT_MODULES: [ConstantModule; 2] = [RELEASE_BOUNDS, MONITORING_BOUNDS];
+pub const CONSTANT_MODULES: [ConstantModule; 3] =
+    [RELEASE_BOUNDS, MONITORING_BOUNDS, BROKER_BOUNDS];
 
 /// The text of one module of core constants.
 pub fn render_constant_module(module: &ConstantModule) -> String {
@@ -171,12 +193,17 @@ mod tests {
             ("MAX_TASK_PAGE_LIMIT", MAX_TASK_PAGE_LIMIT),
             ("MAX_BREAKDOWN_LIMIT", MAX_BREAKDOWN_LIMIT),
             ("MAX_WORKFLOW_RUNS_LIMIT", MAX_WORKFLOW_RUNS_LIMIT),
+            ("LIST_ROW_BOUND", LIST_ROW_BOUND as i64),
         ] {
             assert!(
                 rendered.contains(&format!("\n{name}: Final = {value}\n")),
                 "{name}"
             );
         }
+        let rendered = render_constant_module(&BROKER_BOUNDS);
+        assert!(rendered.contains(&format!(
+            "\nTASK_LIST_ROW_BOUND: Final = {TASK_LIST_BOUND}\n"
+        )));
     }
 
     /// A span in whole seconds loses nothing of the core's span.
