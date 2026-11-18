@@ -152,8 +152,9 @@ The code enums `BrokerErrorCode`, `TaskSendErrorCode`, `WorkflowStartErrorCode`,
 
 `ForkedAfterCoreStart` and `CoreStopped` are states of the process. The core refuses each later call in that process, so a retry in the same process gets the same refusal. Import both from `horsies._core`.
 
-- The sends raise them: `send()`, `send_async()`, `schedule()`, `schedule_async()`, `retry_send()`, `retry_send_async()`, `retry_schedule()` and `retry_schedule_async()`. `PostgresBroker.enqueue()` and `enqueue_async()` raise them too. These calls never return them as `ENQUEUE_FAILED`.
-- The other calls return their failure code, with the error as `exception`.
+- Each call that runs on the core raises them, in its sync form and in its async form. No call returns them as a result, and no result type has a variant for them.
+- This covers the sends and their retry methods, `PostgresBroker.enqueue()`, the task, result and health reads, `ensure_schema_initialized()`, `check(live=True)`, the workflow start, the methods of `WorkflowHandle`, `pause_workflow()`, `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`.
+- Code that handles only the `Err` of a call does not see them.
 
 See [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals).
 
@@ -198,7 +199,7 @@ if __name__ == '__main__':
 A core background task panicked. `args` are the `(subject, cause)` of the first panic. The panic is a defect of horsies.
 
 - In a `horsies worker` process, the panic aborts the process. Its supervisor restarts it.
-- In each other process, for example a producer, `horsies scheduler` or a web app, the core stops. Each later call gets `CoreStopped`.
+- In each other process, for example a producer, `horsies scheduler` or a web app, the core stops. Each later call raises `CoreStopped`.
 
 To fix it, restart the process. The core does not start again in the same process. Report the subject and the cause.
 
@@ -297,4 +298,4 @@ The changes in behaviour that need no change of code are in the Changed and Fixe
 
 **Do not stop the 0.7 workers before the queues drain.** The tasks that wait in the 0.7 database do not move to the new database.
 
-**Do not call horsies in a child that its parent forked after a call that runs on the core.** Each core call in the child raises or returns `ForkedAfterCoreStart`. Use the `spawn` or `forkserver` start method.
+**Do not call horsies in a child that its parent forked after a call that runs on the core.** Each core call in the child raises `ForkedAfterCoreStart`. Use the `spawn` or `forkserver` start method.
