@@ -169,9 +169,9 @@ fn default_reservation_window() -> ReservationWindowMicros {
 ///
 /// - A worker profile asks for no preload parent. A preload parent imports
 ///   Python code once before it forks children; a Rust worker starts each
-///   child with `exec` of its own binary, which holds every task. The core's
-///   default preload is Python's (`library`), so a Rust profile sets
-///   `ChildPreload::NoPreload`.
+///   child with `exec` of its own binary, which holds every task. A profile
+///   that does not set `preload` has the core's default,
+///   `ChildPreload::NoPreload`; an explicit `Library` or `App` is refused.
 pub(crate) fn rust_config_refusals(config: &AppConfig) -> Vec<HorsiesError> {
     preload_refusals(&config.worker_profiles)
 }
@@ -198,7 +198,10 @@ fn preload_refusal(profile_name: &str, preload: ChildPreload) -> HorsiesError {
         "a Rust worker starts each child with exec of its own binary, which holds every \
          task, so there is nothing to preload",
     )
-    .with_help("set preload: ChildPreload::NoPreload in this profile")
+    .with_help(
+        "remove preload from this profile: the default is ChildPreload::NoPreload, the only \
+         value that a Rust worker takes",
+    )
 }
 
 #[cfg(test)]
@@ -307,6 +310,8 @@ mod tests {
         }
     }
 
+    /// An explicit `Library` or `App` is refused with its path; an explicit
+    /// `NoPreload` is not.
     #[test]
     fn a_profile_with_a_preload_is_refused_with_its_path() {
         let mut config = AppConfig::for_database_url("postgresql://db/horsies");

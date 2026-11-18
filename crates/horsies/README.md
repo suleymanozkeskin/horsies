@@ -32,7 +32,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, ChildPreload, Horsies, IsolatedChildCount, IsolatedChildren,
+    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
     IsolatedSetting, TaskError, TaskOutcome, WaitLimit, WorkerProfile,
 };
 
@@ -49,7 +49,6 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
         isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
             IsolatedChildCount::try_from(2)?,
         )),
-        preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     };
     let config = AppConfig {

@@ -56,7 +56,7 @@ See [CLI Reference](/horsies/rust/cli/), [Worker Setup](/horsies/rust/workers/wo
 | `role` and `set_role` with a string | `AppRole::Producer`, `Worker`, `Scheduler` |
 | `AppError`, `AppResult` | Removed. `HorsiesError` for the config, a registration and `provide`; each other call returns its own closed error type |
 | `PostgresBroker`, `Broker`, `pub mod core`, the row and listener types, `run_horsies_migrations`, `registry()`, `workflow_registry()` | No longer public |
-| – | `broker.pool_size` outside 1 to 10,000 or `broker.max_overflow` above 10,000 is refused. A worker profile whose `preload` is not `ChildPreload::NoPreload` is refused (`HRS-218`) |
+| – | `broker.pool_size` outside 1 to 10,000 or `broker.max_overflow` above 10,000 is refused. A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` is refused (`HRS-218`). A profile that does not set `preload` has `ChildPreload::NoPreload`, the default of `ChildPreload` |
 | – | Added: `suppress_sends`, `are_sends_suppressed`, `HORSIES_SUPPRESS_SENDS` |
 
 In `Default` queue mode a task that names a queue is refused, and in `Custom` mode a task that names no queue is refused (`HRS-200`). See [App Config](/horsies/rust/configuration/app-config/).
