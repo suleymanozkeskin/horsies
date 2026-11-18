@@ -42,14 +42,6 @@ class HandleErrorCode(str, Enum):
     The workflow is RUNNING. Not retryable.
     """
 
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    """Internal polling/event-loop runner failed."""
-
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event loops, and this call ran on a
-    new one. Nothing ran. Python client only; removed before 0.8.0.
-    """
-
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
     """A sync or blocking handle method was called on a thread that runs an event loop or a tokio
     runtime. Its wait would stall that loop, so nothing ran.

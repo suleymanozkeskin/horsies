@@ -94,11 +94,6 @@ class RetrievalCode(str, Enum):
 
     RESULT_NOT_READY = 'RESULT_NOT_READY'
 
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event loops, so this new loop
-    cannot read the value now. Never cached: it clears when one of those loops closes.
-    """
-
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
     """A sync get was called on a thread that runs an event loop, so this call site cannot wait for
     the value. Never cached: the async form, or a sync call from a thread without a running loop,
