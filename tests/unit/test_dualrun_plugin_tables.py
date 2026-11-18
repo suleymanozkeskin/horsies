@@ -3,7 +3,8 @@
 Each listed node id names a test that exists, and no test is both core-only
 and reference-only for one module. A wrong id runs the test twice, and its
 run on the other implementation trips. A wrong id in ``LARGE_SEED_TESTS``
-leaves its test at the default capture limit.
+leaves its test at the default capture limit. A wrong id in ``PAIR_RULES``
+leaves its test on the compare of the whole snapshot.
 """
 
 from __future__ import annotations
@@ -18,11 +19,18 @@ from tests.dualrun.operations.plugin import (
     CORE_ONLY_TESTS,
     LARGE_SEED_ROW_LIMIT,
     LARGE_SEED_TESTS,
+    PAIR_RULES,
     REFERENCE_ONLY_TESTS,
     _implementations,  # pyright: ignore[reportPrivateUsage]
+    _pair_compare,  # pyright: ignore[reportPrivateUsage]
     _row_limit,  # pyright: ignore[reportPrivateUsage]
 )
-from tests.dualrun.operations.table import Implementation, SwitchModule
+from tests.dualrun.operations.table import (
+    Implementation,
+    PairRule,
+    SwitchModule,
+    WholeSnapshot,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -81,6 +89,27 @@ def test_a_test_outside_the_large_seed_list_reads_the_default_limit() -> None:
 
     assert _defines(node_id)
     assert _row_limit(node_id) == TABLE_ROW_LIMIT < LARGE_SEED_ROW_LIMIT
+
+
+@pytest.mark.parametrize(
+    'rule', PAIR_RULES, ids=[rule.fact.name for rule in PAIR_RULES]
+)
+def test_each_pair_rule_names_a_test_that_exists_and_is_its_compare(
+    rule: PairRule,
+) -> None:
+    assert _defines(rule.node_id), f'{rule.node_id} names no test'
+    assert _pair_compare(rule.node_id) == rule
+
+
+def test_a_test_without_a_pair_rule_compares_the_whole_snapshot() -> None:
+    """The other test of the class of the race rule keeps the whole compare."""
+    node_id = (
+        'tests/integration/test_monitoring_task_actions.py::TestClaimCancelRace::'
+        'test_cancel_of_a_freshly_claimed_row_still_wins'
+    )
+
+    assert _defines(node_id)
+    assert _pair_compare(node_id) == WholeSnapshot()
 
 
 def test_no_test_is_core_only_and_reference_only() -> None:
