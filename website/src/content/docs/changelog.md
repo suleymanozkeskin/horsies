@@ -289,6 +289,20 @@ before you upgrade a 0.7 deployment.
   core worker write the same key. An isolated or `SHARED_THREAD` timeout
   has no `cancel_end`. The `data` keeps `task_id` and `timeout_ms`.
 
+- **A workflow whose start did not finish fails with
+  `WORKFLOW_START_INCOMPLETE`.** `OperationalErrorCode` has the new member
+  `WORKFLOW_START_INCOMPLETE`. When recovery finds a RUNNING workflow with
+  no node rows, it fails the workflow and stores a `TaskError` with this
+  code, the message `Orphaned workflow '<name>': no workflow_tasks found.
+  Workflow task insertion did not complete.` and the `data` keys
+  `workflow_id` and `recovery` (`case_4`). `WorkflowHandle.get()` returns
+  this error. 0.7 stored an error object with the code `E400` that is not a
+  `TaskError`, and `WorkflowHandle.get()` returned
+  `RESULT_DESERIALIZATION_ERROR`. `TaskError` refuses the text
+  `'WORKFLOW_START_INCOMPLETE'` as a user code; 0.7 accepted it. Add the
+  member to an exhaustive `match` on `OperationalErrorCode`, and rename a
+  user code with this name.
+
 - **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
   longer age is refused when the config is built: Python raises
   `ConfigurationError` with `CONFIG_INVALID_RETENTION` (HRS-216), and the
@@ -456,6 +470,13 @@ before you upgrade a 0.7 deployment.
   key of `GET /api/workers/classes`, and the `not_recorded` value of
   `slot_health` (`GET /api/workers`). On the baseline schema every snapshot
   records these facts.
+
+- **`RerunInputUnavailable.reference_locator`.** `RerunInputUnavailable`
+  keeps `task_id` and `disposition`. The baseline history row stores no
+  input reference: a row without a stored input holds only its disposition
+  (`DECLINED_BY_POLICY`, `OVER_BOUND` or `NEVER_ELIGIBLE`). In 0.7 no
+  writer stored a reference, so the field was always `None`. Remove the
+  read.
 
 - **The Python route modules of the web app.** `horsies.web.routes`,
   `horsies.web.events`, `horsies.web.read_cache`,
@@ -984,6 +1005,8 @@ unless it starts with "Added".
   `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
   `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
   `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+  `InputUnavailable` has `task_id` and `disposition`: its field
+  `reference_locator`, which was always `None`, is removed.
 - **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
   sent_at)`**, the rerun in a transaction that the caller owns (Python
   `rerun_task(connection, ...)`): the core builds each statement and
