@@ -103,10 +103,7 @@ impl PgbouncerUrls {
             .execute(&mut connection)
             .await
             .expect("create the test database");
-        connection
-            .close()
-            .await
-            .expect("close the admin connection");
+        connection.close().await;
         Self {
             admin,
             direct: with_database(&direct, &database_name),
@@ -137,10 +134,7 @@ impl PgbouncerUrls {
         .execute(&mut connection)
         .await
         .expect("drop the test database");
-        connection
-            .close()
-            .await
-            .expect("close the admin connection");
+        connection.close().await;
     }
 }
 

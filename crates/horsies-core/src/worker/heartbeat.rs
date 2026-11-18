@@ -209,7 +209,10 @@ mod tests {
             ensure_heartbeat_coverage, EnsureHeartbeatCoverage,
         };
         let pool = crate::test_support::migrated_pool().await;
-        let mut connection = pool.acquire().await.expect("acquire");
+        // ensure_heartbeat_coverage takes a sqlx connection: it runs on the
+        // sqlx pool of the same database.
+        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+        let mut connection = sqlx_pool.acquire().await.expect("acquire");
         ensure_heartbeat_coverage(
             &mut connection,
             &EnsureHeartbeatCoverage::new(2).expect("coverage command"),
@@ -217,6 +220,7 @@ mod tests {
         .await
         .expect("heartbeat leaves");
         drop(connection);
+        sqlx_pool.close().await;
         pool
     }
 

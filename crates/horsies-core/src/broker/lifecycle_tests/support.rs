@@ -16,6 +16,7 @@ use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_postgres::error::DbError;
+use tokio_postgres::Row;
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{
