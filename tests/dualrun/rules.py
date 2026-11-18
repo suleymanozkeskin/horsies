@@ -122,7 +122,13 @@ class EachItem:
     """A path step into every element of an array."""
 
 
-PathStep = Key | Index | EachItem
+@dataclass(frozen=True, slots=True)
+class EachMember:
+    """A path step into every member of an object, whatever its key: a map
+    whose keys are data (node ids), not names of the format."""
+
+
+PathStep = Key | Index | EachItem | EachMember
 
 
 class TimeEncoding(Enum):

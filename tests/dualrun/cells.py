@@ -21,6 +21,7 @@ from tests.dualrun.rules import (
     AnchorReference,
     DigestOf,
     EachItem,
+    EachMember,
     Exact,
     FormatVersion,
     GeneratedName,
@@ -527,6 +528,8 @@ def _advance(alive: _Alive, paths: tuple[JsonPath, ...], key: str | int) -> _Ali
             case Index(position=position), int() if position == key:
                 moved.append((path_index, matched + 1))
             case EachItem(), int():
+                moved.append((path_index, matched + 1))
+            case EachMember(), str():
                 moved.append((path_index, matched + 1))
             case _:
                 pass
