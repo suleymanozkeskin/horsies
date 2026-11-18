@@ -17,7 +17,7 @@ production facades are tested on a mocked core handle in
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import get_args
+
 from uuid import UUID
 
 import pytest
@@ -49,6 +49,7 @@ from tests.monitoring_function_support import (
     list_totals_row,
     node_row,
 )
+from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
 
@@ -79,7 +80,7 @@ def _variant_id(error: MonitoringQueryError) -> str:
 
 class TestVariantCatalog:
     def test_each_code_names_exactly_one_variant(self) -> None:
-        codes = [variant.code for variant in get_args(MonitoringQueryError.__value__)]
+        codes = [variant.code for variant in union_members(MonitoringQueryError)]
 
         assert len(codes) == len(set(codes))
         assert set(codes) == set(MonitoringQueryErrorCode)
@@ -87,7 +88,7 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
-        assert built == set(get_args(MonitoringQueryError.__value__))
+        assert built == set(union_members(MonitoringQueryError))
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError(CAUSE_MARKER)), ids=_variant_id,

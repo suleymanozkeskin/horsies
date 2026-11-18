@@ -261,6 +261,62 @@ async fn get_after_cancel_gives_workflow_cancelled() {
     assert_eq!(code(error_of(&got)).as_deref(), Some("WORKFLOW_CANCELLED"));
 }
 
+/// `TestWorkflowHandleGet.test_get_completed_returns_result`: a workflow of
+/// one node whose output is that node gives the node's result at `get()`.
+#[tokio::test]
+#[serial]
+async fn get_of_a_completed_workflow_gives_the_result_of_its_output_node() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let mut workflow_spec = spec("get_completed", vec![task_node(0, "get_completed_a")]);
+    workflow_spec.output_index = Some(0);
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+    let _a = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(100)),
+        &child_specs,
+    )
+    .await;
+
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
+
+    match got {
+        TaskResult::Ok(value) => assert_eq!(value, serde_json::json!(100)),
+        TaskResult::Err(error) => panic!("a completed workflow gave an error: {error:?}"),
+    }
+}
+
+/// `TestWorkflowHandleGet.test_get_failed_returns_error`: a workflow whose
+/// one node fails gives the node's error at `get()`.
+#[tokio::test]
+#[serial]
+async fn get_of_a_failed_workflow_gives_the_error_of_its_node() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_spec = spec("get_failed", vec![task_node(0, "get_failed_a")]);
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+    let _a = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &err("TEST_ERROR", "Test failure"),
+        &child_specs,
+    )
+    .await;
+
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
+
+    assert_eq!(code(error_of(&got)).as_deref(), Some("TEST_ERROR"));
+}
+
 /// A finished chain: A gave 10 and B gave 20.
 async fn finished_chain(pool: &PgPool, name: &str) -> Uuid {
     let child_specs = TestChildSpecs::empty();
