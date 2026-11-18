@@ -210,6 +210,8 @@ To fix it, restart the process. The core does not start again in the same proces
 | `ClassCapacityNotRecorded`; `ClassCapacity` was `ClassBudgets \| ClassCapacityNotRecorded` | Removed. `ClassCapacity` is `ClassBudgets` | Remove the match arm |
 | `ClassesNotRecorded`, `horsies.monitoring.ClassesNotRecordedInfo`, and the `not_recorded` fields of `ClassCoverage`, `ClassReport` and `ClassReportInfo` | Removed. Each worker snapshot of the baseline schema records these facts | Remove the reads |
 | `SchemaState.CUTOVER_REQUIRED` | Removed. `SchemaState.ZERO_X` names a 0.x database | Match `ZERO_X` |
+| `GroupRow.group` of `horsies.monitoring.task_breakdown` was a `str`; the unclaimed tasks were `'unknown'`. `Breakdown.total` was a `GroupRow` with the group `'TOTAL'` | `GroupRow.group` is `BreakdownValueGroup(value=...)`, or `BreakdownUnclaimedGroup()` for the tasks that no worker claimed (`group_by='worker'` only). A worker with the id `unknown` is a value group of its own. `GroupRow` derives from `BreakdownCounts`. `Breakdown.total` is a `BreakdownCounts`, with no `group` | Match `row.group` on the two classes. Read `total` as counts |
+| `queue_priorities`, `queue_max_concurrency` and `recovery_config` of `WorkerStateSnapshot`, and `WorkerStateInfo.queue_max_concurrency`, were `dict \| None` | `dict`. `{}` when the worker had none set | Test for `{}` where the code tested `None` |
 | `OperationalErrorCode` | One more member: `WORKFLOW_START_INCOMPLETE`. Recovery fails a RUNNING workflow that has no node rows with this code. `TaskError` refuses `'WORKFLOW_START_INCOMPLETE'` as a user code | Add the case to an exhaustive `match`. Rename a user code with this name |
 | `TaskSendPayload.args_json`, `kwargs_json` and `enqueue_sha` | Removed. `TaskSendPayload.input_json` holds the keyword arguments as one JSON object, or `None` for none | Read `input_json` |
 | `PostgresBroker.enqueue()` and `enqueue_async()` with `args_json`, `kwargs_json` and `enqueue_sha` | `input_json` replaces the three. `sent_at` and `send_kind` are required. An `input_json` that is not a JSON object or null, or that repeats a key, gets `INVALID_INPUT` | Give `input_json`, `sent_at` and `send_kind`. Import `SendKind` from `horsies`: `SendKind.FIRST` for the first send of a task id, `SendKind.REPEAT` for a resend |
@@ -256,6 +258,8 @@ See [Refusals](/horsies/configuration/broker-connections/#refusals).
 | A request body over 1 MiB | – | 413 |
 | `GET /api/workers/classes` | Has the key `not_recorded` | Has no key `not_recorded` |
 | `slot_health` of `GET /api/workers` | Can be `not_recorded` | Never `not_recorded` |
+| `queue_max_concurrency` of `GET /api/workers` | Can be `null` | `{}` when none is set |
+| `GET /api/tasks/breakdown` | `group` is text, `'unknown'` for the unclaimed tasks. `total` has the group `'TOTAL'` | `group` is `{"kind": "value", "value": ...}` or `{"kind": "unclaimed"}`. `total` has no `group` key |
 | The times of each answer | In the zone of the database session | In UTC, with `Z` |
 
 ## The worker liveness lock
