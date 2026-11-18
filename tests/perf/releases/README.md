@@ -56,6 +56,11 @@ them.
 
 ## Scenario map
 
+The current harness has no scenario. Its scenarios measured statements of
+the Python core implementation, which 0.8.0 deleted; scenarios on public
+operations that run on both releases are tracked in #2049. The table below
+records the pairs that the harness measured before that deletion.
+
 The comparison pairs these scenarios. Each cell names what the scenario
 sends in one operation: the statements that the product of that release
 sends for the same case.
@@ -74,11 +79,9 @@ sends for the same case.
 
 Where each release sends these statements:
 
-- Current, failed attempt: one statement, with the retry facts of the claim
-  (`python/horsies/core/worker/failed_attempt.py`), through the core
-  (`crates/horsies-core/src/broker/attempt_writes.rs`).
-- Current, phase 2: the form follows the step that phase 1 returns
-  (`finish_node`, `python/horsies/core/workflows/node_finish.py`):
+- Current, failed attempt: one statement, with the retry facts of the claim,
+  through the core (`crates/horsies-core/src/broker/attempt_writes.rs`).
+- Current, phase 2: the form follows the step that phase 1 returns:
   `NO_DEPENDENTS` sends `'NONE'`, and `DEPENDENTS_WITHOUT_SUBWORKFLOW` sends
   `'READ'`. Each form is one statement.
 - v0.7.0, failed attempt: `_persist_failed_attempt`

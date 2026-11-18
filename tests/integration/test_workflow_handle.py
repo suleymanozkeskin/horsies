@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
@@ -35,8 +36,6 @@ from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.typed import encode_task_error
 from horsies._core import CoreConnectionError
 from horsies.core.types.result import Err, Ok, is_ok, is_err
-from horsies.core.workflows.functions import EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL
-from horsies.core.workflows.lifecycle import expire_paused_workflows
 
 from .conftest import DB_URL, make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from tests.integration.conftest import finish_task
@@ -191,13 +190,13 @@ class TestWorkflowHandleGet:
             TaskResult(err=TaskError(error_code='FAIL', message='pause')),
         )
 
-        expired = await expire_paused_workflows(
-            current_resources(broker).session_factory,
-            older_than=timedelta(0),
-            batch_size=1,
-        )
-
-        assert expired == 1
+        # The core refuses an age of 0; the workflow paused more than 1 µs ago.
+        handle_of_core = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+        match await handle_of_core.expire_paused_workflows_async(older_than_us=1, batch_size=1):
+            case core.PausedExpired(expired=expired):
+                assert expired == 1
+            case core.PausedExpiryFailed(message=message):
+                pytest.fail(f'the paused expiry failed: {message}')
         row = (
             await session.execute(
                 text("""
@@ -1781,6 +1780,16 @@ def _expiry_error_json(older_than: timedelta) -> str:
             raise AssertionError(refused)
 
 
+_EXPIRE_PAUSED_WORKFLOW_SQL = text("""
+    SELECT outcome, observed_status, expired_task_ids
+    FROM horsies_workflow_expire_paused(
+        CAST(:wf_id AS uuid), CAST(:age_us AS bigint), CAST(:error AS text)
+    )
+""")
+"""The expiry of one PAUSED workflow older than the age in microseconds, as
+the core's paused expiry calls it."""
+
+
 async def _expire_each_at_one_now(
     broker: PostgresBroker,
     *,
@@ -1820,7 +1829,7 @@ async def _expire_each_at_one_now(
                 outcomes.append(
                     (
                         await connection.execute(
-                            EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL,
+                            _EXPIRE_PAUSED_WORKFLOW_SQL,
                             {
                                 'wf_id': workflow_id,
                                 'age_us': age_us,

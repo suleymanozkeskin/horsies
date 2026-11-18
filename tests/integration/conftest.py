@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, AsyncGenerator, Generator
+from typing import Any, AsyncGenerator, Generator, Literal
 import pytest
 import pytest_asyncio
 
@@ -25,14 +25,6 @@ from tests.session_database import suite_database_url
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.lifecycle.outcomes import PhaseTwoStep
-from horsies.core.workflows.node_finish import (
-    CapacityWake,
-    FactsUnknown,
-    NodeFinishFacts,
-    finish_node,
-)
-from horsies.core.workflows.steps import advance_parents
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
@@ -340,13 +332,21 @@ def _error_code_text(error: TaskError) -> str:
             return code
 
 
+NodeFacts = Literal[
+    'NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN',
+]
+"""The node facts that phase 2 takes (``core.NodeFinishRequest.facts``): the
+step that phase 1 read, or ``UNKNOWN`` for a task whose phase 1 committed
+earlier."""
+
+
 async def _phase_one(
     broker: PostgresBroker,
     task_id: str,
     task_name: str,
     claimed_at: datetime,
     result: TaskResult[Any, TaskError],
-) -> PhaseTwoStep:
+) -> NodeFacts:
     """Phase 1 of the RUNNING task through the core handle of ``broker``: the
     success (``finish_workflow_success_async``), or the failure with no retry
     (``finish_failed_attempt_async``). Returns the node facts it read."""
@@ -369,7 +369,7 @@ async def _phase_one(
             )
             match succeeded:
                 case core.WorkflowSuccessApplied(phase_two=owed):
-                    return PhaseTwoStep(owed.step)
+                    return owed.step
                 case _:
                     pytest.fail(f'phase 1 of the success of task {task_id}: {succeeded!r}')
         case error:
@@ -389,7 +389,7 @@ async def _phase_one(
             )
             match failed:
                 case core.AttemptFailureApplied(after=core.PhaseTwoOwedRecord() as owed):
-                    return PhaseTwoStep(owed.step)
+                    return owed.step
                 case _:
                     pytest.fail(f'phase 1 of the failure of task {task_id}: {failed!r}')
 
@@ -400,7 +400,7 @@ class PhaseOneDone:
     task and the node facts that phase 2 takes."""
 
     task_id: str
-    facts: NodeFinishFacts
+    facts: NodeFacts
 
 
 async def finish_phase_one(
@@ -417,7 +417,7 @@ async def finish_phase_one(
     of an error result with no retry (``horsies_finish_workflow_success``,
     ``horsies_finish_failed_attempt``), and returns the node facts it read.
     A task that is no longer live (its phase 1 committed earlier) returns
-    ``FactsUnknown``: phase 2 replays in the transaction form. Fails the test
+    ``UNKNOWN``: phase 2 replays in the transaction form. Fails the test
     for a node with no task and for any other phase-1 outcome.
     """
     await session.commit()
@@ -448,21 +448,30 @@ async def finish_phase_one(
                 ),
             )
         case _:
-            return PhaseOneDone(task_id=task_id, facts=FactsUnknown())
+            return PhaseOneDone(task_id=task_id, facts='UNKNOWN')
 
 
 async def finish_phase_two(broker: PostgresBroker, done: PhaseOneDone) -> None:
-    """Phase 2 as the worker runs it: ``horsies_workflow_node_finish`` in the
-    form of the node facts, with the child starts it owes and the capacity
-    wake, then the parent advances after the commit. Fails the test for a
-    failed parent advance."""
-    session_factory = current_resources(broker).session_factory
-    committed = await finish_node(
-        session_factory, broker, done.task_id, done.facts, CapacityWake.SEND,
+    """Phase 2 as the worker runs it, through the core handle of ``broker``:
+    the node finish in the form of the node facts, with the child starts it
+    owes and the capacity wake (``finish_workflow_node_async``), then the
+    parent advances after the commit (``advance_workflow_parents_async``).
+    Fails the test for a failed node finish or parent advance."""
+    handle = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+    finished = await handle.finish_workflow_node_async(
+        core.NodeFinishRequest(task_id=uuid.UUID(done.task_id), facts=done.facts, wake='SEND'),
     )
-    failure = await advance_parents(broker, session_factory, committed.parent_advances)
-    if failure is not None:
-        pytest.fail(f'parent advance after task {done.task_id}: {failure!r}')
+    match finished:
+        case core.NodeFinished(parent_advances=parent_advances):
+            pass
+        case core.NodeFinishFailed(message=message):
+            pytest.fail(f'phase 2 of task {done.task_id}: {message}')
+    advanced = await handle.advance_workflow_parents_async(parent_advances)
+    match advanced:
+        case core.ParentsAdvanced():
+            pass
+        case core.ParentAdvanceStopped(message=message):
+            pytest.fail(f'parent advance after task {done.task_id}: {message}')
 
 
 async def finish_task(

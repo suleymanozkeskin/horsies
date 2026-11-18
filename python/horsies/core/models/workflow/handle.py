@@ -13,7 +13,6 @@ from typing import (
     cast,
 )
 
-from sqlalchemy import text
 
 from horsies.core.logging import get_logger
 from horsies.core.utils.loop_runner import (
@@ -25,9 +24,6 @@ from horsies.core.process_role import (
     ProcessRole,
     process_role,
     wait_inside_task_message,
-)
-from horsies.core.brokers.resources import (
-    EventLoopLimit,
 )
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.json_io import loads_json
@@ -48,7 +44,6 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.core_failure import CoreCallRefusal, call_refusal_or_raise
 from horsies.core.types.result import Ok, Err, Result, is_err
-from horsies.core.types.status import TASK_TERMINAL_STATES
 
 from .context import SubWorkflowSummary
 from .enums import (
@@ -61,7 +56,6 @@ from .enums import (
 from .handle_types import (
     HandleAsyncContext,
     HandleDbOperationFailed,
-    HandleEventLoopLimit,
     HandleResult,
     HandleStoredDataInvalid,
     HandleWorkflowNotFound,
@@ -69,8 +63,6 @@ from .handle_types import (
 from .nodes import NodeKey
 
 logger = get_logger('workflow.handle')
-
-_TASK_TERMINAL_VALUES: list[str] = [status.value for status in TASK_TERMINAL_STATES]
 
 
 if TYPE_CHECKING:
@@ -97,57 +89,6 @@ if TYPE_CHECKING:
 # =============================================================================
 # SQL constants for WorkflowHandle
 # =============================================================================
-
-# The cancel locks of one workflow, in the order of horsies_workflow_cancel
-# and horsies_workflow_expire_paused: the workflow row first, before any
-# horsies_tasks/horsies_workflow_tasks rows, so a cancel acquires
-# {horsies_workflows, horsies_workflow_tasks} in the same order as
-# horsies_workflow_node_finish (workflows before workflow_tasks). Lock-order
-# invariant (N6): any transaction locking both tables must take
-# horsies_workflows first, or it deadlocks against a completing task
-# (SQLSTATE 40P01).
-LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL = text("""
-    SELECT id FROM horsies_workflows WHERE id = :wf_id FOR UPDATE
-""")
-
-LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL = text("""
-    SELECT t.id
-    FROM horsies_tasks t
-    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
-    WHERE wt.workflow_id = :wf_id
-      AND NOT (wt.status = ANY(:wf_task_terminal_states))
-      AND NOT (t.status = ANY(:task_terminal_states))
-    FOR UPDATE OF t
-""")
-
-LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL = text("""
-    SELECT id
-    FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-      AND NOT (status = ANY(:wf_task_terminal_states))
-    FOR UPDATE
-""")
-
-# Every write of a terminal node status sets completed_at, SKIPPED included.
-SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
-    UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED', completed_at = NOW()
-    WHERE workflow_id = :wf_id AND status IN ('PENDING', 'READY')
-""")
-
-# The cancelled backing tasks were MOVED to history by the batch
-# cancellation, so a live-table join can no longer find them; the batch
-# outcomes name exactly which tasks are cancelled, and the skip targets
-# those ids.
-SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL = text("""
-    UPDATE horsies_workflow_tasks wt
-    SET status = 'SKIPPED',
-        completed_at = NOW()
-    WHERE wt.workflow_id = :wf_id
-      AND wt.status = 'ENQUEUED'
-      AND wt.task_id = ANY(CAST(:cancelled_task_ids AS uuid[]))
-""")
-
 
 
 # =============================================================================
@@ -733,16 +674,6 @@ class WorkflowHandle(Generic[OutT]):
     # registered spec leaves this ``None`` and ``get()`` folds
     # NO_TYPE_AVAILABLE into the err slot when the ok slot is present.
     out_type: TypeAnnotation | None = None
-
-    def _event_loop_limit(
-        self, loop_limit: EventLoopLimit, operation: str,
-    ) -> Err[HandleEventLoopLimit]:
-        """Build the wrap-strategy error for the event loop limit."""
-        return Err(HandleEventLoopLimit(
-            message=f'{operation} for workflow {self.workflow_id}: {loop_limit.describe()}',
-            workflow_id=self.workflow_id,
-            loop_limit=loop_limit,
-        ))
 
     # ─── sync refusal ────────────────────────────────────────────────
 
