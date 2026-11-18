@@ -455,6 +455,47 @@ fn a_timeout_retries_when_the_policy_names_it() {
     );
 }
 
+/// One retry of `TASK_TIMEOUT` after 30 s (Python
+/// `test_task_timeout_order.py::_TIMEOUT_RETRY_OPTIONS`).
+const ONE_TIMEOUT_RETRY_AFTER_30_S: &str = r#"{"retry_policy": {"max_retries": 1,
+    "intervals": [30], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+
+/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_a_retry_is_written_only_after_the_exit`
+/// (the command; the order is
+/// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
+/// the timeout write of a task whose policy lists `TASK_TIMEOUT` is a
+/// `TASK_TIMEOUT` failure that asks for the retry: the retry count of the
+/// claim, the delay of the policy, in the class of the end.
+#[test]
+fn a_timeout_write_asks_for_the_retry_of_its_policy() {
+    let claimed = ClaimedTask {
+        retry: RetryFacts {
+            retry_count: 0,
+            max_retries: 1,
+        },
+        ..task(ExecutionClass::Isolated, ONE_TIMEOUT_RETRY_AFTER_30_S)
+    };
+
+    let write = timeout_write(
+        &claimed,
+        "worker-1",
+        TaskTimeoutMs::new(1_000).unwrap(),
+        RetryPlacement::SameClass,
+        TimeoutCancel::NoSignal,
+    );
+
+    assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
+    assert_eq!(
+        write.retry,
+        RetryRequest::RetryAfter {
+            expected_retry_count: 0,
+            delay_seconds: 30.0,
+            placement: RetryPlacement::SameClass,
+        }
+    );
+}
+
 #[test]
 fn a_killed_child_write_names_its_code() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
