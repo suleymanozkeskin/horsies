@@ -15,7 +15,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from tests.session_database import database_name_prefix, suite_database_url
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 
 _SETUP_LOCK_SQL = text(

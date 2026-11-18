@@ -1,6 +1,6 @@
 # python/horsies/core/utils/url.py
-"""URL helpers: the database URL scheme check, the SQLAlchemy URL, safe
-logging, and driver URL normalization."""
+"""URL helpers: the database URL scheme check, safe logging, and driver URL
+normalization."""
 
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ from horsies.core.types.result import Err, Ok, Result
 DATABASE_URL_SCHEMES: Final = ('postgresql', 'postgres')
 """The schemes that a database URL may have. The URL names no driver:
 horsies opens it with psycopg 3."""
-
-_SQLALCHEMY_SCHEME: Final = 'postgresql+psycopg'
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,25 +56,6 @@ def check_database_url_scheme(url: str) -> Result[str, DatabaseUrlRefusal]:
     if plus != '' and base_scheme in DATABASE_URL_SCHEMES:
         return Err(DatabaseUrlNamesDriver(scheme=scheme))
     return Err(DatabaseUrlNotPostgres(scheme=scheme))
-
-
-def sqlalchemy_url(url: str) -> str:
-    """The SQLAlchemy URL that opens ``url`` with psycopg 3: the scheme
-    becomes ``postgresql+psycopg`` and the rest is kept as it is.
-
-    ``url`` is a URL that ``check_database_url_scheme`` accepts, as
-    ``PostgresConfig`` holds it. Any other URL is a defect of the caller:
-    ``AssertionError``.
-    """
-    match check_database_url_scheme(url):
-        case Ok():
-            _, _, rest = url.partition('://')
-            return f'{_SQLALCHEMY_SCHEME}://{rest}'
-        case Err(refusal):
-            raise AssertionError(
-                f'sqlalchemy_url got a database URL that the config check '
-                f'refuses: {refusal!r}'
-            )
 
 
 def mask_database_url(url: str) -> str:

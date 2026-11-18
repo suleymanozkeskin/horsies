@@ -22,7 +22,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 

@@ -36,7 +36,7 @@ from tests.perf.scenarios import (
 )
 from tests.perf.statistics import Verdict
 from horsies.core.types.result import Err, Ok
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 RESULTS_DIR = Path(__file__).parent / 'results'
 RAW_DIR = RESULTS_DIR / 'raw'

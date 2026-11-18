@@ -41,7 +41,7 @@ from tests.integration.isolated_database import (
     MakeDatabase,
     make_database,
 )
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 __all__ = ['make_database']
 
