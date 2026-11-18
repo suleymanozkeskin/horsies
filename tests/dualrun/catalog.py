@@ -41,6 +41,7 @@ from tests.dualrun.rules import (
     ColumnSpec,
     DigestOf,
     EachItem,
+    EachMarkedMember,
     EachMember,
     Exact,
     FormatVersion,
@@ -149,6 +150,21 @@ result envelope)."""
 
 _CONTEXT: Final = Key(name='__h_workflow_ctx__')
 
+ARGS_FROM_MARKER: Final = '__h_taskresult_envelope__'
+"""The marker of an ``args_from`` entry: a member of a task input that the
+engine writes in place of the keyword argument that a node takes from a
+dependency (``crates/horsies-core/src/workflow_engine/args_merge.rs``,
+``ARGS_FROM_ENVELOPE_KEY``)."""
+
+_ARGS_FROM_ERROR: Final = (
+    EachMarkedMember(marker=ARGS_FROM_MARKER),
+    Key(name='inner'),
+    Key(name='err'),
+)
+"""The error of the dependency's result in each ``args_from`` entry
+(``{"__h_taskresult_envelope__": true, "source_task_name": ...,
+"source_definition_key": ..., "inner": <result envelope>}``)."""
+
 TASK_INPUT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
@@ -159,6 +175,7 @@ TASK_INPUT: Final = StoredJson(
         ),
         JsonPath(steps=(_CONTEXT, Key(name='workflow_id')), rule=WORKFLOW_ID),
         *stored_error_paths((_CONTEXT, *_RESULTS_BY_ID_ERROR)),
+        *stored_error_paths(_ARGS_FROM_ERROR),
         JsonPath(
             steps=(
                 _CONTEXT,
@@ -176,7 +193,12 @@ workflow context names its workflow in ``__h_workflow_ctx__.workflow_id``,
 holds the result of each dependency in ``__h_workflow_ctx__.results_by_id``
 (each error by ``stored_error_paths``) and the summary of each sub-workflow
 dependency in ``__h_workflow_ctx__.summaries_by_id`` (``error_summary`` can
-name a workflow)."""
+name a workflow). The input of a node that takes keyword arguments from its
+dependencies (``args_from``) holds one entry per argument, marked by
+``ARGS_FROM_MARKER``; the error of the dependency's result in it
+(``inner.err``) follows ``stored_error_paths``: the output-skipped error of
+a child and the error of a child result that does not parse name the child
+in ``data.workflow_id`` and in ``message``."""
 
 WORKFLOW_ERROR: Final = StoredJson(
     storage=JsonStorage.TEXT,

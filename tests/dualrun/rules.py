@@ -145,7 +145,22 @@ class EachMember:
     whose keys are data (node ids), not names of the format."""
 
 
-PathStep = Key | Index | EachItem | EachMember
+@dataclass(frozen=True, slots=True)
+class EachMarkedMember:
+    """A path step into every member of an object whose value is an object
+    that holds ``marker`` with the value ``true``, whatever its key.
+
+    The keys are names that the user gives, and the marker names the members
+    that the library writes among them: an ``args_from`` entry of a task
+    input (``__h_taskresult_envelope__``). A member without the marker, or
+    with another value at the marker, does not match: it is user data and
+    compares exactly.
+    """
+
+    marker: str
+
+
+PathStep = Key | Index | EachItem | EachMember | EachMarkedMember
 
 
 class TimeEncoding(Enum):

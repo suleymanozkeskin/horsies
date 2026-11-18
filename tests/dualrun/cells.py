@@ -23,6 +23,7 @@ from tests.dualrun.rules import (
     AnchorReference,
     DigestOf,
     EachItem,
+    EachMarkedMember,
     EachMember,
     Exact,
     FormatVersion,
@@ -540,7 +541,19 @@ def _scalar_text(value: None | bool | int | float | str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _advance(alive: _Alive, paths: tuple[JsonPath, ...], key: str | int) -> _Alive:
+def _holds_marker(value: object, marker: str) -> bool:
+    """Whether ``value`` is an object that holds ``marker`` with the value ``true``."""
+    match value:
+        case dict():
+            return cast(dict[str, object], value).get(marker) is True
+        case _:
+            return False
+
+
+def _advance(
+    alive: _Alive, paths: tuple[JsonPath, ...], key: str | int, value: object
+) -> _Alive:
+    """The path rules that still match at the member or item ``key``, whose value is ``value``."""
     moved: list[tuple[int, int]] = []
     for path_index, matched in alive:
         steps = paths[path_index].steps
@@ -554,6 +567,8 @@ def _advance(alive: _Alive, paths: tuple[JsonPath, ...], key: str | int) -> _Ali
             case EachItem(), int():
                 moved.append((path_index, matched + 1))
             case EachMember(), str():
+                moved.append((path_index, matched + 1))
+            case EachMarkedMember(marker=marker), str() if _holds_marker(value, marker):
                 moved.append((path_index, matched + 1))
             case _:
                 pass
@@ -631,7 +646,11 @@ def _node(
             items: list[JsonNode[_Building]] = []
             for position, item in enumerate(cast(list[object], value)):
                 match _node(
-                    item, _advance(alive, rule.paths, position), rule, window, depth + 1
+                    item,
+                    _advance(alive, rule.paths, position, item),
+                    rule,
+                    window,
+                    depth + 1,
                 ):
                     case Err(cause):
                         return Err(cause)
@@ -642,7 +661,11 @@ def _node(
             members: list[tuple[str, JsonNode[_Building]]] = []
             for key, member in sorted(cast(dict[str, object], value).items()):
                 match _node(
-                    member, _advance(alive, rule.paths, key), rule, window, depth + 1
+                    member,
+                    _advance(alive, rule.paths, key, member),
+                    rule,
+                    window,
+                    depth + 1,
                 ):
                     case Err(cause):
                         return Err(cause)
