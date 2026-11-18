@@ -1110,6 +1110,48 @@ async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
     assert_eq!(spent[0].field("task_id"), Some(task_id.as_str()));
 }
 
+/// The text that the result of [`a_failed_success_write_logs_the_task_and_not_the_result`]
+/// carries, to find it in any log line.
+const RESULT_MARKER: &str = "result-marker-7f3c";
+
+/// Python `test_worker_helpers.py::TestFinalizeErrorLogOmitsResult::test_log_line_has_result_length_not_result`
+/// (case `retries_exhausted`; the line of a write that is not tried again
+/// has the same form): the success write of a plain task fails on every
+/// retry, and its log lines name the task and leave out the result text.
+/// The length of the result has no counterpart: Python logs the `data` dict
+/// of its finalize error with the result replaced by its length; the core's
+/// error is typed and carries no result.
+#[tokio::test]
+async fn a_failed_success_write_logs_the_task_and_not_the_result() {
+    let claimed = task(1, ExecutionClass::Isolated);
+    let writer = unreachable_writer();
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    let envelope = format!(r#"{{"__h_task_result__":true,"ok":"{RESULT_MARKER}","err":null}}"#);
+
+    let settled = writer
+        .settle(
+            &claimed,
+            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(envelope))),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::RetriesExhausted);
+    let task_id = claimed.task_id.to_string();
+    let exhausted = capture.lines_starting(
+        tracing::Level::ERROR,
+        &format!("Finalize retries exhausted for task {task_id}"),
+    );
+    assert_eq!(exhausted.len(), 1, "{exhausted:?}");
+    assert_eq!(exhausted[0].field("task_id"), Some(task_id.as_str()));
+    for event in capture.events() {
+        assert!(!event.message.contains(RESULT_MARKER), "{event:?}");
+        for (name, value) in &event.fields {
+            assert!(!value.contains(RESULT_MARKER), "{name}: {event:?}");
+        }
+    }
+}
+
 /// The work of a shared async run with its stored timeout and grace, as
 /// the route reads it (Python `TestRoute::test_a_row_of_the_shared_async_budget_runs_on_a_seat`
 /// with the grace of `SHARED_OPTIONS`).
