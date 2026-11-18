@@ -411,8 +411,9 @@ def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
 
 
 def _deser_json(raw: str | None, context: str, fallback: Any = None) -> Any:
-    """Deserialize JSON, returning fallback on error."""
-    if not raw:
+    """Deserialize JSON, returning fallback for NULL and on error (an empty
+    text is an error: it is not JSON)."""
+    if raw is None:
         return fallback
     r = loads_json(raw)
     if is_err(r):
@@ -445,7 +446,7 @@ def _child_task_options_json(child_task: TaskNode[Any]) -> str | None:
     if child_task.good_until is None:
         return options_json
     base_options: dict[str, Json] = {}
-    if options_json:
+    if options_json is not None:
         match loads_json(options_json):
             case Ok(dict() as parsed_options):
                 base_options = parsed_options
@@ -2801,10 +2802,11 @@ def _parse_child_output(stored_result: str | None) -> _ChildOutput:
     """Parse the stored result column of a child workflow.
 
     Every outcome is a variant. ``ok_slot`` is not decoded: typed decode is
-    the concern of the node that reads the output.
+    the concern of the node that reads the output. NULL and a text that does
+    not read (an empty text included) are ``_ChildOutputUnreadable``.
     """
-    if not stored_result:
-        return _ChildOutputUnreadable(cause='the result is NULL or empty')
+    if stored_result is None:
+        return _ChildOutputUnreadable(cause='the result is NULL')
     loaded = loads_json(stored_result)
     if is_err(loaded):
         return _ChildOutputUnreadable(cause=f'not JSON: {loaded.err_value}')

@@ -205,8 +205,9 @@ pub enum RunPermit {
 
 /// Read the stored `task_options` of a claimed row.
 ///
-/// `None` and an empty text mean the row has no options, as the enqueue
-/// reader treats them.
+/// `None` and an empty text mean the row has no options, as the Python
+/// worker read (`read_stored_timeout`, `read_stored_retry_policy`) treats
+/// them.
 pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
     let text = match task_options {
         None | Some("") => {
