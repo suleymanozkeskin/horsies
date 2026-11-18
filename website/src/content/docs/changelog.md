@@ -777,7 +777,7 @@ unless it starts with "Added".
   async retry sends them), `ReadError::AsyncContext` (added; not kept by
   the handle), `BrokerOperationError::AsyncContext`, `HRS-217` in the check
   report, `WorkflowStartError::AsyncContext` with the workflow id of
-  the start, `HandleErrorCode::AsyncContext`, or
+  the start, `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
 - **A send in a fork panics.** A send, a schedule or a retry, async or
@@ -805,6 +805,12 @@ unless it starts with "Added".
   become the methods `code()`, `message()`, `retryable()`,
   `workflow_name()` and `workflow_id()`. Only `ValidationFailed` can lack
   a workflow id, so `retry_start` no longer refuses an error without one.
+- **`HandleOperationError` is an enum with one variant per state.**
+  `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`),
+  `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and
+  `AsyncContext`; each has `message` and `workflow_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `workflow_id()` and
+  `failure_cause()`.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

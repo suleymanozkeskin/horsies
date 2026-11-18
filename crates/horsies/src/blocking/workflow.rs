@@ -11,7 +11,7 @@
 //!   `WorkflowStartError::AsyncContext` with the workflow id of the
 //!   start, nothing written (Python `WorkflowStartAsyncContext`); `status`,
 //!   `results`, `tasks`, `cancel`, `pause` and `resume` answer
-//!   `HandleErrorCode::AsyncContext` (Python `HandleAsyncContext`); `get`
+//!   `HandleOperationError::AsyncContext` (Python `HandleAsyncContext`); `get`
 //!   and `result_for` answer `WorkflowReadError::AsyncContext` (Python's
 //!   `RetrievalCode.ASYNC_CONTEXT`).
 //! - The thread check comes first, as in Python's `WorkflowSpec.start`: a
@@ -356,29 +356,21 @@ impl<T> WorkflowHandleView<'_, T> {
         method: &str,
     ) -> HandleResult<V> {
         let workflow_id = self.handle.workflow_id();
-        let refused =
-            |code: HandleErrorCode, message: String, retryable: bool| HandleOperationError {
-                code,
-                message,
-                retryable,
-                workflow_id,
-                cause: FailureCause::PreconditionFailed,
-            };
         match place() {
             Place::Runs(runtime) => runtime.block_on(call),
-            Place::AsyncContext => Err(refused(
-                HandleErrorCode::AsyncContext,
-                async_context_message(
+            Place::AsyncContext => Err(HandleOperationError::AsyncContext {
+                message: async_context_message(
                     &format!("WorkflowHandle::{method} for workflow {workflow_id}"),
                     &format!("handle.{method}"),
                 ),
-                false,
-            )),
-            Place::RuntimeRefused(refusal) => Err(refused(
-                HandleErrorCode::DbOperationFailed,
-                format!("the call did not run: {refusal}"),
-                refusal_retryable(&refusal),
-            )),
+                workflow_id,
+            }),
+            Place::RuntimeRefused(refusal) => Err(HandleOperationError::DbOperationFailed {
+                message: format!("the call did not run: {refusal}"),
+                retryable: refusal_retryable(&refusal),
+                workflow_id,
+                cause: FailureCause::PreconditionFailed,
+            }),
         }
     }
 

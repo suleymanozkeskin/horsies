@@ -13,8 +13,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
 use horsies_core::{
-    BrokerError, HandleErrorCode, HandleOperationError, HandleResult, NodeResultsRead, NodesRead,
-    StoredNode, StoredNodeResult, WorkflowEnd, WorkflowStatus, WorkflowWait,
+    BrokerError, HandleOperationError, HandleResult, NodeResultsRead, NodesRead, StoredNode,
+    StoredNodeResult, WorkflowEnd, WorkflowStatus, WorkflowWait,
 };
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -208,26 +208,26 @@ impl<'py> IntoPyObject<'py> for WorkflowReadOutcome {
 /// The record of a handle error of a read. Pure.
 ///
 /// Panics: a code that a read never gives (`RESUME_RECOVERY_FAILED`) or that
-/// only Python gives (`LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`,
-/// `ASYNC_CONTEXT`): a defect of the core.
+/// only a sync or blocking form gives (`ASYNC_CONTEXT`): a defect of the
+/// core.
 fn failed_read(
     subject: &'static str,
     workflow_id: Uuid,
     error: &HandleOperationError,
 ) -> WorkflowReadOutcome {
-    match error.code {
-        HandleErrorCode::WorkflowNotFound => {
+    match error {
+        HandleOperationError::WorkflowNotFound { .. } => {
             WorkflowReadOutcome::Absent(WorkflowAbsent { workflow_id })
         }
-        HandleErrorCode::DbOperationFailed | HandleErrorCode::StoredDataInvalid => {
+        HandleOperationError::DbOperationFailed { .. }
+        | HandleOperationError::StoredDataInvalid { .. } => {
             WorkflowReadOutcome::Failed(HandleFailed::of_handle_error(subject, workflow_id, error))
         }
-        HandleErrorCode::ResumeRecoveryFailed
-        | HandleErrorCode::LoopRunnerFailed
-        | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::AsyncContext => panic!(
+        HandleOperationError::ResumeRecoveryFailed { .. }
+        | HandleOperationError::AsyncContext { .. } => panic!(
             "a read of workflow {workflow_id} answered {} (a defect): {}",
-            error.code, error.message
+            error.code(),
+            error.message()
         ),
     }
 }
@@ -406,19 +406,44 @@ pub async fn workflow_nodes_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horsies_core::TerminalErrorStatus;
+    use horsies_core::{HandleErrorCode, TerminalErrorStatus};
 
     fn workflow() -> Uuid {
         Uuid::from_u128(11)
     }
 
     fn handle_error(code: HandleErrorCode, retryable: bool) -> HandleOperationError {
-        HandleOperationError {
-            code,
-            message: format!("planned {code}"),
-            retryable,
-            workflow_id: workflow(),
-            cause: horsies_core::FailureCause::Connection,
+        let message = format!("planned {code}");
+        let workflow_id = workflow();
+        let cause = horsies_core::FailureCause::Connection;
+        match code {
+            HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
+                message,
+                workflow_id,
+            },
+            HandleErrorCode::DbOperationFailed => HandleOperationError::DbOperationFailed {
+                message,
+                retryable,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
+                message,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::ResumeRecoveryFailed => HandleOperationError::ResumeRecoveryFailed {
+                message,
+                workflow_id,
+                cause,
+            },
+            HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
+                message,
+                workflow_id,
+            },
+            HandleErrorCode::LoopRunnerFailed | HandleErrorCode::EventLoopLimit => {
+                unreachable!("{code} is a code of the Python client only")
+            }
         }
     }
 

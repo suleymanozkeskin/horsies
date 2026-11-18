@@ -417,8 +417,10 @@ with the error's id.
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed |
 
 `HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
-`pause`, `resume`) has `code`, `message`, `retryable`, `workflow_id`. The
-operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
+`pause`, `resume`) is an enum with one variant per state; every variant
+has `message` and `workflow_id`, and `DbOperationFailed` has `retryable`.
+The methods `code()`, `message()`, `retryable()`, `workflow_id()` and
+`failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
 `StoredDataInvalid` (`status`, `tasks`, `resume`), and
 `ResumeRecoveryFailed` (`resume` committed and the work after it failed:
 the workflow is RUNNING). A blocking form (`handle.blocking()`) on a thread

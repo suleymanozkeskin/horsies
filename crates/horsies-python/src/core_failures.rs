@@ -276,9 +276,9 @@ impl FailureException {
     pub fn of_handle_error(subject: &'static str, error: &HandleOperationError) -> Self {
         Self::new(
             subject,
-            error.message.clone(),
-            error.retryable,
-            error.cause.clone(),
+            error.message().to_owned(),
+            error.retryable(),
+            error.failure_cause(),
         )
     }
 }

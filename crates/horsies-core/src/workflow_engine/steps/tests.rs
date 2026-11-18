@@ -348,8 +348,8 @@ async fn pause_answers_not_running_and_missing_workflows() {
     let error = pause_workflow(&broker, missing)
         .await
         .expect_err("pause of a missing workflow");
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
-    assert_eq!(error.workflow_id, missing);
+    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.workflow_id(), missing);
 }
 
 /// Cancel moves the root and its PAUSED child to CANCELLED, moves the CLAIMED
@@ -404,7 +404,7 @@ async fn cancel_answers_terminal_and_missing_workflows() {
     let error = cancel_workflow(&broker, missing)
         .await
         .expect_err("cancel of a missing workflow");
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
 }
 
 // ---------------------------------------------------------------------------
@@ -861,5 +861,5 @@ async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     )
     .await
     .expect_err("resume of a missing workflow");
-    assert_eq!(missing.code, HandleErrorCode::WorkflowNotFound);
+    assert_eq!(missing.code(), HandleErrorCode::WorkflowNotFound);
 }
