@@ -9,7 +9,9 @@ and there is no migration contract between pre-1.0 versions.
 ## [Unreleased]
 
 Draft notes of 0.8.0. The Python client and the Rust client run on one core,
-written in Rust, on a new baseline schema.
+written in Rust, on a new baseline schema. Read the
+[migration guide to 0.8.0](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-8-0/)
+before you upgrade a 0.7 deployment.
 
 ### Changed
 

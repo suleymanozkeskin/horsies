@@ -330,6 +330,7 @@ export default defineConfig({
 						{ label: 'Migrating to 0.5.0', slug: 'migrations/migration-to-0-5-0' },
 						{ label: 'Migrating to 0.6.0', slug: 'migrations/migration-to-0-6-0' },
 						{ label: 'Migrating to 0.7.0', slug: 'migrations/migration-to-0-7-0' },
+						{ label: 'Migrating to 0.8.0', slug: 'migrations/migration-to-0-8-0' },
 					],
 				},
 				{
