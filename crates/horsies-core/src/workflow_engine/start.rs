@@ -408,7 +408,10 @@ mod tests {
                 graph_node(2, false, vec![0]),
             ],
         );
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let workflow_id = Uuid::new_v4();
 
         let started = start_client(
@@ -563,10 +566,10 @@ mod tests {
     #[serial]
     async fn a_start_of_another_client_family_is_refused_and_writes_nothing() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let broker = Arc::new(
-            PostgresBroker::from_pool(pool.clone())
-                .with_client_family(crate::broker::client_family::ClientFamily::Python),
-        );
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Python,
+        ));
         let workflow_id = Uuid::new_v4();
         let spec = keyed_spec(
             Some("tests.family.start.v1"),
@@ -647,7 +650,10 @@ mod tests {
     #[serial]
     async fn a_node_whose_retry_policy_does_not_fit_is_refused_before_any_row() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let task_name = "start_refused_retry_policy_node";
         let exponential = |max_retries: &str| {
             format!(
@@ -732,7 +738,10 @@ mod tests {
     #[serial]
     async fn a_node_whose_options_or_deadline_do_not_read_is_refused_before_any_row() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let task_name = "start_refused_deadline_node";
         let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
         let cases = [
@@ -797,7 +806,10 @@ mod tests {
     #[serial]
     async fn a_node_whose_retry_policy_fits_stores_its_limit_on_both_rows() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let mut root = node_with(false, Some(17));
         root.task_name = "start_fitting_retry_policy_node".to_owned();
         root.task_options_json = Some(
@@ -863,7 +875,10 @@ mod tests {
         // A root that names a context source takes the per-row slow path.
         slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
         let spec = keyed_spec(Some("tests.enqueue_time.root.v1"), vec![fast, slow]);
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let workflow_id = Uuid::new_v4();
 
         let started = start_client(
@@ -917,7 +932,10 @@ mod tests {
     #[serial]
     async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let children = TestChildSpecs::empty();
         let workflow_id = Uuid::new_v4();
         let sent_at = chrono::Utc::now() - chrono::Duration::minutes(5);
@@ -1002,7 +1020,10 @@ mod tests {
         retention
             .queue_retention
             .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let children = TestChildSpecs::empty().with_retention(retention);
         let workflow_id = Uuid::new_v4();
 
@@ -1046,7 +1067,10 @@ mod tests {
         let mut root = node_with(false, Some(17));
         root.task_name = task_name.to_owned();
         let spec = keyed_spec(Some("tests.sent_at.root.v1"), vec![root]);
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let broker = Arc::new(PostgresBroker::from_pool(
+            pool.clone(),
+            crate::ClientFamily::Rust,
+        ));
         let workflow_id = Uuid::new_v4();
         let started = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .expect("fixed start call time")

@@ -640,6 +640,7 @@ mod wait_tests {
         let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
             crate::broker::terminalization_matrix::migrated_pool().await,
             &crate::broker::terminalization_matrix::migrated_database_url().await,
+            crate::ClientFamily::Rust,
         ));
         let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4();
@@ -683,8 +684,10 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn a_wait_with_no_timeout_returns_not_found_for_a_missing_workflow() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let missing = Uuid::new_v4();
 
@@ -704,6 +707,7 @@ mod wait_tests {
     async fn the_wait_returns_immediately_for_a_paused_workflow() {
         let broker = Arc::new(PostgresBroker::from_pool(
             crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
@@ -743,6 +747,7 @@ mod wait_tests {
     async fn the_wait_returns_a_structured_expiry_error_as_stored() {
         let broker = Arc::new(PostgresBroker::from_pool(
             crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
@@ -803,6 +808,7 @@ mod wait_tests {
     async fn the_wait_returns_a_malformed_expiry_error_as_stored() {
         let broker = Arc::new(PostgresBroker::from_pool(
             crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();

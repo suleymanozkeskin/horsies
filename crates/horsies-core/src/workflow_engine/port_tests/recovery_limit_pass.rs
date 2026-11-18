@@ -59,7 +59,7 @@ const BAD_GOOD_UNTIL: &str = r#"{"good_until":"not-a-date"}"#;
 
 async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         child_specs,
         LIMIT,
     )
@@ -77,7 +77,7 @@ async fn passes(pool: &PgPool, child_specs: &TestChildSpecs, count: u32) -> Vec<
 
 async fn phase2_pass(pool: &PgPool) -> Phase2RecoverySummary {
     drive_phase2_recovery_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         0,
         GLOBAL_SCAN_ROW_CAP,
@@ -514,7 +514,7 @@ async fn the_resume_pass_logs_and_does_not_count() {
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
 
     let report = recover_workflow_tree(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         workflow_id,
     )
@@ -993,7 +993,7 @@ async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
         .await
         .expect("seed a count of 2");
         let record = record_candidate_failure(
-            &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
+            &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
             RecoveryFailurePolicy::Count(CountFailures::new_pass(3)),
             workflow_id,
             RecoveryCase::ReadyNotEnqueued { task_index: 0 },
@@ -1123,7 +1123,7 @@ async fn count_rows_go_with_their_workflow_and_with_a_cascaded_child() {
     }
 
     crate::worker::recovery::run_retention_cleanup(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
         &RetentionConfig {
             worker_state_retention_hours: None,
             terminal_record_retention_hours: Some(24),

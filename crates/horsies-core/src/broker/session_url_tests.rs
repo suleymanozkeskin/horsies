@@ -62,10 +62,10 @@ async fn backends_named(database: &TestDatabase, application_name: &str) -> i64 
 async fn a_session_url_on_another_database_fails_the_session_check_as_not_retryable() {
     let main = TestDatabase::create().await;
     let session = TestDatabase::create_empty().await;
-    let broker = PostgresBroker::connect_with(&split_config(
-        main.url().to_owned(),
-        session.url().to_owned(),
-    ))
+    let broker = PostgresBroker::connect_with(
+        &split_config(main.url().to_owned(), session.url().to_owned()),
+        crate::ClientFamily::Rust,
+    )
     .await
     .expect("connect the broker");
 
@@ -94,10 +94,13 @@ async fn a_split_session_url_passes_the_session_check_on_its_own_connection() {
     let suffix = Uuid::new_v4().simple().to_string();
     let main_name = format!("split_main_{suffix}");
     let session_name = format!("split_session_{suffix}");
-    let broker = PostgresBroker::connect_with(&split_config(
-        with_application_name(database.url(), &main_name),
-        with_application_name(database.url(), &session_name),
-    ))
+    let broker = PostgresBroker::connect_with(
+        &split_config(
+            with_application_name(database.url(), &main_name),
+            with_application_name(database.url(), &session_name),
+        ),
+        crate::ClientFamily::Rust,
+    )
     .await
     .expect("connect the broker");
 
@@ -122,10 +125,10 @@ async fn a_split_session_url_passes_the_session_check_on_its_own_connection() {
 async fn a_split_config_installs_the_schema_through_the_session_url() {
     let main = TestDatabase::create_empty().await;
     let session = TestDatabase::create_empty().await;
-    let broker = PostgresBroker::connect_with(&split_config(
-        main.url().to_owned(),
-        session.url().to_owned(),
-    ))
+    let broker = PostgresBroker::connect_with(
+        &split_config(main.url().to_owned(), session.url().to_owned()),
+        crate::ClientFamily::Rust,
+    )
     .await
     .expect("connect the broker");
 

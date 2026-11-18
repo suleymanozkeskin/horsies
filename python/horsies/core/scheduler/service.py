@@ -26,8 +26,6 @@ from horsies._core import (
     SchedulerStartFailed,
     SchedulerStartRefused,
     SchedulerStopped,
-    SchedulerTicked,
-    SchedulerTickFailed,
 )
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -38,7 +36,7 @@ from horsies.core.models.schedule import ScheduleConfig
 from horsies.core.scheduler.manifest import to_scheduler_manifest
 from horsies.core.scheduler.validation import PreparedSchedules, prepare_schedules
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.worker.worker import import_by_path
+from horsies.core.utils.imports import import_file_path
 
 logger = get_logger('scheduler')
 
@@ -188,29 +186,6 @@ class Scheduler:
         finally:
             await self.stop()
 
-    async def _check_and_run_schedules(self) -> None:
-        """One tick of the started scheduler: the due read, the existence heal
-        on its cadence (about every 60 s while every row exists, every tick
-        while one is missing), then one fire per due schedule. The core logs
-        each fire's outcome; the failure of one schedule does not end the
-        tick.
-
-        Raises:
-            RuntimeError: no start completed (a defect of the caller), or the
-                tick fired nothing: the core pools could not open, or the due
-                read failed. The next tick tries again.
-        """
-        match self._core:
-            case _NotBuilt():
-                raise RuntimeError('Scheduler not properly initialized')
-            case _Built(core=core):
-                pass
-        match await core.tick_async():
-            case SchedulerTicked():
-                pass
-            case SchedulerTickFailed(message=message):
-                raise RuntimeError(f'Scheduler tick failed: {message}')
-
     def _core_scheduler(self) -> CoreScheduler:
         """The core scheduler of this service, built once: the broker, the
         import of the task modules, the prepared wire text of each enabled
@@ -290,7 +265,7 @@ class Scheduler:
             for module in modules:
                 if module.endswith('.py') or os.path.sep in module:
                     try:
-                        import_by_path(os.path.abspath(module))
+                        import_file_path(os.path.abspath(module))
                     except Exception as e:
                         logger.warning(f"Failed to import task module '{module}': {e}")
                 else:

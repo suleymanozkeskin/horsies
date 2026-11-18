@@ -204,7 +204,7 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
 #[serial]
 async fn a_malformed_retry_policy_is_refused_before_any_row() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("malformed_policy");
 
     for (case, task_options) in malformed_policies() {
@@ -235,7 +235,7 @@ async fn a_malformed_retry_policy_is_refused_before_any_row() {
 #[serial]
 async fn valid_retry_policies_store_their_limits() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("valid_policy");
 
     for limit in [1, MAX_RETRY_ATTEMPTS] {
@@ -258,7 +258,7 @@ async fn valid_retry_policies_store_their_limits() {
 #[serial]
 async fn a_null_retry_policy_stores_zero_retries() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("null_policy");
     let payload = plain_payload(&task_name, "{}", Some("{\"retry_policy\": null}"));
 
@@ -279,7 +279,7 @@ async fn a_null_retry_policy_stores_zero_retries() {
 #[serial]
 async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_same_conflict() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("key_owner");
     let key = format!("conflict-key-{}", Uuid::new_v4());
     let mut first = plain_payload(&task_name, "{\"value\":1}", None);
@@ -363,7 +363,7 @@ async fn cancel_the_insert_that_waits_for_the_table(pool: &PgPool) -> i32 {
 #[serial]
 async fn a_failed_enqueue_statement_names_its_cause_and_holds_no_input_value() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("hidden_arguments");
     let input = format!("{{\"secret\":\"{ARGUMENT_MARKER}\"}}");
     let payload = plain_payload(&task_name, &input, None);
@@ -460,7 +460,7 @@ async fn a_send_on_a_closed_pooled_connection_is_retryable_and_the_next_send_wri
     config.pool_pre_ping = false;
     config.pool_size = 1;
     config.max_overflow = 0;
-    let broker = PostgresBroker::connect_with(&config)
+    let broker = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
         .await
         .expect("connect the broker");
     let task_name = unique_task_name("dead_connection");
@@ -529,7 +529,7 @@ async fn jit_stays_off_after_the_first_transaction_rolls_back() {
     let mut config = PostgresConfig::from_url(url);
     config.pool_size = 1;
     config.max_overflow = 0;
-    let broker = PostgresBroker::connect_with(&config)
+    let broker = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
         .await
         .expect("connect the broker");
     let mut connection = broker.pool().acquire().await.expect("check out");
@@ -573,7 +573,7 @@ async fn in_transaction_mode_only_the_session_pool_turns_jit_off() {
     config.pgbouncer_transaction_mode = true;
     config.pool_size = 1;
     config.max_overflow = 0;
-    let broker = PostgresBroker::connect_with(&config)
+    let broker = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
         .await
         .expect("connect the broker");
     let server_setting = server_jit(&url).await;
@@ -592,7 +592,7 @@ async fn in_transaction_mode_only_the_session_pool_turns_jit_off() {
 #[serial]
 async fn the_row_stores_the_sent_input_text_byte_for_byte() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("accepted_input");
 
     for input in ["{}", "null", "{ \"z\": 1, \"a\": 2 }", "[ ]"] {

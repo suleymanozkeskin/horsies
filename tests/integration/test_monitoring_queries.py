@@ -73,7 +73,7 @@ from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.aggregates import plan_rows_from_explain
-from horsies.monitoring.queries import LIST_ROW_BOUND
+from horsies._catalog.monitoring_bounds import LIST_ROW_BOUND
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,

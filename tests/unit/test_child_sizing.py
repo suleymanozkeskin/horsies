@@ -9,7 +9,6 @@ from horsies.core.models import child_sizing
 from horsies.core.models.child_sizing import (
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     EXECUTOR_THREADS_FLOOR,
-    FINALIZE_BATCH_FLUSHERS,
     PARENT_POOL_CLAIM_CONNECTIONS,
     PARENT_POOL_CONNECTIONS_CAP,
     PARENT_POOL_CONNECTIONS_FLOOR,
@@ -24,7 +23,6 @@ from horsies.core.models.child_sizing import (
     SHARED_THREAD_POOL_CONNECTIONS_CAP,
     SHARED_THREAD_SEATS_PER_POOL_CONNECTION,
     parent_pool_connections,
-    parent_pool_flusher_bound,
     shared_async_executor_threads,
     shared_async_pool_connections,
     shared_thread_pool_connections,
@@ -247,41 +245,6 @@ class TestParentPoolMinimum:
             PARENT_POOL_RESERVE,
             PARENT_POOL_MIN_CONNECTIONS,
         ) == (1, 2, 3)
-
-
-class TestParentPoolFlusherBound:
-    """The flushers of the batched success write run on the core pool of the
-    worker less the reserve. The claim loop holds no connection of the core
-    pool."""
-
-    @pytest.mark.parametrize(
-        ('connections', 'expected'),
-        [
-            (3, 1),  # the minimum: one steady flusher
-            (4, 2),  # the steady flushers only
-            (5, 3),  # the floor of a derived size: one surge flusher
-            (20, 18),  # the cap of a derived size
-            (1000, 998),  # the largest PoolSize
-        ],
-    )
-    def test_the_bound(self, connections: int, expected: int) -> None:
-        assert parent_pool_flusher_bound(connections) == expected
-
-    def test_the_minimum_runs_one_flusher(self) -> None:
-        assert parent_pool_flusher_bound(PARENT_POOL_MIN_CONNECTIONS) == 1
-
-    def test_a_derived_size_runs_the_steady_flushers(self) -> None:
-        assert (
-            parent_pool_flusher_bound(PARENT_POOL_CONNECTIONS_FLOOR)
-            >= FINALIZE_BATCH_FLUSHERS
-        )
-
-    def test_a_pool_below_the_minimum_is_a_defect(self) -> None:
-        with pytest.raises(
-            AssertionError,
-            match='a parent pool of 2 connections is below the minimum of 3',
-        ):
-            parent_pool_flusher_bound(PARENT_POOL_MIN_CONNECTIONS - 1)
 
 
 class TestConstantsFitTheBounds:

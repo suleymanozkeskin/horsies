@@ -261,7 +261,7 @@ async fn count_tasks(pool: &PgPool, task_name: &str) -> i64 {
 /// The send command of a task `task_name` on the default queue with no
 /// options and the input `{"value": 1}`.
 fn command_of(pool: &PgPool, task_name: &str) -> SendCommand {
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
         .prepare_send_command(
             task_name,
             "default",

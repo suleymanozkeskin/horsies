@@ -919,7 +919,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("aggregate");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -1114,7 +1114,7 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("list");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     for index in 0..5 {
         let mut live = scope.pending(format!("estimate_live_{index}"));
@@ -1266,7 +1266,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     let pool = migrated_pool().await;
     let scope = TestScope::new("filters");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
 
     let match_name = scope.task("filter_match");
     let mut live_match = scope.running("filter_match");
@@ -1474,7 +1474,7 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("detail");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let workflow_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id, &scope.workflow("detail"), "RUNNING").await;
     // The second run: attempt 1 failed and was retried, and the failure of
@@ -1579,7 +1579,7 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("workflow");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let root = Uuid::new_v4();
     let child = Uuid::new_v4();
     let root_name = scope.workflow("root");
@@ -1738,7 +1738,7 @@ async fn database_failure_is_typed_and_retryable() {
         .acquire_timeout(std::time::Duration::from_millis(250))
         .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
         .expect("lazy unreachable pool");
-    let broker = PostgresBroker::from_pool(pool);
+    let broker = PostgresBroker::from_pool(pool, crate::ClientFamily::Rust);
     let error = list_tasks(&broker, &TaskListQuery::new(test_window()))
         .await
         .expect_err("unreachable monitoring database");
@@ -1756,7 +1756,7 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
     let pool = migrated_pool().await;
     let scope = TestScope::new("unpub");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task = scope.running("unpublished_detail");
     seed_task(&pool, &task).await;
     complete_task(&pool, task.id).await;

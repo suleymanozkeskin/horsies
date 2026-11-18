@@ -33,7 +33,12 @@ from horsies.core.worker.child_frames import (
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_main import BAD_PARENT_FRAME_EXIT_CODE
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import (
+    CoreStoppedAfterBody,
+    MarkerDone,
+    MarkerMetStoppedCore,
+    ResultEnvelope,
+)
 from horsies.core.worker.shared_child import (
     CHILD_DEFECT_EXIT_CODE,
     MarkerDue,
@@ -218,6 +223,42 @@ class TestRunTable:
             ),
         ]
         assert table.count() == 0
+
+    def test_a_marker_that_met_the_stopped_core_reports_the_result_of_the_body(
+        self,
+    ) -> None:
+        """The writer ends the child once this frame is written
+        (``test_child_core_refusals``)."""
+        table, writer, _clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        stopped = core.CoreStopped('log forwarder', 'planned panic')
+
+        assert table.returned(1, SetRunning(OK_END)) == MarkerDue()
+        table.marked(1, MarkerMetStoppedCore(stopped))
+        table.finish(1, RssMb(5.0))
+
+        assert writer.frames == [
+            SharedResultFrame(
+                dispatch=1,
+                task_id=_task_id(1),
+                end=CoreStoppedAfterBody(result=OK_END, stopped=stopped),
+                rss=RssMb(5.0),
+            ),
+        ]
+
+    def test_a_written_marker_keeps_the_end_at_the_return(self) -> None:
+        table, writer, _clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+
+        _ = table.returned(1, SetRunning(OK_END))
+        table.marked(1, MarkerDone())
+        table.finish(1, RssMb(5.0))
+
+        assert [item.end for item in writer.frames if isinstance(item, SharedResultFrame)] == [
+            OK_END,
+        ]
 
     def test_a_value_after_the_deadline_is_the_timeout(self) -> None:
         """The deadline report comes first, then the result, which drops the
@@ -538,10 +579,11 @@ class _Program:
             return StoppedBeforeRunning('CLAIM_LOST')
         return SetRunning(end)
 
-    def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+    def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerDone:
         with self._lock:
             self.markers.append(frame.dispatch)
         self.marker()
+        return MarkerDone()
 
 
 @pytest.fixture

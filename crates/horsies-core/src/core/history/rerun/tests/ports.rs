@@ -14,7 +14,7 @@ use super::*;
 #[serial]
 async fn a_refused_value_in_a_stored_envelope_fails_closed() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     for (input, python_text) in [
         (

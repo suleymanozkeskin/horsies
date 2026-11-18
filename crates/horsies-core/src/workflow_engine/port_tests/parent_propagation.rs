@@ -169,7 +169,7 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
     .await;
 
     let report = recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         RECOVERY_FAILURE_LIMIT,
     )
@@ -243,7 +243,7 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
     .await;
 
     run_phase2(
-        &PostgresBroker::from_pool(db.pool.clone()),
+        &PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         Phase2Work {
             task_id: child_task,

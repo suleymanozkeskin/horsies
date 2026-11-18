@@ -7,8 +7,13 @@ database. One side, on an empty `dualrun_` database:
 1. Read the database clock.
 2. Start one worker of the side per profile of the scenario, and the
    scheduler of the side for a scenario with `ScheduleSlots`, before the
-   send process or after it (`WorkerStart`). The first operation of the
-   side installs the schema, so the client family row is the side's.
+   send process or after it (`WorkerStart`). The first worker starts
+   alone; the others start once it logged `WORKER_READY_LINE`, and the
+   start ends once each of them logged it too. So the sends of a
+   `BEFORE_SENDS` scenario start after every worker of the side ended its
+   own start.
+   The first operation of the side installs the schema, so the client
+   family row is the side's.
 3. Run the send process of the side (`python -m tests.parity.send`, or
    `horsies-parity send`): it sends the tasks, reruns tasks, starts the
    workflows, runs the actions on them and pings, and prints the ids of the
@@ -33,6 +38,15 @@ the `family` of `horsies_client_family` (`PYTHON` against `RUST`); the
 reports must be equal. The worker health tables are not in the compare
 (`UNCOMPARED_TABLES`): the ping answers in the report are the compare of a
 health scenario.
+
+The other snapshot differences are judged by the hour rule of the whole-run
+compare (`judge_snapshots`): a `DualRunMismatch` when the run spans of both
+sides lie in one UTC hour, a `ClockBoundaryStraddle` when they do not. The
+install and the worker of each side create the hourly heartbeat leaves from
+their own hour on, and a leaf name is read relative to the hour of the run
+window, so two sides across an hour can differ by a leaf for the clock
+alone. The two sides run one after the other, so their spans can lie in two
+hours.
 """
 
 from __future__ import annotations
@@ -49,6 +63,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Final, LiteralString
 from uuid import UUID
@@ -61,13 +76,18 @@ from tests.dualrun.capture import capture_snapshot, read_database_clock
 from tests.dualrun.compare import (
     ColumnDifference,
     DiffEntry,
+    SnapshotDiff,
     compare_snapshots,
-    render_entry,
 )
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.values import ExactValue, make_run_window
-from tests.dualrun.worker_run import WHOLE_RUN_CATALOG, compared_part
+from tests.dualrun.values import ExactValue, RunWindow, make_run_window
+from tests.dualrun.worker_run import (
+    WHOLE_RUN_CATALOG,
+    PairJudgement,
+    compared_part,
+    judge_snapshots,
+)
 from tests.parity.app import DATABASE_URL_ENV
 from tests.parity.scenarios import NoScheduler, Scenario, ScheduleSlots, WorkerStart
 
@@ -329,11 +349,13 @@ def read_report(
 
 @dataclass(frozen=True, slots=True)
 class SideRun:
-    """What one side left: the comparable snapshot and the report."""
+    """What one side left: the comparable snapshot and the report, and the
+    span of its run, from the first clock reading to the last."""
 
     client: Client
     snapshot: NormalizedSnapshot
     report: dict[ReportKey, ReportEntry]
+    span: RunWindow
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,35 +467,110 @@ def _start_process(
     return StartedProcess(name=name, process=process, log_path=log_path)
 
 
+@dataclass(frozen=True, slots=True)
+class WorkersReady:
+    """Each started worker of the side logged `WORKER_READY_LINE`."""
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerNotReady:
+    """A worker did not log `WORKER_READY_LINE`: a process of the side
+    exited first, or `TERMINAL_WAIT` passed. `detail` names the worker and
+    the cause."""
+
+    detail: str
+
+
+type Readiness = WorkersReady | WorkerNotReady
+
+
+@dataclass(frozen=True, slots=True)
+class StartedSide:
+    """The processes that the start of a side left running, and whether
+    each worker got ready. After `WorkerNotReady` no later process of the
+    side started."""
+
+    processes: tuple[StartedProcess, ...]
+    readiness: Readiness
+
+
+def _logged_ready(worker: StartedProcess) -> bool:
+    return WORKER_READY_LINE in _tail(worker.log_path, limit=READY_LOG_BYTES)
+
+
+def _wait_ready(
+    running: Sequence[StartedProcess], workers: Sequence[StartedProcess],
+) -> Readiness:
+    """`WorkersReady` once each of `workers` logged `WORKER_READY_LINE`;
+    `WorkerNotReady` when a process of `running` exited first, or
+    `TERMINAL_WAIT` passed for one worker."""
+    for worker in workers:
+        match _wait_until(running, partial(_logged_ready, worker), f'{worker.name} ready'):
+            case None:
+                pass
+            case str() as cause:
+                return WorkerNotReady(detail=f'{worker.name} not ready: {cause}')
+    return WorkersReady()
+
+
 def _start_processes(
     commands: SideCommands, scenario: Scenario, env: dict[str, str], log_dir: Path,
-) -> list[StartedProcess]:
+) -> StartedSide:
     """One worker per profile of `scenario`, then the scheduler of a
     scenario with `ScheduleSlots`, each with its own log file.
 
     The first worker starts alone, and the others start once its log shows
     `WORKER_READY_LINE`: on a fresh database a worker whose startup coverage
     meets the coverage gate of another starting worker refuses its boot
-    (`coverage_gate_busy`), on both clients. A first worker that exits or
-    does not get ready within `TERMINAL_WAIT` is reported by the next wait of
-    the side."""
+    (`coverage_gate_busy`), on both clients. The others start together,
+    and the scheduler starts once each of them logged `WORKER_READY_LINE`
+    too. A worker that does not get ready ends the start with
+    `WorkerNotReady`."""
     first, *others = scenario.profiles
-    started = [_start_process('worker-0', [*commands.worker, f'--profile={first}'], env, log_dir)]
-    _ = _wait_until(
-        started,
-        lambda: WORKER_READY_LINE in _tail(started[0].log_path, limit=READY_LOG_BYTES),
-        'worker-0 ready',
-    )
-    started.extend(
+    leader = _start_process('worker-0', [*commands.worker, f'--profile={first}'], env, log_dir)
+    match _wait_ready([leader], [leader]):
+        case WorkersReady():
+            pass
+        case WorkerNotReady() as not_ready:
+            return StartedSide(processes=(leader,), readiness=not_ready)
+    followers = tuple(
         _start_process(f'worker-{position}', [*commands.worker, f'--profile={profile}'], env, log_dir)
         for position, profile in enumerate(others, start=1)
     )
+    workers = (leader, *followers)
+    match _wait_ready(workers, followers):
+        case WorkersReady():
+            pass
+        case WorkerNotReady() as not_ready:
+            return StartedSide(processes=workers, readiness=not_ready)
     match scenario.scheduler:
         case ScheduleSlots():
-            started.append(_start_process('scheduler', commands.scheduler, env, log_dir))
+            scheduler = _start_process('scheduler', commands.scheduler, env, log_dir)
+            return StartedSide(processes=(*workers, scheduler), readiness=WorkersReady())
         case NoScheduler():
-            pass
-    return started
+            return StartedSide(processes=workers, readiness=WorkersReady())
+
+
+def _send_when_ready(
+    readiness: Readiness, send_command: list[str], scenario: Scenario, env: dict[str, str],
+) -> Result[SentIds, str]:
+    """The send of a `BEFORE_SENDS` scenario: it runs only once each worker
+    of the side got ready."""
+    match readiness:
+        case WorkersReady():
+            return _run_send(send_command, scenario, env)
+        case WorkerNotReady(detail=detail):
+            return Err(detail)
+
+
+def _sent_then_ready(sent: Result[SentIds, str], readiness: Readiness) -> Result[SentIds, str]:
+    """The send of an `AFTER_ACTIONS` scenario and the readiness of the
+    workers that started after it: the earlier failure of the two."""
+    match sent, readiness:
+        case (Err(), _) | (Ok(), WorkersReady()):
+            return sent
+        case (Ok(), WorkerNotReady(detail=detail)):
+            return Err(detail)
 
 
 def _run_send(
@@ -602,11 +699,14 @@ def run_side(
             try:
                 match scenario.worker_start:
                     case WorkerStart.BEFORE_SENDS:
-                        processes = _start_processes(commands, scenario, env, log_dir)
-                        sent_ids = _run_send(commands.send, scenario, env)
+                        side = _start_processes(commands, scenario, env, log_dir)
+                        processes = list(side.processes)
+                        sent_ids = _send_when_ready(side.readiness, commands.send, scenario, env)
                     case WorkerStart.AFTER_ACTIONS:
-                        sent_ids = _run_send(commands.send, scenario, env)
-                        processes = _start_processes(commands, scenario, env, log_dir)
+                        sent_first = _run_send(commands.send, scenario, env)
+                        side = _start_processes(commands, scenario, env, log_dir)
+                        processes = list(side.processes)
+                        sent_ids = _sent_then_ready(sent_first, side.readiness)
                 match sent_ids:
                     case Ok(sent):
                         pass
@@ -652,7 +752,14 @@ def run_side(
                 case Err(capture_error):
                     return Err(SideFailed(client=client, detail=f'capture: {capture_error}'))
             report = read_report(connection, sent, schedule)
-        return Ok(SideRun(client=client, snapshot=compared_part(snapshot), report=report))
+        return Ok(
+            SideRun(
+                client=client,
+                snapshot=compared_part(snapshot),
+                report=report,
+                span=window,
+            ),
+        )
     finally:
         shutil.rmtree(log_dir)
 
@@ -676,20 +783,25 @@ def _is_planned(entry: DiffEntry) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ParityResult:
-    """The unplanned snapshot differences, rendered, and the report keys
-    whose entries differ, with both entries."""
+    """The judgement of the unplanned snapshot differences, whether the
+    planned difference was seen once, and the report keys whose entries
+    differ, with both entries."""
 
-    snapshot_differences: tuple[str, ...]
+    snapshots: PairJudgement
     planned_seen: bool
     report_differences: tuple[tuple[ReportKey, ReportEntry | None, ReportEntry | None], ...]
 
 
 def compare_sides(python: SideRun, rust: SideRun) -> ParityResult:
     """Compare the Python side (reference) with the Rust side (candidate).
+    The snapshot differences other than the planned one are judged by
+    `judge_snapshots` on the run spans of both sides; no entry is left out.
     Pure."""
     diff = compare_snapshots(python.snapshot, rust.snapshot)
     planned = tuple(entry for entry in diff.entries if _is_planned(entry))
-    unplanned = tuple(render_entry(entry) for entry in diff.entries if not _is_planned(entry))
+    unplanned = SnapshotDiff(
+        entries=tuple(entry for entry in diff.entries if not _is_planned(entry)),
+    )
     keys = sorted(set(python.report) | set(rust.report), key=str)
     report_differences = tuple(
         (key, python.report.get(key), rust.report.get(key))
@@ -697,7 +809,7 @@ def compare_sides(python: SideRun, rust: SideRun) -> ParityResult:
         if python.report.get(key) != rust.report.get(key)
     )
     return ParityResult(
-        snapshot_differences=unplanned,
+        snapshots=judge_snapshots(unplanned, python.span, rust.span),
         planned_seen=len(planned) == 1,
         report_differences=report_differences,
     )

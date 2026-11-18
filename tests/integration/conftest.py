@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
-from pydantic import SecretStr
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, AsyncEngine
@@ -43,22 +43,11 @@ from horsies.core.models.workflow import (
     SuccessPolicy,
     SuccessCase,
 )
-from horsies._core import CoreHandle
-from horsies.core.brokers.postgres import PostgresBroker, WorkerProcessBroker
-from tests.dualrun.reference.worker_parent.worker import (
-    child_pool as reference_child_pool,
-)
-from tests.dualrun.reference.worker_parent.worker.child_pool import (
-    _cleanup_worker_pool,
-)
+import horsies._core as core
+from horsies.core.brokers.postgres import PostgresBroker
 from tests.fixtures.child_core import (
-    TEST_CHILD_POOL,
     drop_child_core_handle,
     install_child_core_handle,
-)
-from horsies.core.worker.worker import Worker
-from tests.dualrun.reference.worker_parent.worker.worker import (
-    Worker as ReferenceWorker,
 )
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
@@ -131,43 +120,6 @@ def app(app_config: AppConfig, broker: PostgresBroker) -> Horsies:
     return horsies_app
 
 
-@pytest.fixture(autouse=True)
-def worker_core_handle(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    """Give a ``Worker`` built without a broker the core handle of a worker
-    broker on the suite database; a worker built with a broker keeps its own.
-    The same for the ``Worker`` of the reference copy, which the parent-rule
-    tests build.
-
-    A running worker always has its broker (``run_forever`` refuses to start
-    without one), and production raises for a worker without one. Tests
-    that drive the worker's methods build it without a broker, and the
-    operations that run in the core need a handle. The handle's pools close
-    at teardown.
-    """
-    handle_broker = WorkerProcessBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
-    handle = handle_broker._core_handle  # pyright: ignore[reportPrivateUsage]
-
-    def core_handle(worker: Worker | ReferenceWorker) -> CoreHandle:
-        match worker.broker:
-            case None:
-                return handle
-            case broker:
-                return broker._core_handle  # pyright: ignore[reportPrivateUsage]
-
-    monkeypatch.setattr(Worker, 'core_handle', property(core_handle))
-    monkeypatch.setattr(ReferenceWorker, 'core_handle', property(core_handle))
-    yield
-    _ = handle.close()
-
-
-@pytest.fixture(scope='session', autouse=True)
-def cleanup_worker_pool_at_teardown() -> Generator[None, None, None]:
-    """Close the psycopg pool of the version-1 child of the reference copy,
-    which the parent-rule tests open (``_initialize_worker_pool``)."""
-    yield
-    _cleanup_worker_pool()
-
-
 @pytest.fixture(scope='session', autouse=True)
 def child_core_handle() -> Generator[None, None, None]:
     """The core handle of a worker's child for the suite database, for the
@@ -177,20 +129,6 @@ def child_core_handle() -> Generator[None, None, None]:
     install_child_core_handle(DB_URL)
     yield
     drop_child_core_handle()
-
-
-@pytest.fixture(scope='session', autouse=True)
-def reference_child_core_handle() -> Generator[None, None, None]:
-    """The core handle of the version-1 child of the reference copy for the
-    suite database, for the parent-rule tests that run the start of the
-    reference child in this process (``_run_task_entry`` of
-    ``tests.dualrun.reference.worker_parent``)."""
-    reference_child_pool._initialize_child_core_handle(  # pyright: ignore[reportPrivateUsage]
-        PostgresConfig(database_url=SecretStr(DB_URL)),
-        TEST_CHILD_POOL,
-    )
-    yield
-    reference_child_pool._drop_child_core_handle()  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest_asyncio.fixture
@@ -409,66 +347,49 @@ async def _phase_one(
     claimed_at: datetime,
     result: TaskResult[Any, TaskError],
 ) -> PhaseTwoStep:
-    """Phase 1 of the RUNNING task through the production functions: the
-    success, or the failure with no retry. Returns the node facts it read."""
+    """Phase 1 of the RUNNING task through the core handle of ``broker``: the
+    success (``finish_workflow_success_async``), or the failure with no retry
+    (``finish_failed_attempt_async``). Returns the node facts it read."""
     from horsies.core.codec.json_io import dumps_json
     from horsies.core.codec.typed import encode_task_result
-    from horsies.core.lifecycle.fences import OwnedClaim
-    from horsies.core.lifecycle.outcomes import FailureApplied, PhaseTwoOwed, SuccessApplied
     from horsies.core.models.workflow.typing_utils import resolve_source_ok_type
-    from horsies.core.utils.db import autocommit_connection
-    from horsies.core.worker.failed_attempt import (
-        AttemptFailure,
-        AttemptFailureKind,
-        FinishFailedAttempt,
-        NoRetry,
-        finish_failed_attempt,
-    )
-    from horsies.core.worker.workflow_success import (
-        FinishWorkflowSuccess,
-        finish_workflow_success,
-    )
 
-    session_factory = current_resources(broker).session_factory
+    handle = broker._core_handle  # pyright: ignore[reportPrivateUsage]
     ok_type = resolve_source_ok_type(broker.app, task_name)
     encoded = dumps_json(encode_task_result(result, Any if ok_type is None else ok_type))
     if is_err(encoded):
         pytest.fail(f'the result of task {task_id} does not encode: {encoded.err_value}')
-    fence = OwnedClaim(worker_id=FINISH_WORKER_ID, claimed_at=claimed_at)
     match result.err:
         case None:
-            outcome = await finish_workflow_success(
-                session_factory,
-                FinishWorkflowSuccess(
-                    task_id=task_id, fence=fence, result_json=encoded.ok_value,
+            succeeded = await handle.finish_workflow_success_async(
+                uuid.UUID(task_id),
+                worker_id=FINISH_WORKER_ID,
+                claimed_at=claimed_at,
+                result_json=encoded.ok_value,
+            )
+            match succeeded:
+                case core.WorkflowSuccessApplied(phase_two=owed):
+                    return PhaseTwoStep(owed.step)
+                case _:
+                    pytest.fail(f'phase 1 of the success of task {task_id}: {succeeded!r}')
+        case error:
+            failed = await handle.finish_failed_attempt_async(
+                core.FinishFailedAttemptRequest(
+                    task_id=uuid.UUID(task_id),
+                    worker_id=FINISH_WORKER_ID,
+                    claimed_at=claimed_at,
+                    retry=core.NoRetry(),
+                    result_json=encoded.ok_value,
+                    error_code=_error_code_text(error),
+                    failed_reason=None,
+                    attempt_outcome='FAILED',
+                    attempt_error_message=error.message,
+                    attempt_failed_reason=None,
                 ),
             )
-            match outcome:
-                case SuccessApplied(phase_two=PhaseTwoOwed(step=step)):
-                    return step
-                case _:
-                    pytest.fail(f'phase 1 of the success of task {task_id}: {outcome!r}')
-        case error:
-            async with session_factory() as phase_one_session:
-                failed = await finish_failed_attempt(
-                    await autocommit_connection(phase_one_session),
-                    FinishFailedAttempt(
-                        task_id=task_id,
-                        fence=fence,
-                        retry=NoRetry(),
-                        result_json=encoded.ok_value,
-                        error_code=_error_code_text(error),
-                        failed_reason=None,
-                        attempt=AttemptFailure(
-                            kind=AttemptFailureKind.FAILED,
-                            error_message=error.message,
-                            failed_reason=None,
-                        ),
-                    ),
-                )
             match failed:
-                case FailureApplied(after=PhaseTwoOwed(step=step)):
-                    return step
+                case core.AttemptFailureApplied(after=core.PhaseTwoOwedRecord() as owed):
+                    return PhaseTwoStep(owed.step)
                 case _:
                     pytest.fail(f'phase 1 of the failure of task {task_id}: {failed!r}')
 

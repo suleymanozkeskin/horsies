@@ -10,6 +10,10 @@
 //! - A `loop_blocked` report kills the child at once.
 //! - A closing child is killed once no run in it has time left; each run
 //!   then ends past its deadline.
+//! - A result frame that says the child ends itself (its core stopped)
+//!   closes the child to new runs. Once it holds no run, the slot waits for
+//!   its exit, with no stop frame; a run that it still holds ends at its
+//!   exit, as at a loss.
 //! - A run with no end at its backstop, whose child reported neither the
 //!   due step of its stop nor its end, kills the child.
 //! - The runner beats of every run of a child end when a kill is sent.
@@ -39,7 +43,7 @@ use super::seat_runs::{
 };
 use super::shared::{Accepting, QueuedSeatRun, SharedPoolShared, Take};
 use crate::worker::executor::protocol::{
-    ChildFrame, ParentFrame, ProcessId, RunRef, SharedResultFrame,
+    ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RunRef, SharedResultFrame,
 };
 use crate::worker::executor::supervisor::{
     log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
@@ -101,6 +105,9 @@ struct Generation {
     channel: ChildChannel,
     runs: SeatRuns<RunHold>,
     service: ChildService,
+    /// What the child said it does after its result frames: once one said
+    /// `EndsItself`, the child takes no new run.
+    child_after: ChildAfterFrame,
     kill: KillSent,
     tasks_done: u64,
     /// The defect that ended this generation, when one did.
@@ -123,6 +130,9 @@ enum Flow {
     Continue,
     /// The closing child has no run: retire it.
     Retire,
+    /// The child said that it ends itself and has no run: wait for its
+    /// exit.
+    AwaitOwnEnd,
     /// The closing child has no run with time left: kill it.
     KillPastDeadlines(CloseReason),
     /// The child is lost: end each run.
@@ -203,6 +213,7 @@ async fn serve_generation(
         channel,
         runs: SeatRuns::new(pool.seats),
         service: ChildService::Open,
+        child_after: ChildAfterFrame::ServesOn,
         kill: KillSent::NotSent,
         tasks_done: 0,
         defect: None,
@@ -229,6 +240,7 @@ async fn serve_generation(
     let defect = generation.defect.take();
     match flow {
         Flow::Retire => retire(generation).await,
+        Flow::AwaitOwnEnd => end_child_that_ends_itself(generation).await,
         Flow::KillPastDeadlines(reason) => kill_past_deadlines(pool, generation, reason).await,
         Flow::Lost(lost) => {
             // Every defect sets `defect` and kills the child: the runs end
@@ -296,11 +308,11 @@ async fn kill_at_defect(generation: &mut Generation, defect: SlotDefect) -> Chil
 fn publish(pool: &SharedPoolShared, local: usize, generation: &Generation) {
     let pid = generation.channel.pid();
     let runs = generation.runs.count();
-    let accepting = match (generation.service, generation.kill) {
-        (ChildService::Open, KillSent::NotSent) => Accepting::Open,
-        (ChildService::Open, KillSent::Sent(_)) | (ChildService::Closing(_), _) => {
-            Accepting::NotOpen
-        }
+    let accepting = match (generation.service, generation.kill, generation.child_after) {
+        (ChildService::Open, KillSent::NotSent, ChildAfterFrame::ServesOn) => Accepting::Open,
+        (ChildService::Open, KillSent::NotSent, ChildAfterFrame::EndsItself)
+        | (ChildService::Open, KillSent::Sent(_), _)
+        | (ChildService::Closing(_), _, _) => Accepting::NotOpen,
     };
     let phase = match generation.service {
         ChildService::Open => SlotPhase::Serving { pid },
@@ -319,6 +331,7 @@ fn publish(pool: &SharedPoolShared, local: usize, generation: &Generation) {
 fn note_ready(pool: &SharedPoolShared, generation: &mut Generation) {
     let open_with_free_seat = generation.service == ChildService::Open
         && generation.kill == KillSent::NotSent
+        && generation.child_after == ChildAfterFrame::ServesOn
         && generation.runs.has_free_seat();
     match (generation.ready, open_with_free_seat) {
         (ReadyNotice::Pending, true) => {
@@ -353,11 +366,17 @@ async fn next_event(
     }
 }
 
-/// After every change: retire a closing child with no run, or kill a
-/// closing child with no run that has time left.
+/// After every change: wait for the exit of a child that ends itself and
+/// has no run, retire a closing child with no run, or kill a closing child
+/// with no run that has time left.
 fn after_change(pool: &SharedPoolShared, generation: &mut Generation) -> Flow {
     if pool.board.not_serving() {
         generation.service.close_for_pool_stop();
+    }
+    let ends_with_no_run =
+        generation.child_after == ChildAfterFrame::EndsItself && generation.runs.count() == 0;
+    if ends_with_no_run {
+        return Flow::AwaitOwnEnd;
     }
     let reason = match generation.service {
         ChildService::Open => return Flow::Continue,
@@ -371,6 +390,18 @@ fn after_change(pool: &SharedPoolShared, generation: &mut Generation) -> Flow {
         (0, _, _) => Flow::Retire,
         (_, KillSent::NotSent, true) => Flow::KillPastDeadlines(reason),
         (_, KillSent::NotSent, false) | (_, KillSent::Sent(_), _) => Flow::Continue,
+    }
+}
+
+/// End a child that said it ends itself and holds no run: wait for its exit
+/// with no stop frame ([`ChildChannel::await_own_end`]), and log an end with
+/// the core-stopped code.
+async fn end_child_that_ends_itself(generation: Generation) {
+    let pid = generation.channel.pid();
+    let exit = generation.channel.await_own_end().await;
+    match EndWithoutTask::of(exit) {
+        EndWithoutTask::CoreStopped => log_core_stopped_child(pid),
+        EndWithoutTask::Other => {}
     }
 }
 
@@ -399,6 +430,7 @@ async fn pull_runs(pool: &SharedPoolShared, local: usize, generation: &mut Gener
     loop {
         let can_take = generation.service == ChildService::Open
             && generation.kill == KillSent::NotSent
+            && generation.child_after == ChildAfterFrame::ServesOn
             && !generation.channel.has_exited()
             && !generation.channel.channel_closed()
             && generation.runs.has_free_seat();
@@ -612,19 +644,26 @@ async fn on_frame(
     }
 }
 
-/// A run ended: answer it, count it, and close the child at a recycle
-/// limit.
+/// A run ended: answer it, count it, note a child that ends itself, and
+/// close the child at a recycle limit.
 fn on_result(
     pool: &SharedPoolShared,
     generation: &mut Generation,
     result: SharedResultFrame,
 ) -> Result<(), BadFrame> {
     let rss = result.rss;
+    let child = result.child;
     let (seat, end) = generation
         .runs
         .end_run(result)
         .map_err(BadFrame::OutOfTurn)?;
     finish(seat, end);
+    generation.child_after = match (generation.child_after, child) {
+        (ChildAfterFrame::EndsItself, _) | (_, ChildAfterFrame::EndsItself) => {
+            ChildAfterFrame::EndsItself
+        }
+        (ChildAfterFrame::ServesOn, ChildAfterFrame::ServesOn) => ChildAfterFrame::ServesOn,
+    };
     generation.tasks_done = generation.tasks_done.saturating_add(1);
     let recycle = shared_recycle(
         pool.config.tasks_per_seat,

@@ -541,6 +541,60 @@ mod tests {
         let _ = stream_wait(&[], at());
     }
 
+    /// Python `TestLiveWorker::test_a_recorded_snapshot_builds_a_live_worker`:
+    /// the worker id, the snapshot time, the queues and the recorded budgets
+    /// reach the live worker.
+    #[test]
+    fn a_recorded_snapshot_builds_a_live_worker() {
+        let stored = json!({"ISOLATED": {"capacity": 2, "serves": ["ISOLATED"]}});
+
+        let live = live_worker(
+            "w1".to_owned(),
+            at(),
+            vec!["a".to_owned(), "b".to_owned()],
+            &stored,
+        )
+        .expect("readable budgets");
+
+        assert_eq!(live.worker_id, "w1");
+        assert_eq!(live.snapshot_at, at());
+        assert_eq!(
+            live.queues,
+            BTreeSet::from(["a".to_owned(), "b".to_owned()])
+        );
+        assert_eq!(
+            live.budgets.as_slice(),
+            [ClassBudget {
+                budget: ISOLATED,
+                capacity: 2,
+                serves: vec![ISOLATED],
+            }]
+        );
+    }
+
+    /// Python `TestLiveWorker::test_a_snapshot_without_budgets_is_refused_with_the_worker_named`:
+    /// no stored value is not a state (the column is NOT NULL), so a null
+    /// is refused, and the reason names the worker and the cause.
+    #[test]
+    fn a_snapshot_without_budgets_is_refused_with_the_worker_named() {
+        let refusal = live_worker(
+            "w-none".to_owned(),
+            at(),
+            vec!["a".to_owned()],
+            &Value::Null,
+        )
+        .expect_err("no budgets");
+
+        assert!(refusal.reason.contains("w-none"), "{}", refusal.reason);
+        assert!(
+            refusal
+                .reason
+                .contains("class_capacity is not a JSON object"),
+            "{}",
+            refusal.reason
+        );
+    }
+
     #[test]
     fn an_unreadable_snapshot_is_refused_with_the_worker_named() {
         for stored in [Value::Null, json!({"EXCLUSIVE": {}})] {

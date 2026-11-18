@@ -106,7 +106,7 @@ async fn enqueue_keyed(
 async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let sent_at = Utc::now();
     let first_id = crate::core::history::identity::uuid7::mint_task_id().unwrap();
     let applied = enqueue_keyed(
@@ -213,6 +213,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     let broker = PostgresBroker::from_pool_with_idempotency_reservation_window(
         pool.clone(),
         Some(Duration::hours(2)),
+        crate::ClientFamily::Rust,
     )
     .unwrap();
     let task_id = crate::core::history::identity::uuid7::mint_task_id().unwrap();
@@ -404,6 +405,7 @@ async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
         let broker = PostgresBroker::from_pool_with_idempotency_reservation_window(
             pool.clone(),
             Some(window),
+            crate::ClientFamily::Rust,
         )
         .expect("a window from 1 microsecond to 30 days");
         let task_id = crate::core::history::identity::uuid7::mint_task_id().unwrap();
@@ -444,7 +446,13 @@ async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
 async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
-    let broker = PostgresBroker::from_pool_with_enqueue_policy(pool.clone(), true, None).unwrap();
+    let broker = PostgresBroker::from_pool_with_enqueue_policy(
+        pool.clone(),
+        true,
+        None,
+        crate::ClientFamily::Rust,
+    )
+    .unwrap();
     let sent_at = Utc::now();
 
     let inherited = broker
@@ -523,7 +531,7 @@ async fn an_enqueue_outcome_outside_the_contract_panics_with_the_outcome_and_the
     .execute(&pool)
     .await
     .expect("replace the enqueue function");
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let task_id = Uuid::from_u128(0x1232);
 
     let sent = tokio::spawn(async move {

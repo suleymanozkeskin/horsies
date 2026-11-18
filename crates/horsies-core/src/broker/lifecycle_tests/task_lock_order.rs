@@ -316,7 +316,7 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
         .await
         .expect("take the task lock");
 
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
     let cancel = tokio::spawn(async move { cancel_task(&broker, task_id, true).await });
     let waited = a_backend_waits_on(&pool, finalizer_pid).await;
     let mut probe = pool.begin().await.expect("begin the probe");

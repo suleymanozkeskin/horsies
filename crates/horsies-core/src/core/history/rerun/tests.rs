@@ -352,7 +352,7 @@ async fn cleanup(pool: &PgPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
 #[serial]
 async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let mut registration = pool.acquire().await.unwrap();
     register_period_class(
         &mut registration,
@@ -491,7 +491,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
 #[serial]
 async fn root_lineage_is_preserved_across_multiple_reruns() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let original = Uuid::new_v4();
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, Some(original)).await;
     let outcome = broker
@@ -517,7 +517,7 @@ async fn root_lineage_is_preserved_across_multiple_reruns() {
 #[serial]
 async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let python_payload = br#"{"input":{"v":1e-06},"options":{"nested":[1e+20,0.0001,-0.0]}}"#;
     assert_eq!(
@@ -586,7 +586,7 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
 #[serial]
 async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
     let (workflow_task, workflow_id) = seed_source(&pool, TerminalSource::Failed, true, None).await;
     let core = core_pool_for_test_pool(&pool);
@@ -790,7 +790,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
 #[serial]
 async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     for disposition in ["DECLINED_BY_POLICY", "OVER_BOUND", "NEVER_ELIGIBLE"] {
         sqlx::query(
@@ -973,7 +973,7 @@ async fn rerun_count(pool: &PgPool, source: Uuid) -> i64 {
 #[serial]
 async fn an_unknown_stored_status_is_source_corrupt() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     sqlx::query("UPDATE horsies_task_history SET status = 'BOGUS' WHERE task_id = $1")
         .bind(source)
@@ -999,7 +999,7 @@ async fn an_unknown_stored_status_is_source_corrupt() {
 #[serial]
 async fn a_rerun_keeps_the_execution_class_of_the_request() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     store_inline_input(&pool, source, "{\"execution\":\"SHARED_THREAD\"}").await;
     let RerunOutcome::Enqueued { new_task_id, .. } = broker
@@ -1025,7 +1025,7 @@ async fn a_rerun_keeps_the_execution_class_of_the_request() {
 #[serial]
 async fn an_invalid_stored_execution_is_input_corrupt() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     store_inline_input(&pool, source, "{\"execution\":\"PARALLEL\"}").await;
     assert!(matches!(
@@ -1047,7 +1047,7 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
 #[serial]
 async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let command = || RerunTask::new(source, None, Some("p8-replay".to_owned()));
     let first = broker
@@ -1126,7 +1126,7 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
 #[serial]
 async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let caller_key = "p8-post-claim-insert-failure";
     let key_digest = ScopedIdempotencyKey::new("p8.rerun", caller_key)
@@ -1202,7 +1202,7 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
 #[serial]
 async fn unregistered_class_refuses_before_source_or_reservation_writes() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let before: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks),
@@ -1269,7 +1269,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
 #[serial]
 async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Rust);
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
     let raw = broker
         .get_raw_result_record(completed, None)
@@ -1506,7 +1506,7 @@ async fn a_handle_of_another_client_family_reruns_nothing() {
 
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    let broker = PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+    let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Python);
     let before: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks),
                 (SELECT count(*) FROM horsies_key_reservations)",

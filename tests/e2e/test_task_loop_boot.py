@@ -29,7 +29,6 @@ from horsies.core.models.health import DownSlot, SlotsDown, WorkerStateSnapshot
 from horsies.core.task_decorator import TaskFunction, TaskHandle
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
-from horsies.core.worker.slots import CHILD_BOOT_ATTEMPTS
 from tests.broker_resources_support import current_resources
 from tests.e2e.helpers.assertions import assert_ok, unwrap_send
 from tests.e2e.helpers.db import read_task
@@ -40,6 +39,10 @@ from tests.e2e.tasks.loop_creation_budget import (
     LOOP_FAILS_ON_SLOT_ENV,
     LOOP_FAILURES_ENV,
 )
+
+CHILD_BOOT_ATTEMPTS: Final = 3
+"""The failed boots after which a worker with no other slot that can serve
+stops: the core's ``CHILD_BOOT_ATTEMPTS`` (``worker/executor/supervisor/boot.rs``)."""
 
 INSTANCE = 'tests.e2e.tasks.instance_task_loop_boot:app'
 SYNC_ONLY_INSTANCE = 'tests.e2e.tasks.instance_task_loop_boot_sync_only:app'

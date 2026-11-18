@@ -38,20 +38,25 @@ from horsies.core.worker import child_runner
 from horsies.core.worker.child_runner import (
     CHILD_HOOK_FAILURE_EXIT_CODE,
     OnSharedSeat,
-    _encode_task_outcome,
     _prepare_task_call,
     _PreparedCall,
     _stored_timeout_refusal_response,
     _task_exception_response,
+    encoded_body_end,
+    set_running_or_end_child,
 )
 from horsies.core.worker.current import get_current_app
 from horsies.core.worker.shared_child import (
     SeatReturn,
-    SetRunning,
     StartedSeats,
     StoppedBeforeRunning,
 )
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import (
+    BodyInterrupted,
+    CoreStoppedBeforeStart,
+    MarkerEnd,
+    ResultEnvelope,
+)
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -69,10 +74,10 @@ class PostgresSeats:
         handle of the child."""
         return await run_seat_task(frame)
 
-    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``
         (``mark_seat_finalizing``)."""
-        await mark_seat_finalizing(frame)
+        return await mark_seat_finalizing(frame)
 
 
 class PostgresSeatProgram:
@@ -204,7 +209,9 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
     the child, then the task call and the result encode
     (``_run_after_running``). A stop before the RUNNING
     update commits returns ``StoppedBeforeRunning``; every other end returns
-    ``SetRunning``. The seat loop writes the marker at the end of the run
+    ``SetRunning``, but a body that a refusal of the core of the child
+    ended: the child ends at once (``set_running_or_end_child``). The seat
+    loop writes the marker at the end of the run
     (``PostgresSeats.mark_finalizing``). A cancel during the RUNNING
     transition propagates, and the seat loop reports it.
     """
@@ -217,14 +224,19 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
     )
     match ownership_result:
         case None:
-            return SetRunning(await _run_after_running(frame))
-        case StoppedBeforeRunning():
+            return set_running_or_end_child(
+                str(frame.task_id),
+                await _run_after_running(frame),
+            )
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
         case _ as unreachable:
             assert_never(unreachable)
 
 
-async def _run_after_running(frame: core.SharedRunFrame) -> ResultEnvelope:
+async def _run_after_running(
+    frame: core.SharedRunFrame,
+) -> ResultEnvelope | BodyInterrupted:
     """The steps of a run after its RUNNING update, as in
     ``_run_task_entry``.
 
@@ -232,7 +244,9 @@ async def _run_after_running(frame: core.SharedRunFrame) -> ResultEnvelope:
     ``WORKER_SERIALIZATION_ERROR`` before the task is resolved, as
     ``_run_task_entry`` does. The body runs through ``_seat_call_result``, which maps a
     cancel of the body; the seat loop reports a cancel of its deadline as
-    the timeout. Any other exception becomes ``TASK_EXCEPTION``.
+    the timeout. Any other exception becomes ``TASK_EXCEPTION``. A body
+    that a refusal of the core ended gives ``BodyInterrupted``
+    (``encoded_body_end``).
     """
     try:
         match frame.work:
@@ -262,16 +276,18 @@ async def _run_after_running(frame: core.SharedRunFrame) -> ResultEnvelope:
             task._map_exception,
         )
         logger.info(f'Task execution completed: {frame.task_name} ({frame.task_id})')
-        return _encode_task_outcome(frame.task_name, task, out)
+        return encoded_body_end(frame.task_name, task, out)
     except BaseException as e:
         return _task_exception_response(frame.task_name, e)
 
 
-async def mark_seat_finalizing(frame: core.SharedRunFrame) -> None:
+async def mark_seat_finalizing(frame: core.SharedRunFrame) -> MarkerEnd:
     """Write the finalizing marker of a run that ended
     (``shared_lifecycle.mark_task_finalizing``): within the bound of the
     core, ``FINALIZING_MARKER_TIMEOUT_S``. A failed or late write is logged
     only: the marker is best effort, and the end of the run follows at
-    once. Nothing escapes but a cancel of the calling task.
+    once. ``MarkerMetStoppedCore``: the core of the child stopped; the run
+    reports its result, and the child then ends itself. Nothing escapes but
+    a cancel of the calling task.
     """
-    await mark_task_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)
+    return await mark_task_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)

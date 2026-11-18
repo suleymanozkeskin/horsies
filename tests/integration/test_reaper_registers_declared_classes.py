@@ -1,197 +1,62 @@
-"""The maintenance pass registers the period classes config lists.
+"""The retention periods that the config declares reach the worker's
+maintenance pass.
 
-`ensure_partition_coverage` accepting `declared_classes` proves the
-registrar works when called with them. It cannot prove the reaper passes
-config through — that is a separate seam, and a threading mistake there
-would leave every declaration silently inert while the registrar's own
-tests stayed green.
-
-So these tests enter ABOVE the wiring, at `_run_reaper_pass`, with a real
-`RecoveryConfig`, and assert BELOW it on the registry row. They never call
-`ensure_partition_coverage` directly; naming it here would reintroduce
-exactly the blindness they exist to remove.
+The core's maintenance pass registers each period class of the retention
+section of the worker manifest. A worker built from an `AppConfig` must carry
+`AppConfig.retention` into that section, or every declaration is inert while
+the registrar's own tests stay green. The test enters at `to_worker_manifest`,
+the one place where the worker gets its config, and reads the section the core
+receives.
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
-from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import text
+from pydantic import SecretStr
 
-from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.history.periods import period_class_key
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.worker.runtime import _ReaperPassState
-from horsies.core.worker.worker import Worker, WorkerConfig
-from tests.broker_resources_support import current_resources
+from horsies.core.worker_manifest import (
+    CurrentDirectory,
+    child_argv,
+    child_sys_path,
+    python_child_launch,
+    to_worker_manifest,
+)
 
 DECLARED_DURATION = timedelta(days=11)
-DECLARED_KEY = period_class_key(DECLARED_DURATION.days)
-
-
-def _reaper_worker(broker: PostgresBroker) -> Worker:
-    config = WorkerConfig(
-        dsn='postgresql://unused:unused@localhost/unused',
-        psycopg_dsn='postgresql://unused:unused@localhost/unused',
-        queues=['default'],
-    )
-    return Worker(
-        session_factory=MagicMock(),
-        listener=MagicMock(),
-        cfg=config,
-        broker=broker,
-    )
-
-
-def _maintenance_state() -> _ReaperPassState:
-    """Fires partition maintenance; leaves row retention alone."""
-    return _ReaperPassState(
-        next_retention_cleanup_at=float('inf'),
-        next_partition_maintenance_at=0.0,
-    )
-
-
-def _config_listing(duration: timedelta) -> RetentionConfig:
-    return RetentionConfig(retention_periods=(duration,))
-
-
-async def _registered_duration(
-    broker: PostgresBroker, key: str
-) -> timedelta | None:
-    async with current_resources(broker).engine.connect() as connection:
-        return (
-            await connection.execute(
-                text(
-                    "SELECT make_interval(days => retention_days) "
-                    'FROM horsies_retention_classes '
-                    'WHERE class_key = :key'
-                ),
-                {'key': key},
-            )
-        ).scalar_one_or_none()
-
-
-async def _forget_class(broker: PostgresBroker, key: str) -> None:
-    """Remove the class and everything the pass built for it.
-
-    Order matters: the leaf catalog carries a foreign key to the class,
-    and a registered class gets leaves created for it on the same pass,
-    so the class row cannot go first.
-    """
-    async with current_resources(broker).engine.begin() as connection:
-        leaves = (
-            await connection.execute(
-                text(
-                    'SELECT leaf_name FROM horsies_task_history_leaf_catalog '
-                    'WHERE class_key = :key'
-                ),
-                {'key': key},
-            )
-        ).scalars().all()
-        for leaf_name in leaves:
-            await connection.execute(
-                text(f'DROP TABLE IF EXISTS {leaf_name} CASCADE')
-            )
-        await connection.execute(
-            text(
-                'DELETE FROM horsies_task_history_leaf_catalog '
-                'WHERE class_key = :key'
-            ),
-            {'key': key},
-        )
-        await connection.execute(
-            text(f'DROP TABLE IF EXISTS horsies_task_history_{key} CASCADE')
-        )
-        await connection.execute(
-            text(
-                'DELETE FROM horsies_retention_classes WHERE class_key = :key'
-            ),
-            {'key': key},
-        )
 
 
 @pytest.mark.integration
 class TestReaperRegistersDeclaredClasses:
-    @pytest.mark.asyncio
-    async def test_the_pass_registers_a_declared_class(
-        self, broker: PostgresBroker
-    ) -> None:
-        await _forget_class(broker, DECLARED_KEY)
-        try:
-            assert await _registered_duration(broker, DECLARED_KEY) is None
+    def test_the_worker_config_carries_retention_to_the_pass(self) -> None:
+        """The retention split's seam: `AppConfig.retention` must reach the
+        retention section of the worker manifest, which the core's pass
+        reads to register the declared classes."""
+        config = AppConfig(
+            broker=PostgresConfig(database_url=SecretStr('postgresql://unused:unused@localhost/unused')),
+            retention=RetentionConfig(retention_periods=(DECLARED_DURATION,)),
+        )
+        launch = python_child_launch(
+            executable='/usr/bin/python3',
+            interpreter_flags=(),
+            app_locator='app.main:app',
+            imports=(),
+            sys_path_roots=(),
+            parent_sys_path=child_sys_path([], CurrentDirectory('/srv/cwd')),
+            parent_argv=child_argv([]),
+            log_level='INFO',
+        ).unwrap()
 
-            worker = _reaper_worker(broker)
-            await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker,
-                current_resources(broker),
-                RecoveryConfig(),
-                _config_listing(DECLARED_DURATION),
-                _maintenance_state(),
-            )
+        manifest = to_worker_manifest(
+            config,
+            profile=None,
+            tasks={},
+            child_launch=launch,
+            idempotency_reservation_window=timedelta(hours=24),
+        )
 
-            registered = await _registered_duration(broker, DECLARED_KEY)
-            assert registered == DECLARED_DURATION, (
-                f'{DECLARED_KEY!r} is declared in config but the maintenance '
-                'pass did not register it — the declaration is inert'
-            )
-        finally:
-            await _forget_class(broker, DECLARED_KEY)
-
-    @pytest.mark.asyncio
-    async def test_declaring_nothing_registers_nothing_extra(
-        self, broker: PostgresBroker
-    ) -> None:
-        """The complement: the pass must not invent classes."""
-        await _forget_class(broker, DECLARED_KEY)
-        try:
-            worker = _reaper_worker(broker)
-            await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker,
-                current_resources(broker),
-                RecoveryConfig(),
-                RetentionConfig(),
-                _maintenance_state(),
-            )
-            assert await _registered_duration(broker, DECLARED_KEY) is None
-        finally:
-            await _forget_class(broker, DECLARED_KEY)
-
-    @pytest.mark.asyncio
-    async def test_the_worker_config_carries_retention_to_the_pass(
-        self, broker: PostgresBroker
-    ) -> None:
-        """The retention split's seam: AppConfig.retention must reach the
-        registrar.
-
-        The pass takes `retention_cfg` explicitly, so a worker built from
-        an AppConfig must carry it through `WorkerConfig.retention_config`
-        or every declaration is inert. Entering at the loop's own binding
-        — `self.cfg.retention_config` — is what proves the threading,
-        which passing a config directly to the pass cannot.
-        """
-        await _forget_class(broker, DECLARED_KEY)
-        try:
-            worker = _reaper_worker(broker)
-            worker.cfg.retention_config = _config_listing(DECLARED_DURATION)
-            # Read it back the way the loop does, then drive the pass
-            # with exactly that value.
-            carried = worker.cfg.retention_config
-            assert carried is not None, (
-                'WorkerConfig does not carry a retention section — the '
-                'declaration cannot reach the registrar'
-            )
-            await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker,
-                current_resources(broker),
-                RecoveryConfig(),
-                carried,
-                _maintenance_state(),
-            )
-            assert await _registered_duration(broker, DECLARED_KEY) == (
-                DECLARED_DURATION
-            )
-        finally:
-            await _forget_class(broker, DECLARED_KEY)
+        assert manifest.retention.retention_periods == (DECLARED_DURATION.days,)
