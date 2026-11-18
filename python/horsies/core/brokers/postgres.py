@@ -125,7 +125,6 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
-    BrokerLoopRunnerFailed,
     BrokerOperationFailed,
     BrokerOperationFailedCode,
     BrokerPayloadMismatch,
@@ -213,7 +212,6 @@ from horsies.core.process_role import (
 )
 from horsies.core.utils.loop_runner import (
     LoopRunner,
-    LoopRunnerError,
     async_context_message,
     in_running_event_loop,
 )
@@ -648,6 +646,70 @@ def _monitoring_read_failed(
             raise AssertionError(f'the core {operation} answered the code {code}')
 
 
+def _database_ping_call_failed(exc: CoreError) -> Err[BrokerOperationFailed]:
+    """The ping's error for a core boundary error: ``DB_PING_FAILED`` with
+    the error, retryable by ``core_error_retryable``. Nothing changed."""
+    return Err(
+        BrokerOperationFailed(
+            code=BrokerErrorCode.DB_PING_FAILED,
+            message=f'ping_database failed: {exc}',
+            retryable=core_error_retryable(exc),
+            exception=exc,
+        ),
+    )
+
+
+def _database_ping_answer(
+    outcome: DatabasePingRecord | BrokerFailure,
+) -> BrokerResult[DatabasePing]:
+    """The answer of the core's database ping. Pure.
+
+    - ``DatabasePingRecord``: ``Ok(DatabasePing)`` with its latency.
+    - ``BrokerFailure`` with ``DB_PING_FAILED``: ``BrokerOperationFailed``
+      with the core's text, retryable flag and exception.
+
+    Another code contradicts the ping's catalog: ``AssertionError``.
+    """
+    match outcome:
+        case DatabasePingRecord(latency_ms=latency_ms):
+            return Ok(DatabasePing(latency_ms=latency_ms))
+        case BrokerFailure(
+            code='DB_PING_FAILED',
+            message=message,
+            retryable=retryable,
+            exception=exception,
+        ):
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.DB_PING_FAILED,
+                    message=f'ping_database failed: {message}',
+                    retryable=retryable,
+                    exception=exception,
+                ),
+            )
+        case BrokerFailure(code=code):
+            raise AssertionError(f'the core database ping answered the code {code}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _close_answer(errors: list[BaseException]) -> BrokerResult[None]:
+    """The answer of a close for the failures of its steps. Pure.
+
+    No failure: ``Ok(None)``. Otherwise ``CLOSE_FAILED`` with the count and
+    the first failure, retryable by ``is_retryable_connection_error``.
+    """
+    match errors:
+        case [first, *_]:
+            return _operation_failed(
+                BrokerErrorCode.CLOSE_FAILED,
+                f'Close failed ({len(errors)} error(s)): {first}',
+                first,
+            )
+        case _:
+            return Ok(None)
+
+
 def _loop_limit_err(  # pyright: ignore[reportUnusedFunction]
     operation: str, loop_limit: EventLoopLimit,
 ) -> Err[BrokerEventLoopLimit]:
@@ -661,21 +723,6 @@ def _loop_limit_err(  # pyright: ignore[reportUnusedFunction]
         BrokerEventLoopLimit(
             message=f'{operation}: {loop_limit.describe()}',
             loop_limit=loop_limit,
-        )
-    )
-
-
-def _loop_runner_err(
-    sync_call: str, exc: LoopRunnerError,
-) -> Err[BrokerLoopRunnerFailed]:
-    """Build the broker error for a sync facade whose runner could not run the call.
-
-    Nothing ran. Not retryable: a stopped runner does not start again.
-    """
-    return Err(
-        BrokerLoopRunnerFailed(
-            message=f'Loop runner failed for {sync_call}: {exc}',
-            exception=exc,
         )
     )
 
@@ -851,6 +898,16 @@ class _SyncSendEngineNotOpen:
 @dataclass(frozen=True, slots=True)
 class _SyncSendEngineOpen:
     engine: Engine
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonResources:
+    """The Python-side resources that one close took from the broker: the
+    resource sets of the event loops, and the engine of the sync sends that
+    ran on the caller's thread."""
+
+    loop_sets: tuple[LoopResources, ...]
+    sync_send_engine: _SyncSendEngineNotOpen | _SyncSendEngineOpen
 
 
 def _task_info_core_error(task_id: UUID, exc: CoreError) -> Err[BrokerOperationFailed]:
@@ -2711,29 +2768,7 @@ class PostgresBroker:
         core. The broker stays usable: a later async call builds a new set
         for its loop, and a later core operation opens new core pools.
         """
-        current_loop = asyncio.get_running_loop()
-        with self._loop_sets_lock:
-            loop_sets = self._loop_sets
-            self._loop_sets = ()
-        per_set_errors = await asyncio.gather(
-            *(self._close_loop_set(entry, current_loop) for entry in loop_sets),
-        )
-        errors: list[BaseException] = [
-            error for set_errors in per_set_errors for error in set_errors
-        ]
-        with self._sync_send_lock:
-            sync_send_engine = self._sync_send_engine
-            self._sync_send_engine = _SyncSendEngineNotOpen()
-        match sync_send_engine:
-            case _SyncSendEngineOpen(engine=engine):
-                try:
-                    await asyncio.to_thread(engine.dispose)
-                except _DRIVER_ERRORS as exc:
-                    errors.append(exc)
-            case _SyncSendEngineNotOpen():
-                pass
-            case _ as unreachable:
-                assert_never(unreachable)
+        errors = await self._close_python_resources(self._take_python_resources())
         try:
             _ = await self._core_handle.close_async()
         except CoreError as exc:
@@ -2755,13 +2790,43 @@ class PostgresBroker:
                 await asyncio.to_thread(self._loop_runner.stop)
             except Exception as exc:
                 errors.append(exc)
-        if errors:
-            return _operation_failed(
-                BrokerErrorCode.CLOSE_FAILED,
-                f'Close failed ({len(errors)} error(s)): {errors[0]}',
-                errors[0],
-            )
-        return Ok(None)
+        return _close_answer(errors)
+
+    def _take_python_resources(self) -> _PythonResources:
+        """Take the resource sets and the sync send engine from the broker, so
+        that no later call uses them. No I/O."""
+        with self._loop_sets_lock:
+            loop_sets = self._loop_sets
+            self._loop_sets = ()
+        with self._sync_send_lock:
+            sync_send_engine = self._sync_send_engine
+            self._sync_send_engine = _SyncSendEngineNotOpen()
+        return _PythonResources(loop_sets=loop_sets, sync_send_engine=sync_send_engine)
+
+    async def _close_python_resources(self, taken: _PythonResources) -> list[BaseException]:
+        """Close the taken resource sets, each by the rule for its loop, and
+        dispose the taken sync send engine, on the running loop.
+
+        Returns the failures; raises none except the caller's cancellation.
+        """
+        current_loop = asyncio.get_running_loop()
+        per_set_errors = await asyncio.gather(
+            *(self._close_loop_set(entry, current_loop) for entry in taken.loop_sets),
+        )
+        errors: list[BaseException] = [
+            error for set_errors in per_set_errors for error in set_errors
+        ]
+        match taken.sync_send_engine:
+            case _SyncSendEngineOpen(engine=engine):
+                try:
+                    await asyncio.to_thread(engine.dispose)
+                except _DRIVER_ERRORS as exc:
+                    errors.append(exc)
+            case _SyncSendEngineNotOpen():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        return errors
 
     # ------------- Operational & Monitoring Methods -------------
 
@@ -2832,35 +2897,24 @@ class PostgresBroker:
         try:
             outcome = await self._core_handle.ping_database_async()
         except CoreError as exc:
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.DB_PING_FAILED,
-                    message=f'ping_database failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
-                ),
-            )
-        match outcome:
-            case DatabasePingRecord(latency_ms=latency_ms):
-                return Ok(DatabasePing(latency_ms=latency_ms))
-            case BrokerFailure(
-                code='DB_PING_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=exception,
-            ):
-                return Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.DB_PING_FAILED,
-                        message=f'ping_database failed: {message}',
-                        retryable=retryable,
-                        exception=exception,
-                    ),
-                )
-            case BrokerFailure(code=code):
-                raise AssertionError(f'the core database ping answered the code {code}')
-            case _ as unreachable:
-                assert_never(unreachable)
+            return _database_ping_call_failed(exc)
+        return _database_ping_answer(outcome)
+
+    def _ping_database_blocking(self) -> BrokerResult[DatabasePing]:
+        """The blocking form of ``ping_database_async``, for
+        ``Horsies.ping_database``: ``CoreHandle.ping_database`` on the calling
+        thread, with the GIL released. The same outcomes, plus
+        ``DB_PING_FAILED`` with the ``CoreCallTimedOut`` (retryable) for a
+        call that does not end within the core's bound of a blocking call.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.ping_database()
+        except CoreError as exc:
+            return _database_ping_call_failed(exc)
+        return _database_ping_answer(outcome)
 
     async def ping_workers_async(
         self,
@@ -3770,7 +3824,16 @@ class PostgresBroker:
         return _task_info_result(task_id, outcome)
 
     def close(self) -> BrokerResult[None]:
-        """Synchronous cleanup (runs close_async in background loop).
+        """The blocking form of ``close_async``: the core handle's close
+        (``CoreHandle.close``) on the calling thread, with the GIL released.
+        Then it stops the sync runner, which does not start again.
+
+        Resource sets and a sync send engine that earlier calls opened close
+        by the rules of ``close_async``, on an event loop that this call runs
+        for them; with none, no event loop runs. The core handle's writes in
+        flight end within the core's close bound; a handle that never
+        connected closes without starting the core. A raised signal handler
+        (Ctrl+C) leaves the close; the core's close runs on to its end.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and closes nothing: no resource set closes and the sync runner keeps
@@ -3781,9 +3844,19 @@ class PostgresBroker:
                 'PostgresBroker.close()', 'broker.close_async()',
             )
         try:
-            return self.run_sync(self.close_async)
-        except LoopRunnerError as exc:
-            return _loop_runner_err('PostgresBroker.close()', exc)
+            taken = self._take_python_resources()
+            match taken:
+                case _PythonResources(loop_sets=(), sync_send_engine=_SyncSendEngineNotOpen()):
+                    errors: list[BaseException] = []
+                case _PythonResources():
+                    errors = asyncio.run(self._close_python_resources(taken))
+            try:
+                _ = self._core_handle.close()
+            except CoreError as exc:
+                # As in close_async: the core of this process cannot run the
+                # close, or the close did not end within the core's bound.
+                errors.append(exc)
+            return _close_answer(errors)
         finally:
             self._loop_runner.stop()
 
