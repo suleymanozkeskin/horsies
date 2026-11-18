@@ -117,9 +117,10 @@ impl fmt::Display for BootFailureCause {
                 f.write_str("the child could not create the event loop for async tasks")
             }
             Self::SpawnFailed => f.write_str("the OS refused to start the child process"),
-            Self::LostBeforeReady { loss, exit } => {
-                write!(f, "the child ended before it was ready ({loss}: {exit})")
-            }
+            // Python `describe_failure_cause`
+            // (`python/horsies/core/worker/slots.py:781`) names no loss: the
+            // detail of the boot failure carries the loss and the exit.
+            Self::LostBeforeReady { .. } => f.write_str("the child ended before it was ready"),
             Self::NotReadyInTime => f.write_str("the child was not ready in time"),
             Self::ProtocolMismatch(MismatchSeen::ReadyNamed(received)) => write!(
                 f,

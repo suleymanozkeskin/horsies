@@ -350,7 +350,9 @@ async fn a_task_that_ends_during_the_drain_keeps_its_result() {
 /// Python `test_worker_stop_ordering.py::test_stop_drains_for_the_configured_time`
 /// and `test_slot_pool.py::TestStop::test_drain_deadline_kills_and_reports`:
 /// the stop gives a busy child its drain timeout, then kills it; its task
-/// takes the crash path.
+/// takes the crash path. The kill is the worker's (`KILLED_BY_PARENT`,
+/// Python `_kill_at_deadline`), so the reason is Python's text of a lost
+/// child (`_finalize_child_loss`, `python/horsies/core/worker/finalize.py:1057`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path() {
     let first = task(1, ExecutionClass::Isolated);
@@ -375,12 +377,14 @@ async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path
             killed: vec![first.task_id]
         }
     );
-    match answer_of(receiver).await {
-        AttemptEnd::Crashed { reason } => {
-            assert!(reason.as_str().contains("drain deadline"), "{reason}");
+    assert_eq!(
+        answer_of(receiver).await,
+        AttemptEnd::Crashed {
+            reason: FailureDetail::cut(
+                "Worker child lost: killed by the worker: signal 9 (SIGKILL)"
+            ),
         }
-        other => panic!("expected the crash path, got {other:?}"),
-    }
+    );
     ended(pid.as_pid_t()).await;
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
 }

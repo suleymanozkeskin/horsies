@@ -838,6 +838,150 @@ async fn a_lost_child_stores_its_reason_on_the_attempt() {
     );
 }
 
+/// Python `_kill_at_deadline` and `_finalize_child_loss`: the drain
+/// deadline kills the child with the worker's kill, so the loss is
+/// `KILLED_BY_PARENT` with the exit `signal 9 (SIGKILL)`; the running task
+/// fails with `WORKER_CRASHED`, and the attempt stores
+/// `Worker child lost: killed by the worker: signal 9 (SIGKILL)` as its
+/// message and its failed reason. The isolated slot gives this end at the
+/// drain deadline
+/// (`stop_and_loss_tests::the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path`).
+#[tokio::test]
+#[serial]
+async fn a_child_killed_at_the_drain_deadline_stores_its_reason_on_the_attempt() {
+    let killed_at_drain_deadline = ChildLost {
+        cause: LossCause::KilledByParent,
+        exit: ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGKILL)),
+        ..child_died_with_exit_code_9()
+    };
+    let end = AttemptEnd::of_lost_child(&killed_at_drain_deadline);
+
+    let (facts, attempts) = settle_on_a_running_row(end).await;
+
+    assert_attempt_failed_with_reason(
+        &facts,
+        &attempts,
+        "WORKER_CRASHED",
+        "Worker child lost: killed by the worker: signal 9 (SIGKILL)",
+    );
+}
+
+/// The objects of [`refuse_first_attempt_insert`], named for one test.
+struct AttemptInsertRefusal {
+    counter: String,
+    function: String,
+    trigger: String,
+}
+
+impl AttemptInsertRefusal {
+    async fn remove(self, pool: &PgPool) {
+        for statement in [
+            format!(
+                "DROP TRIGGER IF EXISTS {} ON horsies_task_attempts",
+                self.trigger
+            ),
+            format!("DROP FUNCTION IF EXISTS {}()", self.function),
+            format!("DROP SEQUENCE IF EXISTS {}", self.counter),
+        ] {
+            sqlx::query(&statement)
+                .execute(pool)
+                .await
+                .expect("remove the attempt insert refusal");
+        }
+    }
+}
+
+/// Refuse the first insert of an attempt row of `task_id` with SQLSTATE
+/// 40001 (`serialization_failure`, a class that may clear): the first send
+/// of the failed-attempt write fails, and the outcome writer sends the
+/// write again. A sequence counts the inserts: `nextval` is not rolled back
+/// with the refused statement.
+async fn refuse_first_attempt_insert(pool: &PgPool, task_id: Uuid) -> AttemptInsertRefusal {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let refusal = AttemptInsertRefusal {
+        counter: format!("report_attempt_inserts_{suffix}"),
+        function: format!("report_refuse_attempt_{suffix}"),
+        trigger: format!("report_refuse_attempt_{suffix}"),
+    };
+    for statement in [
+        format!("CREATE SEQUENCE {}", refusal.counter),
+        format!(
+            "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF nextval('{counter}') <= 1 THEN
+                     RAISE EXCEPTION 'a serialization failure for the test'
+                         USING ERRCODE = 'serialization_failure';
+                 END IF;
+                 RETURN NEW;
+             END
+             $body$",
+            function = refusal.function,
+            counter = refusal.counter,
+        ),
+        format!(
+            "CREATE TRIGGER {trigger} BEFORE INSERT ON horsies_task_attempts
+             FOR EACH ROW WHEN (NEW.task_id = '{task_id}'::uuid)
+             EXECUTE FUNCTION {function}()",
+            trigger = refusal.trigger,
+            function = refusal.function,
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(pool)
+            .await
+            .expect("create the attempt insert refusal");
+    }
+    refusal
+}
+
+/// The `err.message` of the result that the history row of `task_id`
+/// stores.
+async fn stored_error_message(pool: &PgPool, task_id: Uuid) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT convert_from(result_payload, 'UTF8')::jsonb -> 'err' ->> 'message'
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the stored error message")
+}
+
+/// Python `_retry_finalize_future` (`python/horsies/core/worker/finalize.py:1957`):
+/// the crash-recovery write of a lost child fails once with a database
+/// error that may clear; the write sent again stores
+/// `Retry after future-stage finalize error: ` and the first message as the
+/// task's error message, and as the attempt's message and failed reason.
+#[tokio::test]
+#[serial]
+async fn a_crash_write_sent_again_stores_python_s_retry_text() {
+    let pool = migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed_task(&pool, &queue, RUNNING_PLAIN).await;
+    let refusal = refuse_first_attempt_insert(&pool, task_id).await;
+    let end = AttemptEnd::of_lost_child(&child_died_with_exit_code_9());
+
+    let settled = writer(&pool)
+        .settle(&claimed(task_id, &queue, generation, TaskKind::Plain), end)
+        .await;
+
+    let facts = history_facts(&pool, task_id).await;
+    let attempts = archived_attempts(&pool, task_id).await;
+    let error_message = stored_error_message(&pool, task_id).await;
+    refusal.remove(&pool).await;
+    remove_task(&pool, task_id).await;
+    let text =
+        "Retry after future-stage finalize error: Worker child lost: child died: exit code 9";
+    assert_eq!(settled, Settlement::Written);
+    assert_attempt_failed_with_reason(
+        &facts.expect("the task moved to history"),
+        &attempts,
+        "WORKER_CRASHED",
+        text,
+    );
+    assert_eq!(error_message.as_deref(), Some(text));
+}
+
 /// Python `_settle_timed_out_row`: a run past its deadline fails the
 /// running task with `TASK_TIMEOUT`; the attempt stores
 /// `Task exceeded timeout_ms=1000` as its message and its failed reason.

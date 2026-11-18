@@ -98,7 +98,9 @@ async fn a_start_hook_that_fails_at_boot_fails_the_pool_at_once() {
 
 /// Python `TestBoot::test_boot_failure_is_bounded_and_named`: a child that
 /// dies before its ready frame counts; the third counted attempt fails the
-/// pool with the cause and the exit.
+/// pool with the cause and the exit. The text of the failure is Python's
+/// `describe_pool_failure` (`python/horsies/core/worker/slots.py:852`):
+/// the cause names no loss, and the detail names the loss and the exit once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_boot_that_fails_three_times_fails_the_pool_with_its_cause() {
     let dir = TestDir::new();
@@ -106,7 +108,13 @@ async fn a_boot_that_fails_three_times_fails_the_pool_with_its_cause() {
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
 
-    let last = exhausted(failure_of(&board).await);
+    let failure = failure_of(&board).await;
+    assert_eq!(
+        failure.to_string(),
+        "3 child boot attempts failed; the last one: the child ended before it was ready: \
+         child died: exit code 1"
+    );
+    let last = exhausted(failure);
 
     assert_eq!(
         last.cause,
