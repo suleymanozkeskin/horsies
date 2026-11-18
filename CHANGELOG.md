@@ -45,16 +45,13 @@ before you upgrade a 0.7 deployment.
   sends, `PostgresBroker.enqueue` and `enqueue_async`, `get_task_info`,
   `get_raw_result_record` (and `TaskHandle.get()`), `ping_database_async`,
   `ping_workers_async` and `ensure_schema_initialized` use one set of core
-  pools per broker, for every thread and event loop. They return no
-  `EVENT_LOOP_LIMIT`, and the sync `send()`, `enqueue()`, `get_task_info()`
-  and `get_raw_result_record()` return no `LOOP_RUNNER_FAILED`; the error
-  types keep both variants. When the core cannot run a call, the call
+  pools per broker, for every thread and event loop. When the core cannot
+  run a call, the call
   returns its failure code with the core error as `exception`:
   `TooManyPendingCalls` (65,536 calls in flight on one event loop) and
   `CoreCallTimedOut` (a sync call over 30 minutes) are retryable;
   `CoreStartFailed` is not. `CoreStopped` and `ForkedAfterCoreStart` are
-  raised instead (see below). Only a workflow start and a workflow resume
-  keep a resource set per event loop. The sync send pool is gone.
+  raised instead (see below). The sync send pool is gone.
 
 - **Every sync call runs on the calling thread.** The sync methods of
   `Horsies` (`get_result`, `get_task_info`, `ping_database`,
@@ -66,8 +63,7 @@ before you upgrade a 0.7 deployment.
   call the core's blocking form on the calling thread, with the GIL
   released and signals checked every 100 ms: Ctrl+C ends a blocking wait,
   `WorkflowHandle.get()` with no limit included. Their outcomes are those of
-  the async forms. No sync call starts the broker's `horsies-loop` thread,
-  and none returns `LOOP_RUNNER_FAILED`; the error types keep the variant.
+  the async forms. No sync call starts a `horsies-loop` thread.
   A sync call that does not end within 30 minutes returns its failure code
   with `CoreCallTimedOut`; a wait (`get()`, `get_result()`, `ping_workers()`)
   is bounded by its limit plus 30 minutes, and a wait with no limit is not
@@ -125,8 +121,7 @@ before you upgrade a 0.7 deployment.
   and `DEFAULT_RETENTION_CLASS_KEY` are rendered into `horsies._catalog`
   from the core's records. Their names, fields, defaults and docs do not
   change, and the old import paths re-export them. `TaskSendError` is the
-  generated union `TaskSendCoreError` plus `TaskSendEventLoopLimit` and
-  `TaskSendLoopRunnerFailed`, which only the Python client produces.
+  generated union `TaskSendCoreError`.
 
 - **`OutcomeDecodeError` is generated from the core, and the core builds
   the error classes of `cancel_task`.** `OutcomeDecodeError` is rendered
@@ -680,6 +675,34 @@ before you upgrade a 0.7 deployment.
 - **`PostgresBroker.create_single_connection_engine` and
   `BrokerResources.session_async_engine` are removed.**
 
+- **The Python listener, the per-loop resource sets, the sync runner and
+  the event loop limit are removed.** Every call of the broker runs on the
+  core: one pool for every thread and event loop of the process, and one
+  listener per process. A sync call runs on the calling thread, so no
+  `horsies-loop` thread starts, and a web process builds no SQLAlchemy
+  engine. Removed: `PostgresBroker.select_resources`, `run_sync` and
+  `discard_inherited_resources`; `SyncSendRoute`;
+  `horsies.core.brokers.resources` (`BrokerResources`, `EventLoopLimit`),
+  `horsies.core.brokers.listener` (`PostgresListener`),
+  `horsies.core.brokers.session_capability`,
+  `horsies.core.history.maintenance` (`PartitionMaintenanceDatabase`),
+  `horsies.core.utils.db`, and `LoopRunner` and `LoopRunnerError` of
+  `horsies.core.utils.loop_runner`. The member `EVENT_LOOP_LIMIT` of
+  `BrokerErrorCode`, `TaskSendErrorCode`, `WorkflowStartErrorCode`,
+  `HandleErrorCode`, `MonitoringQueryErrorCode`, `TaskActionErrorCode` and
+  `RetrievalCode`, and `LOOP_RUNNER_FAILED` of `BrokerErrorCode`,
+  `TaskSendErrorCode`, `WorkflowStartErrorCode` and `HandleErrorCode`, are
+  removed with their classes: `BrokerEventLoopLimit`,
+  `BrokerLoopRunnerFailed`, `TaskSendEventLoopLimit`,
+  `TaskSendLoopRunnerFailed`, `WorkflowStartEventLoopLimit`,
+  `WorkflowStartLoopRunnerFailed`, `HandleEventLoopLimit`,
+  `HandleLoopRunnerFailed`, `MonitoringQueryEventLoopLimit` and
+  `TaskActionEventLoopLimit`. `TaskSendRetryable` and
+  `WorkflowStartRetryable` no longer hold a `LOOP_RUNNER_FAILED` class;
+  `BrokerSyncCallError` is `BrokerAsyncContext`, and
+  `ensure_schema_initialized` returns `Result[None, BrokerOperationFailed]`.
+  `TaskError` accepts `'EVENT_LOOP_LIMIT'` as a user code.
+
 - **Client helpers with no caller in the library.** From
   `horsies.core.types.result`: `do`, `do_async`, `as_result`,
   `as_async_result` and `OkErr`. From `horsies.core.errors`:
@@ -819,8 +842,8 @@ unless it starts with "Added".
   `SEND_SUPPRESSED` are no longer task codes. Added:
   `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`,
   `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`,
-  `WORKFLOW_START_INCOMPLETE`, `NO_TYPE_AVAILABLE`, `EVENT_LOOP_LIMIT`,
-  `ASYNC_CONTEXT`, `INVALID_INPUT`, `WAIT_INSIDE_TASK` and
+  `WORKFLOW_START_INCOMPLETE`, `NO_TYPE_AVAILABLE`, `ASYNC_CONTEXT`,
+  `INVALID_INPUT`, `WAIT_INSIDE_TASK` and
   `WORKFLOW_OUTPUT_SKIPPED`. `ExceptionRecord` and `SubWorkflowFailure`
   (the failed child workflow as top-level fields) replace
   `SubWorkflowError`.
@@ -1122,8 +1145,7 @@ unless it starts with "Added".
   `Option`), `DbOperationFailed` (with `retryable` and `cause`) and
   `StoredDataInvalid`; each has `message` and `task_id`. The fields become
   the methods `code()`, `message()`, `retryable()`, `task_id()` and
-  `failure_cause()`. Python's `EVENT_LOOP_LIMIT` classes are not
-  variants: no Rust call gives them.
+  `failure_cause()`.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

@@ -17,10 +17,6 @@ pub enum MonitoringQueryErrorCode {
     /// The read failed with a database or driver error. `retryable` is the
     /// driver classification of the cause.
     DbOperationFailed,
-    /// The broker already holds resource sets for its limit of open event
-    /// loops, and this call ran on a new one. Nothing ran. Python client
-    /// only; removed before 0.8.0.
-    EventLoopLimit,
     /// Stored history data does not decode: a status that is not a task
     /// status, an attempt snapshot or archive envelope that does not decode.
     /// Not retryable: a repeat gives the same result until the stored row
@@ -58,10 +54,9 @@ impl MonitoringQueryErrorSource {
 pub struct HistoryContractSource(pub MonitoringQueryErrorSource);
 
 /// A failed monitoring read: one variant per class of Python's monitoring
-/// query catalog that the core produces, each with the facts of its state.
-/// Python's `MonitoringQueryEventLoopLimit` is a class of the Python client
-/// only, so it is not a variant. A monitoring read changes nothing. Each
-/// variant's doc is its Python class doc (`ErrorCatalog`).
+/// query catalog, each with the facts of its state. A monitoring read
+/// changes nothing. Each variant's doc is its Python class doc
+/// (`ErrorCatalog`).
 #[derive(
     Debug,
     thiserror::Error,

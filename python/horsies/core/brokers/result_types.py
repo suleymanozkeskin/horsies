@@ -17,7 +17,7 @@ The library uses two distinct error systems:
    ``enqueue_async`` returns ``Result[str, BrokerEnqueueError]``,
    ``enqueue`` adds ``BrokerSyncCallError``, and
    ``ensure_schema_initialized`` returns
-   ``Result[None, BrokerOperationFailed | BrokerEventLoopLimit]``.
+   ``Result[None, BrokerOperationFailed]``.
 
 Where Result stops and exceptions take over (the "stop line"):
 
@@ -41,10 +41,8 @@ Where Result stops and exceptions take over (the "stop line"):
 * **Workflow start** (``start_workflow_async``, ``start_workflow``) --
   returns ``WorkflowStartResult`` (see ``start_types.py``).  A schema
   init ``BrokerOperationFailed`` becomes ``WorkflowStartEnqueueFailed``
-  with the ``retryable`` flag and the cause of the broker error; a
-  ``BrokerEventLoopLimit`` becomes ``WorkflowStartEventLoopLimit``.  A
-  sync runner failure maps to ``WorkflowStartLoopRunnerFailed``; any other
-  exception propagates.
+  with the ``retryable`` flag and the cause of the broker error; any
+  other exception propagates.
 
 * **User-facing API** (``TaskHandle.info`` / ``info_async``) -- returns
   ``BrokerResult`` directly.  The user decides how to handle
@@ -78,7 +76,6 @@ from horsies.core.types.result import Result
 
 
 if TYPE_CHECKING:
-    from horsies.core.brokers.resources import EventLoopLimit
     from horsies.core.codec.typed import Json
     from horsies.core.types.status import TaskStatus
 
@@ -105,40 +102,10 @@ class BrokerNoTypeAvailable:
     message: str = field(repr=False)
 
 
-@dataclass(slots=True, frozen=True)
-class BrokerEventLoopLimit:
-    """The broker holds resource sets for its limit of open event loops. Nothing ran.
-
-    ``loop_limit`` names the limit and the threads of the held loops. A call
-    from this loop returns the same error until one of the held loops closes.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.EVENT_LOOP_LIMIT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    loop_limit: EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
-class BrokerLoopRunnerFailed:
-    """A sync facade could not run the call on the broker's sync runner. Nothing ran.
-
-    ``exception`` is the ``LoopRunnerError``. A stopped runner does not start
-    again; call the ``*_async`` form or use a new broker.
-    """
-
-    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.LOOP_RUNNER_FAILED
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    exception: BaseException = field(repr=False)
-
-
 type BrokerOperationError = (
     BrokerCoreError
     | BrokerNotAttached
     | BrokerNoTypeAvailable
-    | BrokerEventLoopLimit
-    | BrokerLoopRunnerFailed
 )
 """Every failure of a broker operation: one variant per state."""
 
@@ -146,12 +113,13 @@ type BrokerOperationError = (
 type BrokerResult[T] = Result[T, BrokerOperationError]
 
 
-type BrokerEnqueueError = BrokerCoreEnqueueError | BrokerEventLoopLimit
+type BrokerEnqueueError = BrokerCoreEnqueueError
 """Every failure of ``PostgresBroker.enqueue_async``."""
 
 
-type BrokerSyncCallError = BrokerAsyncContext | BrokerLoopRunnerFailed
-"""The failures that a sync facade adds to its async method. Nothing ran."""
+type BrokerSyncCallError = BrokerAsyncContext
+"""The failure that a sync facade adds to its async method: it was called
+inside a running event loop. Nothing ran."""
 
 
 def broker_error_cause(error: BrokerOperationError) -> BaseException | NoCause:
@@ -161,9 +129,7 @@ def broker_error_cause(error: BrokerOperationError) -> BaseException | NoCause:
     call. It does not change ``error``.
     """
     match error:
-        case BrokerOperationFailed(exception=cause) | BrokerLoopRunnerFailed(
-            exception=cause,
-        ):
+        case BrokerOperationFailed(exception=cause):
             return cause
         case (
             BrokerEnqueueFailed(exception=cause)
@@ -177,7 +143,6 @@ def broker_error_cause(error: BrokerOperationError) -> BaseException | NoCause:
             | BrokerIdempotencyKeyConflict()
             | BrokerNotAttached()
             | BrokerNoTypeAvailable()
-            | BrokerEventLoopLimit()
             | BrokerAsyncContext()
             | BrokerListenerDisabled()
             | BrokerWaitInsideTask()

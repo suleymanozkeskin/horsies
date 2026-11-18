@@ -71,8 +71,6 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` | Nothing written |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` | Nothing written |
 | `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | Driver classification of the cause | Rolled back, or the commit outcome is unknown |
-| `WorkflowStartLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` (the `LoopRunnerError`) | `False` | Nothing ran |
-| `WorkflowStartEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing written |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing written |
 
 `NoCause()` means that a check refused the input without a Python exception. Match on `exception` before `raise ... from`.
@@ -86,11 +84,9 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. `existing_workflow_name` names it. Use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
-| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 
-`WorkflowStartRetryable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
+`WorkflowStartRetryable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
 
 **Usage:**
 
@@ -157,8 +153,6 @@ Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, 
 | `HandleDbOperationFailed` | `DB_OPERATION_FAILED` | `exception: BaseException` | Driver classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
 | `HandleStoredDataInvalid` | `STORED_DATA_INVALID` | `exception: BaseException` | `False` | Nothing changed; a stored workflow status or subworkflow summary does not parse |
 | `HandleResumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `exception: BaseException` | `False` | The resume committed and the workflow is `RUNNING`; the recovery pass after the commit failed |
-| `HandleLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` (the `LoopRunnerError`) | `False` | Nothing ran |
-| `HandleEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing ran. Only `resume()` and `resume_workflow()` return it |
 | `HandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 
 See [Errors Reference](/horsies/tasks/errors/#workflow-handle-error-codes) for when each code occurs.

@@ -6,7 +6,7 @@ Tests verify:
 - SKIPPED vs FAILED propagation semantics
 - Mixed args_from and workflow_ctx usage
 
-All tests use DB polling to avoid event loop conflicts with PostgresListener.
+All tests poll the database for the state they wait for.
 """
 
 from __future__ import annotations

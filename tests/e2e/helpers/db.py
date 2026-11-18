@@ -18,7 +18,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.types.status import TaskStatus
-from horsies.core.utils.db import uuid_column_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +53,31 @@ class TaskRow:
     error_code: str | None
 
 
+def uuid_of_column(value: object, *, column: str) -> UUID:
+    """The ``uuid.UUID`` of a non-null uuid column value: the test-side engine
+    reads it as text, a connection without the text loader as ``uuid.UUID``.
+
+    Raises:
+        TypeError: the value is neither; ``column`` names the column.
+        ValueError: the text is not a UUID; ``column`` names the column.
+    """
+    match value:
+        case UUID():
+            return value
+        case str():
+            try:
+                return UUID(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f'uuid column {column} read text that is not a UUID: {value!r}'
+                ) from exc
+        case _:
+            raise TypeError(
+                f'uuid column {column} read a {type(value).__name__}, '
+                'not text or uuid.UUID'
+            )
+
+
 _READ_TASK_SQL = text("""
     SELECT id, task_name, queue_name, status, result, retry_count,
            max_retries, claimed_by_worker_id, last_claimed_worker_id,
@@ -77,7 +101,7 @@ async def read_task(session: AsyncSession, task_id: UUID) -> TaskRow | None:
     if row is None:
         return None
     return TaskRow(
-        id=uuid_column_value(row.id, column='itest_task_rows.id'),
+        id=uuid_of_column(row.id, column='itest_task_rows.id'),
         task_name=row.task_name,
         queue_name=row.queue_name,
         status=TaskStatus(row.status),

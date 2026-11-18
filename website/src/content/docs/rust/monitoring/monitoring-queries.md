@@ -102,8 +102,6 @@ Every read returns `MonitoringResult<T>`: `Result<T, MonitoringQueryError>`. `Mo
 | `DbOperationFailed { retryable, .. }` | `DbOperationFailed` | The connect or the statement failed. No statement ran after a failed connect. `retryable` is the classification of the cause |
 | `HistoryContractViolation` | `HistoryContractViolation` | A stored history row does not decode (`task_stats`, `task_facets`, `task_breakdown`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable: a repeat gives the same result until the row changes |
 
-`MonitoringQueryErrorCode::EventLoopLimit` is a code of the Python client only; no variant has it.
-
 ## Cancel a Task
 
 ```rust
@@ -140,8 +138,6 @@ The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-c
 | `WorkflowTask { current_status, .. }` | `TaskIsWorkflowTask` | The task belongs to a workflow. Nothing changed |
 | `DbOperationFailed { retryable, cause, .. }` | `DbOperationFailed` | The connect or the statement failed; `cause` is the `BrokerError`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
 | `StoredDataInvalid { cause, .. }` | `StoredDataInvalid` | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed. Not retryable |
-
-`TaskActionErrorCode::EventLoopLimit` is a code of the Python client only; no variant has it.
 
 ## Actions as the Web Routes Answer
 

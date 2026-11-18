@@ -25,7 +25,6 @@ from horsies._core import (
     TaskCancelledRecord,
     TooManyPendingCalls,
 )
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
@@ -34,7 +33,6 @@ from horsies.monitoring.task_actions import (
     TaskActionDbOperationFailed,
     TaskActionError,
     TaskActionErrorCode,
-    TaskActionEventLoopLimit,
     TaskActionNotCancellable,
     TaskActionNotFound,
     TaskActionStoredDataInvalid,
@@ -49,11 +47,6 @@ pytestmark = [pytest.mark.unit]
 MESSAGE_MARKER = 'message-marker-7d2e'
 CAUSE_MARKER = 'cause-marker-7d2e'
 TASK_ID = uuid.UUID('3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607')
-LOOP_LIMIT = EventLoopLimit(
-    limit=5,
-    held_thread_names=('MainThread',),
-    current_thread_name='worker-1',
-)
 
 
 def _every_variant(cause: BaseException) -> list[TaskActionError]:
@@ -69,9 +62,6 @@ def _every_variant(cause: BaseException) -> list[TaskActionError]:
         ),
         TaskActionDbOperationFailed(
             message=message, retryable=True, task_id=TASK_ID, exception=cause,
-        ),
-        TaskActionEventLoopLimit(
-            message=message, task_id=TASK_ID, loop_limit=LOOP_LIMIT,
         ),
         TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, exception=cause),
     ]
@@ -113,14 +103,12 @@ class TestVariantCatalog:
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError('x')), ids=_variant_id,
     )
-    def test_repr_shows_the_status_and_the_limit(self, error: TaskActionError) -> None:
+    def test_repr_shows_the_status(self, error: TaskActionError) -> None:
         text = repr(error)
 
         match error:
             case TaskActionNotCancellable() | TaskActionWorkflowTask():
                 assert repr(error.current_status) in text
-            case TaskActionEventLoopLimit():
-                assert repr(LOOP_LIMIT) in text
             case _:
                 assert 'current_status' not in text
 

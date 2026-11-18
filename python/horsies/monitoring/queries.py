@@ -13,14 +13,12 @@ that a read gives:
   does not decode, in ``task_stats``, ``list_tasks``, ``get_task_detail``
   and ``get_workflow_node``.
 
-``MonitoringQueryEventLoopLimit`` stays in the union and no read gives it:
-the reads select no SQLAlchemy resource set. Every read raises
-``ForkedAfterCoreStart`` and ``CoreStopped``: they are states of the
-process, never a result (``call_refusal_or_raise``). Nothing else is caught. A row
-that does not exist is ``Ok(None)``, not an error. ``get_task_detail`` names
-it: ``Ok(TaskDetailNotFound)`` with the reason the reads know. Each read
-sends one statement, so the live read and the history read see the same
-rows.
+Every read raises ``ForkedAfterCoreStart`` and ``CoreStopped``: they are
+states of the process, never a result (``call_refusal_or_raise``). Nothing
+else is caught. A row that does not exist is ``Ok(None)``, not an error.
+``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the reason the
+reads know. Each read sends one statement, so the live read and the history
+read see the same rows.
 
 Sort keys and group columns are ``Literal`` types; each passes as a bound
 argument, and the monitoring function maps it to a fixed column text, so no
@@ -254,8 +252,6 @@ async def task_stats(
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
     """
     query = CoreTaskStatsQuery(
         window_lower=window.lower,
@@ -303,8 +299,6 @@ async def task_facets(
     One statement (``horsies_monitoring_task_facets``) that the core runs on
     the broker's core handle: the values and their counts, ranked after the
     two sides sum, with ties in the database collation.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it uses
-    no SQLAlchemy resource set.
     """
     query = CoreTaskFacetsQuery(
         window_lower=window.lower,
@@ -353,8 +347,6 @@ async def task_breakdown(
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
     """
     query = CoreTaskBreakdownQuery(
         window_lower=window.lower,
@@ -419,8 +411,7 @@ async def list_tasks(
     One statement (``horsies_monitoring_task_list``) that the core runs on
     the broker's core handle, so the page and the total read one snapshot: a
     task that moves to history during the read is on the page once or not at
-    all. ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
+    all.
     """
     query = CoreTaskListQuery(
         window_lower=window.lower,
@@ -474,8 +465,6 @@ async def get_task_detail(
 
     One statement (``horsies_monitoring_task_detail``) that the core runs on
     the broker's core handle, so every part comes from one snapshot.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it uses
-    no SQLAlchemy resource set.
     """
     operation = 'task detail query'
     try:
@@ -505,8 +494,6 @@ async def list_workflow_names(
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
     The cut is logged on ``horsies.monitoring`` by the core.
     """
     operation = 'workflow names query'
@@ -537,8 +524,6 @@ async def list_workflow_runs(
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
     """
     query = CoreWorkflowRunsQuery(name=name, status=status, limit=limit.value)
     operation = 'workflow runs query'
@@ -567,8 +552,6 @@ async def get_workflow_run(
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
     An id text that is not a UUID names no run: ``Ok(None)``, with no call.
     """
     match _workflow_uuid(workflow_id):
@@ -610,8 +593,6 @@ async def get_workflow_node(
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
     An id text that is not a UUID, or an index outside the integer column
     of the node index, names no node: ``Ok(None)``, with no call.
     """
@@ -651,8 +632,6 @@ async def list_schedules(
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
-    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
-    uses no SQLAlchemy resource set.
     The cut is logged on ``horsies.monitoring`` by the core.
     """
     operation = 'schedule state query'

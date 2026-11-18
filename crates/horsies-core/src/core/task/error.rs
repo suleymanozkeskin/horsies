@@ -111,9 +111,6 @@ pub enum RetrievalCode {
     WorkflowNotFound,
     ResultNotAvailable,
     ResultNotReady,
-    /// The broker already holds resource sets for its limit of open event loops, so this new loop
-    /// cannot read the value now. Never cached: it clears when one of those loops closes.
-    EventLoopLimit,
     /// A sync get was called on a thread that runs an event loop, so this call site cannot wait for
     /// the value. Never cached: the async form, or a sync call from a thread without a running loop,
     /// reads it.
@@ -129,13 +126,12 @@ pub enum RetrievalCode {
 }
 
 impl RetrievalCode {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::WaitTimeout,
         Self::TaskNotFound,
         Self::WorkflowNotFound,
         Self::ResultNotAvailable,
         Self::ResultNotReady,
-        Self::EventLoopLimit,
         Self::AsyncContext,
         Self::InvalidInput,
         Self::WaitInsideTask,
@@ -1401,7 +1397,6 @@ mod tests {
             "TASK_BLOCKED_LOOP",
             "NEIGHBOUR_BLOCKED_LOOP",
             "NO_TYPE_AVAILABLE",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
             "WAIT_INSIDE_TASK",
         ] {

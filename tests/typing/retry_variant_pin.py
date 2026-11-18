@@ -14,9 +14,7 @@ from horsies import (
     NoCause,
     TaskSendAsyncContext,
     TaskSendEnqueueFailed,
-    TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
-    TaskSendLoopRunnerFailed,
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
     TaskSendSuppressed,
@@ -34,18 +32,14 @@ def sync_retries(
     payload_mismatch: TaskSendPayloadMismatch,
     payload_too_large: TaskSendPayloadTooLarge,
     key_conflict: TaskSendIdempotencyKeyConflict,
-    loop_limit: TaskSendEventLoopLimit,
-    loop_runner: TaskSendLoopRunnerFailed,
 ) -> None:
     _ = task.retry_send(enqueue_failed)
     _ = task.retry_send(async_context)
     _ = task.retry_send(key_conflict)
-    _ = task.retry_send(loop_runner)
     _ = task.retry_send(suppressed)  # pyright: ignore[reportArgumentType]
     _ = task.retry_send(validation_failed)  # pyright: ignore[reportArgumentType]
     _ = task.retry_send(payload_mismatch)  # pyright: ignore[reportArgumentType]
     _ = task.retry_send(payload_too_large)  # pyright: ignore[reportArgumentType]
-    _ = task.retry_send(loop_limit)  # pyright: ignore[reportArgumentType]
     _ = task.retry_schedule(enqueue_failed)
     _ = task.retry_schedule(payload_mismatch)  # pyright: ignore[reportArgumentType]
 
@@ -54,11 +48,11 @@ async def async_retries(
     task: TaskFunction[..., int],
     enqueue_failed: TaskSendEnqueueFailed,
     payload_mismatch: TaskSendPayloadMismatch,
-    loop_runner: TaskSendLoopRunnerFailed,
+    async_context: TaskSendAsyncContext,
 ) -> None:
     _ = await task.retry_send_async(enqueue_failed)
-    _ = await task.retry_send_async(loop_runner)
-    _ = await task.retry_schedule_async(loop_runner)
+    _ = await task.retry_send_async(async_context)
+    _ = await task.retry_schedule_async(async_context)
     _ = await task.retry_send_async(payload_mismatch)  # pyright: ignore[reportArgumentType]
     _ = await task.retry_schedule_async(enqueue_failed)
     _ = await task.retry_schedule_async(payload_mismatch)  # pyright: ignore[reportArgumentType]
@@ -74,7 +68,3 @@ def chain_the_matched_cause(enqueue_failed: TaskSendEnqueueFailed) -> None:
             raise RuntimeError('send failed')
         case cause:
             raise RuntimeError('send failed') from cause
-
-
-def chain_the_runner_cause(loop_runner: TaskSendLoopRunnerFailed) -> None:
-    raise RuntimeError('send failed') from loop_runner.exception

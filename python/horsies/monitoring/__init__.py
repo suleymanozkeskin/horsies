@@ -3,8 +3,8 @@
 This package is part of horsies core: it needs no optional extra and never
 imports the web layer. Every query takes a ``PostgresBroker``, is async, and
 returns ``MonitoringResult[T]``. ``Err`` holds a ``MonitoringQueryError``
-variant: a database failure, the event loop limit, or history data that
-does not decode. A missing row is ``Ok(None)``; ``get_task_detail`` returns
+variant: a database failure, or history data that does not decode. A
+missing row is ``Ok(None)``; ``get_task_detail`` returns
 ``Ok(TaskDetailNotFound)`` with a ``TaskAbsenceReason``.
 
 The list and aggregate reads take a ``MonitoringWindow``, which only
@@ -62,7 +62,6 @@ from horsies.monitoring.errors import (
     MonitoringQueryDbOperationFailed,
     MonitoringQueryError,
     MonitoringQueryErrorCode,
-    MonitoringQueryEventLoopLimit,
     MonitoringQueryHistoryContractViolation,
     MonitoringResult,
 )
@@ -110,7 +109,6 @@ from horsies.monitoring.task_actions import (
     TaskActionDbOperationFailed,
     TaskActionError,
     TaskActionErrorCode,
-    TaskActionEventLoopLimit,
     TaskActionNotCancellable,
     TaskActionNotFound,
     TaskActionStoredDataInvalid,
@@ -161,13 +159,11 @@ __all__ = [
     'MonitoringQueryDbOperationFailed',
     'MonitoringQueryError',
     'MonitoringQueryErrorCode',
-    'MonitoringQueryEventLoopLimit',
     'MonitoringQueryHistoryContractViolation',
     'MonitoringResult',
     'TaskActionDbOperationFailed',
     'TaskActionError',
     'TaskActionErrorCode',
-    'TaskActionEventLoopLimit',
     'TaskActionNotCancellable',
     'TaskActionNotFound',
     'TaskActionStoredDataInvalid',

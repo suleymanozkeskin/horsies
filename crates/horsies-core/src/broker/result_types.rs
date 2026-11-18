@@ -20,8 +20,7 @@ use crate::failure_cause::FailureCause;
 /// (`python/horsies/core/brokers/result_types.py`). The nine operation codes from
 /// `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
 /// Python, `BrokerOperationFailed`. A client produces `NO_BROKER` and
-/// `NO_TYPE_AVAILABLE`; only the Python client produces `EVENT_LOOP_LIMIT`,
-/// `ASYNC_CONTEXT` and `LOOP_RUNNER_FAILED`.
+/// `NO_TYPE_AVAILABLE`; only the Python client produces `ASYNC_CONTEXT`.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
@@ -53,16 +52,9 @@ pub enum BrokerErrorCode {
     /// The task options passed to enqueue are not valid JSON, or carry a
     /// retry limit that cannot be stored; nothing was written.
     InvalidTaskOptions,
-    /// The broker already holds resource sets for its limit of open event
-    /// loops, and this call ran on a new one. Nothing ran. Python client
-    /// only; removed before 0.8.0.
-    EventLoopLimit,
     /// A sync facade was called on a thread that runs an event loop. Its wait
     /// would stall that loop, so nothing ran. Python client only.
     AsyncContext,
-    /// A sync facade could not run the call on the broker's sync runner.
-    /// Nothing ran. Python client only; removed before 0.8.0.
-    LoopRunnerFailed,
     /// An argument of the call was refused before anything ran. Nothing was
     /// written, and the same arguments are refused again.
     InvalidInput,
@@ -134,8 +126,7 @@ impl BrokerOperationFailedCode {
 /// variant's doc is its Python class doc (`ErrorCatalog`).
 ///
 /// The classes that only the Python client produces are not variants:
-/// `BrokerNotAttached`, `BrokerNoTypeAvailable`, `BrokerEventLoopLimit` and
-/// `BrokerLoopRunnerFailed`.
+/// `BrokerNotAttached` and `BrokerNoTypeAvailable`.
 ///
 /// `cause` is the typed cause of the variant's `exception`
 /// (`ErrorClassValues`): the [`BrokerOperationSource`] that a failed
@@ -1020,9 +1011,7 @@ mod tests {
             BrokerErrorCode::NoTypeAvailable,
             BrokerErrorCode::InvalidJsonPayload,
             BrokerErrorCode::InvalidTaskOptions,
-            BrokerErrorCode::EventLoopLimit,
             BrokerErrorCode::AsyncContext,
-            BrokerErrorCode::LoopRunnerFailed,
             BrokerErrorCode::InvalidInput,
             BrokerErrorCode::ListenerDisabled,
             BrokerErrorCode::WaitInsideTask,

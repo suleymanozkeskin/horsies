@@ -15,13 +15,20 @@ call:
   (``CoreCallRefusal``) are the failure of one call: the call answers its
   failure code with the error as ``exception``. ``core_error_retryable``
   classifies them.
+
+``core_exception_retryable`` classifies either kind: the ``retryable`` of a
+core failure, or ``core_error_retryable`` of a core boundary error.
 """
 
 from __future__ import annotations
 
 from horsies._core import (
     CoreCallTimedOut,
+    CoreContractViolation,
+    CoreDatabaseError,
     CoreError,
+    CoreFailure,
+    CorePreconditionFailed,
     CoreStartFailed,
     CoreStopped,
     ForkedAfterCoreStart,
@@ -78,3 +85,32 @@ def core_error_retryable(exc: CoreError) -> bool:
             return False
         case _:
             return False
+
+
+def core_exception_retryable(exc: CoreFailure | CoreError) -> bool:
+    """Whether the cause of a failed core operation, or a core boundary
+    error, may clear. Pure.
+
+    - ``CoreDatabaseError`` (``CoreServerError``, ``CoreConnectionError``)
+      and ``CorePreconditionFailed``: the core's ``retryable`` of the cause.
+    - ``CoreContractViolation``: no, the same call meets it again.
+    - ``CoreError``: ``core_error_retryable``.
+
+    Raises:
+        AssertionError: ``exc`` is a ``CoreFailure`` class that the core does
+            not define (a defect).
+    """
+    match exc:
+        case CoreDatabaseError(retryable=retryable) | CorePreconditionFailed(
+            retryable=retryable,
+        ):
+            return retryable
+        case CoreContractViolation():
+            return False
+        case CoreError():
+            return core_error_retryable(exc)
+        case _:
+            raise AssertionError(
+                f'a core failure of a class the core does not define: '
+                f'{type(exc).__name__}: {exc}',
+            )

@@ -43,8 +43,7 @@ At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
 ```
 
 Task code that sends through the app adds the `task_send_pool` of its child
-kind (default 2) in its child for each event loop that it sends from:
-`8 × 2 = 16` more with one sending loop per child, `32` in all. See
+kind (default 2) in its child: `8 × 2 = 16` more, `32` in all. See
 [Worker Profiles](/horsies/workers/worker-profiles/#connections).
 
 The pool of the worker process writes the outcome of each task. At a high RTT

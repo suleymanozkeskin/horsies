@@ -16,9 +16,7 @@ from horsies import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
     WorkflowStartEnqueueFailed,
-    WorkflowStartEventLoopLimit,
     WorkflowStartIdConflict,
-    WorkflowStartLoopRunnerFailed,
     WorkflowStartValidationFailed,
 )
 
@@ -27,19 +25,15 @@ def sync_retries(
     spec: WorkflowSpec[int],
     enqueue_failed: WorkflowStartEnqueueFailed,
     async_context: WorkflowStartAsyncContext,
-    loop_runner_failed: WorkflowStartLoopRunnerFailed,
     broker_not_configured: WorkflowStartBrokerNotConfigured,
     validation_failed: WorkflowStartValidationFailed,
     id_conflict: WorkflowStartIdConflict,
-    loop_limit: WorkflowStartEventLoopLimit,
 ) -> None:
     _ = spec.retry_start(enqueue_failed)
     _ = spec.retry_start(async_context)
-    _ = spec.retry_start(loop_runner_failed)
     _ = spec.retry_start(broker_not_configured)  # pyright: ignore[reportArgumentType]
     _ = spec.retry_start(validation_failed)  # pyright: ignore[reportArgumentType]
     _ = spec.retry_start(id_conflict)  # pyright: ignore[reportArgumentType]
-    _ = spec.retry_start(loop_limit)  # pyright: ignore[reportArgumentType]
 
 
 async def async_retries(

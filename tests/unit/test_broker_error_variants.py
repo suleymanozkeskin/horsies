@@ -15,20 +15,17 @@ from uuid import UUID
 
 import pytest
 
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerErrorCode,
-    BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
     BrokerWaitInsideTask,
-    BrokerLoopRunnerFailed,
     BrokerNoTypeAvailable,
     BrokerNotAttached,
     BrokerOperationError,
@@ -44,9 +41,7 @@ from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
     TaskSendEnqueueFailed,
     TaskSendError,
-    TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
-    TaskSendLoopRunnerFailed,
     TaskSendPayloadMismatch,
     TaskSendValidationFailed,
 )
@@ -71,14 +66,6 @@ OWNER_TASK_ID = UUID('0198c0de-0000-7000-8000-00000000000a')
 HANDLE_TASK_ID = UUID('0198c0de-0000-7000-8000-00000000000b')
 
 
-def _loop_limit() -> EventLoopLimit:
-    return EventLoopLimit(
-        limit=5,
-        held_thread_names=('MainThread',),
-        current_thread_name='worker-1',
-    )
-
-
 def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
     """One value of each variant; each cause field holds ``cause``."""
     message = f'failed: {MESSAGE_MARKER}'
@@ -97,9 +84,7 @@ def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
         BrokerInvalidJsonPayload(message=message, exception=cause),
         BrokerInvalidTaskOptions(message=message, exception=cause),
         BrokerInvalidInput(message=message, exception=cause),
-        BrokerEventLoopLimit(message=message, loop_limit=_loop_limit()),
         BrokerAsyncContext(message=message),
-        BrokerLoopRunnerFailed(message=message, exception=cause),
         BrokerListenerDisabled(message=message),
         BrokerWaitInsideTask(message=message),
     ]
@@ -133,7 +118,6 @@ CAUSED_VARIANTS = (
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerInvalidInput,
-    BrokerLoopRunnerFailed,
 )
 
 
@@ -201,11 +185,7 @@ class TestBrokerErrorCause:
                 BrokerOperationFailed()
                 | BrokerEnqueueFailed()
                 | BrokerInvalidJsonPayload()
-                | (
-                    BrokerInvalidTaskOptions()
-                    | BrokerInvalidInput()
-                    | BrokerLoopRunnerFailed()
-                )
+                | (BrokerInvalidTaskOptions() | BrokerInvalidInput())
             ):
                 assert cause is error.exception
                 assert isinstance(cause, RuntimeError)
@@ -247,12 +227,10 @@ def _send_with_broker_error(error: BrokerOperationError) -> TaskSendError:
 SEND_VARIANT_OF: dict[type[Any], type[Any]] = {
     BrokerEnqueueFailed: TaskSendEnqueueFailed,
     BrokerPayloadMismatch: TaskSendPayloadMismatch,
-    BrokerEventLoopLimit: TaskSendEventLoopLimit,
     BrokerIdempotencyKeyConflict: TaskSendIdempotencyKeyConflict,
     BrokerAsyncContext: TaskSendAsyncContext,
     BrokerInvalidTaskOptions: TaskSendValidationFailed,
     BrokerInvalidInput: TaskSendValidationFailed,
-    BrokerLoopRunnerFailed: TaskSendLoopRunnerFailed,
 }
 
 
@@ -335,7 +313,6 @@ def _handle(broker: MagicMock) -> TaskHandle[int]:
 RESULT_CODE_OF: dict[type[Any], tuple[BuiltInTaskCode, bool]] = {
     BrokerNoTypeAvailable: (ContractCode.NO_TYPE_AVAILABLE, True),
     BrokerInvalidJsonPayload: (OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True),
-    BrokerEventLoopLimit: (RetrievalCode.EVENT_LOOP_LIMIT, False),
     BrokerWaitInsideTask: (RetrievalCode.WAIT_INSIDE_TASK, False),
 }
 
@@ -402,9 +379,9 @@ class TestProcessBoundaries:
         assert raised.value.__cause__ is cause
 
     def test_cli_schema_error_without_a_cause_is_not_chained(self) -> None:
-        error = BrokerEventLoopLimit(message='loop limit', loop_limit=_loop_limit())
+        error = BrokerNotAttached(message='no broker')
 
-        with pytest.raises(RuntimeError, match='loop limit') as raised:
+        with pytest.raises(RuntimeError, match='no broker') as raised:
             _raise_schema_error(error)
 
         assert raised.value.__cause__ is None

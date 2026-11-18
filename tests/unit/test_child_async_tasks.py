@@ -13,7 +13,6 @@ import uuid
 
 import asyncio
 import json
-import threading
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from enum import Enum
@@ -27,7 +26,6 @@ from pydantic import SecretStr
 
 from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
-from horsies.core.brokers.postgres import MAX_CALLER_EVENT_LOOPS
 from horsies.core.brokers.result_types import BrokerWaitInsideTask
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result
@@ -43,7 +41,7 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import NodeKey, WorkflowContext
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.process_role import ProcessRole
-from horsies.core.types.result import Err, Ok, is_ok
+from horsies.core.types.result import Err, Ok
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
@@ -492,16 +490,13 @@ class TestResultWaitsInsideAnAsyncTask:
             outcomes.append(_task_refusal(await workflow.get_async()))
             return TaskResult(ok=outcomes)
 
-        try:
-            with (
-                patch.object(child_runner, '_run_child_start_hooks'),
-                patch.object(child_runner, '_initialize_child_core_handle'),
-            ):
-                child_runner.finish_child_start(app, init_frame())
-            with patch.object(broker, 'enqueue_async', enqueue_async):
-                wire = _runner(app, task_loop)(waits_inside_task.task_name)
-        finally:
-            broker._loop_runner.stop()
+        with (
+            patch.object(child_runner, '_run_child_start_hooks'),
+            patch.object(child_runner, '_initialize_child_core_handle'),
+        ):
+            child_runner.finish_child_start(app, init_frame())
+        with patch.object(broker, 'enqueue_async', enqueue_async):
+            wire = _runner(app, task_loop)(waits_inside_task.task_name)
 
         assert _result(wire, list[str]).ok_value == [
             'send_async:True',
@@ -511,12 +506,6 @@ class TestResultWaitsInsideAnAsyncTask:
             'WorkflowHandle.get_async():WAIT_INSIDE_TASK',
         ]
         assert len(enqueued) == 1
-        # Refused before any read: no resource set, and no sync runner.
-        assert broker._loop_sets == ()
-        assert broker._loop_runner._started is False
-
-
-CALLER_THREAD_TIMEOUT_S = 10.0
 
 
 class TestTheSendPathLeavesNoLoopTask:
@@ -551,68 +540,11 @@ class TestTheSendPathLeavesNoLoopTask:
                         err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
                     )
 
-        try:
-            with patch.object(broker, 'enqueue_async', enqueue_async):
-                wire = _runner(app, task_loop)(sends.task_name)
-        finally:
-            broker._loop_runner.stop()
+        with patch.object(broker, 'enqueue_async', enqueue_async):
+            wire = _runner(app, task_loop)(sends.task_name)
 
         assert _result(wire, str).ok_value == str(enqueued[0])
         assert task_loop.report() == LoopHoldsNoTask()
-
-
-class TestTheTaskLoopIsNotACallerLoop:
-    def test_a_sync_task_opens_every_caller_loop_after_an_async_broker_call(
-        self,
-        task_loop: TaskLoop,
-    ) -> None:
-        """The task loop keeps its resource set for the life of the child. It
-        does not take a caller place, so a later sync task still opens
-        ``MAX_CALLER_EVENT_LOOPS`` loops of its own at once."""
-        app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
-        )
-        broker = app.get_broker()
-
-        @app.task('async_selects_resources')
-        async def selects_resources() -> TaskResult[bool, TaskError]:
-            return TaskResult(ok=is_ok(await broker.select_resources()))
-
-        @app.task('sync_opens_caller_loops')
-        def opens_caller_loops() -> TaskResult[list[str], TaskError]:
-            all_selected = threading.Barrier(MAX_CALLER_EVENT_LOOPS)
-            outcomes: list[str] = []
-            outcomes_lock = threading.Lock()
-
-            async def select_then_hold_the_loop() -> str:
-                result = await broker.select_resources()
-                # This loop stays open until every thread has selected.
-                all_selected.wait(CALLER_THREAD_TIMEOUT_S)
-                return 'set' if is_ok(result) else type(result.err_value).__name__
-
-            def in_a_thread() -> None:
-                outcome = asyncio.run(select_then_hold_the_loop())
-                with outcomes_lock:
-                    outcomes.append(outcome)
-
-            threads = [
-                threading.Thread(target=in_a_thread)
-                for _ in range(MAX_CALLER_EVENT_LOOPS)
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(CALLER_THREAD_TIMEOUT_S)
-            return TaskResult(ok=sorted(outcomes))
-
-        run = _runner(app, task_loop)
-        try:
-            assert _result(run(selects_resources.task_name), bool).ok_value is True
-            outcomes = _result(run(opens_caller_loops.task_name), list[str]).ok_value
-        finally:
-            broker._loop_runner.stop()
-
-        assert outcomes == ['set'] * MAX_CALLER_EVENT_LOOPS
 
 
 class TestTheSameOutcomesAsASyncTask:

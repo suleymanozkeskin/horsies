@@ -18,11 +18,9 @@ from horsies import NoCause, TaskInfo, TaskStatus
 from horsies.monitoring import (
     MonitoringQueryDbOperationFailed,
     MonitoringQueryError,
-    MonitoringQueryEventLoopLimit,
     MonitoringQueryHistoryContractViolation,
     TaskActionDbOperationFailed,
     TaskActionError,
-    TaskActionEventLoopLimit,
     TaskActionNotCancellable,
     TaskActionNotFound,
     TaskActionStoredDataInvalid,
@@ -42,17 +40,8 @@ def chain_the_query_contract_cause(
     raise RuntimeError('query failed') from contract.exception
 
 
-def chain_a_query_cause_without_a_match(error: MonitoringQueryError) -> None:
-    raise RuntimeError('query failed') from error.exception  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-
-
-def query_fields_on_their_variants(
-    db_failed: MonitoringQueryDbOperationFailed,
-    loop_limit: MonitoringQueryEventLoopLimit,
-) -> None:
-    _ = loop_limit.loop_limit
-    _ = loop_limit.exception  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-    _ = db_failed.loop_limit  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+def every_query_variant_has_a_cause(error: MonitoringQueryError) -> None:
+    raise RuntimeError('query failed') from error.exception
 
 
 def query_causes_are_exceptions() -> None:
@@ -83,13 +72,10 @@ def task_action_fields_on_their_variants(
     not_found: TaskActionNotFound,
     not_cancellable: TaskActionNotCancellable,
     workflow_task: TaskActionWorkflowTask,
-    loop_limit: TaskActionEventLoopLimit,
 ) -> None:
     _ = not_cancellable.current_status
     _ = workflow_task.current_status
-    _ = loop_limit.loop_limit
     _ = not_found.current_status  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-    _ = not_cancellable.loop_limit  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
 
 
 def the_status_is_total() -> None:

@@ -40,7 +40,7 @@ pool max_size                                           # pool of the worker pro
 ```
 
 Task code that sends through the app adds the `task_send_pool` of its child
-kind for each event loop that it sends from, also to the pooled
+kind in each child, also to the pooled
 `database_url`. The listener connection and the session pool of the worker
 process go to `session_database_url`, not through PgBouncer. Each `max_size`
 is the resolved value; see

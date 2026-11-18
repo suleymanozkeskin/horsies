@@ -29,7 +29,6 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from datetime import timedelta
 
-from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import (
     MOVED_TO_PARENT_POOL,
     MOVED_TO_WORKER_PROFILE,
@@ -1636,25 +1635,6 @@ class TestExactPool:
     def test_below_one_is_a_defect(self, connections: int) -> None:
         with pytest.raises(AssertionError, match='connections must be >= 1'):
             self._CONFIG.with_exact_pool(connections)
-
-    @pytest.mark.asyncio
-    async def test_the_broker_engine_opens_with_the_pool_and_no_overflow(
-        self,
-    ) -> None:
-        """The engine that a broker of the copy builds: QueuePool of
-        ``pool_size`` 7 and ``max_overflow`` 0. No connection opens."""
-        from sqlalchemy.pool import QueuePool
-
-        broker = PostgresBroker(self._CONFIG.with_exact_pool(7))
-        resources = broker._build_resources()  # pyright: ignore[reportPrivateUsage]
-        try:
-            pool = resources.engine.sync_engine.pool
-            assert isinstance(pool, QueuePool)
-            assert pool.size() == 7
-            assert pool._max_overflow == 0  # pyright: ignore[reportPrivateUsage]
-            assert pool.checkedout() == 0
-        finally:
-            await resources.engine.dispose()
 
 
 @pytest.mark.unit
