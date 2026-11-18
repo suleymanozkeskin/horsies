@@ -655,16 +655,30 @@ mod tests {
                     "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}}}"#
             )
         };
+        // The detail of Python's refusal, where the case pins it
+        // (`tests/unit/test_stored_max_retries.py::TestWorkflowPaths::test_the_fast_path_root_refuses_a_negative_limit`).
         let cases = [
             (
                 "no max_retries",
                 r#"{"retry_policy": {"backoff_strategy": "exponential"}}"#.to_owned(),
+                None,
             ),
-            ("max_retries is text", exponential("\"5\"")),
-            ("max_retries above 20", exponential("21")),
-            ("policy is a number", r#"{"retry_policy": 5}"#.to_owned()),
+            ("max_retries is text", exponential("\"5\""), None),
+            ("max_retries above 20", exponential("21"), None),
+            (
+                "max_retries is negative",
+                exponential("-1"),
+                Some(
+                    "max_retries: Input should be greater than or equal to 1 [greater_than_equal]",
+                ),
+            ),
+            (
+                "policy is a number",
+                r#"{"retry_policy": 5}"#.to_owned(),
+                None,
+            ),
         ];
-        for (case, options) in cases {
+        for (case, options, detail) in cases {
             let mut root = node_with(false, Some(17));
             root.task_name = task_name.to_owned();
             root.task_options_json = Some(options);
@@ -692,6 +706,9 @@ mod tests {
                 )),
                 "{case}: {refused}"
             );
+            if let Some(detail) = detail {
+                assert!(refused.to_string().contains(detail), "{case}: {refused}");
+            }
             let rows: (i64, i64, i64) = sqlx::query_as(
                 "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
                         (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1),

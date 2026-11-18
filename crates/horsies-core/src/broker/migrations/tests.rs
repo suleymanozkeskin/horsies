@@ -1364,6 +1364,129 @@ async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing(
     database.drop().await;
 }
 
+/// The structural signature of one relation (Python
+/// `test_task_history_schema_emission.py`, `RELATION_SCHEMA_SIGNATURE_SQL`):
+/// a hash of its kind, persistence, access method and options; its columns
+/// with their types, defaults and identity; its constraints, indexes and
+/// triggers. `$1` is the relation name.
+const RELATION_SCHEMA_SIGNATURE_SQL: &str = "\
+SELECT encode(sha256(convert_to(
+    jsonb_build_object(
+        'relation', jsonb_build_array(
+            relation.relkind, relation.relpersistence, relation.relam, relation.reloptions
+        ),
+        'columns', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(
+                    attribute.attnum, attribute.attname, attribute.atttypid, attribute.atttypmod,
+                    attribute.attcollation, attribute.attnotnull, attribute.attidentity,
+                    attribute.attgenerated, pg_get_expr(defaults.adbin, defaults.adrelid)
+                ) ORDER BY attribute.attnum
+            )
+            FROM pg_attribute AS attribute
+            LEFT JOIN pg_attrdef AS defaults
+              ON defaults.adrelid = attribute.attrelid AND defaults.adnum = attribute.attnum
+            WHERE attribute.attrelid = relation.oid AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+        ), '[]'::jsonb),
+        'constraints', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(
+                    constraints.conname, constraints.contype, constraints.convalidated,
+                    pg_get_constraintdef(constraints.oid, false)
+                ) ORDER BY constraints.conname
+            )
+            FROM pg_constraint AS constraints
+            WHERE constraints.conrelid = relation.oid
+        ), '[]'::jsonb),
+        'indexes', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(
+                    indexes.indisvalid, indexes.indisready, pg_get_indexdef(indexes.indexrelid)
+                ) ORDER BY indexes.indexrelid
+            )
+            FROM pg_index AS indexes
+            WHERE indexes.indrelid = relation.oid
+        ), '[]'::jsonb),
+        'triggers', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(triggers.tgenabled, pg_get_triggerdef(triggers.oid, false))
+                ORDER BY triggers.tgname
+            )
+            FROM pg_trigger AS triggers
+            WHERE triggers.tgrelid = relation.oid AND NOT triggers.tgisinternal
+        ), '[]'::jsonb)
+    )::text,
+    'UTF8'
+)), 'hex')
+FROM pg_class AS relation
+WHERE relation.oid = to_regclass($1)";
+
+/// The structural signature of the history parent, the forever history
+/// relation and the key reservation table, read in UTC so that two captures
+/// compare.
+async fn history_relation_signatures(database: &MigrationTestDatabase) -> Vec<(String, String)> {
+    database
+        .client()
+        .batch_execute("SET TIME ZONE 'UTC'")
+        .await
+        .expect("render in UTC");
+    let mut signatures = Vec::new();
+    for relation in [
+        crate::core::history::names::TASK_HISTORY_PARENT,
+        crate::core::history::names::TASK_HISTORY_FOREVER,
+        crate::core::history::names::KEY_RESERVATIONS,
+    ] {
+        let signature: String = database
+            .client()
+            .query_one(RELATION_SCHEMA_SIGNATURE_SQL, &[&relation])
+            .await
+            .unwrap_or_else(|error| panic!("read the signature of {relation}: {error}"))
+            .get(0);
+        signatures.push((relation.to_owned(), signature));
+    }
+    signatures
+}
+
+/// Installs the schema through a broker of its own, as a new client process
+/// does, and closes the broker.
+async fn install_through_a_new_broker(database: &MigrationTestDatabase) {
+    let broker = crate::broker::PostgresBroker::connect_with(
+        &crate::core::config::PostgresConfig::from_url(database.database.url()),
+    )
+    .await
+    .expect("connect the broker");
+    broker
+        .ensure_schema_initialized()
+        .await
+        .expect("install the schema");
+    broker.close().await;
+}
+
+/// Python `test_task_history_schema_emission.py::TestUpgradedInstallEndpoint::test_reapplication_changes_nothing`:
+/// a second install, by another broker, leaves the structure of the history
+/// parent, the forever history relation and the key reservation table
+/// unchanged, and the stored version stays the baseline version.
+#[tokio::test]
+#[serial]
+async fn a_second_install_leaves_the_history_relations_unchanged() {
+    let database = MigrationTestDatabase::create().await;
+    install_through_a_new_broker(&database).await;
+    let before = history_relation_signatures(&database).await;
+
+    install_through_a_new_broker(&database).await;
+
+    assert_eq!(history_relation_signatures(&database).await, before);
+    let version: i64 = database
+        .client()
+        .query_one("SELECT MAX(version) FROM horsies_migrations", &[])
+        .await
+        .expect("read the stored version")
+        .get(0);
+    assert_eq!(version, BASELINE_MIGRATION_VERSION);
+    database.drop().await;
+}
+
 /// A statement of migration 1000 fails: its transaction rolls back with the
 /// bookkeeping and family rows, and the lock is released.
 #[tokio::test]
@@ -1425,6 +1548,56 @@ async fn a_release_that_frees_no_lock_is_ownership_lost() {
         ),
         "{released:?}"
     );
+    drop(open);
+    let _closed = handle.close().await;
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestPostgresBrokerPgBouncerWiring::test_schema_lock_cancellation_releases_and_closes`:
+/// a lock session dropped while it may hold the lock (an install whose
+/// caller left) discards its connection. The server ends that session and
+/// its lock, so another session takes the lock.
+#[tokio::test]
+#[serial]
+async fn a_dropped_lock_session_frees_the_lock_with_its_session() {
+    let database = MigrationTestDatabase::create().await;
+    let handle = core_handle(database.database.url());
+    let open = handle
+        .pools()
+        .expect("the statement layer accepts the test URL");
+    let lock = test_lock();
+    let session = LockSession::acquire(open.pools().session_work(), lock, StatementLog::Off)
+        .await
+        .expect("a free lock is taken");
+    let taken_by_another_session = || async {
+        database
+            .client()
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&lock.key])
+            .await
+            .expect("try the lock from another session")
+            .get::<_, bool>(0)
+    };
+    assert!(
+        !taken_by_another_session().await,
+        "the lock session holds the lock"
+    );
+
+    drop(session);
+
+    let mut freed = false;
+    for _ in 0..250 {
+        if taken_by_another_session().await {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(freed, "the lock is free once the dropped session ends");
+    let _unlocked = database
+        .client()
+        .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+        .await
+        .expect("release the lock of the test session");
     drop(open);
     let _closed = handle.close().await;
     database.drop().await;

@@ -695,3 +695,64 @@ async fn one_history_parent_gone_is_reported_not_raised() {
     assert_eq!(republished.absent_leaves, vec![lost.leaf_name().to_owned()]);
     database.drop().await;
 }
+
+/// `test_index_relation_lock_wait_is_bounded_and_restores_timeout`: the
+/// index removal of a repair waits at most its own lock timeout (2 s) for a
+/// lock that another transaction holds on the index, answers busy, and
+/// gives the caller its own `lock_timeout` (7 s) back.
+#[tokio::test]
+#[serial]
+async fn the_index_removal_of_a_repair_is_busy_within_its_bound_and_restores_the_lock_timeout() {
+    use crate::core::history::partitions::manager::{
+        remove_attached_index_for_repair, IndexRepairRemoval,
+    };
+
+    let database = TestDatabase::create_with_connections(4).await;
+    for statement in [
+        "CREATE TABLE horsies_index_lock_target (value integer)",
+        "CREATE INDEX horsies_index_lock_canonical ON horsies_index_lock_target (value DESC)",
+    ] {
+        sqlx::query(statement)
+            .execute(&database.pool)
+            .await
+            .expect("create the index target");
+    }
+    let mut holder = database.pool.begin().await.expect("begin lock holder");
+    sqlx::query("ALTER INDEX horsies_index_lock_canonical SET (fillfactor = 70)")
+        .execute(&mut *holder)
+        .await
+        .expect("hold the index relation lock");
+    let mut contender = database.pool.begin().await.expect("begin contender");
+    sqlx::query("SET LOCAL lock_timeout = '7s'")
+        .execute(&mut *contender)
+        .await
+        .expect("set the caller's lock timeout");
+
+    let started = std::time::Instant::now();
+    let removal = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        remove_attached_index_for_repair(
+            contender.as_mut(),
+            "horsies_index_lock_target",
+            "horsies_index_lock_canonical",
+        ),
+    )
+    .await
+    .expect("the removal's lock wait is bounded")
+    .expect("classify the busy removal");
+    let elapsed = started.elapsed();
+    let restored: String = sqlx::query_scalar("SELECT current_setting('lock_timeout')")
+        .fetch_one(&mut *contender)
+        .await
+        .expect("read the restored lock timeout");
+
+    assert!(matches!(removal, IndexRepairRemoval::Busy));
+    assert!(
+        elapsed < std::time::Duration::from_millis(2_750),
+        "{elapsed:?}"
+    );
+    assert_eq!(restored, "7s");
+    contender.rollback().await.expect("roll back the contender");
+    holder.rollback().await.expect("release the index lock");
+    database.drop().await;
+}

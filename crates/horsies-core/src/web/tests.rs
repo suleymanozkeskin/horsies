@@ -332,6 +332,32 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
     assert_eq!(json(response).await["code"], SCHEMA_UNKNOWN);
 }
 
+/// Python `tests/unit/test_web_auth.py::TestActGuard::test_rejects_a_wrong_intent_value`:
+/// an intent header with another value is refused as a missing intent, before
+/// the schema gate.
+#[tokio::test]
+async fn an_action_with_another_intent_value_is_refused() {
+    let unknown = status(SchemaState::Unknown, None);
+    let wrong_intent = Request::builder()
+        .method(Method::POST)
+        .uri("/api/tasks/not-a-uuid/cancel")
+        .header(INTENT_HEADER, "read")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .expect("action request");
+
+    let response = test_router(Arc::new(AllowAll), unknown, true)
+        .oneshot(wrong_intent)
+        .await
+        .expect("the router answers");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json(response).await,
+        serde_json::json!({"detail": "Missing X-Horsies-Intent: action header."})
+    );
+}
+
 #[tokio::test]
 async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     let router = test_router(
@@ -1728,6 +1754,40 @@ fn each_absence_reason_has_the_not_found_text_of_python() {
     ] {
         assert_eq!(task_not_found_text(reason), text, "{reason:?}");
     }
+}
+
+/// Python `tests/unit/test_monitoring_task_detail_absence.py`,
+/// `TestWebRoute::test_a_query_failure_is_not_a_not_found`: a task detail
+/// read that fails is never answered as an absent task. A history contract
+/// violation is a server error (500); a database failure (the router's pool
+/// is lazy and unreachable) is unavailable (503).
+#[tokio::test]
+async fn a_task_detail_read_that_fails_is_not_a_not_found() {
+    let contract = super::common::query_failed(
+        "Task detail",
+        crate::monitoring::MonitoringQueryError::HistoryContractViolation {
+            message: "task detail history read failed: bad row".to_owned(),
+            source: crate::monitoring::MonitoringQueryErrorSource::History(
+                crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
+            ),
+        },
+    );
+    let contract = axum::response::IntoResponse::into_response(contract);
+    assert_eq!(contract.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let read = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/api/tasks/{}", Uuid::new_v4()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 /// A UUIDv7 whose embedded birth is `birth`, with random tail bits.

@@ -794,7 +794,7 @@ async fn resume_workflow(
     action_response(
         "workflows.resume",
         workflow_id,
-        resume_workflow_action(&state.broker, workflow_id, &state.children).await,
+        resume_workflow_action(&state.broker, workflow_id, state.children.as_ref()).await,
     )
 }
 
