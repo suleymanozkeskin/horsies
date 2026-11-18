@@ -36,6 +36,7 @@ use crate::monitoring::{
     ActionOutcome, ActionResponse, ResumeChildren,
 };
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::{database_name_prefix, is_valid_prefix, DATABASE_PREFIX_VARIABLE};
 use crate::worker::execution::{run_phase2, Phase2Work};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
 use crate::workflow_engine::steps::ChildBuild;
@@ -46,6 +47,9 @@ const STACK_MARGIN_THREAD_BYTES: usize = 1536 * 1024;
 
 /// The variable that makes [`stack_margin_probe`] run the paths.
 const PROBE_ENV: &str = "HORSIES_TEST_WORKFLOW_STACK_MARGIN_PROBE";
+
+/// The part that the probe process adds to the database name prefix.
+const PROBE_DATABASE_KIND: &str = "probe_";
 
 /// The libtest name of [`stack_margin_probe`].
 const PROBE_TEST: &str = "workflow_engine::port_tests::stack_margin::stack_margin_probe";
@@ -73,6 +77,7 @@ fn the_deepest_workflow_paths_run_on_a_stack_of_one_and_a_half_mib() {
     let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
         .args(["--exact", PROBE_TEST, "--nocapture", "--test-threads=1"])
         .env(PROBE_ENV, "1")
+        .env(DATABASE_PREFIX_VARIABLE, probe_database_prefix())
         .output()
         .expect("the probe process runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -91,6 +96,24 @@ fn the_deepest_workflow_paths_run_on_a_stack_of_one_and_a_half_mib() {
         stderr.contains(&format!("{PROBE_LINE} {PROBE_DONE}")),
         "the probe did not run the paths.\nstdout:\n{stdout}\nstderr:\n{stderr}",
     );
+}
+
+/// The database name prefix of the probe process: the prefix of this
+/// process and [`PROBE_DATABASE_KIND`]. Before its first database a process
+/// drops the inactive databases of its prefix (`test_support::database`);
+/// with the prefix of this process, the probe dropped the template of this
+/// process between two copies, and every later test of this process failed
+/// at its `CREATE DATABASE ... TEMPLATE`.
+///
+/// Panics: when the prefix of this process is too long to take the kind.
+fn probe_database_prefix() -> String {
+    let prefix = format!("{}{PROBE_DATABASE_KIND}", database_name_prefix());
+    assert!(
+        is_valid_prefix(&prefix),
+        "the database prefix of the stack margin probe, {prefix:?}, is not a valid \
+         prefix: shorten {DATABASE_PREFIX_VARIABLE}"
+    );
+    prefix
 }
 
 /// The body of the probe process: every path on a thread of
