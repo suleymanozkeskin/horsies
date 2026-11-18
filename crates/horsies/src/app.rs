@@ -61,6 +61,13 @@ impl AppRole {
 /// send_email::register(&mut app)?;
 /// app.provide(Mailer::from_env())?;
 /// ```
+///
+/// # Panics
+///
+/// Every method that runs on the core, async or blocking, panics in a
+/// process that was forked without `exec` after the core's process runtime
+/// started in its parent: a fork is a state of the process, never an error
+/// value of a call. Nothing ran.
 pub struct Horsies {
     config: AppConfig,
     handle: Arc<CoreHandle>,

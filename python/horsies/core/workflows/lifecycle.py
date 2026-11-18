@@ -73,7 +73,6 @@ def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
 
 if TYPE_CHECKING:
     from horsies._core import (
-        CoreError,
         HandleFailed,
         WorkflowAbsent,
         WorkflowExists,
@@ -89,6 +88,7 @@ if TYPE_CHECKING:
     )
     from horsies.core.models.workflow import WorkflowSpec
     from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.types.core_failure import CoreCallRefusal
 
 OutT = TypeVar('OutT')
 
@@ -294,6 +294,8 @@ async def start_workflow_async(
         id then finds the workflow).
 
     Raises:
+        ForkedAfterCoreStart, CoreStopped: the core of this process refuses
+            every call (``call_refusal_or_raise``). Nothing was written.
         SerializationError: a value of the node rows does not serialize (a
             defect of values that the process built and validated); or the
             build of a sub-workflow child raised it (task options of a child
@@ -311,6 +313,7 @@ async def start_workflow_async(
         not payload-verified); with another name, ``WorkflowStartIdConflict``.
     """
     from horsies._core import CoreError
+    from horsies.core.types.core_failure import call_refusal_or_raise
 
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
@@ -326,7 +329,7 @@ async def start_workflow_async(
     try:
         outcome = await broker._core_handle.start_workflow_async(request)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(_start_call_failed(spec, wf_id, exc))
+        return Err(_start_call_failed(spec, wf_id, call_refusal_or_raise(exc)))
     return _start_answer(spec, broker, wf_id, outcome)
 
 
@@ -428,7 +431,7 @@ def _start_request(
 def _start_call_failed(
     spec: 'WorkflowSpec[OutT]',
     wf_id: str,
-    exc: CoreError,
+    exc: 'CoreCallRefusal',
 ) -> WorkflowStartEnqueueFailed:
     """The start's error for a core boundary error of the call: nothing ran,
     or the outcome is unknown (``CoreCallTimedOut``). Retryable by
@@ -542,6 +545,7 @@ def start_workflow(
         As ``start_workflow_async()``.
     """
     from horsies._core import CoreError
+    from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.utils.loop_runner import (
         async_context_message,
         in_running_event_loop,
@@ -570,7 +574,7 @@ def start_workflow(
     try:
         outcome = broker._core_handle.start_workflow(request)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(_start_call_failed(spec, wf_id, exc))
+        return Err(_start_call_failed(spec, wf_id, call_refusal_or_raise(exc)))
     return _start_answer(spec, broker, wf_id, outcome)
 
 
@@ -609,10 +613,13 @@ async def pause_workflow(
         ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
 
     Raises:
+        ForkedAfterCoreStart, CoreStopped: the core of this process refuses
+            every call (``call_refusal_or_raise``). Nothing ran.
         PanicException: the function returned a row outside its contract
             (a defect of the core).
     """
     from horsies._core import CoreError
+    from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
@@ -627,7 +634,9 @@ async def pause_workflow(
     try:
         record = await broker._core_handle.pause_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(core_call_error(exc, workflow_id, WorkflowOperation.PAUSE))
+        return Err(core_call_error(
+            call_refusal_or_raise(exc), workflow_id, WorkflowOperation.PAUSE,
+        ))
     return _pause_answer(workflow_id, record)
 
 
@@ -646,6 +655,7 @@ def pause_workflow_blocking(
     event loop (``pause_workflow_sync``, ``WorkflowHandle.pause``).
     """
     from horsies._core import CoreError
+    from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
@@ -660,7 +670,9 @@ def pause_workflow_blocking(
     try:
         record = broker._core_handle.pause_workflow(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(core_call_error(exc, workflow_id, WorkflowOperation.PAUSE))
+        return Err(core_call_error(
+            call_refusal_or_raise(exc), workflow_id, WorkflowOperation.PAUSE,
+        ))
     return _pause_answer(workflow_id, record)
 
 
@@ -806,6 +818,8 @@ async def resume_workflow(
         is RUNNING.
 
     Raises:
+        ForkedAfterCoreStart, CoreStopped: the core of this process refuses
+            every call (``call_refusal_or_raise``). Nothing ran.
         PanicException: a row outside a function's contract, or a child tree
             that the core refuses (a defect); nothing committed.
         KeyboardInterrupt, SystemExit: raised by a child's ``build_with``;
@@ -815,6 +829,7 @@ async def resume_workflow(
             for task options of a child root that do not parse.
     """
     from horsies._core import CoreError
+    from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
@@ -829,7 +844,9 @@ async def resume_workflow(
     try:
         record = await broker._core_handle.resume_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(core_call_error(exc, workflow_id, WorkflowOperation.RESUME))
+        return Err(core_call_error(
+            call_refusal_or_raise(exc), workflow_id, WorkflowOperation.RESUME,
+        ))
     return _resume_answer(workflow_id, record)
 
 
@@ -850,6 +867,7 @@ def resume_workflow_blocking(
     event loop (``resume_workflow_sync``, ``WorkflowHandle.resume``).
     """
     from horsies._core import CoreError
+    from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
@@ -864,7 +882,9 @@ def resume_workflow_blocking(
     try:
         record = broker._core_handle.resume_workflow(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(core_call_error(exc, workflow_id, WorkflowOperation.RESUME))
+        return Err(core_call_error(
+            call_refusal_or_raise(exc), workflow_id, WorkflowOperation.RESUME,
+        ))
     return _resume_answer(workflow_id, record)
 
 

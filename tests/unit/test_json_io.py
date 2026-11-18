@@ -7,7 +7,8 @@ non-RFC-8259 constants (NaN/Infinity), numeric literals outside the finite
 binary64 range, lone surrogates, and an object that repeats a key.
 loads_json_bytes is the stored-payload form: strict UTF-8, then the rules of
 loads_json. dumps_canonical_json is the one canonical form for hashed or stored
-text.
+text. validate_core_model_json reads the core's JSON text of a monitoring read
+with the outcome of the model's own validator.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from horsies.core.codec.json_io import (
     EmptyJsonTextError,
@@ -23,6 +25,7 @@ from horsies.core.codec.json_io import (
     dumps_json,
     loads_json,
     loads_json_bytes,
+    validate_core_model_json,
 )
 from horsies.core.codec.json_value import (
     JSON_TEXT_TOO_DEEP,
@@ -547,3 +550,47 @@ class TestDumpsCanonicalJson:
     def test_non_finite_float_crashes_loud(self, value: float) -> None:
         with pytest.raises(ValueError, match='not JSON compliant'):
             dumps_canonical_json({'x': value})
+
+
+class _CoreCount(BaseModel):
+    value: str
+    count: int
+
+
+@pytest.mark.unit
+class TestValidateCoreModelJson:
+    """The value and the error are those of the model's own validator."""
+
+    def test_a_matching_text_is_the_value_of_model_validate_json(self) -> None:
+        text = '{"value": "worker-1", "count": 2}'
+
+        value = validate_core_model_json(TypeAdapter(_CoreCount), text)
+
+        assert value == _CoreCount.model_validate_json(text)
+        assert value == _CoreCount(value='worker-1', count=2)
+
+    def test_a_list_type_gives_its_items(self) -> None:
+        text = '[{"value": "a", "count": 1}]'
+
+        value = validate_core_model_json(TypeAdapter(list[_CoreCount]), text)
+
+        assert value == [_CoreCount(value='a', count=1)]
+
+    @pytest.mark.parametrize(
+        'text',
+        ['{"value": "worker-1"}', '{"value": "worker-1", "count": "x"}', 'not json'],
+        ids=['missing-field', 'wrong-type', 'malformed'],
+    )
+    def test_a_text_that_does_not_match_raises_the_error_of_the_model(
+        self, text: str,
+    ) -> None:
+        with pytest.raises(ValidationError) as expected:
+            _ = _CoreCount.model_validate_json(text)
+
+        with pytest.raises(ValidationError) as raised:
+            _ = validate_core_model_json(TypeAdapter(_CoreCount), text)
+
+        assert raised.value.title == expected.value.title == '_CoreCount'
+        assert raised.value.errors(include_url=False) == expected.value.errors(
+            include_url=False,
+        )

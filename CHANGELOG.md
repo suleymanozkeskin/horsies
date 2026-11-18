@@ -9,7 +9,9 @@ and there is no migration contract between pre-1.0 versions.
 ## [Unreleased]
 
 Draft notes of 0.8.0. The Python client and the Rust client run on one core,
-written in Rust, on a new baseline schema.
+written in Rust, on a new baseline schema. Read the
+[migration guide to 0.8.0](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-8-0/)
+before you upgrade a 0.7 deployment.
 
 ### Changed
 
@@ -36,10 +38,9 @@ written in Rust, on a new baseline schema.
   returns its failure code with the core error as `exception`:
   `TooManyPendingCalls` (65,536 calls in flight on one event loop) and
   `CoreCallTimedOut` (a sync call over 30 minutes) are retryable;
-  `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not. A
-  send raises `CoreStopped` and `ForkedAfterCoreStart` instead (see below).
-  Only a workflow start and a workflow resume keep a resource set per event
-  loop. The sync send pool is gone.
+  `CoreStartFailed` is not. `CoreStopped` and `ForkedAfterCoreStart` are
+  raised instead (see below). Only a workflow start and a workflow resume
+  keep a resource set per event loop. The sync send pool is gone.
 
 - **Every sync call runs on the calling thread.** The sync methods of
   `Horsies` (`get_result`, `get_task_info`, `ping_database`,
@@ -78,14 +79,21 @@ written in Rust, on a new baseline schema.
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
 
-- **A send raises `ForkedAfterCoreStart` and `CoreStopped`.** Both are
-  states of the process: the core refuses every later call in it. The four
-  sends, `retry_send`, `retry_schedule` and their async forms, and
-  `PostgresBroker.enqueue` and `enqueue_async` raise them; none returns them
-  as `ENQUEUE_FAILED`. The send result types do not change. For a fork, use
-  the `spawn` or `forkserver` start method, or fork before the parent's
-  first call that runs on the core. For a stopped core (a core background
-  task panicked), restart the process.
+- **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
+  Both are states of the process: the core refuses every later call in it.
+  Every call that runs on the core raises them, in its sync and async
+  forms: the sends and their retry methods, `PostgresBroker.enqueue`, the
+  task, result and health reads, the broker's task lists and recovery
+  passes, `ensure_schema_initialized`, `close`, `check(live=True)`, the
+  workflow start, `WorkflowHandle`, `pause_workflow` and `resume_workflow`,
+  the reads and `cancel_task` of `horsies.monitoring`, and the schema probe
+  of `horsies web`. No call returns them as a result: they are no longer
+  the `exception` of `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`,
+  `MONITORING_QUERY_FAILED`, `DB_OPERATION_FAILED` or another failure
+  code. The result types do not change. For a fork, use the `spawn` or
+  `forkserver` start method, or fork before the parent's first call that
+  runs on the core. `CoreStopped` means that a background task of the core
+  panicked, a defect in horsies: restart the process.
 
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of
@@ -293,6 +301,20 @@ written in Rust, on a new baseline schema.
   core worker write the same key. An isolated or `SHARED_THREAD` timeout
   has no `cancel_end`. The `data` keeps `task_id` and `timeout_ms`.
 
+- **A workflow whose start did not finish fails with
+  `WORKFLOW_START_INCOMPLETE`.** `OperationalErrorCode` has the new member
+  `WORKFLOW_START_INCOMPLETE`. When recovery finds a RUNNING workflow with
+  no node rows, it fails the workflow and stores a `TaskError` with this
+  code, the message `Orphaned workflow '<name>': no workflow_tasks found.
+  Workflow task insertion did not complete.` and the `data` keys
+  `workflow_id` and `recovery` (`case_4`). `WorkflowHandle.get()` returns
+  this error. 0.7 stored an error object with the code `E400` that is not a
+  `TaskError`, and `WorkflowHandle.get()` returned
+  `RESULT_DESERIALIZATION_ERROR`. `TaskError` refuses the text
+  `'WORKFLOW_START_INCOMPLETE'` as a user code; 0.7 accepted it. Add the
+  member to an exhaustive `match` on `OperationalErrorCode`, and rename a
+  user code with this name.
+
 - **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
   longer age is refused when the config is built: Python raises
   `ConfigurationError` with `CONFIG_INVALID_RETENTION` (HRS-216), and the
@@ -460,6 +482,13 @@ written in Rust, on a new baseline schema.
   key of `GET /api/workers/classes`, and the `not_recorded` value of
   `slot_health` (`GET /api/workers`). On the baseline schema every snapshot
   records these facts.
+
+- **`RerunInputUnavailable.reference_locator`.** `RerunInputUnavailable`
+  keeps `task_id` and `disposition`. The baseline history row stores no
+  input reference: a row without a stored input holds only its disposition
+  (`DECLINED_BY_POLICY`, `OVER_BOUND` or `NEVER_ELIGIBLE`). In 0.7 no
+  writer stored a reference, so the field was always `None`. Remove the
+  read.
 
 - **The Python route modules of the web app.** `horsies.web.routes`,
   `horsies.web.events`, `horsies.web.read_cache`,
@@ -789,16 +818,22 @@ unless it starts with "Added".
   async retry sends them), `ReadError::AsyncContext` (added; not kept by
   the handle), `BrokerOperationError::AsyncContext`, `HRS-217` in the check
   report, `WorkflowStartError::AsyncContext` with the workflow id of
-  the start, `HandleErrorCode::AsyncContext`, or
+  the start, `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
-- **A send in a fork panics.** A send, a schedule or a retry, async or
-  blocking, in a process that was forked without `exec` after the core's
-  process runtime started in its parent panics with both process ids and
-  the fix; it never returns `EnqueueFailed`. Python's sends raise
-  `ForkedAfterCoreStart` in the same state. A blocking send whose runtime
-  the operating system refused to start is still a retryable
-  `EnqueueFailed`.
+- **Every call that runs on the core panics in a fork.** In a process that
+  was forked without `exec` after the core's process runtime started in its
+  parent, every public call that runs on the core panics with the call,
+  both process ids and the fix, async and blocking forms alike: the sends
+  and retries, the reads, the health reads, `check_live`, the workflow
+  starts, the methods of `WorkflowHandle`, `horsies::monitoring`,
+  `rerun_task`, `run_worker`, `run_scheduler` and the monitoring mount. No
+  call returns the fork as an error value; Python raises
+  `ForkedAfterCoreStart` in the same state. A runtime whose threads the
+  operating system refused to start is still the retryable database failure
+  of the call. `WorkerRunError::RuntimeUnavailable` and
+  `SchedulerRunError::RuntimeUnavailable` hold `RuntimeStartFailed` (new)
+  in place of `ProcessRuntimeRefusal`, which had the fork case too.
 - **`BrokerOperationError` is an enum with one variant per state.** The
   variants are Python's classes that the core produces: `OperationFailed`
   (with a `BrokerOperationFailedCode`, the nine operation codes),
@@ -817,6 +852,24 @@ unless it starts with "Added".
   become the methods `code()`, `message()`, `retryable()`,
   `workflow_name()` and `workflow_id()`. Only `ValidationFailed` can lack
   a workflow id, so `retry_start` no longer refuses an error without one.
+- **`HandleOperationError` is an enum with one variant per state.**
+  `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`),
+  `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and
+  `AsyncContext`; each has `message` and `workflow_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `workflow_id()` and
+  `failure_cause()`.
+- **`MonitoringQueryError` and `TaskActionError` are enums with one
+  variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
+  `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,
+  each with `message` and `source`; the fields become the methods
+  `code()`, `message()`, `retryable()`, `error_source()` and
+  `failure_cause()`. `TaskActionError`: `NotFound`, `NotCancellable` and
+  `WorkflowTask` (each with `current_status`, a `TaskStatus`, not an
+  `Option`), `DbOperationFailed` (with `retryable` and `cause`) and
+  `StoredDataInvalid`; each has `message` and `task_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `task_id()` and
+  `failure_cause()`. Python's `EVENT_LOOP_LIMIT` classes are not
+  variants: no Rust call gives them.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a
@@ -976,6 +1029,8 @@ unless it starts with "Added".
   `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
   `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
   `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+  `InputUnavailable` has `task_id` and `disposition`: its field
+  `reference_locator`, which was always `None`, is removed.
 - **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
   sent_at)`**, the rerun in a transaction that the caller owns (Python
   `rerun_task(connection, ...)`): the core builds each statement and

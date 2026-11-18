@@ -300,4 +300,15 @@ mod tests {
             assert_eq!(parse_uuid_text(text), Ok(expected), "{text:?}");
         }
     }
+
+    /// Python `tests/unit/test_web_path_uuid.py::test_other_text_is_refused_with_the_parse_error`,
+    /// case `sign_that_uuid_UUID_accepts`: Python's `uuid.UUID` reads a sign
+    /// before 31 hex digits; a path id refuses it as a character that is not
+    /// a hex digit.
+    #[test]
+    fn a_sign_before_the_hex_digits_is_refused() {
+        let refusal = parse_uuid_text("+f8fad5bd9cb469fa16570867728950e")
+            .expect_err("a sign is not a hex digit");
+        assert_eq!(refusal.to_string(), "invalid character: found `+` at 1");
+    }
 }

@@ -46,6 +46,7 @@ from horsies.core.models.tasks import (
     RetrievalCode,
     OutcomeCode,
 )
+from horsies.core.types.core_failure import CoreCallRefusal, call_refusal_or_raise
 from horsies.core.types.result import Ok, Err, Result, is_err
 from horsies.core.types.status import TASK_TERMINAL_STATES
 
@@ -76,7 +77,6 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from horsies._core import (
-        CoreError,
         HandleFailed,
         NodeResultNotStored,
         StoredNodeResultRecord,
@@ -718,6 +718,10 @@ class WorkflowHandle(Generic[OutT]):
     ``ASYNC_CONTEXT`` (``HandleAsyncContext`` for the wrap strategy,
     ``RetrievalCode`` for the fold strategy) and runs nothing. Use the
     ``*_async`` form there.
+
+    Every method that calls the core, in both strategies, raises
+    ``ForkedAfterCoreStart`` and ``CoreStopped``: they are states of the
+    process, never a result (``call_refusal_or_raise``).
     """
 
     workflow_id: str
@@ -783,7 +787,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.STATUS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.STATUS,
+            ))
         return self._status_answer(record)
 
     async def status_async(self) -> HandleResult[WorkflowStatus]:
@@ -821,7 +827,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.STATUS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.STATUS,
+            ))
         return self._status_answer(record)
 
     def _status_answer(
@@ -899,7 +907,7 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key, timeout_ms=timeout_ms,
             )
         except CoreError as exc:
-            return cast('TaskResult[OutT, TaskError]', self._get_call_failed(exc))
+            return cast('TaskResult[OutT, TaskError]', self._get_call_failed(call_refusal_or_raise(exc)))
         return cast('TaskResult[OutT, TaskError]', self._get_answer(record, timeout_ms))
 
     async def get_async(
@@ -935,7 +943,7 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key, timeout_ms=timeout_ms,
             )
         except CoreError as exc:
-            return cast('TaskResult[OutT, TaskError]', self._get_call_failed(exc))
+            return cast('TaskResult[OutT, TaskError]', self._get_call_failed(call_refusal_or_raise(exc)))
         return cast('TaskResult[OutT, TaskError]', self._get_answer(record, timeout_ms))
 
     def _wait_key(
@@ -973,7 +981,7 @@ class WorkflowHandle(Generic[OutT]):
             case Ok(workflow_key):
                 return Ok(workflow_key)
 
-    def _get_call_failed(self, exc: CoreError) -> TaskResult[Any, TaskError]:
+    def _get_call_failed(self, exc: CoreCallRefusal) -> TaskResult[Any, TaskError]:
         """The answer of a wait whose core call raised a core boundary error:
         ``BROKER_ERROR`` with its type and text. Pure."""
         return _broker_task_error(
@@ -1117,7 +1125,7 @@ class WorkflowHandle(Generic[OutT]):
             )
         except CoreError as exc:
             return cast(
-                'TaskResult[OkT, TaskError]', self._node_result_call_failed(node_id, exc),
+                'TaskResult[OkT, TaskError]', self._node_result_call_failed(node_id, call_refusal_or_raise(exc)),
             )
         return cast('TaskResult[OkT, TaskError]', self._node_result_answer(node_id, record))
 
@@ -1144,7 +1152,7 @@ class WorkflowHandle(Generic[OutT]):
             )
         except CoreError as exc:
             return cast(
-                'TaskResult[OkT, TaskError]', self._node_result_call_failed(node_id, exc),
+                'TaskResult[OkT, TaskError]', self._node_result_call_failed(node_id, call_refusal_or_raise(exc)),
             )
         return cast('TaskResult[OkT, TaskError]', self._node_result_answer(node_id, record))
 
@@ -1182,7 +1190,7 @@ class WorkflowHandle(Generic[OutT]):
                 return Ok((workflow_key, node_id))
 
     def _node_result_call_failed(
-        self, node_id: str, exc: CoreError,
+        self, node_id: str, exc: CoreCallRefusal,
     ) -> TaskResult[Any, TaskError]:
         """The answer of a result read whose core call raised a core boundary
         error: ``BROKER_ERROR`` with its type and text. Pure."""
@@ -1276,7 +1284,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.RESULTS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.RESULTS,
+            ))
         return self._results_answer(record)
 
     async def results_async(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]:
@@ -1305,7 +1315,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.RESULTS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.RESULTS,
+            ))
         return self._results_answer(record)
 
     def _results_answer(
@@ -1399,7 +1411,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.TASKS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.TASKS,
+            ))
         return self._tasks_answer(record)
 
     async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]:
@@ -1423,7 +1437,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.TASKS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.TASKS,
+            ))
         return self._tasks_answer(record)
 
     def _tasks_answer(
@@ -1544,7 +1560,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.CANCEL))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.CANCEL,
+            ))
         return self._cancel_answer(record)
 
     async def cancel_async(self) -> HandleResult[None]:
@@ -1590,7 +1608,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.CANCEL))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.CANCEL,
+            ))
         return self._cancel_answer(record)
 
     def _cancel_answer(

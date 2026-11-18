@@ -26,6 +26,7 @@ use horsies_core::{
     RerunPreparation,
 };
 
+use crate::process_state::refuse_in_a_fork;
 use crate::Horsies;
 
 pub use horsies_core::{
@@ -151,11 +152,17 @@ impl Horsies {
     /// Outcomes: as [`rerun_task_in`].
     ///
     /// Errors: [`AppRerunError`].
+    ///
+    /// # Panics
+    ///
+    /// In a process that was forked without `exec` after the core's
+    /// process runtime started. Nothing ran.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, AppRerunError> {
+        refuse_in_a_fork(format_args!("Horsies::rerun_task"));
         let broker = self
             .reads_handle()
             .initialized_broker()

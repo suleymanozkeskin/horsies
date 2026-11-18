@@ -92,6 +92,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 # The encode buffer of the tokio-postgres rerun adapter's tests.
 bytes = "1"
+# The fork of `tests/fork_refusal.rs`.
+libc = "0.2"
 
 [lints]
 workspace = true

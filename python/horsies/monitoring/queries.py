@@ -3,17 +3,20 @@
 Every query takes the broker and returns a ``MonitoringResult``. Each runs
 in the core, on the broker's core handle (``horsies._core``): the core sends
 the one statement of the read's 0007 function in autocommit, and the query
-validates the JSON text of the core's model into the response model. The
-error side has two states that a read gives:
+validates the JSON text of the core's model into the response model with
+``validate_core_model_json`` of the codec. The error side has two states
+that a read gives:
 
 * ``MonitoringQueryDbOperationFailed``: a database failure that the core
-  reports, or a core boundary error (``CoreError``) of the call.
+  reports, or a core boundary error of the call (``CoreCallRefusal``).
 * ``MonitoringQueryHistoryContractViolation``: stored history data that
   does not decode, in ``task_stats``, ``list_tasks``, ``get_task_detail``
   and ``get_workflow_node``.
 
 ``MonitoringQueryEventLoopLimit`` stays in the union and no read gives it:
-the reads select no SQLAlchemy resource set. Nothing else is caught. A row
+the reads select no SQLAlchemy resource set. Every read raises
+``ForkedAfterCoreStart`` and ``CoreStopped``: they are states of the
+process, never a result (``call_refusal_or_raise``). Nothing else is caught. A row
 that does not exist is ``Ok(None)``, not an error. ``get_task_detail`` names
 it: ``Ok(TaskDetailNotFound)`` with the reason the reads know. Each read
 sends one statement, so the live read and the history read see the same
@@ -56,6 +59,7 @@ from horsies._core import (
     WorkflowRunsQuery as CoreWorkflowRunsQuery,
 )
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.codec.json_io import validate_core_model_json
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.models.tasks import (
     ContractCode,
@@ -63,7 +67,11 @@ from horsies.core.models.tasks import (
     OutcomeCode,
     RetrievalCode,
 )
-from horsies.core.types.core_failure import core_error_retryable
+from horsies.core.types.core_failure import (
+    CoreCallRefusal,
+    call_refusal_or_raise,
+    core_error_retryable,
+)
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.history_window import MonitoringWindow
@@ -127,9 +135,12 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
 _INT4_MIN: Final = -(2**31)
 _INT4_MAX: Final = 2**31 - 1
 
-# The models of the reads whose JSON is a list or an optional model.
+# The response type of each read, for ``validate_core_model_json``.
 _STATUS_COUNTS: Final = TypeAdapter(list[StatusCount])
+_FACETS: Final = TypeAdapter(Facets)
 _BREAKDOWN: Final = TypeAdapter(Breakdown)
+_TASK_LIST_PAGE: Final = TypeAdapter(TaskListPage)
+_TASK_DETAIL: Final = TypeAdapter(TaskDetail)
 _WORKFLOW_NAMES: Final = TypeAdapter(list[str])
 _WORKFLOW_RUNS: Final = TypeAdapter(list[WorkflowRunSummary])
 _WORKFLOW_RUN: Final[TypeAdapter[WorkflowRunDetail | None]] = TypeAdapter(
@@ -238,10 +249,12 @@ def _core_read_failed(
             )
 
 
-def _core_call_failed(operation: str, exc: CoreError) -> Err[MonitoringQueryDbOperationFailed]:
-    """A core boundary error of a read call (the core stopped, did not start,
-    the process is a fork, or the loop has too many calls in flight): no
-    statement ran, or the read was dropped. Nothing changed."""
+def _core_call_failed(
+    operation: str, exc: CoreCallRefusal,
+) -> Err[MonitoringQueryDbOperationFailed]:
+    """A core boundary error of a read call (the core did not start, or the
+    loop has too many calls in flight): no statement ran, or the read was
+    dropped. Nothing changed."""
     return Err(
         MonitoringQueryDbOperationFailed(
             message=f'{operation} failed: {exc}',
@@ -298,10 +311,10 @@ async def task_stats(
     try:
         outcome = await broker._core_handle.monitoring_task_stats_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_STATUS_COUNTS.validate_json(text))
+            return Ok(validate_core_model_json(_STATUS_COUNTS, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.task_stats', outcome)
 
@@ -344,10 +357,10 @@ async def task_facets(
     try:
         outcome = await broker._core_handle.monitoring_task_facets_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(Facets.model_validate_json(text))
+            return Ok(validate_core_model_json(_FACETS, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.task_facets', outcome)
 
@@ -400,10 +413,10 @@ async def task_breakdown(
     try:
         outcome = await broker._core_handle.monitoring_task_breakdown_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_BREAKDOWN.validate_json(text))
+            return Ok(validate_core_model_json(_BREAKDOWN, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.task_breakdown', outcome)
 
@@ -468,10 +481,10 @@ async def list_tasks(
     try:
         outcome = await broker._core_handle.monitoring_list_tasks_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(TaskListPage.model_validate_json(text))
+            return Ok(validate_core_model_json(_TASK_LIST_PAGE, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_tasks', outcome)
 
@@ -508,10 +521,10 @@ async def get_task_detail(
     try:
         outcome = await broker._core_handle.monitoring_task_detail_async(task_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(TaskDetail.model_validate_json(text))
+            return Ok(validate_core_model_json(_TASK_DETAIL, text))
         case TaskDetailAbsent(task_id=absent_id, reason=reason):
             return Ok(TaskDetailNotFound(task_id=absent_id, reason=TaskAbsenceReason(reason)))
         case MonitoringFailed():
@@ -540,10 +553,10 @@ async def list_workflow_names(
     try:
         outcome = await broker._core_handle.monitoring_workflow_names_async()  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_NAMES.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_NAMES, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_workflow_names', outcome)
 
@@ -572,10 +585,10 @@ async def list_workflow_runs(
     try:
         outcome = await broker._core_handle.monitoring_workflow_runs_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_RUNS.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_RUNS, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_workflow_runs', outcome)
 
@@ -607,10 +620,10 @@ async def get_workflow_run(
     try:
         outcome = await broker._core_handle.monitoring_workflow_run_async(run_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_RUN.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_RUN, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.get_workflow_run', outcome)
 
@@ -655,10 +668,10 @@ async def get_workflow_node(
             run_id, task_index=task_index,
         )
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_WORKFLOW_NODE.validate_json(text))
+            return Ok(validate_core_model_json(_WORKFLOW_NODE, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.get_workflow_node', outcome)
 
@@ -686,9 +699,9 @@ async def list_schedules(
     try:
         outcome = await broker._core_handle.monitoring_schedules_async()  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return _core_call_failed(operation, exc)
+        return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
         case MonitoringJson(json=text):
-            return Ok(_SCHEDULES.validate_json(text))
+            return Ok(validate_core_model_json(_SCHEDULES, text))
         case MonitoringFailed():
             return _core_read_failed('horsies.monitoring.list_schedules', outcome)

@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::handle::{limit_duration, read_task_info};
+use crate::process_state::refuse_in_a_fork;
 use crate::{Horsies, ReadError, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, UserErrorCode};
 
 /// The stored result of a task, not read with any type (Python
@@ -72,6 +73,7 @@ impl Horsies {
                 "Horsies.get_raw_result() for task {task_id}"
             )));
         }
+        refuse_in_a_fork(format_args!("Horsies::get_raw_result for task {task_id}"));
         let broker = self
             .reads_handle()
             .initialized_broker()

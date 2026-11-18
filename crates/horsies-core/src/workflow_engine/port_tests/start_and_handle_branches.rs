@@ -236,6 +236,59 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
     assert_eq!(stored["optional_indices"], serde_json::json!([2]));
 }
 
+/// `TestChildStartSerialization::test_child_start_stores_the_index_of_a_subworkflow_node`
+/// (`test_success_policy_subworkflow_node.py`): the child start stores the
+/// success policy of the child, whose case and optional list name
+/// sub-workflow nodes of the child.
+#[tokio::test]
+#[serial]
+async fn the_child_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
+    let pool = shared_pool().await;
+    let grandchild = spec(
+        "child_branch_policy_grandchild",
+        vec![task_node(0, "child_branch_policy_grandchild_task")],
+    );
+    let mut child = spec(
+        "child_branch_policy_child",
+        vec![
+            sub_workflow_node(0, &grandchild),
+            sub_workflow_node(1, &grandchild),
+        ],
+    );
+    let mut policy = required(&[&[0]]);
+    policy.optional_indices = Some(vec![1]);
+    child.success_policy = Some(policy);
+    let child_specs = child_specs_of(&[grandchild, child.clone()]);
+    let parent = spec(
+        "child_branch_policy_parent",
+        vec![sub_workflow_node(0, &child)],
+    );
+
+    let workflow_id = start(&pool, &parent, &child_specs).await;
+
+    let child_id = child_of(&pool, workflow_id, 0).await;
+    let stored: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT success_policy FROM horsies_workflows WHERE id = $1")
+            .bind(child_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the stored policy of the child");
+    let tree: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM horsies_workflows WHERE id = $1 OR root_workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read the workflow tree");
+    end_workflows(&pool, &tree).await;
+    let stored = stored.expect("the child stores its policy");
+    assert_eq!(
+        stored["cases"],
+        serde_json::json!([{"required_indices": [0]}])
+    );
+    assert_eq!(stored["optional_indices"], serde_json::json!([1]));
+}
+
 /// `TestResults::test_no_workflow_row_is_workflow_not_found`
 /// (`test_workflow_handle_missing_workflow.py`): the node results read of a
 /// missing workflow is absent, not an empty list; a client reads it as

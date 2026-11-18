@@ -33,6 +33,7 @@ use crate::broker::{PostgresBroker, PrestartExpiry};
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
+use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::worker::executor::protocol::{
@@ -332,6 +333,34 @@ fn the_write_of_a_report_is_the_same_for_the_same_report() {
     );
 }
 
+/// Python `test_lifecycle_classification.py::TestEveryRowEndingCommandCarriesTheDispatchedClaim`
+/// (the failure writes): the write of a worker failure and of a task error
+/// carries the worker and the claim generation of this dispatch, to the
+/// microsecond. Its statement refuses a row that a later claim holds
+/// (`a_reported_end_on_a_later_claim_of_the_row_writes_nothing`).
+#[test]
+fn each_failure_write_carries_the_claim_of_its_dispatch() {
+    let first = claimed_plain();
+    let claimed = ClaimedTask {
+        claimed_at: first.claimed_at + chrono::Duration::microseconds(1),
+        ..first
+    };
+    let dispatched = OwnedClaim {
+        worker_id: WORKER.to_owned(),
+        claimed_at: claimed.claimed_at,
+    };
+    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+
+    assert_eq!(
+        worker_failure_write(&claimed, WORKER, "pool died").fence,
+        dispatched
+    );
+    assert_eq!(
+        task_error_write(&claimed, WORKER, &error, &error_envelope(&error)).fence,
+        dispatched
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Database: the statement that each end takes
 // ---------------------------------------------------------------------------
@@ -385,6 +414,12 @@ const CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE: Seed = Seed {
     held: Held::Claimed,
     kind: TaskKind::WorkflowTask,
     deadline: Deadline::Passed,
+};
+
+const CLAIMED_WORKFLOW_TASK: Seed = Seed {
+    held: Held::Claimed,
+    kind: TaskKind::WorkflowTask,
+    deadline: Deadline::NotSet,
 };
 
 /// A row on `queue` held by [`WORKER`], with every baseline column named. A
@@ -712,6 +747,84 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
     remove_workflow(&pool, workflow_id).await;
 }
 
+/// Python `tests/integration/test_worker_finalize_after.py::test_task_expired_workflow_task_advances_workflow_without_reaper`:
+/// the child expired the claimed task of node 0 before it started; node 1
+/// waits for node 0. The worker writes no task row and replays phase 2
+/// alone, with no recovery: node 0 fails with the `TASK_EXPIRED` result,
+/// node 1 is skipped, and the workflow (`on_error` `fail`) fails.
+#[tokio::test]
+#[serial]
+async fn an_expired_workflow_task_fails_its_node_skips_its_dependent_and_fails_the_workflow() {
+    let pool = migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) =
+        seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE).await;
+    let workflow_id = seed_workflow(&pool, task_id, &queue, "ENQUEUED").await;
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+             queue_name, priority, dependencies, allow_failed_deps, join_type, max_retries,
+             execution, retention_class_key, status, task_id, is_subworkflow, created_at,
+             started_at
+         ) VALUES ('NONE', $1, $2, 1, 'dependent', $3, '{}', $4, 100,
+                   '{0}', FALSE, 'all', 0, 'ISOLATED',
+                   'forever', 'PENDING', NULL, FALSE, NOW(), NULL)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(TASK_NAME)
+    .bind(&queue)
+    .execute(&pool)
+    .await
+    .expect("seed the dependent node");
+    let expired = PostgresBroker::from_pool(pool.clone())
+        .expire_claimed_task_before_start(
+            task_id,
+            WORKER,
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
+        )
+        .await
+        .expect("the expiry that the child writes");
+    assert_eq!(expired, PrestartExpiry::Expired);
+
+    let settled = writer(&pool)
+        .settle(
+            &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
+            stopped(StopReason::TaskExpired),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NothingOwed);
+    let nodes: Vec<(i32, String, Option<String>)> = sqlx::query_as(
+        "SELECT task_index, status::text, result FROM horsies_workflow_tasks
+         WHERE workflow_id = $1 ORDER BY task_index",
+    )
+    .bind(workflow_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read the nodes");
+    let [(0, first_status, first_result), (1, second_status, _)] = nodes.as_slice() else {
+        panic!("expected nodes 0 and 1, got {nodes:?}");
+    };
+    assert_eq!(first_status, "FAILED");
+    assert!(
+        first_result
+            .as_deref()
+            .is_some_and(|result| result.contains("TASK_EXPIRED")),
+        "{first_result:?}"
+    );
+    assert_eq!(second_status, "SKIPPED");
+    let workflow_status: String =
+        sqlx::query_scalar("SELECT status::text FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the workflow");
+    assert_eq!(workflow_status, "FAILED");
+    remove_task(&pool, task_id).await;
+    remove_workflow(&pool, workflow_id).await;
+}
+
 /// Python `TestSuccess::test_plain_task_completion_fuses_and_wakes_capacity`:
 /// the success of a plain task owes nothing after its write, so it ends in
 /// the fused write (`COMPLETE_FUSED`), which sends one capacity wake on the
@@ -777,6 +890,145 @@ async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node(
     );
     remove_task(&pool, task_id).await;
     remove_workflow(&pool, workflow_id).await;
+}
+
+/// The live row of `task_id` as JSON; `None` when the row left the live
+/// table.
+async fn live_snapshot(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read the live row")
+}
+
+/// The attempt rows of `task_id` in the live attempt table.
+async fn attempt_rows(pool: &PgPool, task_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("count the attempt rows")
+}
+
+/// The reported ends of Python `TestEveryRowEndingCommandCarriesTheDispatchedClaim`,
+/// each with the seed of the row it ends: a plain and a workflow success, a
+/// plain and a workflow worker failure, a result that is not an envelope,
+/// and a task error that no retry policy admits (Python
+/// `terminalization_for_refused_retry`).
+fn row_ending_reports() -> Vec<(&'static str, Seed, AttemptEnd)> {
+    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+    vec![
+        (
+            "plain-success",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
+        ),
+        (
+            "workflow-success",
+            RUNNING_WORKFLOW_TASK,
+            AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
+        ),
+        (
+            "plain-worker-failure",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::WorkerFailure(FailureDetail::cut("pool died"))),
+        ),
+        (
+            "workflow-worker-failure",
+            RUNNING_WORKFLOW_TASK,
+            AttemptEnd::Reported(RunEnd::WorkerFailure(FailureDetail::cut("pool died"))),
+        ),
+        (
+            "undecodable",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
+                "{not an envelope".to_owned(),
+            ))),
+        ),
+        (
+            "refused-retry",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::Result(error_envelope(&error))),
+        ),
+    ]
+}
+
+/// Python `test_lifecycle_classification.py::TestEveryRowEndingCommandCarriesTheDispatchedClaim::test_a_classified_command`
+/// and `::test_a_refused_retry`: every write that ends the row is fenced
+/// on the worker and the claim generation of this dispatch. The row is
+/// RUNNING under a claim of the same worker one microsecond after the
+/// dispatch, as after a lapsed lease and a new claim. Each reported end
+/// writes nothing and settles as not held: the live row is unchanged, and
+/// no attempt row and no history row exist. A workflow task has its node,
+/// so only the fence refuses the write.
+#[tokio::test]
+#[serial]
+async fn a_reported_end_on_a_later_claim_of_the_row_writes_nothing() {
+    let pool = migrated_pool().await;
+    let mut workflows = Vec::new();
+    for (case, seed, end) in row_ending_reports() {
+        let queue = test_queue();
+        let (task_id, generation) = seed_task(&pool, &queue, seed).await;
+        match seed.kind {
+            TaskKind::WorkflowTask => {
+                workflows.push(seed_workflow(&pool, task_id, &queue, "RUNNING").await);
+            }
+            TaskKind::Plain => {}
+        }
+        let before = live_snapshot(&pool, task_id).await;
+        let dispatched = generation - chrono::Duration::microseconds(1);
+
+        let settled = writer(&pool)
+            .settle(&claimed(task_id, &queue, dispatched, seed.kind), end)
+            .await;
+
+        assert_eq!(settled, Settlement::NotHeld, "{case}");
+        assert_eq!(live_snapshot(&pool, task_id).await, before, "{case}");
+        assert_eq!(attempt_rows(&pool, task_id).await, 0, "{case}");
+        assert_eq!(history_facts(&pool, task_id).await, None, "{case}");
+        remove_task(&pool, task_id).await;
+    }
+    for workflow_id in workflows {
+        remove_workflow(&pool, workflow_id).await;
+    }
+}
+
+/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_an_orphan_that_the_child_cancelled_owes_nothing`,
+/// `::test_the_finalize_sends_no_orphan_cancel` (`ORPHAN_CANCELLED`, and
+/// `WORKFLOW_CHECK_FAILED`, which version 2 spells `NODE_NOT_LINKED`), and
+/// `TestAbortsThatWriteNothing::test_aborts_are_no_ops` for a workflow
+/// task: the child's stop before start wrote what each of these stops
+/// needs, the orphan cancel included, so the worker writes nothing. Each
+/// stop settles as nothing owed; the live row is unchanged, and no attempt
+/// row and no history row exist.
+#[tokio::test]
+#[serial]
+async fn the_stops_that_the_child_wrote_owe_nothing_for_a_workflow_task() {
+    let pool = migrated_pool().await;
+    for reason in [
+        StopReason::ClaimLost,
+        StopReason::WorkflowStopped,
+        StopReason::OrphanCancelled,
+        StopReason::NodeNotLinked,
+    ] {
+        let queue = test_queue();
+        let (task_id, generation) = seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK).await;
+        let before = live_snapshot(&pool, task_id).await;
+
+        let settled = writer(&pool)
+            .settle(
+                &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
+                stopped(reason),
+            )
+            .await;
+
+        assert_eq!(settled, Settlement::NothingOwed, "{reason:?}");
+        assert_eq!(live_snapshot(&pool, task_id).await, before, "{reason:?}");
+        assert_eq!(attempt_rows(&pool, task_id).await, 0, "{reason:?}");
+        assert_eq!(history_facts(&pool, task_id).await, None, "{reason:?}");
+        remove_task(&pool, task_id).await;
+    }
 }
 
 /// Settle `end` on a RUNNING plain row with no retry policy, and read what

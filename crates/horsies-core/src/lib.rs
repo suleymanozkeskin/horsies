@@ -14,6 +14,7 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod error_catalog;
 pub mod failure_cause;
 pub mod handle;
 pub mod log_targets;

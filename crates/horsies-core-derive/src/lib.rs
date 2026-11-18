@@ -1,12 +1,14 @@
 //! The derives that `horsies-core` uses for its own facts: the static data of
-//! its closed code enums (`CodeCatalog`) and the Python form of its manifest
-//! types (`ManifestSchema`). The task and workflow macros of the Rust client
-//! are in `horsies-macros`.
+//! its closed code enums (`CodeCatalog`), the Python classes of its error
+//! enums (`ErrorCatalog`) and the Python form of its manifest types
+//! (`ManifestSchema`). The task and workflow macros of the Rust client are
+//! in `horsies-macros`.
 
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput};
 
 mod code_catalog;
+mod error_catalog;
 mod manifest_schema;
 
 /// Derive the static catalog data of a closed code enum of horsies-core:
@@ -32,6 +34,35 @@ mod manifest_schema;
 pub fn derive_code_catalog(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match code_catalog::derive_code_catalog(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Derive the Python class of each variant of an error enum of
+/// horsies-core: its name, its doc and its slots. `horsies-codegen` renders
+/// the frozen dataclasses and the union from it. See the `error_catalog`
+/// module for the attributes.
+///
+/// ```ignore
+/// #[derive(horsies_core_derive::ErrorCatalog)]
+/// #[error_catalog(module = "broker_errors", code = "BrokerErrorCode",
+///     union = "BrokerCoreError", union_doc = "Every core failure.")]
+/// pub enum BrokerOperationError {
+///     /// The task id holds a different command. Nothing was written.
+///     #[error_class(class = "BrokerPayloadMismatch", code = "PayloadMismatch", never_retryable)]
+///     PayloadMismatch {
+///         #[error_slot(python = "Str", hidden)]
+///         message: String,
+///     },
+/// }
+/// ```
+///
+/// Emits `impl horsies_core::error_catalog::ErrorEnum` for the enum.
+#[proc_macro_derive(ErrorCatalog, attributes(error_catalog, error_class, error_slot))]
+pub fn derive_error_catalog(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    match error_catalog::derive_error_catalog(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

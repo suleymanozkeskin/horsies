@@ -28,7 +28,7 @@ from horsies._core import (
     ClassCoverageRecord,
     ClassReportRecord,
     CoreConnectionError,
-    CoreStopped,
+    CoreStartFailed,
     DatabasePingRecord,
     HandleClosed,
     OldestWaitingRecord,
@@ -411,7 +411,7 @@ def _with_sync_send_engine(broker: Any, dispose_error: BaseException | None) -> 
 CLOSE_CASES: Final[dict[str, Callable[[], Any]]] = {
     'nothing_open': lambda: _closing_broker(MagicMock(spec=HandleClosed)),
     'core_cannot_run_the_close': lambda: _closing_broker(
-        CoreStopped('CoreHandle.close', 'a background task panicked'),
+        CoreStartFailed('the core runtime could not start'),
     ),
     'a_set_of_a_closed_loop': lambda: _with_closed_loop_set(
         _closing_broker(MagicMock(spec=HandleClosed)), None,
