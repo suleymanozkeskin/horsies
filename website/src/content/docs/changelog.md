@@ -18,6 +18,20 @@ written in Rust, on a new baseline schema. Read the
 [migration guide to 0.8.0](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-8-0/)
 before you upgrade a 0.7 deployment.
 
+### Added
+
+- **`SendKind` and the core error classes are exported from `horsies`.**
+  `SendKind` is the type of the required `send_kind` of
+  `PostgresBroker.enqueue` and `enqueue_async`: `SendKind.FIRST` for the
+  first send of a task id, `SendKind.REPEAT` for a resend. The core error
+  classes are `CoreServerError`, `CoreConnectionError`,
+  `CoreContractViolation` and `CorePreconditionFailed` (the `exception` of
+  a failed core call), `TooManyPendingCalls`, `CoreCallTimedOut` and
+  `CoreStartFailed` (the `exception` when the core cannot run a call), and
+  `ForkedAfterCoreStart` and `CoreStopped` (raised). Import them from
+  `horsies`. They are defined in `horsies.core.brokers.enqueue_task` and in
+  the extension `horsies._core`.
+
 ### Changed
 
 - **0.8.0 starts on a new database.** The core installs a new baseline
@@ -68,7 +82,8 @@ before you upgrade a 0.7 deployment.
   cause.** Where a call ran on the core and failed, the `exception` field of
   its error (for example `BrokerOperationFailed.exception`,
   `TaskActionDbOperationFailed.exception`,
-  `HandleDbOperationFailed.exception`) holds one class of `horsies._core`:
+  `HandleDbOperationFailed.exception`) holds one class of the core,
+  exported from `horsies`:
   `CoreServerError` (the server answered with an error: `sqlstate` and the
   server's primary `message`), `CoreConnectionError` (no answer from the
   server), `CoreContractViolation` (a row or a stored value broke the
