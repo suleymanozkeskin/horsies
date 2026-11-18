@@ -149,15 +149,19 @@ class DecidedDifferenceSeen:
 
 @dataclass(frozen=True, slots=True)
 class DualRunMismatch:
-    """The two snapshots differ, and neither run window crossed an hour boundary."""
+    """The two snapshots differ, and both run windows lie in one UTC hour."""
 
     diff: SnapshotDiff
 
 
 @dataclass(frozen=True, slots=True)
 class ClockBoundaryStraddle:
-    """The two snapshots differ, and a run window crossed an hour boundary:
-    a leaf name or a time rank can differ for that reason alone."""
+    """The two snapshots differ, and the run windows do not lie in one UTC
+    hour: a window crossed an hour, or the two cases ran in two hours. A
+    leaf name or a time rank can differ for that reason alone: a leaf name
+    is read relative to the hour of its case's window (``generated_name``),
+    and the coverage pass of a case in a later hour adds the next hourly
+    heartbeat leaf to the leaves of the session seed."""
 
     diff: SnapshotDiff
     reference_window: RunWindow
@@ -174,6 +178,16 @@ def _hour(at: datetime) -> datetime:
 def crosses_hour(window: RunWindow) -> bool:
     """Whether the window holds the start of a UTC hour after its own start."""
     return _hour(window.start) != _hour(window.end)
+
+
+def in_one_hour(reference: RunWindow, candidate: RunWindow) -> bool:
+    """Whether both windows lie in one UTC hour: neither crosses an hour,
+    and both start in the same hour."""
+    return (
+        not crosses_hour(reference)
+        and not crosses_hour(candidate)
+        and _hour(reference.start) == _hour(candidate.start)
+    )
 
 
 def judge_pair(
@@ -197,12 +211,12 @@ def judge_pair(
             return DecidedDifferenceSeen(diff=diff, decided=compare)
         case WholeSnapshot() | PairRule() | DecidedDifference():
             pass
-    match crosses_hour(reference.window) or crosses_hour(candidate_window):
-        case True:
+    match in_one_hour(reference.window, candidate_window):
+        case False:
             return ClockBoundaryStraddle(
                 diff=diff,
                 reference_window=reference.window,
                 candidate_window=candidate_window,
             )
-        case False:
+        case True:
             return DualRunMismatch(diff=diff)
