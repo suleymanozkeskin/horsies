@@ -460,6 +460,34 @@ fn a_stored_node_reads_its_status_result_and_summary() {
     );
 }
 
+/// A stored summary output outside the `i64` and `u64` range keeps its
+/// stored text and decodes as `u128` or `i128` (#1862).
+#[test]
+fn a_stored_summary_output_keeps_its_stored_text() {
+    for output in [
+        "340282366920938463463374607431768211455",
+        "-9223372036854775809",
+    ] {
+        let text = format!(
+            r#"{{"status": "COMPLETED", "output": {output}, "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}}"#
+        );
+        let info = node_info(workflow(), stored_node("COMPLETED", Some(&text))).unwrap();
+        let summary_output = info
+            .sub_workflow_summary
+            .expect("the node gives its summary")
+            .output
+            .expect("the summary holds the output");
+        assert_eq!(summary_output.get(), output);
+        match output.starts_with('-') {
+            true => assert_eq!(
+                summary_output.decode::<i128>().unwrap(),
+                i128::from(i64::MIN) - 1
+            ),
+            false => assert_eq!(summary_output.decode::<u128>().unwrap(), u128::MAX),
+        }
+    }
+}
+
 /// Python `stored_node_status`: a stored status outside the node statuses
 /// is `STORED_DATA_INVALID`, not retryable, and names its node and value.
 #[test]

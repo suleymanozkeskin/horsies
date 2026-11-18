@@ -677,10 +677,9 @@ fn node_result(text: &str) -> NodeResult {
     }
 }
 
-/// A stored sub-workflow summary. Pure.
+/// A stored sub-workflow summary, its output kept as its stored text. Pure.
 fn stored_summary(text: &str) -> Result<SubWorkflowSummary, String> {
-    let value: serde_json::Value = from_json_str(text).map_err(|error| error.to_string())?;
-    SubWorkflowSummary::from_stored_value(&value).map_err(|refused| refused.to_string())
+    SubWorkflowSummary::from_stored_text(text).map_err(|refused| refused.to_string())
 }
 
 /// The code of an ended status with no stored error (Python

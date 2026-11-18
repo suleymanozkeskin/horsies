@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use serde::de::{IgnoredAny, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::IgnoredAny;
+use serde::Serialize;
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
@@ -89,46 +89,9 @@ pub(crate) fn input_members(input: &str) -> Result<Vec<(String, &RawValue)>, Wor
     }
 }
 
-/// The members of the JSON object `text`, each value as its text, in text
-/// order. The callers pass a text that the strict read rule took, or the
-/// text of a member of one, so no key repeats.
-///
-/// Errors: the `serde_json::Error` of a text that is not one JSON object.
-/// Pure.
-pub(crate) fn object_members(text: &str) -> Result<Vec<(String, &RawValue)>, serde_json::Error> {
-    let mut deserializer = serde_json::Deserializer::from_str(text);
-    let members = ObjectMembers::deserialize(&mut deserializer)?;
-    deserializer.end()?;
-    Ok(members.0)
-}
-
-/// The members of one JSON object, in text order, each value as its text.
-struct ObjectMembers<'a>(Vec<(String, &'a RawValue)>);
-
-impl<'de> Deserialize<'de> for ObjectMembers<'de> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(ObjectMembersVisitor)
-    }
-}
-
-struct ObjectMembersVisitor;
-
-impl<'de> Visitor<'de> for ObjectMembersVisitor {
-    type Value = ObjectMembers<'de>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a JSON object")
-    }
-
-    /// One pass over the members; the text bounds their count.
-    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let mut members: Vec<(String, &'de RawValue)> = Vec::new();
-        while let Some(member) = access.next_entry::<String, &'de RawValue>()? {
-            members.push(member);
-        }
-        Ok(ObjectMembers(members))
-    }
-}
+/// The members of a JSON object text, each value as its text, in text order
+/// (`crate::core::codec::object_members`).
+pub(crate) use crate::core::codec::object_members;
 
 /// Whether `text`, a JSON text that the strict read rule took, is an object.
 /// Pure.

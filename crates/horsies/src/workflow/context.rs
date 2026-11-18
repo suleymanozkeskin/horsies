@@ -144,7 +144,9 @@ impl WorkflowContext {
     }
 
     /// The output of the context sub-workflow node `key`, read with the
-    /// child's output type `T`: `None` when the child stored no output.
+    /// child's output type `T`: `None` when the child stored no output. The
+    /// output decodes from its stored text, so an integer outside the `i64`
+    /// and `u64` range reads as `u128` or `i128`, as Python reads any integer.
     ///
     /// Errors: [`WorkflowContextError::NotInContext`];
     /// [`WorkflowContextError::Unreadable`] for an output that does not read
@@ -156,12 +158,15 @@ impl WorkflowContext {
         let summary = self.summary_for(key)?;
         match &summary.output {
             None => Ok(None),
-            Some(output) => serde_json::from_value::<T>(output.clone())
-                .map(Some)
-                .map_err(|error| WorkflowContextError::Unreadable {
-                    node_id: key.node_id().to_owned(),
-                    cause: value_free_decode_text(&error),
-                }),
+            Some(output) => {
+                output
+                    .decode::<T>()
+                    .map(Some)
+                    .map_err(|error| WorkflowContextError::Unreadable {
+                        node_id: key.node_id().to_owned(),
+                        cause: value_free_decode_text(&error),
+                    })
+            }
         }
     }
 
@@ -236,6 +241,49 @@ mod tests {
             context.result_for::<i128, Infallible>(&NodeKey::new("below")),
             Ok(TaskOutcome::Succeeded(i128::from(i64::MIN) - 1))
         );
+    }
+
+    /// The output of a sub-workflow summary decodes from its stored text, in
+    /// a context read by the input decode: an integer outside the `i64` and
+    /// `u64` range reads as `u128` or `i128` (#1862).
+    #[test]
+    fn a_summary_output_outside_i64_and_u64_reads_as_its_type() {
+        #[derive(Deserialize)]
+        struct Input {
+            workflow_ctx: WorkflowContext,
+        }
+        let summary = |output: &str| {
+            format!(
+                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+            )
+        };
+        let text = format!(
+            r#"{{"workflow_ctx":{{"workflow_id":"00000000-0000-0000-0000-000000000007","task_index":2,"task_name":"report","results_by_id":{{}},"summaries_by_id":{{"max":{},"below":{}}}}}}}"#,
+            summary("340282366920938463463374607431768211455"),
+            summary("-9223372036854775809"),
+        );
+        let context = decode_input::<Input>(text.as_bytes()).unwrap().workflow_ctx;
+        assert_eq!(
+            context.output_for(&NodeKey::<u128>::new("max")),
+            Ok(Some(u128::MAX))
+        );
+        assert_eq!(
+            context.output_for(&NodeKey::<i128>::new("below")),
+            Ok(Some(i128::from(i64::MIN) - 1))
+        );
+        assert_eq!(
+            context
+                .summary_for(&NodeKey::<u128>::new("max"))
+                .unwrap()
+                .output
+                .as_ref()
+                .map(horsies_core::JsonText::get),
+            Some("340282366920938463463374607431768211455")
+        );
+        assert!(matches!(
+            context.output_for(&NodeKey::<u64>::new("max")),
+            Err(WorkflowContextError::Unreadable { .. })
+        ));
     }
 
     #[test]

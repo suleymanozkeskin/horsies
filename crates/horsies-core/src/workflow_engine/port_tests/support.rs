@@ -1030,9 +1030,7 @@ impl NodeInfo {
 
 /// A stored sub-workflow summary (`horsies_workflow_tasks.sub_workflow_summary`).
 pub(super) fn stored_summary(text: &str) -> SubWorkflowSummary {
-    let value = crate::core::codec::from_json_str::<serde_json::Value>(text)
-        .unwrap_or_else(|error| panic!("the stored summary is not JSON: {error}: {text}"));
-    SubWorkflowSummary::from_stored_value(&value)
+    SubWorkflowSummary::from_stored_text(text)
         .unwrap_or_else(|refused| panic!("the stored summary does not read: {refused}: {text}"))
 }
 
