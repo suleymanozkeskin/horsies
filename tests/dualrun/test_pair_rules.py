@@ -572,6 +572,101 @@ def test_the_keyed_send_rule_compares_every_other_column_as_captured() -> None:
     ) == ["horsies_tasks [id=task#1]: priority: reference '100', candidate '1'"]
 
 
+# ---- Concurrent starts in any order ----
+
+STARTS: Final = _rule(PairFact.CONCURRENT_STARTS_IN_ANY_ORDER)
+SEND_GAP: Final = timedelta(milliseconds=1)
+ENQUEUE_GAP: Final = timedelta(milliseconds=5)
+START_INPUT: Final = '{"value":1}'
+
+
+def _starts(
+    run: datetime,
+    prefix: str,
+    enqueue_order: Sequence[int],
+    *,
+    changes: Row | None = None,
+) -> NormalizedSnapshot:
+    """The task of each of the concurrent starts of one spec: sent in the
+    order of their position, enqueued in ``enqueue_order`` (the position of
+    the task that the database took first, then the next)."""
+    rows: list[Row] = []
+    for position in range(len(enqueue_order)):
+        task = f'{prefix}-task-{position}'
+        enqueued = run + ENQUEUE_GAP * (enqueue_order.index(position) + 1)
+        rows.append(
+            {
+                **_keyed_task(task, run, START_INPUT, None),
+                'task_name': 'auto_id_concurrent_a',
+                'sent_at': _text(run + SEND_GAP * position),
+                'enqueued_at': _text(enqueued),
+                **(changes or {}),
+            }
+        )
+    return _snapshot(
+        run,
+        {TASKS_TABLE: rows},
+        [
+            event
+            for position in range(len(enqueue_order))
+            for event in (('task_new', f'{prefix}-task-{position}'), ('task_queue_default', 'new'))
+        ],
+    )
+
+
+def test_without_a_rule_the_enqueue_order_of_concurrent_starts_differs() -> None:
+    assert _judge(
+        _starts(RUN_A, 'a', [0, 1]), _starts(RUN_B, 'b', [1, 0]), WholeSnapshot()
+    ) == [
+        'horsies_tasks [id=task#1]: enqueued_at: reference <time rank 1>, '
+        'candidate <time rank 2>',
+        'horsies_tasks [id=task#2]: enqueued_at: reference <time rank 2>, '
+        'candidate <time rank 1>',
+    ]
+
+
+@pytest.mark.parametrize(
+    ('reference', 'candidate'),
+    [((0, 1), (1, 0)), ((1, 0), (0, 1)), ((0, 1), (0, 1)), ((1, 0), (1, 0))],
+    ids=['sent-order-against-reverse', 'reverse-against-sent-order', 'same', 'same-reverse'],
+)
+def test_the_start_rule_passes_either_enqueue_order_against_either(
+    reference: tuple[int, int], candidate: tuple[int, int]
+) -> None:
+    assert _judge(_starts(RUN_A, 'a', reference), _starts(RUN_B, 'b', candidate), STARTS) == []
+
+
+def test_the_start_rule_fails_a_start_whose_task_is_not_committed() -> None:
+    lines = _judge(_starts(RUN_A, 'a', [0, 1]), _starts(RUN_B, 'b', [0]), STARTS)
+
+    assert lines
+    assert lines[0].startswith('horsies_tasks [id=task#2]: row only in the reference'), lines
+
+
+def test_the_start_rule_keeps_a_task_with_no_enqueue_time() -> None:
+    assert _judge(
+        _starts(RUN_A, 'a', [0, 1]),
+        _starts(RUN_B, 'b', [1, 0], changes={'enqueued_at': None}),
+        STARTS,
+    ) == [
+        "horsies_tasks [id=task#1]: enqueued_at: reference 'enqueued by one of the "
+        "concurrent starts', candidate NULL",
+        "horsies_tasks [id=task#2]: enqueued_at: reference 'enqueued by one of the "
+        "concurrent starts', candidate NULL",
+    ]
+
+
+def test_the_start_rule_compares_every_other_column_as_captured() -> None:
+    assert _judge(
+        _starts(RUN_A, 'a', [0, 1]),
+        _starts(RUN_B, 'b', [1, 0], changes={'priority': '1'}),
+        STARTS,
+    ) == [
+        "horsies_tasks [id=task#1]: priority: reference '100', candidate '1'",
+        "horsies_tasks [id=task#2]: priority: reference '100', candidate '1'",
+    ]
+
+
 # ---- One mover per round ----
 
 ROUNDS: Final = _rule(PairFact.ONE_MOVER_PER_ROUND)

@@ -148,6 +148,13 @@ class PairFact(Enum):
     the capacity wake of its queue) or ``COMPLETE_LOCKED`` (the success of a
     workflow task). The stale recovery writes ``FAIL_STALE`` and no wake."""
 
+    CONCURRENT_STARTS_IN_ANY_ORDER = (
+        'each of the concurrent starts committed its workflow and its tasks; not '
+        'in which order the database enqueued the tasks of the starts'
+    )
+    """The starts take their send times in one order and reach the database
+    in either order, so the ranks of ``enqueued_at`` follow the run timing."""
+
 
 @dataclass(frozen=True, slots=True)
 class PairRule:
