@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::scheduler_manifest::parse_scheduler_manifest;
+use crate::test_support::sql::{self, TestPoolOptions};
 
 /// The input text of each slot, in the key order of the client's text.
 const INPUT_TEXT: &str = "{\"z\":1,\"a\":[true,null],\"m\":\"text\"}";
@@ -56,11 +57,13 @@ fn manifest_of(enabled: bool, schedules: Value) -> SchedulerManifest {
 /// A broker whose pool cannot connect: a statement would fail with a
 /// connection error, not with a start refusal.
 fn unreachable_broker() -> Arc<PostgresBroker> {
-    let pool = sqlx::postgres::PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .acquire_timeout(Duration::from_millis(100))
-        .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable")
-        .expect("lazy pool");
-    Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust))
+        .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable");
+    Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ))
 }
 
 async fn start_of(
@@ -146,8 +149,8 @@ async fn a_manifest_scheduler_starts_and_fires_with_the_send_facts_of_the_manife
             {"name": paused, "activation": {"kind": "DISABLED"}}
         ]),
     );
-    let broker = Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     ));
 
@@ -174,7 +177,7 @@ async fn a_manifest_scheduler_starts_and_fires_with_the_send_facts_of_the_manife
 
     let due = database_time(&pool).await - chrono::Duration::seconds(1);
     let _due =
-        sqlx::query("UPDATE horsies_schedule_state SET next_run_at = $2 WHERE schedule_name = $1")
+        sql::query("UPDATE horsies_schedule_state SET next_run_at = $2 WHERE schedule_name = $1")
             .bind(&name)
             .bind(due)
             .execute(&pool)
@@ -191,7 +194,7 @@ async fn a_manifest_scheduler_starts_and_fires_with_the_send_facts_of_the_manife
         i32,
         String,
         bool,
-    ) = sqlx::query_as(
+    ) = sql::query_as(
         "SELECT input, task_options, priority, retention_class_key, retain_rerun_input
              FROM horsies_tasks WHERE task_name = $1",
     )

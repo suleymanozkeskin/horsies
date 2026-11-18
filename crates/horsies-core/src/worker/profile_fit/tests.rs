@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use tracing::instrument::WithSubscriber;
 
-use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::child_sizing::DEFAULT_ISOLATED_POOL_CONNECTIONS;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
 use crate::test_support::migrated_database_url;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
@@ -130,7 +131,7 @@ impl tracing::Subscriber for EventLog {
 /// The usable slots of the test server, read here and not through the code
 /// under test.
 async fn usable_slots_of_the_test_server() -> i64 {
-    let usable: i32 = sqlx::query_scalar(
+    let usable: i32 = sql::query_scalar(
         "SELECT current_setting('max_connections')::int
                 - current_setting('superuser_reserved_connections')::int
                 - COALESCE(current_setting('reserved_connections', true), '0')::int",

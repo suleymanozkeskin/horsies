@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::isolated::ISOLATED_LEFTOVER_BACKSTOP;
@@ -24,6 +23,7 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
+use crate::test_support::sql::{self, TestListener, TestPool};
 use crate::worker::execution::{
     persist_unreported_attempt, FinalizeError, FinalizeOutcome, PhaseTwoForm,
     UnreportedAttemptWrite,
@@ -167,7 +167,12 @@ const SEED_COLUMNS: &str = "id, task_name, queue_name, priority, input, task_opt
 
 /// A plain ISOLATED row in `state`, held by `worker` when it is held.
 /// Returns the id and the claim generation (now for a PENDING row).
-async fn seed(pool: &PgPool, queue: &str, state: RowState, worker: &str) -> (Uuid, DateTime<Utc>) {
+async fn seed(
+    pool: &TestPool,
+    queue: &str,
+    state: RowState,
+    worker: &str,
+) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
     let values = match state {
         RowState::Running => {
@@ -208,7 +213,7 @@ async fn seed(pool: &PgPool, queue: &str, state: RowState, worker: &str) -> (Uui
         "INSERT INTO horsies_tasks ({SEED_COLUMNS}) VALUES ({values})
          RETURNING COALESCE(claimed_at, date_trunc('milliseconds', NOW()))"
     );
-    let query = sqlx::query_scalar(&statement).bind(id).bind(queue);
+    let query = sql::query_scalar(&statement).bind(id).bind(queue);
     let query = match state {
         RowState::Running | RowState::Claimed => query.bind(worker),
         RowState::Pending => query,
@@ -217,22 +222,22 @@ async fn seed(pool: &PgPool, queue: &str, state: RowState, worker: &str) -> (Uui
     (id, generation)
 }
 
-async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read the live row")
 }
 
-async fn remove_task(pool: &PgPool, task_id: Uuid) {
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_task_attempts WHERE task_id = $1",
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
@@ -244,8 +249,11 @@ fn test_queue() -> String {
     format!("timeout_{}", &Uuid::new_v4().simple().to_string()[..8])
 }
 
-fn writer(pool: PgPool) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust));
+fn writer(pool: TestPool) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
@@ -279,7 +287,7 @@ fn timed_out() -> AttemptEnd {
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Running, WORKER_ID).await;
 
@@ -289,7 +297,7 @@ async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
 
     assert_eq!(settled, Settlement::Written);
     assert_eq!(live_row(&pool, task_id).await, None);
-    let pending_phase_two: i64 = sqlx::query_scalar(
+    let pending_phase_two: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(task_id)
@@ -306,7 +314,7 @@ async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Claimed, WORKER_ID).await;
 
@@ -329,7 +337,7 @@ async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_row_this_claim_does_not_hold_changes_nothing() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for (state, holder) in [
         (RowState::Running, "another-worker"),
         (RowState::Pending, WORKER_ID),
@@ -350,8 +358,8 @@ async fn a_timeout_of_a_row_this_claim_does_not_hold_changes_nothing() {
 
 /// The attempts of a task that moved to history, from its archived
 /// snapshot.
-async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRecord> {
-    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+async fn archived_attempts(pool: &TestPool, task_id: Uuid) -> Vec<AttemptRecord> {
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
         "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -375,8 +383,8 @@ const WAKE_WAIT: Duration = Duration::from_secs(5);
 const WAKE_READ_LIMIT: u32 = 100;
 
 /// A listener on the wake channel of `queue`.
-async fn listen_on_queue(pool: &PgPool, queue: &str) -> sqlx::postgres::PgListener {
-    let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+async fn listen_on_queue(pool: &TestPool, queue: &str) -> TestListener {
+    let mut listener = TestListener::connect_with(pool)
         .await
         .expect("open a listener");
     listener
@@ -390,12 +398,12 @@ async fn listen_on_queue(pool: &PgPool, queue: &str) -> sqlx::postgres::PgListen
 /// wake that this call commits. PostgreSQL delivers notifications in commit
 /// order.
 async fn wakes_before_sentinel(
-    listener: &mut sqlx::postgres::PgListener,
-    pool: &PgPool,
+    listener: &mut TestListener,
+    pool: &TestPool,
     queue: &str,
 ) -> Vec<String> {
     let sentinel = format!("sentinel:{}", Uuid::new_v4());
-    sqlx::query("SELECT pg_notify($1, $2)")
+    sql::query("SELECT pg_notify($1, $2)")
         .bind(format!("task_queue_{queue}"))
         .bind(&sentinel)
         .execute(pool)
@@ -425,7 +433,7 @@ async fn wakes_before_sentinel(
 #[tokio::test]
 #[serial]
 async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Running, WORKER_ID).await;
     let task = claimed(task_id, &queue, generation);
@@ -439,7 +447,7 @@ async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
     assert_eq!(replay, Settlement::Written);
     assert_eq!(live_row(&pool, task_id).await, None);
     let history: serde_json::Value =
-        sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+        sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await
@@ -458,7 +466,7 @@ async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
         wakes_before_sentinel(&mut listener, &pool, &queue).await,
         vec!["capacity".to_owned()]
     );
-    let pending_phase_two: i64 = sqlx::query_scalar(
+    let pending_phase_two: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(task_id)
@@ -473,7 +481,7 @@ async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
 /// linked to the RUNNING node of a RUNNING one-node workflow whose
 /// `on_error` is `fail`. Returns the task id, its claim generation and the
 /// workflow id.
-async fn seed_workflow_task(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>, Uuid) {
+async fn seed_workflow_task(pool: &TestPool, queue: &str) -> (Uuid, DateTime<Utc>, Uuid) {
     let task_id = Uuid::new_v4();
     let statement = format!(
         "INSERT INTO horsies_tasks ({SEED_COLUMNS}) VALUES (
@@ -489,7 +497,7 @@ async fn seed_workflow_task(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>,
             NOW(), FALSE, NULL, NULL
          ) RETURNING claimed_at"
     );
-    let generation = sqlx::query_scalar(&statement)
+    let generation = sql::query_scalar(&statement)
         .bind(task_id)
         .bind(queue)
         .bind(WORKER_ID)
@@ -497,7 +505,7 @@ async fn seed_workflow_task(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>,
         .await
         .expect("seed a workflow task row");
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -508,7 +516,7 @@ async fn seed_workflow_task(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>,
     .execute(pool)
     .await
     .expect("seed a workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow,
              id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
@@ -528,8 +536,8 @@ async fn seed_workflow_task(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>,
     (task_id, generation, workflow_id)
 }
 
-async fn text_of(pool: &PgPool, statement: &str, id: Uuid) -> String {
-    sqlx::query_scalar(statement)
+async fn text_of(pool: &TestPool, statement: &str, id: Uuid) -> String {
+    sql::query_scalar(statement)
         .bind(id)
         .fetch_one(pool)
         .await
@@ -574,14 +582,14 @@ fn phase_two_owed(written: Result<UnreportedAttemptWrite, FinalizeError>) -> Pha
 #[tokio::test]
 #[serial]
 async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_attempt() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation, workflow_id) = seed_workflow_task(&pool, &queue).await;
     let task = ClaimedTask {
         kind: TaskKind::WorkflowTask,
         ..claimed(task_id, &queue, generation)
     };
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let command = timeout_write(
         &task,
         WORKER_ID,
@@ -598,7 +606,7 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
     let attempts = archived_attempts(&pool, task_id).await;
     assert_eq!(attempts.len(), 1, "{attempts:?}");
     assert_eq!(attempts[0].error_code(), Some("TASK_TIMEOUT"));
-    let pending_phase_two: i64 = sqlx::query_scalar(
+    let pending_phase_two: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(task_id)
@@ -606,13 +614,13 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
     .await
     .expect("read the phase-2 records");
     assert_eq!(pending_phase_two, 1);
-    sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
         .expect("remove the phase-2 record");
     remove_task(&pool, task_id).await;
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
@@ -626,7 +634,7 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation, workflow_id) = seed_workflow_task(&pool, &queue).await;
     let task = ClaimedTask {
@@ -639,7 +647,7 @@ async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
     assert_eq!(settled, Settlement::Written);
     assert_eq!(live_row(&pool, task_id).await, None);
     let history: serde_json::Value =
-        sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+        sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await
@@ -647,7 +655,7 @@ async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
     assert_eq!(history["status"], "FAILED");
     assert_eq!(history["error_code"], "TASK_TIMEOUT");
     assert_eq!(history["retry_count"], 0);
-    let pending_phase_two: i64 = sqlx::query_scalar(
+    let pending_phase_two: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(task_id)
@@ -673,13 +681,13 @@ async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
         .await,
         "FAILED"
     );
-    sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
         .expect("remove the phase-2 record");
     remove_task(&pool, task_id).await;
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await

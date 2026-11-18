@@ -1,16 +1,16 @@
 use super::{mark_task_finalizing, FinalizingMark, MARK_FINALIZING_SQL};
 use crate::broker::PostgresBroker;
+use crate::test_support::sql::{self, TestPool};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
 /// A RUNNING plain task held by `current-worker`, with every column of the
 /// baseline task row named. Returns the id and the claim generation.
-async fn seed(pool: &PgPool) -> (Uuid, DateTime<Utc>) {
+async fn seed(pool: &TestPool) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
-    let generation = sqlx::query_scalar(
+    let generation = sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -39,8 +39,8 @@ async fn seed(pool: &PgPool) -> (Uuid, DateTime<Utc>) {
     (id, generation)
 }
 
-async fn snapshot(pool: &PgPool, id: Uuid) -> serde_json::Value {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+async fn snapshot(pool: &TestPool, id: Uuid) -> serde_json::Value {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
         .bind(id)
         .fetch_one(pool)
         .await
@@ -48,12 +48,12 @@ async fn snapshot(pool: &PgPool, id: Uuid) -> serde_json::Value {
 }
 
 /// A broker on the test database: the marker runs on its main core pool.
-fn broker(pool: &PgPool) -> PostgresBroker {
-    PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
+fn broker(pool: &TestPool) -> PostgresBroker {
+    PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
 }
 
-async fn remove(pool: &PgPool, id: Uuid) {
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+async fn remove(pool: &TestPool, id: Uuid) {
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await
@@ -63,7 +63,7 @@ async fn remove(pool: &PgPool, id: Uuid) {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_rejects_stale_owner_and_generation() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     for (worker, claimed_at) in [
@@ -86,7 +86,7 @@ async fn finalizing_handoff_rejects_stale_owner_and_generation() {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     assert_eq!(
@@ -101,15 +101,15 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
     assert_eq!(marked["claimed_at"], before["claimed_at"]);
 
     let mut transaction = pool.begin().await.unwrap();
-    sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+    sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
         .bind(id)
-        .fetch_one(transaction.as_mut())
+        .fetch_one(&mut *transaction)
         .await
         .unwrap();
     transaction.rollback().await.unwrap();
     assert_eq!(snapshot(&pool, id).await, marked);
 
-    let outcome: (String, String) = sqlx::query_as(
+    let outcome: (String, String) = sql::query_as(
         "SELECT outcome, guard_kind FROM horsies_finish_stale_attempt(
             $1, 'BEAT_AGE', 300000, 300000, NULL, NULL, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'test', 'test', 'test'
          )",
@@ -132,20 +132,20 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
 #[tokio::test]
 #[serial]
 async fn the_finalizing_marker_refuses_a_null_claim_generation() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (id, _) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
-    let refused = sqlx::query(MARK_FINALIZING_SQL)
+    let refused = sql::query(MARK_FINALIZING_SQL)
         .bind(id)
         .bind("current-worker")
         .bind(None::<DateTime<Utc>>)
         .fetch_all(&pool)
         .await
         .expect_err("a NULL claim generation is refused");
-    let sqlx::Error::Database(database_error) = refused else {
+    let sql::Error::Database(database_error) = refused else {
         panic!("a NULL claim generation is a database refusal: {refused:?}");
     };
-    assert_eq!(database_error.code().as_deref(), Some("22023"));
+    assert_eq!(database_error.code().code(), "22023");
     assert_eq!(snapshot(&pool, id).await, before);
     remove(&pool, id).await;
 }
@@ -191,21 +191,21 @@ fn marker_row_read(definition: &str, id: Uuid, generation: DateTime<Utc>) -> Str
 #[tokio::test]
 #[serial]
 async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
-    let definition: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+    let definition: String = sql::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
         .bind(MARKER_FUNCTION)
         .fetch_one(&pool)
         .await
         .unwrap();
     let statement = marker_row_read(&definition, id, generation);
     let mut transaction = pool.begin().await.unwrap();
-    sqlx::query("SET LOCAL enable_seqscan = off")
-        .execute(transaction.as_mut())
+    sql::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
         .await
         .unwrap();
-    let plan: serde_json::Value = sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {statement}"))
-        .fetch_one(transaction.as_mut())
+    let plan: serde_json::Value = sql::query_scalar(&format!("EXPLAIN (FORMAT JSON) {statement}"))
+        .fetch_one(&mut *transaction)
         .await
         .unwrap();
     transaction.rollback().await.unwrap();
@@ -220,10 +220,10 @@ async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     for status in ["PENDING", "CLAIMED"] {
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET status = $2,
                  claim_expires_at = CASE WHEN $2 = 'CLAIMED'
@@ -256,17 +256,17 @@ async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
 #[tokio::test]
 #[serial]
 async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let waiting_broker = std::sync::Arc::new(broker(&pool));
 
     for (replacement_worker, generation_delta) in [("new-worker", 0), ("current-worker", 1)] {
         let (id, generation) = seed(&pool).await;
         let mut owner = pool.begin().await.unwrap();
-        let owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(owner.as_mut())
+        let owner_pid: i32 = sql::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *owner)
             .await
             .unwrap();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks SET claimed_by_worker_id = $2,
                 claimed_at = $3,
                 finalizing_at = NOW(), finalizing_by_worker_id = $2
@@ -275,13 +275,13 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
         .bind(id)
         .bind(replacement_worker)
         .bind(generation + ChronoDuration::seconds(generation_delta))
-        .execute(owner.as_mut())
+        .execute(&mut *owner)
         .await
         .unwrap();
         let replacement: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+            sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
                 .bind(id)
-                .fetch_one(owner.as_mut())
+                .fetch_one(&mut *owner)
                 .await
                 .unwrap();
 
@@ -293,7 +293,7 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
         // is the marker's.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let blocked: bool = sqlx::query_scalar(
+                let blocked: bool = sql::query_scalar(
                     "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
                      WHERE $1 = ANY(pg_blocking_pids(pid)))",
                 )

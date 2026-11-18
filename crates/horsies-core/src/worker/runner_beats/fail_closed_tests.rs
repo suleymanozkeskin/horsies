@@ -367,17 +367,14 @@ async fn a_dead_writer_stops_the_worker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn a_failed_write_inside_the_window_recovers() {
-    let database = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let options = database.connect_options();
+    let database = crate::test_support::migrated_pool().await;
+    let (host, port) = crate::test_support::sql::endpoint_of(database.url());
     let refuse_until = Instant::now() + Duration::from_millis(700);
-    let gate = ClosingGate::start(
-        options.get_host().to_owned(),
-        options.get_port(),
-        refuse_until,
-    )
-    .await;
-    let pool = test_beat_pool(&crate::broker::pools::test_url_of(
-        &(*options).clone().host("127.0.0.1").port(gate.port),
+    let gate = ClosingGate::start(host, port, refuse_until).await;
+    let pool = test_beat_pool(&crate::test_support::sql::with_endpoint(
+        database.url(),
+        "127.0.0.1",
+        gate.port,
     ));
     let spawner = Spawner::start().expect("the spawner starts");
     let (spawned, child) = sleeping_child(&spawner).await;
