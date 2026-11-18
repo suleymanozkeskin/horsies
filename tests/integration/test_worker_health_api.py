@@ -32,7 +32,6 @@ from horsies.core.models.health import (
 )
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import is_ok
-from horsies.core.utils.url import to_psycopg_url
 
 
 _WORKER_PING_CHANNEL = 'horsies_worker_ping'
@@ -438,7 +437,7 @@ async def test_ping_workers_roundtrip(broker: PostgresBroker) -> None:
     config: it listens on the ping channel and answers the request on its
     reply channel with the pong that a worker sends."""
     responder = await psycopg.AsyncConnection.connect(
-        to_psycopg_url(broker.config.effective_session_database_url),
+        broker.config.effective_session_database_url,
         autocommit=True,
     )
     fake_worker_id = f'itest-{uuid.uuid4().hex}'
