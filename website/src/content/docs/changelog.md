@@ -757,9 +757,13 @@ before you upgrade a 0.7 deployment.
   `WorkflowValidationError` or `TaskDefinitionError`). From
   `horsies.core.utils.imports`: `unload_file_path` and
   `compute_package_path_from_fs`. From `horsies.core.workflows.registry`:
-  `get_task_node`, `get_subworkflow_node`, `get_node` and
-  `is_workflow_registered`. Also `TaskRegistry.unregister` (use
-  `del app.tasks[name]`, which raises `NotRegistered` for a name that is not
+  `get_task_node`, `get_subworkflow_node`, `get_node`,
+  `is_workflow_registered`, `register_workflow_spec`,
+  `unregister_workflow_spec` and `clear_workflow_registry`: a `WorkflowSpec`
+  is no longer registered by its name, and the child build of a sub-workflow
+  node loads its definition by `definition_key`. Also
+  `TaskRegistry.unregister` (use `del app.tasks[name]`, which raises
+  `NotRegistered` for a name that is not
   registered), `WF_TASK_TERMINAL_VALUES` of `horsies.core.models.workflow`
   (use `WORKFLOW_TASK_TERMINAL_STATES`), and `BANNER` and `format_banner`
   of `horsies.core.banner`. From `horsies.core.codec.json_io`:
