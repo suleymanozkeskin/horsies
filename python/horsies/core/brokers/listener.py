@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import defaultdict
-from typing import Any, DefaultDict, Final, Optional, Sequence, Set
+from typing import Any, DefaultDict, Final, Optional, Set
 from asyncio import Task, Queue  # precise type for Pylance/pyright
 
 import psycopg
@@ -98,8 +98,7 @@ class PostgresListener:
         # Process notification
         pass
 
-    # Cleanup: remove local subscription
-    await listener.unsubscribe("task_done", queue)
+    # Cleanup
     await listener.close()
 
     Notes:
@@ -174,30 +173,6 @@ class PostgresListener:
             'PostgresListener used from an event loop other than its owner '
             f'loop: owner {self._owner_loop!r}, caller {current_loop!r}. '
             'Each event loop needs its own listener.'
-        )
-
-    def _remove_local_subscription(
-        self, channel_name: str, q: Optional[Queue[Notify]]
-    ) -> bool:
-        """Remove a local subscriber and compact empty bookkeeping.
-
-        Returns True when no local subscribers remain for the channel.
-        """
-        subs = self._subs.get(channel_name)
-        if subs is None:
-            return not self._channel_has_payload_subs(channel_name)
-        if q is not None:
-            subs.discard(q)
-        if not subs:
-            self._subs.pop(channel_name, None)
-            return not self._channel_has_payload_subs(channel_name)
-        return False
-
-    def _channel_has_payload_subs(self, channel_name: str) -> bool:
-        """Whether any payload-keyed subscriber still needs this channel."""
-        return any(
-            key[0] == channel_name and queues
-            for key, queues in self._payload_subs.items()
         )
 
     async def start(self) -> Result[None, BrokerOperationFailed]:
@@ -317,12 +292,12 @@ class PostgresListener:
             OperationalError | InterfaceError | OSError: the connection
                 failure from _ensure_connections, re-raised at this seam.
                 Callers: the dispatcher loop (backoff + reconnect) and
-                listen/listen_many/listen_payload (fold to Err).
+                listen (fold to Err).
             RuntimeError: the connection was
                 torn down concurrently (close/health reset run without
                 self._lock) between ensure and this check — same exposure
                 the bare assert had, now explicit and -O-proof.
-                listen/listen_many/listen_payload fold it to Err.
+                listen folds it to Err.
         """
         if self._dispatcher_conn is None or self._dispatcher_conn.closed:
             conn_r = await self._ensure_connections()
@@ -332,39 +307,6 @@ class PostgresListener:
         if self._dispatcher_conn is None:
             raise RuntimeError('dispatcher connection missing after ensure')
         return self._dispatcher_conn
-
-    async def _unlisten_on_dispatcher(self, channel_name: str) -> None:
-        """Issue UNLISTEN on dispatcher connection without racing notifies() iterator."""
-        dispatcher_was_running = await self._pause_dispatcher()
-        try:
-            if self._dispatcher_conn and not self._dispatcher_conn.closed:
-                await self._dispatcher_conn.execute(
-                    sql.SQL('UNLISTEN {}').format(sql.Identifier(channel_name))
-                )
-        finally:
-            if dispatcher_was_running:
-                self._start_dispatcher_if_needed()
-
-    async def _drop_server_listen(self, channel_name: str) -> None:
-        """Drop the server-side LISTEN and stop tracking the channel.
-
-        Total: UNLISTEN failures are contained. The callers are subscriber
-        cleanup paths (result waiters, handle teardown) that cannot act on a
-        server-side cleanup error — raising there masked the caller's own
-        outcome. If the connection is dead, the server already forgot the
-        LISTEN; if it is alive but the command failed, the untracked channel
-        delivers notifies with no subscriber (dispatcher drops them) and the
-        next reconnect does not re-LISTEN it. Either way the channel must
-        leave _listen_channels, or reconnect resurrects a ghost LISTEN.
-        """
-        try:
-            await self._unlisten_on_dispatcher(channel_name)
-        except (OperationalError, InterfaceError, OSError) as exc:
-            logger.warning(
-                f"UNLISTEN '{channel_name}' failed; dropping channel "
-                f'tracking anyway: {exc}'
-            )
-        self._listen_channels.discard(channel_name)
 
     async def _close_connections(self) -> None:
         """Close raw connections and reset to None for reconnection."""
@@ -604,216 +546,6 @@ class PostgresListener:
                     exception=exc,
                 )
             )
-
-    async def listen_payload(
-        self, channel_name: str, payload: str
-    ) -> Result[Queue[Notify], BrokerOperationFailed]:
-        """Subscribe to a channel filtered to one exact payload.
-
-        Server-side this is a plain channel LISTEN (issued once per channel,
-        shared with channel-level subscribers); the dispatcher delivers a
-        notification to this queue only when its payload matches. Use for
-        single-value waits on busy channels (e.g. one task_id on task_done).
-
-        Returns Ok(queue) on success, Err(BrokerOperationFailed) on failure.
-        A call from a non-owner event loop fails an assertion.
-        """
-        self._bind_or_validate_loop()
-        conn_r = await self._ensure_connections()
-        if is_err(conn_r):
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                    message=(
-                        f'Failed to subscribe to {channel_name!r}: '
-                        f'{conn_r.err_value.message}'
-                    ),
-                    retryable=conn_r.err_value.retryable,
-                    exception=conn_r.err_value.exception,
-                )
-            )
-
-        try:
-            async with self._lock:
-                if channel_name not in self._listen_channels:
-                    dispatcher_was_running = await self._pause_dispatcher()
-                    try:
-                        disp_conn = await self._ensure_dispatcher_connection()
-                        await disp_conn.execute(
-                            sql.SQL('LISTEN {}').format(sql.Identifier(channel_name))
-                        )
-                        self._listen_channels.add(channel_name)
-                    finally:
-                        if dispatcher_was_running:
-                            self._start_dispatcher_if_needed()
-                    self._start_dispatcher_if_needed()
-
-                q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
-                self._payload_subs[(channel_name, payload)].add(q)
-                self._start_health_monitor_if_needed()
-                return Ok(q)
-        except (OperationalError, InterfaceError, OSError, RuntimeError) as exc:
-            # RuntimeError: _ensure_dispatcher_connection found the dispatcher
-            # connection torn down by a concurrent reset.
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                    message=f'Failed to subscribe to {channel_name!r}: {exc}',
-                    retryable=is_retryable_connection_error(exc),
-                    exception=exc,
-                )
-            )
-
-    async def unsubscribe_payload(
-        self, channel_name: str, payload: str, q: Queue[Notify]
-    ) -> None:
-        """Remove a payload-keyed subscription.
-
-        Drops the server-side LISTEN when neither channel-level nor
-        payload-keyed subscribers remain for the channel.
-        """
-        self._bind_or_validate_loop()
-        async with self._lock:
-            key = (channel_name, payload)
-            queues = self._payload_subs.get(key)
-            if queues is not None:
-                queues.discard(q)
-                if not queues:
-                    self._payload_subs.pop(key, None)
-            if (
-                channel_name not in self._subs
-                and not self._channel_has_payload_subs(channel_name)
-                and channel_name in self._listen_channels
-            ):
-                await self._drop_server_listen(channel_name)
-
-    async def listen_many(
-        self,
-        channel_names: Sequence[str],
-    ) -> Result[list[Queue[Notify]], BrokerOperationFailed]:
-        """Subscribe to multiple channels in a single lock acquisition.
-
-        More efficient than calling listen() in a loop because the
-        dispatcher is stopped/restarted at most once.
-
-        Returns Ok(queues) in the same order as *channel_names*,
-        or Err(BrokerOperationFailed) on connection or SQL failure.
-
-        A call from a non-owner event loop fails an assertion.
-        """
-        self._bind_or_validate_loop()
-        conn_r = await self._ensure_connections()
-        if is_err(conn_r):
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                    message=f'Failed to subscribe to channels: {conn_r.err_value.message}',
-                    retryable=conn_r.err_value.retryable,
-                    exception=conn_r.err_value.exception,
-                )
-            )
-
-        try:
-            async with self._lock:
-                new_channels = [
-                    ch for ch in channel_names if ch not in self._listen_channels
-                ]
-
-                if new_channels:
-                    # Stop dispatcher once for all new channels.
-                    dispatcher_was_running = await self._pause_dispatcher()
-
-                    try:
-                        disp_conn = await self._ensure_dispatcher_connection()
-                        for ch in new_channels:
-                            await disp_conn.execute(
-                                sql.SQL('LISTEN {}').format(sql.Identifier(ch))
-                            )
-                            self._listen_channels.add(ch)
-                    finally:
-                        # If dispatcher was already running, revive it on both success/failure.
-                        if dispatcher_was_running:
-                            self._start_dispatcher_if_needed()
-
-                    # First-subscription path: no prior dispatcher existed.
-                    self._start_dispatcher_if_needed()
-
-                # Create bounded queues for all requested channels
-                queues: list[Queue[Notify]] = []
-                for ch in channel_names:
-                    q: Queue[Notify] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
-                    self._subs[ch].add(q)
-                    queues.append(q)
-                self._start_health_monitor_if_needed()
-                return Ok(queues)
-        except (OperationalError, InterfaceError, OSError, RuntimeError) as exc:
-            # RuntimeError: _ensure_dispatcher_connection found the dispatcher
-            # connection torn down by a concurrent reset.
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-                    message=f'Failed to subscribe to channels: {exc}',
-                    retryable=is_retryable_connection_error(exc),
-                    exception=exc,
-                )
-            )
-
-    async def unlisten(
-        self, channel_name: str, q: Optional[Queue[Notify]] = None
-    ) -> None:
-        """
-        Remove subscription and issue UNLISTEN if no subscribers remain.
-
-        This removes the server-side LISTEN when the last local subscriber for the
-        channel is removed.
-
-        Parameters
-        ----------
-        channel_name : str
-            Channel name used in listen()
-        q : Optional[Queue[Notify]]
-            Specific queue to remove. If None, only checks for server-side cleanup.
-
-        Notes
-        -----
-        - Removes server-side LISTEN when local subscriber count reaches zero
-        - Cleans up local bookkeeping for empty channels
-        """
-        self._bind_or_validate_loop()
-        async with self._lock:
-            no_local_subs = self._remove_local_subscription(channel_name, q)
-            # If nobody is listening locally, drop the server-side LISTEN.
-            if no_local_subs and channel_name in self._listen_channels:
-                await self._drop_server_listen(channel_name)
-
-    async def unsubscribe(
-        self, channel_name: str, q: Optional[Queue[Notify]] = None
-    ) -> None:
-        """
-        Remove a local queue subscription.
-
-        If the removed queue was the last local subscriber for the channel, this
-        also issues UNLISTEN and removes local channel tracking to prevent
-        unbounded metadata growth over long runtimes.
-
-        Parameters
-        ----------
-        channel_name : str
-            Channel name used in listen()
-        q : Optional[Queue[Notify]]
-            Specific queue to remove from local subscriptions
-
-        Notes
-        -----
-        - Cleans up empty local subscription entries
-        - Drops server-side LISTEN when local subscriber count reaches zero
-        - Prevents channel tracking from growing without bound
-        """
-        self._bind_or_validate_loop()
-        async with self._lock:
-            no_local_subs = self._remove_local_subscription(channel_name, q)
-            if no_local_subs and channel_name in self._listen_channels:
-                await self._drop_server_listen(channel_name)
 
     async def close(self) -> None:
         """

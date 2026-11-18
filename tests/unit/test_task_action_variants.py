@@ -15,7 +15,6 @@ them.
 from __future__ import annotations
 
 import uuid
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,10 +41,6 @@ from horsies.monitoring.task_actions import (
     TaskActionWorkflowTask,
     TaskCancelled,
     cancel_task,
-)
-from tests.dualrun.reference.web_routes.actions import (
-    _succeeded,  # pyright: ignore[reportPrivateUsage]
-    _task_action_failed,  # pyright: ignore[reportPrivateUsage]
 )
 from tests.union_members import union_members
 
@@ -269,81 +264,3 @@ class TestCancelFailures:
         assert failed.retryable is retryable
 
 
-def _web_cases() -> list[tuple[TaskActionError, int, dict[str, Any]]]:
-    message = 'refused'
-    return [
-        (TaskActionNotFound(message=message, task_id=TASK_ID), 404, {'detail': message}),
-        (
-            TaskActionWorkflowTask(
-                message=message, task_id=TASK_ID, current_status=TaskStatus.PENDING,
-            ),
-            400,
-            {'code': 'TASK_IS_WORKFLOW_TASK'},
-        ),
-        (
-            TaskActionNotCancellable(
-                message=message, task_id=TASK_ID, current_status=TaskStatus.COMPLETED,
-            ),
-            409,
-            {'code': 'TASK_NOT_CANCELLABLE', 'current_status': 'COMPLETED'},
-        ),
-        (
-            TaskActionDbOperationFailed(
-                message=message,
-                retryable=True,
-                task_id=TASK_ID,
-                exception=RuntimeError('x'),
-            ),
-            503,
-            {'detail': message},
-        ),
-        (
-            TaskActionEventLoopLimit(
-                message=message, task_id=TASK_ID, loop_limit=LOOP_LIMIT,
-            ),
-            503,
-            {'detail': message},
-        ),
-        (
-            TaskActionStoredDataInvalid(
-                message=message, task_id=TASK_ID, exception=RuntimeError('x'),
-            ),
-            500,
-            {'detail': message},
-        ),
-    ]
-
-
-class TestWebMapping:
-    def test_the_cases_cover_every_variant(self) -> None:
-        covered = {type(error) for error, _, _ in _web_cases()}
-
-        assert covered == set(union_members(TaskActionError))
-
-    @pytest.mark.parametrize(
-        'error,status_code,content',
-        _web_cases(),
-        ids=[type(error).__name__ for error, _, _ in _web_cases()],
-    )
-    def test_each_variant_maps_to_its_response(
-        self,
-        error: TaskActionError,
-        status_code: int,
-        content: dict[str, Any],
-    ) -> None:
-        outcome = _task_action_failed(error)
-
-        assert outcome.status_code == status_code
-        assert outcome.content == content
-
-
-class TestSuccessEnvelope:
-    def test_the_success_response_has_outcome_status_and_warning_only(self) -> None:
-        outcome = _succeeded('cancelled', was_status='RUNNING')
-
-        assert outcome.status_code == 200
-        assert outcome.content == {
-            'outcome': 'cancelled',
-            'was_status': 'RUNNING',
-            'warning': None,
-        }
