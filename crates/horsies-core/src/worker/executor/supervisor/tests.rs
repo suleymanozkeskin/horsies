@@ -550,6 +550,31 @@ async fn a_kill_after_the_reap_refuses_a_pid_that_a_live_child_holds() {
     stop(spawner);
 }
 
+/// Python `TestKillBeforeSession::test_a_reaped_child_is_left_alone`: the
+/// kill of a reaped child signals its session only, never the bare pid. A
+/// process outside the spawner that holds the pid and leads no session
+/// keeps running.
+#[tokio::test]
+async fn a_kill_after_the_reap_leaves_a_process_that_holds_the_pid_alone() {
+    let spawner = Spawner::start().unwrap();
+    let mut holder = std::process::Command::new("/bin/sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let reaped = ChildId::reaped_child_with_pid(ProcessId::new(holder.id()).unwrap());
+
+    assert_eq!(
+        spawner.handle().kill_session(reaped).await,
+        KillOutcome::SessionGone
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(holder.try_wait().unwrap().is_none());
+    holder.kill().unwrap();
+    let _status = holder.wait().unwrap();
+    stop(spawner);
+}
+
 async fn channel(spawner: &Spawner, script: &str) -> ChildChannel {
     let spawned = spawner.handle().spawn(shell(script)).await.unwrap();
     ChildChannel::attach(
