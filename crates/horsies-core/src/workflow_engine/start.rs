@@ -268,6 +268,7 @@ mod tests {
     use crate::core::task::execution::Execution;
     use crate::core::OnError;
     use crate::test_support::child_specs::TestChildSpecs;
+    use crate::test_support::sql;
     use serial_test::serial;
 
     /// Starts `spec` as the workflow `workflow_id` at `sent_at`, through the
@@ -441,7 +442,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_start_stores_the_downstream_subworkflow_fact_of_each_node() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let spec = keyed_spec(
             Some("tests.downstream.start.v1"),
             vec![
@@ -450,8 +451,8 @@ mod tests {
                 graph_node(2, false, vec![0]),
             ],
         );
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let workflow_id = Uuid::new_v4();
@@ -467,7 +468,7 @@ mod tests {
         .expect("start workflow");
         assert_eq!(started, ClientStartOutcome::Started);
 
-        let nodes: Vec<(i32, String, Option<String>)> = sqlx::query_as(
+        let nodes: Vec<(i32, String, Option<String>)> = sql::query_as(
             "SELECT task_index, downstream_subworkflow, sub_workflow_params
              FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
         )
@@ -484,7 +485,7 @@ mod tests {
             ]
         );
 
-        sqlx::query(
+        sql::query(
             "DELETE FROM horsies_tasks WHERE id IN (
                 SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1
              )",
@@ -493,7 +494,7 @@ mod tests {
         .execute(&pool)
         .await
         .ok();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -607,9 +608,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_start_of_another_client_family_is_refused_and_writes_nothing() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Python,
         ));
         let workflow_id = Uuid::new_v4();
@@ -640,7 +641,7 @@ mod tests {
         assert!(!refused.is_retryable());
         assert!(refused.to_string().contains("its own family"), "{refused}");
         let written: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
@@ -691,9 +692,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_node_whose_retry_policy_does_not_fit_is_refused_before_any_row() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let task_name = "start_refused_retry_policy_node";
@@ -757,7 +758,7 @@ mod tests {
             if let Some(detail) = detail {
                 assert!(refused.to_string().contains(detail), "{case}: {refused}");
             }
-            let rows: (i64, i64, i64) = sqlx::query_as(
+            let rows: (i64, i64, i64) = sql::query_as(
                 "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
                         (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1),
                         (SELECT count(*) FROM horsies_tasks WHERE task_name = $2)",
@@ -779,9 +780,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_node_whose_options_or_deadline_do_not_read_is_refused_before_any_row() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let task_name = "start_refused_deadline_node";
@@ -828,7 +829,7 @@ mod tests {
                 )),
                 "{case}: {refused}"
             );
-            let rows: (i64, i64, i64) = sqlx::query_as(
+            let rows: (i64, i64, i64) = sql::query_as(
                 "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
                         (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1),
                         (SELECT count(*) FROM horsies_tasks WHERE task_name = $2)",
@@ -847,9 +848,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_node_whose_retry_policy_fits_stores_its_limit_on_both_rows() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let mut root = node_with(false, Some(17));
@@ -873,7 +874,7 @@ mod tests {
         .expect("start a workflow whose node policy fits");
         assert_eq!(started, ClientStartOutcome::Started);
 
-        let limits: (i32, i32) = sqlx::query_as(
+        let limits: (i32, i32) = sql::query_as(
             "SELECT wt.max_retries, t.max_retries
              FROM horsies_workflow_tasks wt
              JOIN horsies_tasks t ON t.id = wt.task_id
@@ -883,7 +884,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "DELETE FROM horsies_tasks WHERE id IN (
                 SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1
              )",
@@ -892,7 +893,7 @@ mod tests {
         .execute(&pool)
         .await
         .ok();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -906,7 +907,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn an_enqueued_root_node_holds_its_enqueue_time() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let mut fast = node_with(false, Some(17));
         fast.task_name = "enqueue_time_fast_root".to_owned();
         fast.node_id = Some("fast".to_owned());
@@ -917,8 +918,8 @@ mod tests {
         // A root that names a context source takes the per-row slow path.
         slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
         let spec = keyed_spec(Some("tests.enqueue_time.root.v1"), vec![fast, slow]);
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let workflow_id = Uuid::new_v4();
@@ -934,7 +935,7 @@ mod tests {
         .expect("start workflow with a fast and a slow root");
         assert_eq!(started, ClientStartOutcome::Started);
 
-        let nodes: Vec<(i32, String, bool)> = sqlx::query_as(
+        let nodes: Vec<(i32, String, bool)> = sql::query_as(
             "SELECT wt.task_index, wt.status,
                     wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
              FROM horsies_workflow_tasks wt
@@ -954,7 +955,7 @@ mod tests {
             ]
         );
 
-        sqlx::query(
+        sql::query(
             "DELETE FROM horsies_tasks WHERE id IN (
                 SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1
              )",
@@ -963,7 +964,7 @@ mod tests {
         .execute(&pool)
         .await
         .ok();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -973,9 +974,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
-        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let children = TestChildSpecs::empty();
@@ -1008,7 +1009,7 @@ mod tests {
         }
 
         let (name, stored_sent_at): (String, chrono::DateTime<chrono::Utc>) =
-            sqlx::query_as("SELECT name, sent_at FROM horsies_workflows WHERE id = $1")
+            sql::query_as("SELECT name, sent_at FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
@@ -1019,28 +1020,27 @@ mod tests {
             stored_sent_at.timestamp_micros(),
             sent_at.timestamp_micros()
         );
-        let node_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1",
-        )
-        .bind(workflow_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let node_rows: i64 =
+            sql::query_scalar("SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(node_rows, 1, "the repeated starts wrote no node row");
     }
 
     #[tokio::test]
     #[serial]
     async fn p6_workflow_enqueue_start_paths_persist_mapped_class_and_never_eligible_facts() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let workflow_name = "p6_workflow_facts";
         let task_name = "p6_workflow_node_facts";
-        sqlx::query("DELETE FROM horsies_workflows WHERE name = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE name = $1")
             .bind(workflow_name)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+        sql::query("DELETE FROM horsies_tasks WHERE task_name = $1")
             .bind(task_name)
             .execute(&pool)
             .await
@@ -1062,8 +1062,8 @@ mod tests {
         retention
             .queue_retention
             .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let children = TestChildSpecs::empty().with_retention(retention);
@@ -1074,7 +1074,7 @@ mod tests {
             .expect("start workflow with a root task");
         assert_eq!(started, ClientStartOutcome::Started);
 
-        let rows: Vec<(String, String, Option<i32>, Option<i16>, bool)> = sqlx::query_as(
+        let rows: Vec<(String, String, Option<i32>, Option<i16>, bool)> = sql::query_as(
             "SELECT id::text, retention_class_key,
                     octet_length(command_fingerprint), command_fingerprint_version,
                     retain_rerun_input
@@ -1099,9 +1099,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_root_task_row_stores_the_start_call_time_of_its_workflow() {
-        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let task_name = "sent_at_root_task";
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+        sql::query("DELETE FROM horsies_tasks WHERE task_name = $1")
             .bind(task_name)
             .execute(&pool)
             .await
@@ -1109,8 +1109,8 @@ mod tests {
         let mut root = node_with(false, Some(17));
         root.task_name = task_name.to_owned();
         let spec = keyed_spec(Some("tests.sent_at.root.v1"), vec![root]);
-        let broker = Arc::new(PostgresBroker::from_pool(
-            pool.clone(),
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
             crate::ClientFamily::Rust,
         ));
         let workflow_id = Uuid::new_v4();
@@ -1130,7 +1130,7 @@ mod tests {
         assert_eq!(outcome, ClientStartOutcome::Started);
 
         let stored: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
-            sqlx::query_as("SELECT id, sent_at FROM horsies_tasks WHERE task_name = $1")
+            sql::query_as("SELECT id, sent_at FROM horsies_tasks WHERE task_name = $1")
                 .bind(task_name)
                 .fetch_all(&pool)
                 .await
@@ -1140,17 +1140,17 @@ mod tests {
             assert_eq!(*sent_at, started, "task {id}");
         }
 
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+        sql::query("DELETE FROM horsies_tasks WHERE task_name = $1")
             .bind(task_name)
             .execute(&pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await

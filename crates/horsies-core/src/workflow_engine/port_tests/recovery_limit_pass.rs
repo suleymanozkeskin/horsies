@@ -16,7 +16,6 @@
 //! ([`poison_child_specs`]).
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -29,7 +28,8 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::{TaskError, TaskResult};
 use crate::test_support::child_specs::TestChildSpecs;
-use crate::test_support::sqlx_terminal_writes as terminal_writes;
+use crate::test_support::sql::{self, TestPool};
+use crate::test_support::terminal_writes;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::phase2_recovery::{drive_phase2_recovery_with, Phase2RecoverySummary};
 use crate::workflow_engine::recovery::{
@@ -57,9 +57,9 @@ const LIMIT_MESSAGE: &str = "Workflow recovery raised a persistent error";
 /// `python/horsies/core/workflows/engine.py:831-835`).
 const BAD_GOOD_UNTIL: &str = r#"{"good_until":"not-a-date"}"#;
 
-async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
+async fn pass(pool: &TestPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         child_specs,
         LIMIT,
     )
@@ -67,7 +67,7 @@ async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     .expect("the recovery pass returns its report")
 }
 
-async fn passes(pool: &PgPool, child_specs: &TestChildSpecs, count: u32) -> Vec<RecoveryReport> {
+async fn passes(pool: &TestPool, child_specs: &TestChildSpecs, count: u32) -> Vec<RecoveryReport> {
     let mut reports = Vec::new();
     for _ in 0..count {
         reports.push(pass(pool, child_specs).await);
@@ -75,9 +75,9 @@ async fn passes(pool: &PgPool, child_specs: &TestChildSpecs, count: u32) -> Vec<
     reports
 }
 
-async fn phase2_pass(pool: &PgPool) -> Phase2RecoverySummary {
+async fn phase2_pass(pool: &TestPool) -> Phase2RecoverySummary {
     drive_phase2_recovery_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         0,
         GLOBAL_SCAN_ROW_CAP,
@@ -88,8 +88,8 @@ async fn phase2_pass(pool: &PgPool) -> Phase2RecoverySummary {
 }
 
 /// The stored count of a workflow, or `None` when it has no row.
-async fn failed_passes(pool: &PgPool, workflow_id: Uuid) -> Option<i32> {
-    sqlx::query_scalar(
+async fn failed_passes(pool: &TestPool, workflow_id: Uuid) -> Option<i32> {
+    sql::query_scalar(
         "SELECT failed_passes FROM horsies_workflow_recovery_failures WHERE workflow_id = $1",
     )
     .bind(workflow_id)
@@ -98,8 +98,8 @@ async fn failed_passes(pool: &PgPool, workflow_id: Uuid) -> Option<i32> {
     .expect("read the stored count")
 }
 
-async fn failure_rows(pool: &PgPool) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_recovery_failures")
+async fn failure_rows(pool: &TestPool) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_recovery_failures")
         .fetch_one(pool)
         .await
         .expect("count the failure rows")
@@ -107,7 +107,7 @@ async fn failure_rows(pool: &PgPool) -> i64 {
 
 /// A RUNNING workflow with one READY node whose task insert raises
 /// ([`BAD_GOOD_UNTIL`]).
-async fn seed_poison_ready(pool: &PgPool, seed: WorkflowSeed) -> Uuid {
+async fn seed_poison_ready(pool: &TestPool, seed: WorkflowSeed) -> Uuid {
     let workflow_id = seed_workflow(pool, &seed).await;
     seed_node(
         pool,
@@ -119,7 +119,7 @@ async fn seed_poison_ready(pool: &PgPool, seed: WorkflowSeed) -> Uuid {
 
 /// Makes every update of this workflow's rows in `table` refuse with `sqlstate`.
 async fn refuse_updates(
-    pool: &PgPool,
+    pool: &TestPool,
     table: &str,
     id_column: &str,
     workflow_id: Uuid,
@@ -150,14 +150,14 @@ async fn refuse_updates(
     .await;
 }
 
-async fn stop_refusing_updates(pool: &PgPool, table: &str) {
+async fn stop_refusing_updates(pool: &TestPool, table: &str) {
     super::support::execute(pool, &format!("DROP TRIGGER port_test_refuse ON {table}")).await;
     super::support::execute(pool, "DROP FUNCTION port_test_refuse()").await;
 }
 
 /// Makes an update of `table` (of the row `id_column = filter`, or of any row)
 /// end its own backend: the connection is lost in the middle of a statement.
-async fn kill_on_update(pool: &PgPool, table: &str, filter: Option<(&str, Uuid)>) {
+async fn kill_on_update(pool: &TestPool, table: &str, filter: Option<(&str, Uuid)>) {
     let condition = match filter {
         Some((id_column, id)) => format!("NEW.{id_column} = '{id}'::uuid"),
         None => "TRUE".to_owned(),
@@ -187,7 +187,7 @@ async fn kill_on_update(pool: &PgPool, table: &str, filter: Option<(&str, Uuid)>
     .await;
 }
 
-async fn stop_killing(pool: &PgPool, table: &str) {
+async fn stop_killing(pool: &TestPool, table: &str) {
     super::support::execute(pool, &format!("DROP TRIGGER port_test_kill ON {table}")).await;
     super::support::execute(pool, "DROP FUNCTION port_test_kill()").await;
 }
@@ -209,7 +209,7 @@ fn poison_child_specs() -> TestChildSpecs {
 /// Makes every insert of a task row of `workflow_id` refuse with a data
 /// exception (22007), as the insert of a stored deadline that does not parse
 /// does (Python `_refuse_task_inserts`).
-async fn refuse_task_inserts(pool: &PgPool, workflow_id: Uuid) {
+async fn refuse_task_inserts(pool: &TestPool, workflow_id: Uuid) {
     super::support::execute(
         pool,
         &format!(
@@ -237,7 +237,7 @@ async fn refuse_task_inserts(pool: &PgPool, workflow_id: Uuid) {
 /// phase-2 recovery owes A's progression, and that progression raises on the
 /// task row of B. Returns the workflow id and A's task id. Python:
 /// `_start_a_then_b`.
-async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
+async fn start_a_then_b(pool: &TestPool) -> (Uuid, Uuid) {
     let first = task_node(0, "limit_task");
     let mut second = task_node(1, "limit_task");
     second.dependencies = vec![0];
@@ -252,7 +252,7 @@ async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
         .await
         .task_id
         .expect("A has its task at start");
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = 4242,
@@ -279,8 +279,8 @@ async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
     (workflow_id, task_id)
 }
 
-async fn pending_attempts(pool: &PgPool, task_id: Uuid) -> (i32, Option<String>) {
-    sqlx::query_as(
+async fn pending_attempts(pool: &TestPool, task_id: Uuid) -> (i32, Option<String>) {
+    sql::query_as(
         "SELECT attempt_count, last_failure_class
          FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
@@ -369,7 +369,7 @@ async fn a_repair_before_the_limit_saves_the_workflow() {
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
     let _reports = passes(&db.pool, &child_specs, LIMIT - 1).await;
 
-    sqlx::query("UPDATE horsies_workflow_tasks SET task_options = NULL WHERE workflow_id = $1")
+    sql::query("UPDATE horsies_workflow_tasks SET task_options = NULL WHERE workflow_id = $1")
         .bind(workflow_id)
         .execute(&db.pool)
         .await
@@ -484,18 +484,18 @@ async fn a_connection_loss_counts_no_candidate_of_the_pass() {
 async fn the_real_raise_after_a_connection_loss_is_transient() {
     let db = IsolatedDatabase::create().await;
     let mut connection = db.pool.acquire().await.expect("acquire a connection");
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let pid: i32 = sql::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *connection)
         .await
         .expect("read the backend pid");
-    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+    let terminated: bool = sql::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(pid)
         .fetch_one(&db.pool)
         .await
         .expect("terminate the backend");
     assert!(terminated);
 
-    let error = sqlx::query("SELECT 1")
+    let error = sql::query("SELECT 1")
         .execute(&mut *connection)
         .await
         .expect_err("a statement on a terminated backend fails");
@@ -514,7 +514,7 @@ async fn the_resume_pass_logs_and_does_not_count() {
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
 
     let report = recover_workflow_tree(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         workflow_id,
     )
@@ -729,7 +729,7 @@ async fn the_limit_fails_an_on_error_pause_workflow() {
 
 /// A RUNNING workflow with a poison READY node 0 and a RUNNING node 1 whose
 /// task is live. Returns the workflow id and the live task id.
-async fn seed_poison_with_live_node(pool: &PgPool, seed: WorkflowSeed) -> (Uuid, Uuid) {
+async fn seed_poison_with_live_node(pool: &TestPool, seed: WorkflowSeed) -> (Uuid, Uuid) {
     let workflow_id = seed_poison_ready(pool, seed).await;
     let live_task = Uuid::new_v4();
     seed_node_task(pool, live_task, LiveStatus::Running).await;
@@ -981,7 +981,7 @@ async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
         let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().status(status)).await;
         seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "READY")).await;
         // A stored count of 2 and a limit of 3 (the lowest limit): this failure reaches it.
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_recovery_failures (
                  workflow_id, failed_passes, last_pass_id, first_failed_at,
                  last_failed_at, last_case, last_task_index, last_error_type
@@ -993,7 +993,7 @@ async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
         .await
         .expect("seed a count of 2");
         let record = record_candidate_failure(
-            &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
+            &crate::broker::PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
             RecoveryFailurePolicy::Count(CountFailures::new_pass(3)),
             workflow_id,
             RecoveryCase::ReadyNotEnqueued { task_index: 0 },
@@ -1109,7 +1109,7 @@ async fn count_rows_go_with_their_workflow_and_with_a_cascaded_child() {
     )
     .await;
     for workflow_id in [parent, child, kept] {
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_recovery_failures (
                  workflow_id, failed_passes, last_pass_id, first_failed_at,
                  last_failed_at, last_case, last_task_index, last_error_type
@@ -1123,7 +1123,7 @@ async fn count_rows_go_with_their_workflow_and_with_a_cascaded_child() {
     }
 
     crate::worker::recovery::run_retention_cleanup(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
         &RetentionConfig {
             worker_state_retention_hours: None,
             terminal_record_retention_hours: Some(24),
