@@ -22,8 +22,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from horsies import TaskAttemptInfo
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.archive.attempts import AttemptRecord
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
 
@@ -171,9 +171,8 @@ async def _history_row(engine: AsyncEngine, task_id: str) -> Any:
         ).one_or_none()
 
 
-async def _attempts(engine: AsyncEngine, task_id: str) -> tuple[AttemptRecord, ...]:
-    async with AsyncSession(engine) as session:
-        return await read_attempts(session, task_id)
+async def _attempts(broker: PostgresBroker, task_id: str) -> tuple[TaskAttemptInfo, ...]:
+    return await read_attempts(broker, task_id)
 
 
 _DIRECT_SQL: Final = """
@@ -199,6 +198,7 @@ class TestRefusedCall:
     async def test_it_raises_and_writes_nothing(
         self,
         engine: AsyncEngine,
+        broker: PostgresBroker,
         seed: Any,
         is_workflow_task: bool,
         result: str | None,
@@ -224,5 +224,5 @@ class TestRefusedCall:
         assert original.diag.message_primary is not None
         assert message in original.diag.message_primary
         assert await _live_row(engine, seeded.task_id) == before
-        assert await _attempts(engine, seeded.task_id) == ()
+        assert await _attempts(broker, seeded.task_id) == ()
         assert await _history_row(engine, seeded.task_id) is None

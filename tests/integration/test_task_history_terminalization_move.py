@@ -1,11 +1,13 @@
 """The completion-family move against real PostgreSQL.
 
-Behavioral proof of the reconciled transaction: an applied completion
-moves the row with its full projection, the attempt snapshot decodes
-byte-identically through the Python codec, the reservation window starts
-from the live row's digest, and the miss classifier reports replay,
+Behavioral proof of the reconciled transaction: the reservation window
+starts from the live row's digest, and the miss classifier reports replay,
 foreign terminalization, absence, and lost claims through the staged
-provenance path. The COMPLETED-to-NEVER_ELIGIBLE eligibility test is the
+provenance path. The move of an applied completion with its projection
+and its attempt snapshot is a core test
+(``crates/horsies-core/src/broker/lifecycle_tests/
+task_history_terminalization_move.rs``, ``fused_completion_moves_the_row``).
+The COMPLETED-to-NEVER_ELIGIBLE eligibility test is the
 coverage obligation recorded at the envelope-shape reconciliation: the
 gate candidate never exercises the completed branch, so this suite owns
 it.
@@ -23,8 +25,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from horsies.core.history.archive.attempts import decode_attempt_snapshot
-from horsies.core.history.archive.versions import DecodedArchiveValue
 from tests.integration.task_history_harness import (
     INSERT_HISTORY_ROW_SQL,
     HistorySchema,
@@ -143,67 +143,6 @@ async def cancel_admin(connection: AsyncConnection, task_id: str) -> Any:
 
 
 class TestAppliedCompletion:
-    @pytest.mark.asyncio
-    async def test_fused_completion_moves_the_row(
-        self, terminalization_schema: HistorySchema
-    ) -> None:
-        async with terminalization_schema.engine.begin() as connection:
-            await prepare_storage(connection)
-            task_id = await insert_live_task(connection)
-            outcome = await complete_fused(connection, task_id)
-            assert outcome.outcome == 'APPLIED'
-            assert outcome.terminalization_kind == 'COMPLETE_FUSED'
-
-            history = (
-                await connection.execute(
-                    text(
-                        'SELECT status, terminalization_kind, terminal_at, '
-                        'result_payload, result_digest, '
-                        'retry_count, last_claimed_worker_id, '
-                        'attempt_snapshot, attempt_snapshot_digest, '
-                        'attempt_archive_version '
-                        'FROM horsies_task_history '
-                        'WHERE task_id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': task_id},
-                )
-            ).one()
-            assert history.status == 'COMPLETED'
-            assert bytes(history.result_payload) == b'{"ok":true}'
-            assert bytes(history.result_digest) == sha256(b'{"ok":true}').digest()
-            assert history.last_claimed_worker_id == WORKER
-
-            decoded = decode_attempt_snapshot(
-                version=history.attempt_archive_version,
-                payload=bytes(history.attempt_snapshot),
-                digest=bytes(history.attempt_snapshot_digest),
-            )
-            assert isinstance(decoded, DecodedArchiveValue)
-            (attempt,) = decoded.value
-            assert attempt.attempt == 1
-            assert attempt.outcome == 'COMPLETED'
-            assert attempt.worker_id == WORKER
-
-            live_left = (
-                await connection.execute(
-                    text(
-                        'SELECT count(*) FROM horsies_tasks '
-                        'WHERE id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': task_id},
-                )
-            ).scalar_one()
-            attempts_left = (
-                await connection.execute(
-                    text(
-                        'SELECT count(*) FROM horsies_task_attempts '
-                        'WHERE task_id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': task_id},
-                )
-            ).scalar_one()
-            assert (live_left, attempts_left) == (0, 0)
-
     @pytest.mark.asyncio
     async def test_completed_is_never_eligible_even_with_retained_input(
         self, terminalization_schema: HistorySchema

@@ -19,8 +19,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.archive.attempts import decode_attempt_snapshot
-from horsies.core.history.archive.versions import DecodedArchiveValue
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import (
@@ -30,6 +28,7 @@ from horsies.core.models.tasks import (
 from horsies.core.types.result import is_err, is_ok
 from tests.integration.terminal_writes import complete_plain_task
 from tests.integration.conftest import compute_test_command_fingerprint
+from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
 
@@ -149,85 +148,34 @@ async def _insert_retried_attempts(
 
 
 async def _get_attempts(
-    session: AsyncSession,
+    broker: PostgresBroker,
     task_id: str,
 ) -> list[dict[str, Any]]:
-    """All attempts for a task, wherever they live, attempt ASC.
+    """All attempts for a task, attempt ASC, as a Python user reads them.
 
-    Live attempt rows while the task is live; after terminalization the
-    move purges them and the history snapshot is their only home — the
-    snapshot preserves every field this suite asserts on.
+    ``read_attempts`` reads them through ``get_task_info_async``: the live
+    attempt rows while the task is live; after terminalization the move
+    purges them and the core decodes the history snapshot, which keeps
+    every field this suite asserts on.
     """
-    result = await session.execute(
-        text("""
-            SELECT task_id, attempt, outcome, will_retry,
-                   started_at, finished_at,
-                   error_code, error_message, failed_reason,
-                   worker_id, worker_hostname, worker_pid, worker_process_name
-            FROM horsies_task_attempts
-            WHERE task_id = CAST(:task_id AS uuid)
-            ORDER BY attempt ASC
-        """),
-        {'task_id': task_id},
-    )
-    rows = result.fetchall()
-    cols = [
-        'task_id',
-        'attempt',
-        'outcome',
-        'will_retry',
-        'started_at',
-        'finished_at',
-        'error_code',
-        'error_message',
-        'failed_reason',
-        'worker_id',
-        'worker_hostname',
-        'worker_pid',
-        'worker_process_name',
+    return [
+        {
+            'task_id': str(attempt.task_id),
+            'attempt': attempt.attempt,
+            'outcome': attempt.outcome.value,
+            'will_retry': attempt.will_retry,
+            'started_at': attempt.started_at,
+            'finished_at': attempt.finished_at,
+            'error_code': attempt.error_code,
+            'error_message': attempt.error_message,
+            'failed_reason': attempt.failed_reason,
+            'worker_id': attempt.worker_id,
+            'worker_hostname': attempt.worker_hostname,
+            'worker_pid': attempt.worker_pid,
+            'worker_process_name': attempt.worker_process_name,
+        }
+        for attempt in await read_attempts(broker, task_id)
     ]
-    if rows:
-        return [dict(zip(cols, row)) for row in rows]
-    snapshot = (
-        await session.execute(
-            text("""
-                SELECT attempt_archive_version, attempt_snapshot,
-                       attempt_snapshot_digest
-                FROM horsies_task_history
-                WHERE task_id = CAST(:task_id AS uuid)
-            """),
-            {'task_id': task_id},
-        )
-    ).first()
-    if snapshot is None:
-        return []
-    decoded = decode_attempt_snapshot(
-        version=snapshot.attempt_archive_version,
-        payload=bytes(snapshot.attempt_snapshot),
-        digest=bytes(snapshot.attempt_snapshot_digest),
-    )
-    match decoded:
-        case DecodedArchiveValue(value=records):
-            return [
-                {
-                    'task_id': task_id,
-                    'attempt': record.attempt,
-                    'outcome': record.outcome,
-                    'will_retry': record.will_retry,
-                    'started_at': record.started_at,
-                    'finished_at': record.finished_at,
-                    'error_code': record.error_code,
-                    'error_message': record.error_message,
-                    'failed_reason': record.failed_reason,
-                    'worker_id': record.worker_id,
-                    'worker_hostname': record.worker_hostname,
-                    'worker_pid': record.worker_pid,
-                    'worker_process_name': record.worker_process_name,
-                }
-                for record in records
-            ]
-        case _:
-            raise AssertionError(f'corrupt attempt snapshot: {decoded!r}')
 
 
 async def _get_task_error_code(
@@ -305,7 +253,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
     assert is_ok(result)
     assert result.ok_value >= 1
 
-    attempts = await _get_attempts(session, task_id)
+    attempts = await _get_attempts(broker, task_id)
     assert len(attempts) == 1
 
     att = attempts[0]
@@ -404,7 +352,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     assert row[3] is None, 'error_code should be cleared on retry'
 
     # Attempt row should say will_retry=True
-    attempts = await _get_attempts(session, task_id)
+    attempts = await _get_attempts(broker, task_id)
     assert len(attempts) == 1
     att = attempts[0]
     assert att['attempt'] == 1
@@ -517,5 +465,5 @@ async def test_expire_pending_task_transitions_to_expired(
     assert 'TASK_EXPIRED' in row[2]
 
     # No attempt row should exist (task never started)
-    attempts = await _get_attempts(session, task_id)
+    attempts = await _get_attempts(broker, task_id)
     assert len(attempts) == 0

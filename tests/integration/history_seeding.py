@@ -10,8 +10,10 @@ functions of the core's coverage pass; every step is idempotent
 republication rewrites the same manifest).
 
 `force_terminal` moves a seeded row to history with a terminal status;
-`read_attempts`, `read_attempt_history`, `read_attempt_workers` and
-`stored_history_status` read what history holds.
+`stored_history_status` sets the stored status of a history row for a
+block. `read_attempts`, `read_attempt_history` and `read_attempt_workers`
+read the attempts of a task through the broker, as a Python user reads
+them, live or from history.
 """
 
 from __future__ import annotations
@@ -20,15 +22,14 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Final
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from horsies.core.history.archive.attempts import (
-    AttemptRecord,
-    decode_attempt_snapshot,
-)
-from horsies.core.history.archive.versions import DecodedArchiveValue
+from horsies import TaskAttemptInfo, TaskInfo
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.types.result import Err, Ok
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     DEFAULT_RETENTION_DAYS,
@@ -220,93 +221,51 @@ terminalization is correct, not a gap."""
 
 
 async def read_attempts(
-    session: AsyncSession, task_id: str
-) -> tuple[AttemptRecord, ...]:
-    """Every recorded attempt, wherever it lives, attempt ascending.
+    broker: PostgresBroker, task_id: str
+) -> tuple[TaskAttemptInfo, ...]:
+    """Every recorded attempt of a task, attempt ascending, as a Python user
+    reads them: ``PostgresBroker.get_task_info_async`` with
+    ``include_attempts``.
 
-    Live attempt rows while the task is live; after terminalization the
-    move purges them and the history row's snapshot is their only home.
-    One reader, because the two homes are one question and a caller
-    asking it twice can only get them out of step.
+    The core reads the live attempt rows while the task is live; after the
+    move to history it decodes the history row's snapshot, their only home.
+    An id that no table holds has no attempts. A read that fails, or a task
+    read with no attempt list, fails the caller with an ``AssertionError``.
     """
-    live = (
-        await session.execute(
-            text(
-                """
-                SELECT attempt, outcome, will_retry, started_at,
-                       finished_at, error_code, error_message,
-                       failed_reason, worker_id, worker_hostname,
-                       worker_pid, worker_process_name
-                FROM horsies_task_attempts
-                WHERE task_id = CAST(:id AS uuid)
-                ORDER BY attempt
-                """
-            ),
-            {'id': task_id},
-        )
-    ).all()
-    if live:
-        return tuple(
-            AttemptRecord(
-                attempt=row.attempt,
-                outcome=row.outcome,
-                will_retry=row.will_retry,
-                started_at=row.started_at,
-                finished_at=row.finished_at,
-                error_code=row.error_code,
-                error_message=row.error_message,
-                failed_reason=row.failed_reason,
-                worker_id=row.worker_id,
-                worker_hostname=row.worker_hostname,
-                worker_pid=row.worker_pid,
-                worker_process_name=row.worker_process_name,
-            )
-            for row in live
-        )
-    snapshot = (
-        await session.execute(
-            text(
-                """
-                SELECT attempt_archive_version, attempt_snapshot,
-                       attempt_snapshot_digest
-                FROM horsies_task_history
-                WHERE task_id = CAST(:id AS uuid)
-                """
-            ),
-            {'id': task_id},
-        )
-    ).first()
-    if snapshot is None:
-        return ()
-    decoded = decode_attempt_snapshot(
-        version=snapshot.attempt_archive_version,
-        payload=bytes(snapshot.attempt_snapshot),
-        digest=bytes(snapshot.attempt_snapshot_digest),
-    )
-    match decoded:
-        case DecodedArchiveValue(value=records):
-            return records
-        case _:
-            raise AssertionError(f'corrupt attempt snapshot: {decoded!r}')
+    match await broker.get_task_info_async(UUID(task_id), include_attempts=True):
+        case Err(err_value=failed):
+            raise AssertionError(f'the attempts of {task_id} could not be read: {failed}')
+        case Ok(ok_value=info):
+            pass
+    match info:
+        case None:
+            return ()
+        case TaskInfo(attempts=listed):
+            pass
+    match listed:
+        case None:
+            raise AssertionError(f'the task read of {task_id} has no attempt list')
+        case list():
+            return tuple(sorted(listed, key=lambda attempt: attempt.attempt))
 
 
 async def read_attempt_history(
-    session: AsyncSession, task_id: str
+    broker: PostgresBroker, task_id: str
 ) -> list[tuple[int, str, str | None]]:
-    """(attempt, outcome, failed_reason) tuples, wherever they live."""
+    """(attempt, outcome, failed_reason) tuples, live or from history."""
     return [
-        (record.attempt, record.outcome, record.failed_reason)
-        for record in await read_attempts(session, task_id)
+        (record.attempt, record.outcome.value, record.failed_reason)
+        for record in await read_attempts(broker, task_id)
     ]
 
 
 async def read_attempt_workers(
-    session: AsyncSession, task_id: str
+    broker: PostgresBroker, task_id: str
 ) -> set[str]:
-    """The distinct workers that attempted a task, wherever they live."""
+    """The distinct workers that attempted a task, live or from history."""
     return {
         record.worker_id
-        for record in await read_attempts(session, task_id)
+        for record in await read_attempts(broker, task_id)
         if record.worker_id is not None
     }
 

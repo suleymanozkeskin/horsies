@@ -672,8 +672,10 @@ before you upgrade a 0.7 deployment.
   (`horsies.core.baseline`, `baseline.install`, `baseline.migration`), the
   history reads (`horsies.core.history.reads.detail`, `reads.result`,
   `reads.publisher`, `horsies.core.history.names`,
-  `horsies.core.history.partitions`), `horsies.core.utils.time` and the
-  statement helpers of `horsies.core.utils.db`. The re-exports `recover_stuck_workflow_tree` and
+  `horsies.core.history.partitions`), the attempt snapshot decoder
+  (`horsies.core.history.archive`, `archive.attempts`, `archive.versions`),
+  `horsies.core.utils.time` and the statement helpers of
+  `horsies.core.utils.db`. The re-exports `recover_stuck_workflow_tree` and
   `recover_stuck_workflows_global` of `horsies.core.workflows` go with
   them. Removed methods: `PostgresListener.listen_payload`,
   `unsubscribe_payload`, `listen_many`, `unlisten` and `unsubscribe`;
