@@ -50,7 +50,6 @@ from pydantic import TypeAdapter
 from horsies._catalog import monitoring_bounds
 from horsies._core import (
     CoreError,
-    MonitoringFailed,
     MonitoringJson,
     TaskBreakdownQuery as CoreTaskBreakdownQuery,
     TaskDetailAbsent,
@@ -61,7 +60,6 @@ from horsies._core import (
 )
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import validate_core_model_json
-from horsies.core.history.errors import HistoryContractError
 from horsies.core.models.tasks import (
     ContractCode,
     OperationalErrorCode,
@@ -216,40 +214,6 @@ def _workflow_uuid(workflow_id: str) -> uuid.UUID | None:
         return None
 
 
-def _core_read_failed(
-    subject: str, failed: MonitoringFailed,
-) -> Err[MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation]:
-    """The error of a read failure that the core reports. Pure.
-
-    The core's message names the read and the cause, as Python's did
-    (``'<read> failed: <cause>'``). A database failure keeps the record's
-    exception: the core's class of the cause, with the read as its
-    subject. ``subject`` names the read in the error of a defect. ``EVENT_LOOP_LIMIT`` is a code of the
-    Python client only: a core answer with it is a defect.
-    """
-    match failed.code:
-        case 'DB_OPERATION_FAILED':
-            return Err(
-                MonitoringQueryDbOperationFailed(
-                    message=failed.message,
-                    retryable=failed.retryable,
-                    exception=failed.exception,
-                )
-            )
-        case 'HISTORY_CONTRACT_VIOLATION':
-            return Err(
-                MonitoringQueryHistoryContractViolation(
-                    message=failed.message,
-                    exception=HistoryContractError(failed.message),
-                )
-            )
-        case 'EVENT_LOOP_LIMIT':
-            raise AssertionError(
-                f'{subject}: the core answered EVENT_LOOP_LIMIT, a code of the Python '
-                f'client only: {failed.message}'
-            )
-
-
 def _core_call_failed(
     operation: str, exc: CoreCallRefusal,
 ) -> Err[MonitoringQueryDbOperationFailed]:
@@ -316,8 +280,8 @@ async def task_stats(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_STATUS_COUNTS, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.task_stats', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 async def task_facets(
@@ -362,8 +326,8 @@ async def task_facets(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_FACETS, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.task_facets', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 async def task_breakdown(
@@ -418,8 +382,8 @@ async def task_breakdown(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_BREAKDOWN, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.task_breakdown', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 async def list_tasks(
@@ -486,8 +450,8 @@ async def list_tasks(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_TASK_LIST_PAGE, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.list_tasks', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 async def get_task_detail(
@@ -528,8 +492,8 @@ async def get_task_detail(
             return Ok(validate_core_model_json(_TASK_DETAIL, text))
         case TaskDetailAbsent(task_id=absent_id, reason=reason):
             return Ok(TaskDetailNotFound(task_id=absent_id, reason=TaskAbsenceReason(reason)))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.get_task_detail', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -558,8 +522,8 @@ async def list_workflow_names(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_NAMES, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.list_workflow_names', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 async def list_workflow_runs(
@@ -590,8 +554,8 @@ async def list_workflow_runs(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_RUNS, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.list_workflow_runs', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 async def get_workflow_run(
@@ -625,8 +589,8 @@ async def get_workflow_run(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_RUN, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.get_workflow_run', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 async def get_workflow_node(
@@ -673,8 +637,8 @@ async def get_workflow_node(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_WORKFLOW_NODE, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.get_workflow_node', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -704,5 +668,5 @@ async def list_schedules(
     match outcome:
         case MonitoringJson(json=text):
             return Ok(validate_core_model_json(_SCHEDULES, text))
-        case MonitoringFailed():
-            return _core_read_failed('horsies.monitoring.list_schedules', outcome)
+        case MonitoringQueryDbOperationFailed() | MonitoringQueryHistoryContractViolation():
+            return Err(outcome)

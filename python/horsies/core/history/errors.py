@@ -11,9 +11,7 @@ variant is allowed to paper over.
 
 from __future__ import annotations
 
-
-class HistoryContractError(Exception):
-    """The database state violates an invariant this subsystem relies on."""
+from horsies._catalog.history_errors import HistoryContractError as HistoryContractError
 
 
 class LeafLockNotHeld(HistoryContractError):
