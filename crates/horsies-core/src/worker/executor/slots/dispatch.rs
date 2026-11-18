@@ -168,9 +168,9 @@ pub enum AttemptEnd {
         retry: RetryPlacement,
         reason: FailureDetail,
     },
-    /// The child was lost with its exit seen, or killed at the drain
-    /// deadline: the crash path (`WORKER_CRASHED`). The reason of a loss is
-    /// built by [`AttemptEnd::of_lost_child`].
+    /// The child was lost with its exit seen, a kill at the drain deadline
+    /// included: the crash path (`WORKER_CRASHED`). The reason is built by
+    /// [`AttemptEnd::of_lost_child`].
     Crashed { reason: FailureDetail },
     /// The child was killed and its exit was not seen. Nothing is written:
     /// stale recovery or the claim lease decides the row.
