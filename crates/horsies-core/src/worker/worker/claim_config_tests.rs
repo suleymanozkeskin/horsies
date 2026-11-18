@@ -231,6 +231,102 @@ mod claim_function {
         assert_eq!(ids, vec![older]);
     }
 
+    /// `test_distinct_queue_priority_wins`: with a budget of one, the task of
+    /// the queue with the better priority is claimed, though the task of the
+    /// other queue is older.
+    #[tokio::test]
+    #[serial]
+    async fn distinct_queue_priority_wins() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let high = seed(&pool, "q_hi", 1, 0.0).await;
+        seed(&pool, "q_lo", 10, 10.0).await;
+        let config = ClaimerConfig {
+            queues: names(&["q_hi", "q_lo"]),
+            processes: 1,
+            queue_priorities: priorities(&[("q_hi", 1), ("q_lo", 10)]),
+            ..ClaimerConfig::default()
+        };
+
+        let claimed = pass(
+            &core_pool_for_test_pool(&pool),
+            &request(&config, &worker_id()),
+        )
+        .await;
+
+        let rows: Vec<(Uuid, &str)> = claimed
+            .claimed
+            .iter()
+            .map(|row| (row.id, row.queue_name.as_str()))
+            .collect();
+        assert_eq!(rows, vec![(high, "q_hi")]);
+    }
+
+    /// `test_equal_queue_priority_explicit_task_priority_wins`: with equal
+    /// queue priorities, a task of a better task priority (a workflow node,
+    /// for example) is claimed before an older task of the default priority.
+    #[tokio::test]
+    #[serial]
+    async fn equal_queue_priority_explicit_task_priority_wins() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        seed(&pool, "q1", 100, 30.0).await;
+        let urgent = seed(&pool, "q2", 1, 5.0).await;
+        let config = ClaimerConfig {
+            queues: names(&["q1", "q2"]),
+            processes: 1,
+            queue_priorities: priorities(&[("q1", 100), ("q2", 100)]),
+            ..ClaimerConfig::default()
+        };
+
+        let claimed = pass(
+            &core_pool_for_test_pool(&pool),
+            &request(&config, &worker_id()),
+        )
+        .await;
+
+        let ids: Vec<Uuid> = claimed.claimed.iter().map(|row| row.id).collect();
+        assert_eq!(ids, vec![urgent]);
+    }
+
+    /// `test_claim_candidate_bounds.py::test_claim_returns_rows_in_dispatch_order`:
+    /// the rows come back in dispatch order across the pending and the
+    /// expired-claim arms: queue priority first, then task priority, then
+    /// age. The rows are seeded in the opposite order of that rank.
+    #[tokio::test]
+    #[serial]
+    async fn claim_returns_rows_in_dispatch_order() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let low_queue = seed(&pool, "bounds_low", 1, 50.0).await;
+        let late = seed(&pool, "bounds_high", 50, 1.0).await;
+        let early = seed(&pool, "bounds_high", 50, 30.0).await;
+        let expired_urgent = seed(&pool, "bounds_high", 10, 5.0).await;
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET status = 'CLAIMED', claimed_at = now() - interval '10 minutes',
+                 claimed_by_worker_id = 'dead-worker',
+                 claim_expires_at = now() - interval '5 minutes', updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(expired_urgent)
+        .execute(&pool)
+        .await
+        .expect("expire the seeded claim");
+        let config = ClaimerConfig {
+            queues: names(&["bounds_low", "bounds_high"]),
+            processes: 4,
+            queue_priorities: priorities(&[("bounds_high", 1), ("bounds_low", 2)]),
+            ..ClaimerConfig::default()
+        };
+
+        let claimed = pass(
+            &core_pool_for_test_pool(&pool),
+            &request(&config, &worker_id()),
+        )
+        .await;
+
+        let ids: Vec<Uuid> = claimed.claimed.iter().map(|row| row.id).collect();
+        assert_eq!(ids, vec![expired_urgent, early, late, low_queue]);
+    }
+
     /// `test_per_queue_cap_never_over_claims`: concurrent claimers never
     /// exceed the `max_concurrency` of a queue in hard-cap mode.
     #[tokio::test]
