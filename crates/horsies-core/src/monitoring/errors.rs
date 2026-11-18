@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::broker::{is_retryable_sqlx_error, BrokerError};
 use crate::core::history::errors::HistoryError;
 
+/// Failure category for a monitoring read.
+///
+/// Each member names one variant of `MonitoringQueryError`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
