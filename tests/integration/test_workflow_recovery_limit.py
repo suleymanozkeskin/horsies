@@ -1,7 +1,14 @@
 """The workflow recovery limit against real raising rows.
 
 Each test enters from the pass that the reaper calls and asserts on stored
-rows. No test patches the function under test. Three stored rows raise on
+rows and on the report of that pass: the global pass through
+``ReaperMixin._recover_workflows`` (``CoreHandle.recover_workflows_async``),
+the phase-2 pass through ``ReaperMixin._recover_phase2``
+(``CoreHandle.recover_workflow_phase2_async``), and the retention delete
+through ``ReaperMixin._delete_expired_workflows``
+(``CoreHandle.delete_expired_workflows_async``). In the workflow dual-run the
+Python reference of each method runs in its place, so each test runs as a
+pair. No test patches the function under test. Three stored rows raise on
 every pass:
 
 - ``BAD_GOOD_UNTIL`` on a node: the INSERT of the task refuses it (DataError).
@@ -15,12 +22,29 @@ every pass:
   that index``.
 
 Each test has its own database, because a global pass reads every workflow.
+
+The rules that no reaper pass can show are tested in the core, in
+``crates/horsies-core/src/workflow_engine/port_tests/recovery_limit_pass.rs``
+and ``crates/horsies-core/src/workflow_engine/phase2_recovery.rs``:
+
+- the class of the driver error after a lost connection
+  (``the_real_raise_after_a_connection_loss_is_transient``);
+- the tree pass of a resume logs a raise and counts nothing
+  (``the_resume_pass_logs_and_does_not_count``): a resume reports no pass
+  metrics;
+- the limit write changes nothing on a workflow that is not RUNNING
+  (``the_limit_write_refuses_a_workflow_that_is_not_running``), and a raise
+  at the bound of a PAUSED workflow is not recorded
+  (``a_raise_at_the_bound_of_a_paused_workflow_is_not_recorded``): the pass
+  reads a RUNNING workflow, so the pause must come between its raise and its
+  write.
 """
 
 # pyright: reportPrivateUsage=false, reportUnusedFunction=false
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -31,7 +55,6 @@ import pytest
 import pytest_asyncio
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, PendingRollbackError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from horsies.core.app import Horsies
@@ -50,28 +73,9 @@ from horsies.core.models.workflow import TaskNode, WorkflowDefinition
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_err
 from horsies.core.worker.reaper import ReaperMixin
-from horsies.core.worker.sql import DELETE_EXPIRED_WORKFLOWS_SQL
 from horsies.core.workflows.engine import start_workflow_async
-from horsies.core.workflows.phase2_recovery import (
-    Phase2RecoverySummary,
-    _RaisedRowNotRecorded,
-    _record_raised_row,
-    drive_phase2_recovery,
-)
-from horsies.core.workflows.recovery import (
-    GLOBAL_SCAN_ROW_CAP,
-    RecoveryReport,
-    recover_stuck_workflow_tree,
-    recover_stuck_workflows_global,
-)
-from horsies.core.workflows.recovery_limit import (
-    RecoveryCase,
-    RecoveryLimitOutcome,
-    RecoveryRaise,
-    RecoveryRaiseClass,
-    apply_recovery_limit,
-    classify_recovery_raise,
-)
+from horsies.core.workflows.phase2_recovery import Phase2RecoverySummary
+from horsies.core.workflows.recovery import GLOBAL_SCAN_ROW_CAP, RecoveryReport
 from tests.broker_resources_support import current_resources
 from tests.integration.conftest import DB_URL, finish_task
 from tests.integration.isolated_database import isolated_test_database
@@ -84,6 +88,8 @@ BAD_GOOD_UNTIL = '{"good_until":"not-a-date"}'
 BAD_POLICY = '{"cases":[1]}'
 FIRST_FAILURE = '{"error_code":"TASK_EXCEPTION","message":"first failure"}'
 OK_ENVELOPE = '{"__h_task_result__":true,"ok":1,"err":null}'
+RETENTION_PASS_BUDGET_S = 30.0
+"""Seconds that the retention delete may take before it stops after a batch."""
 
 INSERT_WORKFLOW_SQL = text("""
     INSERT INTO horsies_workflows (
@@ -261,16 +267,8 @@ async def _execute(harness: Harness, statement: str, **params: Any) -> None:
         await session.commit()
 
 
-async def _run_pass(harness: Harness) -> RecoveryReport:
-    return await recover_stuck_workflows_global(
-        harness.sessions,
-        harness.broker,
-        failure_limit=LIMIT,
-    )
-
-
 class _Reaper(ReaperMixin):
-    """The reaper mixin alone: its recovery call reads only the broker."""
+    """The reaper mixin alone: its passes read only the broker."""
 
 
 async def _run_reaper_pass(harness: Harness) -> RecoveryReport:
@@ -281,12 +279,13 @@ async def _run_reaper_pass(harness: Harness) -> RecoveryReport:
 
 
 async def _run_passes(harness: Harness, count: int) -> list[RecoveryReport]:
-    return [await _run_pass(harness) for _ in range(count)]
+    return [await _run_reaper_pass(harness) for _ in range(count)]
 
 
 async def _run_phase2(harness: Harness) -> Phase2RecoverySummary:
-    return await drive_phase2_recovery(
-        harness.sessions,
+    """One phase-2 pass as the reaper runs it (``ReaperMixin._recover_phase2``),
+    with no grace and the reaper's row cap."""
+    return await _Reaper()._recover_phase2(
         harness.broker,
         grace_ms=0,
         max_rows=GLOBAL_SCAN_ROW_CAP,
@@ -539,7 +538,7 @@ class TestCountsUnderTheLimit:
         )
         await _seed_node(harness, workflow_id, 2, status='READY', options=BAD_GOOD_UNTIL)
 
-        report = await _run_pass(harness)
+        report = await _run_reaper_pass(harness)
 
         assert await _failed_passes(harness, workflow_id) == 1
         assert report.metrics['case_0'].errors == 1
@@ -560,11 +559,7 @@ class TestCountsUnderTheLimit:
         )
         other.app = harness.app
         try:
-            await recover_stuck_workflows_global(
-                current_resources(other).session_factory,
-                other,
-                failure_limit=LIMIT,
-            )
+            await _Reaper()._recover_workflows(other, failure_limit=LIMIT)
         finally:
             await other.close_async()
 
@@ -584,7 +579,7 @@ class TestCountsUnderTheLimit:
             'WHERE workflow_id = :id',
             id=workflow_id,
         )
-        report = await _run_pass(harness)
+        report = await _run_reaper_pass(harness)
 
         assert report.recovered == 1
         assert await _node_status(harness, workflow_id, 0) == 'ENQUEUED'
@@ -601,7 +596,7 @@ class TestHealthyPath:
         idle = await _seed_workflow(harness)
         await _seed_node(harness, idle, 0, status='RUNNING')
 
-        report = await _run_pass(harness)
+        report = await _run_reaper_pass(harness)
 
         assert report.recovered == 1
         assert await _node_status(harness, recovered, 0) == 'ENQUEUED'
@@ -635,7 +630,7 @@ class TestTransientRaises:
         assert all(r.metrics['case_1'].errors == 1 for r in reports)
 
         await _stop_raising_on_update(harness, table='horsies_workflow_tasks')
-        await _run_pass(harness)
+        await _run_reaper_pass(harness)
         assert await _node_status(harness, workflow_id, 0) == 'ENQUEUED'
 
     async def test_a_connection_loss_counts_no_candidate_of_the_pass(
@@ -686,52 +681,6 @@ class TestTransientRaises:
         for workflow_id in (first, second):
             assert await _workflow_status(harness, workflow_id) == 'RUNNING'
             assert await _node_status(harness, workflow_id, 0) == 'READY'
-
-
-    async def test_the_real_raise_after_a_connection_loss_is_transient(
-        self, harness: Harness,
-    ) -> None:
-        """The classifier rule rests on what SQLAlchemy raises after a loss.
-        A dead session also refuses the count write, so a pass cannot show
-        this rule: only the real exception can."""
-        async with harness.sessions() as session:
-            pid = (
-                await session.execute(text('SELECT pg_backend_pid()'))
-            ).scalar_one()
-            async with harness.sessions() as admin:
-                await admin.execute(
-                    text('SELECT pg_terminate_backend(:pid)'), {'pid': pid},
-                )
-                await admin.commit()
-            # Each block has the shape of one candidate: a SAVEPOINT around
-            # its statements.
-            with pytest.raises(OperationalError):
-                async with session.begin_nested():
-                    await session.execute(text('SELECT 1'))
-            with pytest.raises(PendingRollbackError) as raised:
-                async with session.begin_nested():
-                    await session.execute(text('SELECT 1'))
-            await session.rollback()
-
-        assert classify_recovery_raise(raised.value) is RecoveryRaiseClass.TRANSIENT
-
-
-class TestResumePass:
-    async def test_the_resume_pass_logs_and_does_not_count(
-        self, harness: Harness,
-    ) -> None:
-        workflow_id = await _seed_workflow(harness)
-        await _seed_node(harness, workflow_id, 0, status='READY', options=BAD_GOOD_UNTIL)
-
-        report = await recover_stuck_workflow_tree(
-            harness.sessions, harness.broker, workflow_id,
-        )
-
-        assert report.metrics['case_1'].errors == 1
-        assert report.metrics['case_1'].failures_counted == 0
-
-        assert await _failed_passes(harness, workflow_id) is None
-        assert await _node_status(harness, workflow_id, 0) == 'READY'
 
 
 class TestLimitOnEachCase:
@@ -889,7 +838,7 @@ class TestLiveNodes:
         error = await _workflow_error(harness, workflow_id)
         assert error is not None
         assert 'WORKFLOW_RECOVERY_LIMIT_REACHED' in error
-        assert (await _run_pass(harness)).over_failure_limit == 0
+        assert (await _run_reaper_pass(harness)).over_failure_limit == 0
 
     async def test_success_policy_met_by_a_live_node_can_complete(
         self, harness: Harness,
@@ -950,7 +899,7 @@ class TestGlobalCompletion:
             dependencies=(0,), options=BAD_GOOD_UNTIL,
         )
 
-        first = await _run_pass(harness)
+        first = await _run_reaper_pass(harness)
 
         assert first.recovered == 1
         assert await _workflow_status(harness, child) == 'COMPLETED'
@@ -990,7 +939,7 @@ class TestGlobalCompletion:
             """,
         )
 
-        report = await _run_pass(harness)
+        report = await _run_reaper_pass(harness)
 
         await _execute(harness, 'DROP TRIGGER limit_test_kill ON horsies_workflows')
         await _execute(harness, 'DROP FUNCTION limit_test_kill()')
@@ -998,7 +947,7 @@ class TestGlobalCompletion:
         assert report.health()['errors'] == 1
         assert await _failed_passes(harness, workflow_id) is None
 
-        await _run_pass(harness)
+        await _run_reaper_pass(harness)
         assert await _workflow_status(harness, workflow_id) == 'COMPLETED'
 
     async def test_a_raised_completion_commits_its_count(
@@ -1007,7 +956,7 @@ class TestGlobalCompletion:
         workflow_id = await _seed_workflow(harness, policy=BAD_POLICY)
         await _seed_node(harness, workflow_id, 0, status='COMPLETED')
 
-        await _run_pass(harness)
+        await _run_reaper_pass(harness)
 
         assert await _failed_passes(harness, workflow_id) == 1
         assert await _workflow_status(harness, workflow_id) == 'RUNNING'
@@ -1066,7 +1015,7 @@ class TestCountWrite:
             """,
         )
 
-        report = await _run_pass(harness)
+        report = await _run_reaper_pass(harness)
 
         assert report.recovered == 1
         assert report.metrics['case_1'].failures_counted == 0
@@ -1099,35 +1048,10 @@ class TestLimitWrite:
         assert reports[-1].over_failure_limit == 1
 
         await _stop_raising_on_update(harness, table='horsies_workflows')
-        await _run_pass(harness)
+        await _run_reaper_pass(harness)
 
         assert await _failed_passes(harness, workflow_id) == LIMIT + 1
         assert await _workflow_status(harness, workflow_id) == 'FAILED'
-
-    @pytest.mark.parametrize('status', ['PAUSED', 'CANCELLED'])
-    async def test_a_workflow_that_is_not_running_is_refused(
-        self, harness: Harness, status: str,
-    ) -> None:
-        workflow_id = await _seed_workflow(harness, status=status)
-        await _seed_node(harness, workflow_id, 0, status='READY')
-        failure = RecoveryRaise(
-            workflow_id=workflow_id,
-            task_index=0,
-            case=RecoveryCase.READY_NOT_ENQUEUED,
-            exception_type='DataError',
-            detail='refused',
-        )
-
-        async with harness.sessions() as session:
-            result = await apply_recovery_limit(session, failure, LIMIT)
-            await session.commit()
-
-        assert result.is_ok()
-        assert result.unwrap() is RecoveryLimitOutcome.REFUSED
-        assert await _workflow_status(harness, workflow_id) == status
-        assert await _node_status(harness, workflow_id, 0) == 'READY'
-        assert await _workflow_error(harness, workflow_id) is None
-
 
 class TestPhase2Catch:
     async def test_a_raised_row_is_counted_and_fails_the_workflow_at_the_bound(
@@ -1137,6 +1061,7 @@ class TestPhase2Catch:
 
         summaries = [await _run_phase2(harness) for _ in range(LIMIT)]
 
+        assert [s.considered for s in summaries] == [1, 1, 1]
         assert [s.raised_counted for s in summaries] == [1, 1, 1]
         assert [s.quarantined for s in summaries] == [0, 0, 1]
         assert await _workflow_status(harness, workflow_id) == 'FAILED'
@@ -1226,59 +1151,6 @@ class TestPhase2Catch:
         assert await _workflow_status(harness, workflow_id) == 'FAILED'
 
 
-class TestPhase2PauseWindow:
-    async def test_a_pause_at_the_bound_leaves_the_row_for_a_later_pass(
-        self, harness: Harness,
-    ) -> None:
-        """The workflow pauses after the raise and before the limit write.
-        Discovery stops at the bound, so a stored attempt would leave the
-        resumed workflow RUNNING with no path to end."""
-        workflow_id, task_id = await _start_a_then_b(harness)
-        for _ in range(LIMIT - 1):
-            await _run_phase2(harness)
-        await _execute(
-            harness,
-            "UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = :id",
-            id=workflow_id,
-        )
-
-        row = await _record_raised_row(
-            harness.sessions,
-            task_id=task_id,
-            workflow_id=workflow_id,
-            task_index=0,
-            exc=RuntimeError('raised before the pause'),
-            quarantine_after_attempts=LIMIT,
-        )
-
-        assert isinstance(row, _RaisedRowNotRecorded)
-        async with harness.sessions() as session:
-            stored = (
-                await session.execute(
-                    text(
-                        'SELECT attempt_count, recovery_source '
-                        'FROM horsies_workflow_phase2_pending '
-                        'WHERE task_id = :id',
-                    ),
-                    {'id': task_id},
-                )
-            ).one()
-        assert stored.attempt_count == LIMIT - 1
-        assert stored.recovery_source == 'HISTORY'
-        assert await _workflow_status(harness, workflow_id) == 'PAUSED'
-
-        await _execute(
-            harness,
-            "UPDATE horsies_workflows SET status = 'RUNNING' WHERE id = :id",
-            id=workflow_id,
-        )
-        summary = await _run_phase2(harness)
-
-        assert summary.considered == 1
-        assert summary.quarantined == 1
-        assert await _workflow_status(harness, workflow_id) == 'FAILED'
-
-
 class TestRetention:
     async def test_rows_go_with_their_workflow_and_with_a_cascaded_child(
         self, harness: Harness,
@@ -1316,12 +1188,12 @@ class TestRetention:
                 )
             await session.commit()
 
-        async with harness.sessions() as session:
-            await session.execute(
-                DELETE_EXPIRED_WORKFLOWS_SQL,
-                {'retention_hours': 24, 'batch_size': 100},
-            )
-            await session.commit()
+        _ = await _Reaper()._delete_expired_workflows(
+            harness.broker,
+            retention_hours=24,
+            batch_size=100,
+            deadline_monotonic=time.monotonic() + RETENTION_PASS_BUDGET_S,
+        )
 
         assert await _failed_passes(harness, parent) is None
         assert await _failed_passes(harness, child) is None
