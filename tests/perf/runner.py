@@ -40,10 +40,27 @@ from tests.perf.scenarios import (
     SeedRows,
     SingleRowScenario,
     StatementScenario,
+    WorkerDrainScenario,
     analyze,
     delete_seeded,
     seed_rows,
     seed_terminal_ballast,
+)
+from tests.perf.worker_drain import DrainSender
+from tests.perf.worker_process import (
+    Drained,
+    DrainOutcome,
+    DrainTimedOut,
+    StartedWorker,
+    WorkerExitedEarly,
+    WorkerKilled,
+    WorkerStartFailed,
+    WorkerStop,
+    WorkerStopped,
+    remove_log,
+    stop_worker,
+    wait_for_drain,
+    worker_state,
 )
 from tests.perf.statistics import (
     Comparison,
@@ -111,6 +128,7 @@ class PlanEvidence:
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
+    scenario: Scenario
     conditions: Conditions
     baseline: Measurement
     candidate: Measurement
@@ -179,6 +197,13 @@ def run_scenario(
                         observations=observations,
                         block_size=block_size,
                     )
+                case WorkerDrainScenario():
+                    baseline, candidate, plans = _measure_drains_interleaved(
+                        connection,
+                        dsn=dsn,
+                        scenario=scenario,
+                        drains=observations,
+                    )
                 case _ as unreachable:
                     assert_never(unreachable)
         finally:
@@ -226,6 +251,16 @@ def run_scenario(
                 resamples=resamples,
                 seed=seed,
             )
+        case WorkerDrainScenario():
+            comparisons = []
+            throughput = compare_throughput(
+                baseline_ms=baseline.samples_ms,
+                candidate_ms=candidate.samples_ms,
+                rows_per_operation=scenario.task_count,
+                minimum_ratio=scenario.minimum_throughput_ratio,
+                resamples=resamples,
+                seed=seed,
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -264,6 +299,7 @@ def run_scenario(
     )
 
     return RunResult(
+        scenario=scenario,
         conditions=conditions,
         baseline=baseline,
         candidate=candidate,
@@ -440,6 +476,154 @@ def _run_public_block(client: PublicCall, block_size: int) -> list[float]:
         client.call()
         samples.append((time.perf_counter_ns() - started) / 1_000_000)
     return samples
+
+
+def _measure_drains_interleaved(
+    connection: Connection,
+    *,
+    dsn: str,
+    scenario: WorkerDrainScenario,
+    drains: int,
+) -> tuple[Measurement, Measurement, None]:
+    """Alternate drains between the two sides until each side has ``drains``;
+    the first drain of each side is a warmup.
+
+    Both sides share one sender. Each drain starts a new worker, so each
+    sample pays the start of a worker process. No plan is captured: the
+    statements are the worker's.
+    """
+    samples: dict[Side, list[float]] = {Side.BASELINE: [], Side.CANDIDATE: []}
+    counts: dict[Side, list[Counts]] = {Side.BASELINE: [], Side.CANDIDATE: []}
+    analyze(connection)
+    probe = CounterProbe(connection)
+    sender = scenario.open_sender(dsn)
+    try:
+        for _warmup_side in (Side.BASELINE, Side.CANDIDATE):
+            _ = _drain_once(
+                connection,
+                dsn=dsn,
+                scenario=scenario,
+                sender=sender,
+                probe=probe,
+            )
+        for _ in range(drains):
+            for side in (Side.BASELINE, Side.CANDIDATE):
+                elapsed_ms, drain_counts = _drain_once(
+                    connection,
+                    dsn=dsn,
+                    scenario=scenario,
+                    sender=sender,
+                    probe=probe,
+                )
+                samples[side].append(elapsed_ms)
+                counts[side].append(drain_counts)
+    finally:
+        sender.close()
+    return (
+        Measurement(
+            samples_ms=samples[Side.BASELINE],
+            counts=_total(counts[Side.BASELINE]),
+        ),
+        Measurement(
+            samples_ms=samples[Side.CANDIDATE],
+            counts=_total(counts[Side.CANDIDATE]),
+        ),
+        None,
+    )
+
+
+def _drain_once(
+    connection: Connection,
+    *,
+    dsn: str,
+    scenario: WorkerDrainScenario,
+    sender: DrainSender,
+    probe: CounterProbe,
+) -> tuple[float, Counts]:
+    """One drain: delete the tasks of the last drain, send the tasks, start a
+    worker, time it until every task is terminal, then stop it.
+
+    The probe brackets the worker from its start until the drain. Gives the
+    time in milliseconds and the server counts.
+
+    Raises:
+        RuntimeError: the worker did not start, did not drain the tasks in
+            ``scenario.timeout``, exited before it drained them, or did not
+            exit 0 after SIGTERM. The message names the log of the worker,
+            which stays in the temporary directory.
+    """
+    scenario.cleanup(connection)
+    sender.send(scenario.task_count)
+    probe.begin()
+    # The probe's reads assign no transaction id. Ending their transaction
+    # leaves the harness session idle while the worker writes.
+    connection.commit()
+    match scenario.start_worker(dsn):
+        case WorkerStartFailed(command=command, cause=cause):
+            raise RuntimeError(f'the worker did not start: {cause}; command: {command}')
+        case StartedWorker() as worker:
+            pass
+    try:
+        match _wait_for_drain(connection, scenario=scenario, worker=worker):
+            case Drained(elapsed_ns=elapsed_ns):
+                drain_counts = probe.finish(terminal_rows=scenario.task_count)
+                connection.commit()
+            case DrainTimedOut() | WorkerExitedEarly() as failed:
+                raise RuntimeError(
+                    f'{scenario.name}: {failed!r}; worker log: {worker.log_path}'
+                )
+    except BaseException:
+        # Explicit discard: the error that stopped the drain is the report;
+        # the stop only frees the database and the host.
+        _ = stop_worker(worker.process, scenario.stop_timeout)
+        raise
+    _require_clean_stop(
+        stop_worker(worker.process, scenario.stop_timeout),
+        scenario=scenario,
+        worker=worker,
+    )
+    remove_log(worker)
+    return elapsed_ns / 1_000_000, drain_counts
+
+
+def _wait_for_drain(
+    connection: Connection,
+    *,
+    scenario: WorkerDrainScenario,
+    worker: StartedWorker,
+) -> DrainOutcome:
+    return wait_for_drain(
+        count_terminal=lambda: scenario.count_terminal(connection),
+        state_of_worker=lambda: worker_state(worker.process),
+        expected=scenario.task_count,
+        started_ns=worker.started_ns,
+        timeout=scenario.timeout,
+        interval=scenario.count_interval,
+        clock_ns=time.perf_counter_ns,
+        sleep=time.sleep,
+    )
+
+
+def _require_clean_stop(
+    stop: WorkerStop,
+    *,
+    scenario: WorkerDrainScenario,
+    worker: StartedWorker,
+) -> None:
+    """A drained worker exits 0 after SIGTERM (the stop contract of
+    ``horsies worker``).
+
+    Raises:
+        RuntimeError: it exited with another code, or was killed.
+    """
+    match stop:
+        case WorkerStopped(exit_code=0):
+            return
+        case WorkerStopped() | WorkerKilled():
+            raise RuntimeError(
+                f'{scenario.name}: the drained worker did not stop clean: '
+                f'{stop!r}; worker log: {worker.log_path}'
+            )
 
 
 def _capture_plans(
@@ -672,10 +856,10 @@ def _cleanup(scenario: Scenario, connection: Connection, rows: SeedRows) -> None
     match scenario:
         case SingleRowScenario() | BatchScenario():
             scenario.cleanup(connection, rows)
-        case PublicCallScenario():
-            # The calls write rows with ids that the library mints; the
-            # cleanup finds them by the names the scenario owns, so it has
-            # no role.
+        case PublicCallScenario() | WorkerDrainScenario():
+            # The calls and the sends write rows with ids that the library
+            # mints; the cleanup finds them by the names the scenario owns,
+            # so it has no role.
             scenario.cleanup(connection)
         case _ as unreachable:
             assert_never(unreachable)
@@ -689,6 +873,9 @@ def _payload_bytes(scenario: Scenario) -> int:
             return payload_bytes
         case BatchScenario():
             return 200
+        case WorkerDrainScenario():
+            # The no-op task takes no argument.
+            return 0
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -699,6 +886,8 @@ def _batch_size(scenario: Scenario) -> int | None:
             return None
         case BatchScenario(batch_size=batch_size):
             return batch_size
+        case WorkerDrainScenario(task_count=task_count):
+            return task_count
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -708,6 +897,8 @@ def _comparison_label(scenario: Scenario, *, control: bool) -> str:
     match scenario:
         case PublicCallScenario():
             return 'public call against itself (harness control)'
+        case WorkerDrainScenario():
+            return 'worker drain against itself (harness control)'
         case _ if control:
             return 'existing statement against itself (harness control)'
         case SingleRowScenario(candidate=None) | BatchScenario(candidate=None):
@@ -731,11 +922,11 @@ def _contract_violations(
 
     Latency is sampled and has confidence intervals. These facts are counted,
     so they fail directly: an interval cannot make an extra commit or WAL
-    record less real. A public call scenario has one implementation, which
-    both sides run, so it has no contract to break.
+    record less real. A public call scenario and a worker drain have one
+    implementation, which both sides run, so they have no contract to break.
     """
     match scenario:
-        case PublicCallScenario():
+        case PublicCallScenario() | WorkerDrainScenario():
             return ()
         case SingleRowScenario() | BatchScenario():
             pass

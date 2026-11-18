@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 
+from tests.perf.public_calls import SEND_TASK_NAME, WORKFLOW_TASK_NAME
 from tests.perf.scenarios import (
     ID_BIRTH,
     MAX_SEEDED_INDEX,
@@ -22,6 +23,7 @@ from tests.perf.scenarios import (
     seed_ids,
     seed_rows,
 )
+from tests.perf.worker_drain import DRAIN_TASK_NAME
 
 pytestmark = [pytest.mark.unit]
 
@@ -112,3 +114,21 @@ class TestScenarioRanges:
         assert len({ids.prefix for ids in ranges}) == len(SCENARIOS)
         for earlier, later in zip(ranges, ranges[1:]):
             assert uuid.UUID(earlier.upper) < uuid.UUID(later.lower)
+
+
+class TestNamedRows:
+    """The library mints the ids of the rows that a public call or a drain
+    writes, so their cleanups delete by task name. A name that two scenarios
+    share would let one cleanup delete the rows of the other."""
+
+    SEEDED_TASK_NAME = 'perf.task'
+    """The task name that the seeds write (``_INSERT_RUNNING_SQL``)."""
+
+    def test_the_task_names_of_the_cleanups_are_distinct(self) -> None:
+        names = [
+            SEND_TASK_NAME,
+            WORKFLOW_TASK_NAME,
+            DRAIN_TASK_NAME,
+            self.SEEDED_TASK_NAME,
+        ]
+        assert len(set(names)) == len(names)
