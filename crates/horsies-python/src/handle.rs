@@ -65,7 +65,7 @@ use crate::operations::task_lists::{
     expired_tasks_operation, stale_tasks_operation, stale_threshold,
 };
 use crate::operations::worker_connections::check_worker_connections_operation;
-use crate::operations::worker_ping::{ping_request, ping_workers_operation};
+use crate::operations::worker_ping::{ping_request, ping_wait_bound, ping_workers_operation};
 use crate::operations::worker_reads::{
     class_coverage_operation, class_report_operation, history_limit,
     worker_state_history_operation, worker_state_operation, worker_states_operation,
@@ -753,9 +753,20 @@ impl CoreHandle {
 
     /// Pause one workflow tree (`horsies_workflow_pause`): `WorkflowPaused`,
     /// `WorkflowNotRunning`, `WorkflowAbsent`, or `HandleFailed`. Writes, in
-    /// one statement. Awaitable only: its caller,
-    /// `horsies.core.workflows.lifecycle.pause_workflow`, is a coroutine. A row
-    /// outside the function's contract raises `PanicException`.
+    /// one statement; a caller that leaves does not stop it. A row outside
+    /// the function's contract raises `PanicException`.
+    fn pause_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.pause_workflow",
+            CallKind::Write,
+            pause_workflow_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The awaitable form of `pause_workflow`.
     fn pause_workflow_async<'py>(
         &self,
         py: Python<'py>,
@@ -773,11 +784,29 @@ impl CoreHandle {
 
     /// Start one workflow (`horsies_workflow_start`): `WorkflowStarted`,
     /// `WorkflowExists`, `WorkflowIdTaken` or `WorkflowStartFailed`. Writes;
-    /// the children of its sub-workflow roots come from the child spec
-    /// source. A build that raised (`KeyboardInterrupt`, `SystemExit`, or an
+    /// a caller that leaves does not stop it. The children of its
+    /// sub-workflow roots come from the child spec source, which runs on the
+    /// callback thread while this thread waits with the GIL released. A
+    /// build that raised (`KeyboardInterrupt`, `SystemExit`, or an
     /// `Exception` such as `SerializationError`) rolls the start back and
-    /// raises it again. Awaitable only: its caller, `start_workflow_async`,
-    /// is a coroutine. With no child spec source it raises `RuntimeError`.
+    /// raises it again. With no child spec source it raises `RuntimeError`.
+    fn start_workflow(
+        &self,
+        py: Python<'_>,
+        request: &Bound<'_, WorkflowStartRequest>,
+    ) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core, RaisedExceptions::ToCaller)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.start_workflow",
+            CallKind::Write,
+            start_workflow_operation(self.connection(), request.get().parts(), source),
+        )
+    }
+
+    /// The awaitable form of `start_workflow`.
     fn start_workflow_async<'py>(
         &self,
         py: Python<'py>,
@@ -796,12 +825,26 @@ impl CoreHandle {
 
     /// Resume one workflow tree (`horsies_workflow_resume`): `WorkflowResumed`,
     /// `WorkflowNotPaused`, `WorkflowResumeRecoveryFailed`, `WorkflowAbsent`
-    /// or `HandleFailed`. Writes; the child starts it owes build their
-    /// children through the child spec source. A build that raised
-    /// `KeyboardInterrupt` or `SystemExit` raises it again; one that raised
-    /// an `Exception` raises it again when the resume failed with it.
-    /// Awaitable only: its callers run it on the loop runner. With no child
-    /// spec source it raises `RuntimeError`.
+    /// or `HandleFailed`. Writes; a caller that leaves does not stop it. The
+    /// child starts it owes build their children through the child spec
+    /// source, which runs on the callback thread while this thread waits
+    /// with the GIL released. A build that raised `KeyboardInterrupt` or
+    /// `SystemExit` raises it again; one that raised an `Exception` raises
+    /// it again when the resume failed with it. With no child spec source it
+    /// raises `RuntimeError`.
+    fn resume_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core, RaisedExceptions::ToCaller)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.resume_workflow",
+            CallKind::Write,
+            resume_workflow_operation(self.connection(), workflow_id, source),
+        )
+    }
+
+    /// The awaitable form of `resume_workflow`.
     fn resume_workflow_async<'py>(
         &self,
         py: Python<'py>,
@@ -951,9 +994,21 @@ impl CoreHandle {
 
     /// Cancel one workflow tree (`horsies_workflow_cancel`):
     /// `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or
-    /// `HandleFailed`. Writes, in one statement. Awaitable only: its caller,
-    /// `WorkflowHandle.cancel_async`, is a coroutine. A row outside the
-    /// function's contract raises `PanicException`.
+    /// `HandleFailed`. Writes, in one statement; a caller that leaves does
+    /// not stop it. A row outside the function's contract raises
+    /// `PanicException`.
+    fn cancel_workflow(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.cancel_workflow",
+            CallKind::Write,
+            cancel_workflow_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The awaitable form of `cancel_workflow`.
     fn cancel_workflow_async<'py>(
         &self,
         py: Python<'py>,
@@ -970,8 +1025,19 @@ impl CoreHandle {
     }
 
     /// The status of one workflow: `WorkflowStatusRead`, `WorkflowAbsent` or
-    /// `HandleFailed`. Reads only. Awaitable only: the sync handle methods
-    /// run the awaitable ones on the broker's loop runner.
+    /// `HandleFailed`. Reads only; a caller that leaves drops the read.
+    fn workflow_status(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.workflow_status",
+            CallKind::Read,
+            workflow_status_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The awaitable form of `workflow_status`.
     fn workflow_status_async<'py>(
         &self,
         py: Python<'py>,
@@ -990,8 +1056,31 @@ impl CoreHandle {
     /// Wait for the end of one workflow, up to `timeout_ms` (no limit for
     /// None): `WorkflowCompletedRead`, `WorkflowEndedRead`,
     /// `WorkflowPausedRead`, `WaitTimedOut`, `WorkflowAbsent` or
-    /// `HandleFailed`. Reads only; a cancelled await drops the wait and its
-    /// subscription. A negative timeout raises `OverflowError`.
+    /// `HandleFailed`. Reads only; a caller that leaves drops the wait and
+    /// its subscription. The call is bounded by the limit plus the bound of
+    /// a blocking call, and not bounded with no limit; signals are checked
+    /// every 100 ms, so a raised signal handler (Ctrl+C) ends the wait. A
+    /// negative timeout raises `OverflowError`.
+    #[pyo3(signature = (workflow_id, *, timeout_ms))]
+    fn wait_workflow_result(
+        &self,
+        py: Python<'_>,
+        workflow_id: Uuid,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking_within(
+            py,
+            core,
+            "CoreHandle.wait_workflow_result",
+            CallKind::Read,
+            result_wait_bound(timeout_ms),
+            wait_workflow_result_operation(self.connection(), workflow_id, timeout_ms),
+        )
+    }
+
+    /// The awaitable form of `wait_workflow_result`. A cancelled await drops
+    /// the wait and its subscription.
     #[pyo3(signature = (workflow_id, *, timeout_ms))]
     fn wait_workflow_result_async<'py>(
         &self,
@@ -1011,7 +1100,19 @@ impl CoreHandle {
 
     /// The nodes of one workflow that store a result:
     /// `WorkflowNodeResultsRead`, `WorkflowAbsent` or `HandleFailed`. Reads
-    /// only.
+    /// only; a caller that leaves drops the read.
+    fn workflow_node_results(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.workflow_node_results",
+            CallKind::Read,
+            workflow_node_results_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The awaitable form of `workflow_node_results`.
     fn workflow_node_results_async<'py>(
         &self,
         py: Python<'py>,
@@ -1028,7 +1129,25 @@ impl CoreHandle {
     }
 
     /// The stored result of one node: `StoredNodeResultRecord`,
-    /// `NodeResultNotStored` or `HandleFailed`. Reads only.
+    /// `NodeResultNotStored` or `HandleFailed`. Reads only; a caller that
+    /// leaves drops the read.
+    fn workflow_node_result(
+        &self,
+        py: Python<'_>,
+        workflow_id: Uuid,
+        node_id: String,
+    ) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.workflow_node_result",
+            CallKind::Read,
+            workflow_node_result_operation(self.connection(), workflow_id, node_id),
+        )
+    }
+
+    /// The awaitable form of `workflow_node_result`.
     fn workflow_node_result_async<'py>(
         &self,
         py: Python<'py>,
@@ -1046,7 +1165,20 @@ impl CoreHandle {
     }
 
     /// The nodes of one workflow in index order: `WorkflowNodesRead`,
-    /// `WorkflowAbsent` or `HandleFailed`. Reads only.
+    /// `WorkflowAbsent` or `HandleFailed`. Reads only; a caller that leaves
+    /// drops the read.
+    fn workflow_nodes(&self, py: Python<'_>, workflow_id: Uuid) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.workflow_nodes",
+            CallKind::Read,
+            workflow_nodes_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The awaitable form of `workflow_nodes`.
     fn workflow_nodes_async<'py>(
         &self,
         py: Python<'py>,
@@ -1459,11 +1591,40 @@ impl CoreHandle {
     /// `LISTENER_DISABLED` (an `ASSUME_INITIALIZED` handle has no listener)
     /// or `WORKER_PING_FAILED`. The arguments and the handle's listener follow
     /// Python's rules (`ping_request`); a refused argument, or a handle with
-    /// no listener, answers in a future that is already done, before any
-    /// core call or connect. Sends one NOTIFY; writes no row.
-    /// Awaitable only: the sync facade of `Horsies` runs the async method
-    /// on the broker's loop runner. A cancelled await drops the wait and the
-    /// reply subscription.
+    /// no listener, answers at once, before any core call or connect. Sends
+    /// one NOTIFY; writes no row. A caller that leaves drops the wait and the
+    /// reply subscription. The call is bounded by the window plus the bound
+    /// of a blocking call, and not bounded for an infinite window
+    /// (`ping_wait_bound`); signals are checked every 100 ms.
+    #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
+    fn ping_workers(
+        &self,
+        py: Python<'_>,
+        target_worker_id: &Bound<'_, PyAny>,
+        timeout_seconds: &Bound<'_, PyAny>,
+        min_responses: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let listener = self.connection().lazy_handle().listener();
+        let request =
+            match ping_request(target_worker_id, timeout_seconds, min_responses, listener)? {
+                Ok(request) => request,
+                Err(refused) => return refused.into_py_any(py),
+            };
+        let core = checked_core(py)?;
+        let bound = ping_wait_bound(request.window);
+        call_blocking_within(
+            py,
+            core,
+            "CoreHandle.ping_workers",
+            CallKind::Read,
+            bound,
+            ping_workers_operation(self.connection(), request),
+        )
+    }
+
+    /// The awaitable form of `ping_workers`: a refused argument, or a handle
+    /// with no listener, answers in a future that is already done. A
+    /// cancelled await drops the wait and the reply subscription.
     #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
     fn ping_workers_async<'py>(
         &self,
@@ -1490,9 +1651,21 @@ impl CoreHandle {
 
     /// The latest state snapshot per worker, idle workers included:
     /// `WorkerStatesRecord` or `BrokerFailure` with
-    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
-    /// only: the sync facade of `Horsies` runs the async method on the
-    /// broker's loop runner. A cancelled await drops the read.
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
+    /// that leaves drops the read.
+    fn worker_states(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.worker_states",
+            CallKind::Read,
+            worker_states_operation(self.connection()),
+        )
+    }
+
+    /// The awaitable form of `worker_states`. A cancelled await drops the
+    /// read.
     fn worker_states_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
@@ -1506,8 +1679,21 @@ impl CoreHandle {
 
     /// The latest state snapshot of one worker: `WorkerStateRecord`,
     /// `WorkerStateAbsent` (no snapshot), or `BrokerFailure` with
-    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
-    /// only. A cancelled await drops the read.
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
+    /// that leaves drops the read.
+    fn worker_state(&self, py: Python<'_>, worker_id: String) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.worker_state",
+            CallKind::Read,
+            worker_state_operation(self.connection(), worker_id),
+        )
+    }
+
+    /// The awaitable form of `worker_state`. A cancelled await drops the
+    /// read.
     fn worker_state_async<'py>(
         &self,
         py: Python<'py>,
@@ -1527,10 +1713,33 @@ impl CoreHandle {
     /// every retained one for `None`. `WorkerStatesRecord`, or
     /// `BrokerFailure` with `INVALID_INPUT` (a limit of 0 or less) or
     /// `MONITORING_QUERY_FAILED`. A limit of 0 or less, and a limit that
-    /// Python's statement refused, answer in a future that is already done,
-    /// before any core call (`history_limit`); a limit that is not an `int`
-    /// or `None` raises `TypeError`. Reads only, in one statement. Awaitable only. A
-    /// cancelled await drops the read.
+    /// Python's statement refused, answer at once, before any core call
+    /// (`history_limit`); a limit that is not an `int` or `None` raises
+    /// `TypeError`. Reads only, in one statement; a caller that leaves drops
+    /// the read.
+    #[pyo3(signature = (worker_id, *, limit))]
+    fn worker_state_history(
+        &self,
+        py: Python<'_>,
+        worker_id: String,
+        limit: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let limit = match history_limit(limit)? {
+            Ok(limit) => limit,
+            Err(refused) => return refused.into_py_any(py),
+        };
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.worker_state_history",
+            CallKind::Read,
+            worker_state_history_operation(self.connection(), worker_id, limit),
+        )
+    }
+
+    /// The awaitable form of `worker_state_history`: a refused limit answers
+    /// in a future that is already done. A cancelled await drops the read.
     #[pyo3(signature = (worker_id, *, limit))]
     fn worker_state_history_async<'py>(
         &self,
@@ -1554,8 +1763,21 @@ impl CoreHandle {
 
     /// The fleet check: for each (queue, class) with PENDING rows, whether a
     /// live worker serves it. `ClassCoverageRecord` or `BrokerFailure` with
-    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
-    /// only. A cancelled await drops the read.
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
+    /// that leaves drops the read.
+    fn class_coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.class_coverage",
+            CallKind::Read,
+            class_coverage_operation(self.connection()),
+        )
+    }
+
+    /// The awaitable form of `class_coverage`. A cancelled await drops the
+    /// read.
     fn class_coverage_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
@@ -1570,7 +1792,20 @@ impl CoreHandle {
     /// The pending streams with their oldest wait and coverage, and the
     /// budget load of each live worker. `ClassReportRecord` or
     /// `BrokerFailure` with `MONITORING_QUERY_FAILED`. Reads only, in one
-    /// statement. Awaitable only. A cancelled await drops the read.
+    /// statement; a caller that leaves drops the read.
+    fn class_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.class_report",
+            CallKind::Read,
+            class_report_operation(self.connection()),
+        )
+    }
+
+    /// The awaitable form of `class_report`. A cancelled await drops the
+    /// read.
     fn class_report_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(

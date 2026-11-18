@@ -461,24 +461,33 @@ class TestBackoffValues:
 
 @pytest.mark.unit
 class TestSyncWrapperForwarding:
-    """start_workflow forwards resend_on_transient_err to start_workflow_async."""
+    """start_workflow forwards resend_on_transient_err to the start request of
+    its blocking core call (``CoreHandle.start_workflow``)."""
 
-    def test_sync_forwards_flag_to_async(self) -> None:
-        """start_workflow passes resend_on_transient_err through to async."""
+    def test_sync_forwards_flag_to_the_start_request(self) -> None:
+        """start_workflow passes resend_on_transient_err into the request."""
+        import horsies._core as core
         from horsies.core.workflows.lifecycle import start_workflow
 
         spec = _make_spec()
         broker = MagicMock()
-        mock_handle = MagicMock()
+        broker._core_handle.start_workflow.return_value = MagicMock(spec=core.WorkflowStarted)
 
-        with patch.object(broker, 'run_sync') as mock_call:
-            mock_call.return_value = Ok(mock_handle)
-
+        with (
+            patch('horsies.core.workflows.start_tree.top_node_rows', return_value=[]),
+            patch(
+                'horsies.core.workflows.spec_data.workflow_spec_json',
+                return_value=Ok('{}'),
+            ),
+            patch('horsies._core.WorkflowStartRequest') as request_class,
+        ):
             result = start_workflow(
                 spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
 
         assert is_ok(result)
-        # Verify the async function was called with the flag
-        call_kwargs = mock_call.call_args
-        assert call_kwargs.kwargs.get('resend_on_transient_err') is True
+        assert request_class.call_args.kwargs['resend_on_transient_err'] is True
+        broker._core_handle.start_workflow.assert_called_once_with(
+            request_class.return_value,
+        )
+        broker.run_sync.assert_not_called()

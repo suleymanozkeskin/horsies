@@ -755,16 +755,28 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Register the child spec source of the handle's workflow operations. The core calls it\non the callback thread for each sub-workflow child that an operation builds. A second\nregistration raises RuntimeError. Starts nothing.",
     },
     StubFunction {
+        name: "start_workflow",
+        parameters: START_WORKFLOW_PARAMETERS,
+        returns: TypeText::Plain(START_WORKFLOW_OUTCOME),
+        doc: "Start one workflow. Writes; a caller that leaves does not stop it. The children of its\nsub-workflow roots come from the child spec source. A build that raised (KeyboardInterrupt,\nSystemExit, or an Exception such as SerializationError) rolls the start back and raises it\nagain. With no child spec source it raises RuntimeError.",
+    },
+    StubFunction {
         name: "start_workflow_async",
         parameters: START_WORKFLOW_PARAMETERS,
         returns: TypeText::FutureOf(START_WORKFLOW_OUTCOME),
-        doc: "Start one workflow. Writes; the children of its sub-workflow roots come from the child\nspec source. A build that raised (KeyboardInterrupt, SystemExit, or an Exception such as\nSerializationError) rolls the start back and raises it again. With no child spec source it\nraises RuntimeError.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "resume_workflow",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(RESUME_WORKFLOW_OUTCOME),
+        doc: "Resume one workflow tree. Writes; a caller that leaves does not stop it. The child starts\nit owes build their children through the child spec source. A build that raised\nKeyboardInterrupt or SystemExit raises it again; one that raised an Exception raises it\nagain when the resume failed with it. With no child spec source it raises RuntimeError.",
     },
     StubFunction {
         name: "resume_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(RESUME_WORKFLOW_OUTCOME),
-        doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain; one that raised an Exception raises it again when the resume failed with it. With\nno child spec source it raises RuntimeError.",
+        doc: "The awaitable form of the method above.",
     },
     StubFunction {
         name: "finish_workflow_node_async",
@@ -797,16 +809,28 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000\nclaims. A request with no claim sends nothing.",
     },
     StubFunction {
+        name: "pause_workflow",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(PAUSE_WORKFLOW_OUTCOME),
+        doc: "Pause one workflow tree. Writes, in one statement; a caller that leaves does not stop\nit. A row outside the function's contract raises PanicException.",
+    },
+    StubFunction {
         name: "pause_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(PAUSE_WORKFLOW_OUTCOME),
-        doc: "Pause one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "cancel_workflow",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(CANCEL_WORKFLOW_OUTCOME),
+        doc: "Cancel one workflow tree. Writes, in one statement; a caller that leaves does not stop\nit. A row outside the function's contract raises PanicException.",
     },
     StubFunction {
         name: "cancel_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_WORKFLOW_OUTCOME),
-        doc: "Cancel one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
+        doc: "The awaitable form of the method above.",
     },
     StubFunction {
         name: "delete_expired_workflows_async",
@@ -821,34 +845,64 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,\noldest first. Writes; each candidate commits alone.",
     },
     StubFunction {
+        name: "workflow_status",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_STATUS_OUTCOME),
+        doc: "The status of one workflow. Reads only.",
+    },
+    StubFunction {
         name: "workflow_status_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_STATUS_OUTCOME),
-        doc: "The status of one workflow. Reads only.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "wait_workflow_result",
+        parameters: WAIT_WORKFLOW_RESULT_PARAMETERS,
+        returns: TypeText::Plain(WAIT_WORKFLOW_RESULT_OUTCOME),
+        doc: "Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a\ncaller that leaves drops the wait and its subscription. Bounded by the limit plus the bound\nof a blocking call; not bounded with no limit. A negative timeout raises OverflowError.",
     },
     StubFunction {
         name: "wait_workflow_result_async",
         parameters: WAIT_WORKFLOW_RESULT_PARAMETERS,
         returns: TypeText::FutureOf(WAIT_WORKFLOW_RESULT_OUTCOME),
-        doc: "Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a\ncancelled await drops the wait and its subscription. A negative timeout raises\nOverflowError.",
+        doc: "The awaitable form of the method above. A cancelled await drops the wait and its\nsubscription.",
+    },
+    StubFunction {
+        name: "workflow_node_results",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_NODE_RESULTS_OUTCOME),
+        doc: "The nodes of one workflow that store a result. Reads only.",
     },
     StubFunction {
         name: "workflow_node_results_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_NODE_RESULTS_OUTCOME),
-        doc: "The nodes of one workflow that store a result. Reads only.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "workflow_node_result",
+        parameters: WORKFLOW_NODE_RESULT_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_NODE_RESULT_OUTCOME),
+        doc: "The stored result of one node. Reads only.",
     },
     StubFunction {
         name: "workflow_node_result_async",
         parameters: WORKFLOW_NODE_RESULT_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_NODE_RESULT_OUTCOME),
-        doc: "The stored result of one node. Reads only.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "workflow_nodes",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_NODES_OUTCOME),
+        doc: "The nodes of one workflow in index order. Reads only.",
     },
     StubFunction {
         name: "workflow_nodes_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_NODES_OUTCOME),
-        doc: "The nodes of one workflow in index order. Reads only.",
+        doc: "The awaitable form of the method above.",
     },
     StubFunction {
         name: "task_info",
@@ -877,6 +931,11 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
 ];
 
 const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
+const PING_WORKERS_OUTCOME: &str = "WorkerPongsRecord | BrokerFailure";
+const WORKER_STATES_OUTCOME: &str = "WorkerStatesRecord | BrokerFailure";
+const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerFailure";
+const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerFailure";
+const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerFailure";
 const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFailure";
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
@@ -955,41 +1014,76 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
     },
     StubFunction {
+        name: "ping_workers",
+        parameters: PING_WORKERS_PARAMETERS,
+        returns: TypeText::Plain(PING_WORKERS_OUTCOME),
+        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus\nthe bound of a blocking call; not bounded for an infinite window.",
+    },
+    StubFunction {
         name: "ping_workers_async",
         parameters: PING_WORKERS_PARAMETERS,
-        returns: TypeText::FutureOf("WorkerPongsRecord | BrokerFailure"),
-        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row.",
+        returns: TypeText::FutureOf(PING_WORKERS_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the wait and the reply\nsubscription.",
     },
-
+    StubFunction {
+        name: "worker_states",
+        parameters: &[],
+        returns: TypeText::Plain(WORKER_STATES_OUTCOME),
+        doc: "The latest state snapshot per worker, idle workers included. Reads only, in one\nstatement.",
+    },
     StubFunction {
         name: "worker_states_async",
         parameters: &[],
-        returns: TypeText::FutureOf("WorkerStatesRecord | BrokerFailure"),
-        doc: "The latest state snapshot per worker, idle workers included. Reads only, in one\nstatement. A cancelled await drops the read.",
+        returns: TypeText::FutureOf(WORKER_STATES_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "worker_state",
+        parameters: WORKER_STATE_PARAMETERS,
+        returns: TypeText::Plain(WORKER_STATE_OUTCOME),
+        doc: "The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads\nonly, in one statement.",
     },
     StubFunction {
         name: "worker_state_async",
         parameters: WORKER_STATE_PARAMETERS,
-        returns: TypeText::FutureOf("WorkerStateRecord | WorkerStateAbsent | BrokerFailure"),
-        doc: "The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads\nonly, in one statement.",
+        returns: TypeText::FutureOf(WORKER_STATE_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "worker_state_history",
+        parameters: WORKER_STATE_HISTORY_PARAMETERS,
+        returns: TypeText::Plain(WORKER_STATES_OUTCOME),
+        doc: "The state snapshots of one worker, newest first: at most limit, or every retained one for\nNone. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint\nis MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one\nstatement.",
     },
     StubFunction {
         name: "worker_state_history_async",
         parameters: WORKER_STATE_HISTORY_PARAMETERS,
-        returns: TypeText::FutureOf("WorkerStatesRecord | BrokerFailure"),
-        doc: "The state snapshots of one worker, newest first: at most limit, or every retained one for\nNone. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint\nis MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one\nstatement.",
+        returns: TypeText::FutureOf(WORKER_STATES_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "class_coverage",
+        parameters: &[],
+        returns: TypeText::Plain(CLASS_COVERAGE_OUTCOME),
+        doc: "The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves\nit. Reads only, in one statement.",
     },
     StubFunction {
         name: "class_coverage_async",
         parameters: &[],
-        returns: TypeText::FutureOf("ClassCoverageRecord | BrokerFailure"),
-        doc: "The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves\nit. Reads only, in one statement.",
+        returns: TypeText::FutureOf(CLASS_COVERAGE_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "class_report",
+        parameters: &[],
+        returns: TypeText::Plain(CLASS_REPORT_OUTCOME),
+        doc: "The pending streams with their oldest wait and coverage, and the budget load of each\nlive worker. Reads only, in one statement.",
     },
     StubFunction {
         name: "class_report_async",
         parameters: &[],
-        returns: TypeText::FutureOf("ClassReportRecord | BrokerFailure"),
-        doc: "The pending streams with their oldest wait and coverage, and the budget load of each\nlive worker. Reads only, in one statement.",
+        returns: TypeText::FutureOf(CLASS_REPORT_OUTCOME),
+        doc: "The awaitable form of the method above.",
     },
 ];
 

@@ -221,18 +221,22 @@ class CoreHandle:
         on the callback thread for each sub-workflow child that an operation builds. A second
         registration raises RuntimeError. Starts nothing.
         """
+    def start_workflow(self, request: WorkflowStartRequest) -> WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed:
+        """Start one workflow. Writes; a caller that leaves does not stop it. The children of its
+        sub-workflow roots come from the child spec source. A build that raised (KeyboardInterrupt,
+        SystemExit, or an Exception such as SerializationError) rolls the start back and raises it
+        again. With no child spec source it raises RuntimeError.
+        """
     def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed]:
-        """Start one workflow. Writes; the children of its sub-workflow roots come from the child
-        spec source. A build that raised (KeyboardInterrupt, SystemExit, or an Exception such as
-        SerializationError) rolls the start back and raises it again. With no child spec source it
-        raises RuntimeError.
+        """The awaitable form of the method above."""
+    def resume_workflow(self, workflow_id: uuid.UUID) -> WorkflowResumed | WorkflowNotPaused | WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed:
+        """Resume one workflow tree. Writes; a caller that leaves does not stop it. The child starts
+        it owes build their children through the child spec source. A build that raised
+        KeyboardInterrupt or SystemExit raises it again; one that raised an Exception raises it
+        again when the resume failed with it. With no child spec source it raises RuntimeError.
         """
     def resume_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowResumed | WorkflowNotPaused | WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed]:
-        """Resume one workflow tree. Writes; the child starts it owes build their children through
-        the child spec source. A build that raised KeyboardInterrupt or SystemExit raises it
-        again; one that raised an Exception raises it again when the resume failed with it. With
-        no child spec source it raises RuntimeError.
-        """
+        """The awaitable form of the method above."""
     def finish_workflow_node_async(self, request: NodeFinishRequest) -> asyncio.Future[NodeFinished | NodeFinishFailed]:
         """Phase 2 of one finished workflow task. Writes; the child starts it owes build their
         children through the child spec source. A build that raised KeyboardInterrupt or
@@ -263,14 +267,18 @@ class CoreHandle:
         """Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000
         claims. A request with no claim sends nothing.
         """
+    def pause_workflow(self, workflow_id: uuid.UUID) -> WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed:
+        """Pause one workflow tree. Writes, in one statement; a caller that leaves does not stop
+        it. A row outside the function's contract raises PanicException.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
-        """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
-        raises PanicException.
+        """The awaitable form of the method above."""
+    def cancel_workflow(self, workflow_id: uuid.UUID) -> WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed:
+        """Cancel one workflow tree. Writes, in one statement; a caller that leaves does not stop
+        it. A row outside the function's contract raises PanicException.
         """
     def cancel_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed]:
-        """Cancel one workflow tree. Writes, in one statement. A row outside the function's contract
-        raises PanicException.
-        """
+        """The awaitable form of the method above."""
     def delete_expired_workflows_async(self, older_than_hours: int, batch_size: int, budget_ms: int) -> asyncio.Future[WorkflowsDeleted | WorkflowDeleteFailed]:
         """One workflow retention pass of the reaper, in batches until one deletes nothing or the
         budget has passed. Writes; each batch commits alone. A negative value raises
@@ -280,19 +288,31 @@ class CoreHandle:
         """Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,
         oldest first. Writes; each candidate commits alone.
         """
-    def workflow_status_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowStatusRead | WorkflowAbsent | HandleFailed]:
+    def workflow_status(self, workflow_id: uuid.UUID) -> WorkflowStatusRead | WorkflowAbsent | HandleFailed:
         """The status of one workflow. Reads only."""
-    def wait_workflow_result_async(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed]:
+    def workflow_status_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowStatusRead | WorkflowAbsent | HandleFailed]:
+        """The awaitable form of the method above."""
+    def wait_workflow_result(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed:
         """Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a
-        cancelled await drops the wait and its subscription. A negative timeout raises
-        OverflowError.
+        caller that leaves drops the wait and its subscription. Bounded by the limit plus the bound
+        of a blocking call; not bounded with no limit. A negative timeout raises OverflowError.
         """
-    def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed]:
+    def wait_workflow_result_async(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed]:
+        """The awaitable form of the method above. A cancelled await drops the wait and its
+        subscription.
+        """
+    def workflow_node_results(self, workflow_id: uuid.UUID) -> WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed:
         """The nodes of one workflow that store a result. Reads only."""
-    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | HandleFailed]:
+    def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed]:
+        """The awaitable form of the method above."""
+    def workflow_node_result(self, workflow_id: uuid.UUID, node_id: str) -> StoredNodeResultRecord | NodeResultNotStored | HandleFailed:
         """The stored result of one node. Reads only."""
-    def workflow_nodes_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodesRead | WorkflowAbsent | HandleFailed]:
+    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | HandleFailed]:
+        """The awaitable form of the method above."""
+    def workflow_nodes(self, workflow_id: uuid.UUID) -> WorkflowNodesRead | WorkflowAbsent | HandleFailed:
         """The nodes of one workflow in index order. Reads only."""
+    def workflow_nodes_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodesRead | WorkflowAbsent | HandleFailed]:
+        """The awaitable form of the method above."""
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -352,33 +372,48 @@ class CoreHandle:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
         """
-    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerFailure]:
+    def ping_workers(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> WorkerPongsRecord | BrokerFailure:
         """Ping the workers and collect the distinct replies within the window, on the process
         listener. A refused argument is INVALID_INPUT before any core call; a handle with no
-        listener is LISTENER_DISABLED. Sends one NOTIFY; writes no row.
+        listener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus
+        the bound of a blocking call; not bounded for an infinite window.
+        """
+    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerFailure]:
+        """The awaitable form of the method above. A cancelled await drops the wait and the reply
+        subscription.
+        """
+    def worker_states(self) -> WorkerStatesRecord | BrokerFailure:
+        """The latest state snapshot per worker, idle workers included. Reads only, in one
+        statement.
         """
     def worker_states_async(self) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
-        """The latest state snapshot per worker, idle workers included. Reads only, in one
-        statement. A cancelled await drops the read.
-        """
-    def worker_state_async(self, worker_id: str) -> asyncio.Future[WorkerStateRecord | WorkerStateAbsent | BrokerFailure]:
+        """The awaitable form of the method above. A cancelled await drops the read."""
+    def worker_state(self, worker_id: str) -> WorkerStateRecord | WorkerStateAbsent | BrokerFailure:
         """The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads
         only, in one statement.
         """
-    def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+    def worker_state_async(self, worker_id: str) -> asyncio.Future[WorkerStateRecord | WorkerStateAbsent | BrokerFailure]:
+        """The awaitable form of the method above."""
+    def worker_state_history(self, worker_id: str, *, limit: int | None) -> WorkerStatesRecord | BrokerFailure:
         """The state snapshots of one worker, newest first: at most limit, or every retained one for
         None. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint
         is MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one
         statement.
         """
-    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | BrokerFailure]:
+    def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+        """The awaitable form of the method above."""
+    def class_coverage(self) -> ClassCoverageRecord | BrokerFailure:
         """The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves
         it. Reads only, in one statement.
         """
-    def class_report_async(self) -> asyncio.Future[ClassReportRecord | BrokerFailure]:
+    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | BrokerFailure]:
+        """The awaitable form of the method above."""
+    def class_report(self) -> ClassReportRecord | BrokerFailure:
         """The pending streams with their oldest wait and coverage, and the budget load of each
         live worker. Reads only, in one statement.
         """
+    def class_report_async(self) -> asyncio.Future[ClassReportRecord | BrokerFailure]:
+        """The awaitable form of the method above."""
 
 
 @final
