@@ -1,5 +1,4 @@
-//! Ports of Python `tests/unit/test_slot_pool.py` rows of `TestVerdicts`,
-//! `TestKill`, `TestKillAndWait` and `TestRecycle`: how a task ends when
+//! How a task ends when
 //! its isolated child dies, sends a bad frame, or passes its deadline, and
 //! when a child is replaced.
 //!

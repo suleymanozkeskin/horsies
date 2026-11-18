@@ -133,7 +133,7 @@ pub(crate) fn inject(index_html: &str, base_path: &str, custom_css_url: Option<&
 }
 
 /// The runtime config object of the page as Python's `json.dumps` writes it
-/// with its defaults (`tests/dualrun/reference/web_app.py` `_inject`):
+/// with its defaults:
 /// `{"basePath": ..., "apiBase": ...}`, a space after each `:` and `,`, and
 /// each text escaped to ASCII. Pure.
 pub(crate) fn runtime_config_json(base_path: &str, api_base: &str) -> String {

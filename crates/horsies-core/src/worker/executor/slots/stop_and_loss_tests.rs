@@ -1,8 +1,7 @@
-//! Ports of Python unit tests of the worker parent: a lost child whose exit
-//! was or was not seen (`tests/unit/test_child_loss_exit_unknown.py`), the
-//! retry of a run that timed out (`test_shared_stop.py`), a start hook that
-//! fails in a replacement child (`test_child_process_start_hooks.py`), and
-//! the drain of the pool at the stop (`test_worker_stop_ordering.py`).
+//! The worker parent: a lost child whose exit was or was not seen, the
+//! retry of a run that timed out, a start hook that fails in a replacement
+//! child (Python `tests/unit/test_child_process_start_hooks.py`), and the
+//! drain of the pool at the stop.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -34,8 +33,7 @@ use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause, Parti
 // The retry of a run that timed out
 // ---------------------------------------------------------------------------
 
-/// Python `test_shared_stop.py::test_a_run_that_ends_after_it_was_stuck_retries_isolated`,
-/// the `NOT_STUCK` case: a run that timed out without a stuck report
+/// The `NOT_STUCK` case: a run that timed out without a stuck report
 /// retries in its class. The stuck case is
 /// `shared_rules_tests::an_async_run_reports_its_stop_in_order`.
 #[test]
@@ -92,8 +90,7 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
 // A loss whose exit was not seen
 // ---------------------------------------------------------------------------
 
-/// Python `test_child_loss_exit_unknown.py::TestLossWithNoExitSeen`: a lost
-/// channel, a bad frame and a cleared slot, each with no exit seen, give
+/// A lost channel, a bad frame and a cleared slot, each with no exit seen, give
 /// no verdict; the attempt may still run.
 #[test]
 fn a_loss_whose_exit_was_not_seen_gives_no_verdict_for_any_cause() {
@@ -138,10 +135,7 @@ fn unreachable_writer() -> OutcomeWriter {
     )
 }
 
-/// Python `test_child_loss_exit_unknown.py::TestLossWithNoExitSeen` (the
-/// finalizer half), and `test_task_timeout_order.py::TestNoExitSeen::test_no_retry_and_no_phase_2_without_the_exit`
-/// and `TestSlotAnsweredAfterTheDeadline::test_a_late_loss_with_no_exit_seen_writes_nothing`
-/// (the writer half, with the log line): crash recovery writes nothing, and
+/// A loss with no exit seen, at the writer, with the log line: crash recovery writes nothing, and
 /// the row is left to stale recovery. One line names the task and the pid
 /// of its child (Python logs it at `CRITICAL`; the core at warning).
 #[tokio::test]
@@ -235,9 +229,7 @@ async fn remove_task(pool: &TestPool, task_id: Uuid) {
     }
 }
 
-/// Python `test_child_loss_exit_unknown.py::TestLossWithTheExitSeen::test_crash_recovery_writes_the_row`
-/// and `tests/integration/test_worker_finalize_after.py::test_child_lost_marks_non_retryable_running_task_failed`:
-/// the crash path of a loss whose exit was seen fails the row with
+/// The crash path of a loss whose exit was seen fails the row with
 /// `WORKER_CRASHED`. The live row is gone, and the history row keeps the
 /// claimant and the process that ran the task as provenance.
 #[tokio::test]
@@ -351,8 +343,7 @@ async fn a_failed_start_hook_of_a_replacement_fails_the_pool_with_no_restart_loo
 // The drain at the stop
 // ---------------------------------------------------------------------------
 
-/// Python `test_worker_stop_ordering.py::test_stop_persists_results_of_late_finishing_tasks`
-/// (the pool half; the order of the outcome writes after the drain is the
+/// The pool half of the stop (the order of the outcome writes after the drain is the
 /// worker loop's): a task that ends during the drain gets its result, and
 /// the stop reports a drained pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -379,12 +370,10 @@ async fn a_task_that_ends_during_the_drain_keeps_its_result() {
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
 }
 
-/// Python `test_worker_stop_ordering.py::test_stop_drains_for_the_configured_time`
-/// and `test_slot_pool.py::TestStop::test_drain_deadline_kills_and_reports`:
-/// the stop gives a busy child its drain timeout, then kills it; its task
-/// takes the crash path. The kill is the worker's (`KILLED_BY_PARENT`,
-/// Python `_kill_at_deadline`), so the reason is Python's text of a lost
-/// child (`_finalize_child_loss`, `python/horsies/core/worker/finalize.py:1057`).
+/// The stop gives a busy child its drain timeout, then kills it; its task
+/// takes the crash path. The kill is the worker's (`KILLED_BY_PARENT`), so
+/// the reason is the text of a lost child
+/// (`dispatch::LOST_CHILD_REASON_PREFIX`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path() {
     let first = task(1, ExecutionClass::Isolated);

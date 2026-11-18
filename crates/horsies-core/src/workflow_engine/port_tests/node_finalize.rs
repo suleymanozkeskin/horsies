@@ -1,8 +1,6 @@
 //! The finalize of a workflow node from the worker's side: phase 1 of a
 //! success and its replay, the start check of a claimed node, and phase 2
-//! with its capacity wake. Python:
-//! `tests/integration/test_workflow_node_finalize.py`,
-//! `test_workflow_node_handoff.py`, `test_worker_finalize_workflow_phase.py`.
+//! with its capacity wake. Python: `tests/integration/test_workflow_node_handoff.py`.
 //!
 //! The worker's finalize of a result is phase 1 (`persist_terminal_state`),
 //! then phase 2 (`finalize_workflow_phase`) when phase 1 owes it, as the
@@ -270,11 +268,10 @@ fn completed_locked() -> Option<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// test_workflow_node_finalize.py
+// Node finalize
 // ---------------------------------------------------------------------------
 
-/// `test_workflow_node_finalize.py::test_a_replay_of_a_committed_success_runs_phase_two`:
-/// phase 1 committed and phase 2 never ran. The worker's finalize gets
+/// Phase 1 committed and phase 2 never ran. The worker's finalize gets
 /// `AlreadyApplied`, reads the phase-2 record and runs phase 2.
 #[tokio::test]
 #[serial]
@@ -323,8 +320,7 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
     assert_eq!(pending_rows(&pool, node_a.task_id()).await, 0);
 }
 
-/// `test_workflow_node_finalize.py::test_a_lost_reply_is_retried_and_the_replay_runs_phase_two`:
-/// the success commits and its reply never reaches the worker. Phase 1 is a
+/// The success commits and its reply never reaches the worker. Phase 1 is a
 /// retryable error; its retry, the same statement on a new connection, is
 /// `AlreadyApplied` and runs phase 2.
 ///
@@ -409,8 +405,7 @@ enum WorkflowEnd {
     Failed,
 }
 
-/// `test_workflow_node_finalize.py::test_a_node_of_an_ended_workflow_completes_and_enqueues_nothing`
-/// (CANCELLED, FAILED): the workflow ended while node A ran. Phase 1
+/// CANCELLED and FAILED: the workflow ended while node A ran. Phase 1
 /// completes the task; phase 2 writes the node and consumes the phase-2
 /// record, and the ended workflow promotes no dependent: B keeps the status
 /// the end left it.
@@ -543,7 +538,7 @@ async fn a_failed_workflow_check_keeps_the_claim_and_writes_no_runner_beat() {
 }
 
 // ---------------------------------------------------------------------------
-// test_worker_finalize_workflow_phase.py
+// The workflow phase of the worker's finalize
 // ---------------------------------------------------------------------------
 
 /// A RUNNING workflow (with `success_policy`, if any) whose one RUNNING node
@@ -602,8 +597,7 @@ fn assert_a_phase_two_error(result: &Result<(), FinalizeError>) -> &FinalizeErro
     }
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_workflow_handler_exception_returns_err`:
-/// a failure in the workflow advancement that is not a connection error is a
+/// A failure in the workflow advancement that is not a connection error is a
 /// phase-2 error that is not retryable. The advancement fails on the stored
 /// success policy, which does not parse (the completion check reads it).
 #[tokio::test]
@@ -621,8 +615,7 @@ async fn a_failure_in_the_advancement_is_a_phase_two_error_that_is_not_retryable
     db.drop().await;
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_workflow_handler_exception_returns_err`,
-/// for a database error: a refused node write (SQLSTATE `XX000`, not a
+/// A database error: a refused node write (SQLSTATE `XX000`, not a
 /// connection error) is a phase-2 error that is not retryable.
 #[tokio::test]
 #[serial]
@@ -662,8 +655,7 @@ enum WakeCase {
     NoNode,
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once`
-/// (`node`, `no_node`): phase 2 sends one capacity wake on the channel of
+/// Phase 2 sends one capacity wake on the channel of
 /// the task's queue, whether or not the task has a node. As in Python, the
 /// node and its task are on the queue that phase 2 is given: the node finish
 /// wakes the queue of the node row (`horsies_workflow_node_apply`). The wake
@@ -706,9 +698,7 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
     }
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_after_its_wake_sends_no_wake`
-/// (`tests/integration/test_worker_finalize_workflow_phase.py:198`): a
-/// phase 2 that fails after the node write rolls the write back, keeps the
+/// A phase 2 that fails after the node write rolls the write back, keeps the
 /// phase-2 record and sends no wake. The node finish wakes the queue of the
 /// node row (`horsies_workflow_node_apply`), so the listener is on the
 /// channel of the seeded node's queue. Control: after the stored success
@@ -758,9 +748,7 @@ async fn node_image(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> serd
     .unwrap_or_else(|error| panic!("read node {task_index} of {workflow_id}: {error}"))
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_after_its_wake_sends_no_wake`
-/// (`tests/integration/test_worker_finalize_workflow_phase.py:198`), with the
-/// failure at the step: the node write and the wake share one transaction. A
+/// A failure at the step: the node write and the wake share one transaction. A
 /// phase 2 whose connection is lost after the server ran the step is a
 /// phase-2 error; the node row is unchanged, the phase-2 record stays, and no
 /// wake is delivered.

@@ -978,8 +978,7 @@ mod tests {
         &[],
     );
 
-    /// Python `tests/unit/test_stale_running.py::TestCandidate::test_a_row_without_a_start_is_a_defect`:
-    /// a scan row without a start is outside the scan's contract; its read
+    /// A scan row without a start is outside the scan's contract; its read
     /// fails closed on `started_at`.
     #[tokio::test]
     #[serial_test::serial]

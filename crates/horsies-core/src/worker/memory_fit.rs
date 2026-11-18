@@ -1,6 +1,5 @@
 //! Whether the per-child memory limits of a worker profile fit the memory
-//! that the worker can use (Python `python/horsies/core/worker/profile_fit.py`, the
-//! memory part, lines 1-470; the boot log, `python/horsies/core/cli.py:617-688`).
+//! that the worker can use.
 //!
 //! - The sum of `recycle.above` over the isolated, shared async and shared
 //!   thread children is compared with the usable memory. A mode with

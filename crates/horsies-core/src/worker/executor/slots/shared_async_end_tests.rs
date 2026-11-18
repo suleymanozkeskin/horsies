@@ -1,7 +1,4 @@
-//! Ports of Python `tests/unit/test_shared_slot_pool.py` rows of `TestLoss`,
-//! `TestCapacity`, `TestStartAndStop`, `TestStopReportOrder`,
-//! `TestReturnedRunAtAKill`, `TestFrozenAfterTheLastCancel`,
-//! `TestStuckStepReported` and `TestNamedCulpritAtAKill`: how the runs of a
+//! How the runs of a
 //! shared async child end when the child ends, the capacity, the start and
 //! the stop of a shared pool, and the second backstop.
 

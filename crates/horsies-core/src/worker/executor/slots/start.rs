@@ -1,8 +1,6 @@
 //! The start of the children of a worker: the wait for the first
 //! generation, the placement of the worker's threads, and the memory
-//! baseline guard of each kind of child (Python `core/worker/worker.py`,
-//! `_start_slots`, `_place_worker_process`, `_check_memory_baseline`,
-//! `_check_baseline_against`, `_new_kind_baseline_loop`).
+//! baseline guard of each kind of child.
 //!
 //! The caller starts the pools on one [`PoolBoard`], then calls
 //! [`start_children`]. After a start, [`guard_new_kind_baselines`] runs as a

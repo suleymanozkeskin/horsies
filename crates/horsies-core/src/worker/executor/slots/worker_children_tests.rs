@@ -1,9 +1,7 @@
 //! The pools of a worker from its profile, with scripted children: the
 //! budgets of a claim pass from the board, and the route of each claimed
 //! row to the pool of its kind (Python
-//! `tests/unit/test_claim_plan.py::TestClaimPassWithClasses::test_the_pass_sends_the_budgets_and_the_routes`,
-//! `tests/unit/test_shared_dispatch.py::TestDispatch`,
-//! `tests/unit/test_thread_dispatch.py::TestDispatch`).
+//! `tests/unit/test_claim_plan.py::TestClaimPassWithClasses::test_the_pass_sends_the_budgets_and_the_routes`).
 
 use super::scripted::{
     act_on_runs, boot_any_kind, idle_child_of_any_kind, ok_envelope, result_frame, run_ref, send,
@@ -80,8 +78,7 @@ async fn the_budgets_and_routes_of_a_pass_come_from_the_board() {
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
 }
 
-/// Python `test_shared_dispatch.py::TestDispatch` and
-/// `test_thread_dispatch.py::TestDispatch`: each row goes to the pool of
+/// Each row goes to the pool of
 /// the budget that claimed it, and its end comes back from that pool. One
 /// child of each kind answers only the task of its kind.
 #[tokio::test]

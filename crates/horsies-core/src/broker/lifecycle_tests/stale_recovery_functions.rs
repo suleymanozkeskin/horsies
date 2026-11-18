@@ -268,7 +268,7 @@ mod finish {
         let task_id = stale_task(&pool).await;
         // A row at retry count 1 holds its attempt 1: the archive numbers
         // attempts from 1 with no gap, and its decoder refuses a gap
-        // (`non_contiguous_attempts`, Python's `archive/attempts.py`).
+        // (`non_contiguous_attempts`, `core::history::archive::attempts`).
         record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
 
         let outcome = recover(&core, &finish(task_id, StaleRetry::NoRetry)).await;

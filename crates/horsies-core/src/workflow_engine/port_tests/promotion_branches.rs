@@ -1,10 +1,7 @@
 //! Promotion branches of one node on the step path: the stored data of a
 //! PENDING node that recovery case 0 promotes (`horsies_workflow_node_reevaluate`
 //! through the tree recovery pass), for a task node and for a sub-workflow
-//! node whose child start the step owes. Python: the promotion branches of
-//! `tests/unit/test_workflow_engine_coverage.py` (`TestEnqueueWorkflowTask`,
-//! `TestEnqueueSubworkflowTask`, `TestCheckAndPromoteTask`). Each test names
-//! the Python tests that it ports.
+//! node whose child start the step owes.
 
 use serial_test::serial;
 use uuid::Uuid;
@@ -363,10 +360,7 @@ async fn a_promoted_node_whose_args_from_is_a_map_of_indexes_or_empty_is_enqueue
     }
 }
 
-/// `TestEnqueueWorkflowTask::test_corrupt_task_options_json_fails_task` and
-/// `test_task_options_non_dict_fails_task`;
-/// `test_workflow_child_start_task_options.py::TestPromotionReadsTheStoredOptions::test_stored_options_fail_only_that_node`:
-/// stored task options that do not parse, or that are not a JSON object, fail
+/// Stored task options that do not parse, or that are not a JSON object, fail
 /// the promoted node alone with `WORKER_SERIALIZATION_ERROR` and Python's
 /// message (`horsies_workflow_task_options_refusal`), and no task row is
 /// written.

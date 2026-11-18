@@ -497,8 +497,7 @@ mod tests {
         assert_eq!(parse_cpu_list("5"), Ok(cpus(&[5])));
     }
 
-    /// Python `test_cpu_placement.py::TestParseCpuList::test_text_that_is_not_a_cpu_list_is_refused`:
-    /// the refusal names the text.
+    /// The refusal names the text.
     #[test]
     fn the_refusal_of_a_cpu_list_names_its_text() {
         for text in ["", "a", "3-1", "1-", "-2", "70000", "1,,2"] {
@@ -552,7 +551,6 @@ mod tests {
         assert!(refused.to_string().contains("at least 2 physical cores"));
     }
 
-    /// Python `test_cpu_placement.py::TestSplitOwnCore::test_cpus_without_smt_siblings_are_one_core_each`.
     #[test]
     fn cpus_without_smt_siblings_are_one_core_each() {
         let alone: BTreeMap<u32, CpuIds> = (0..3).map(|cpu| (cpu, cpus(&[cpu]))).collect();
@@ -626,7 +624,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Python `test_cpu_placement.py::TestDescribeRefusal::test_each_refusal_names_its_cause`.
     #[test]
     fn each_refusal_names_its_cause() {
         let refusals = [
@@ -654,8 +651,7 @@ mod tests {
         }
     }
 
-    /// Python `test_cpu_placement.py::TestPlanCpuPlacement::test_own_core_on_linux_splits_the_allowed_cpus`:
-    /// on Linux the plan is the split of the CPUs that this process may use
+    /// On Linux the plan is the split of the CPUs that this process may use
     /// by the SMT siblings that the host topology lists.
     #[cfg(target_os = "linux")]
     #[test]
@@ -786,8 +782,7 @@ mod tests {
         .contains(&format!("worker thread {thread_id}"))
     }
 
-    /// Python `test_cpu_placement.py::TestPlaceWorkerThreads::test_every_listed_thread_gets_the_cpus`:
-    /// every thread of the listing gets the CPUs, and the count is the count
+    /// Every thread of the listing gets the CPUs, and the count is the count
     /// of the listing.
     #[cfg(target_os = "linux")]
     #[test]

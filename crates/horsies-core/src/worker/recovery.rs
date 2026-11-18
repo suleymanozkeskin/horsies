@@ -309,10 +309,9 @@ mod p7_maintenance_tests {
         );
     }
 
-    /// Python's order (`reaper.py:144-638`) requeues stale CLAIMED rows before
-    /// it expires PENDING rows, so a stale claim whose `good_until` has passed
-    /// is requeued and expired in one pass. Expiry first would leave it
-    /// PENDING after the pass.
+    /// The pass requeues stale CLAIMED rows before it expires PENDING rows,
+    /// so a stale claim whose `good_until` has passed is requeued and expired
+    /// in one pass. Expiry first would leave it PENDING after the pass.
     #[tokio::test]
     #[serial]
     async fn a_stale_claim_past_its_deadline_is_requeued_then_expired_in_one_pass() {
@@ -740,8 +739,7 @@ mod p7_maintenance_tests {
 // ---------------------------------------------------------------------------
 
 // The baseline table has no id column: (worker_id, snapshot_at) is its
-// identity (unique index horsies_worker_states_identity). Python
-// `DELETE_EXPIRED_WORKER_STATES_SQL`, `python/horsies/core/worker/sql.py:310-318`.
+// identity (unique index horsies_worker_states_identity).
 const DELETE_EXPIRED_WORKER_STATES_SQL: &str = "\
 DELETE FROM horsies_worker_states
 WHERE (worker_id, snapshot_at) IN (
@@ -888,7 +886,7 @@ pub fn spawn_reaper(
         // lives as long as the loop.
         let mut unheld_owners = UnheldOwners::default();
         // The fleet check runs after each pass, from one check interval after
-        // the start on (Python `reaper.py:622-628, 747-750`).
+        // the start on.
         let mut coverage_log =
             ClassCoverageLog::for_reaper_start(tokio::time::Instant::now(), check_interval);
 
@@ -1147,7 +1145,7 @@ async fn run_reaper_pass(
         }
     }
 
-    // Python's order (`reaper.py:144-638`): requeue stale CLAIMED rows,
+    // The order: requeue stale CLAIMED rows,
     // audit orphaned workflow tasks, fail stale RUNNING rows, expire PENDING
     // rows, then the workflow and maintenance steps. No step stops for the
     // life of the process: a step that keeps failing logs an error on every
@@ -1546,7 +1544,7 @@ async fn cleanup_expired_key_reservations(
 
 /// Recover the stale RUNNING tasks of one pass: the crash retry that the
 /// task's policy admits, else the terminal failure (Python
-/// `mark_stale_tasks_as_failed`, `core/brokers/postgres.py:3129-3423`).
+/// `PostgresBroker.mark_stale_tasks_as_failed` runs this pass).
 ///
 /// - `horsies_stale_running_scan` reads at most `batch` candidates with no
 ///   lock.
@@ -2171,9 +2169,7 @@ async fn retention_pass(
     })
 }
 
-/// Run retention cleanup for relational monitoring and workflow records
-/// (Python `ReaperMixin._run_reaper_pass`, its retention part,
-/// `python/horsies/core/worker/reaper.py:380-434`).
+/// Run retention cleanup for relational monitoring and workflow records.
 ///
 /// The worker-state snapshots, then the workflows with their node rows
 /// ([`PostgresBroker::delete_expired_workflows`]), each gated by its config

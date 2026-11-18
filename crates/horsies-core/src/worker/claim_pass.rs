@@ -1,6 +1,4 @@
-//! The claim pass of the worker parent with the claim per execution class
-//! (Python `python/horsies/core/worker/claiming.py:131-603`,
-//! `python/horsies/core/worker/row_class.py`).
+//! The claim pass of the worker parent with the claim per execution class.
 //!
 //! One pass:
 //! 1. One `horsies_claim` statement with a budget per class and the routes

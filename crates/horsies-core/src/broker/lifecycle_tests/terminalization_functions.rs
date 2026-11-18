@@ -1,8 +1,8 @@
-//! Port of Python `tests/integration/test_terminalization_functions.py`.
+//! The terminalization functions of 0004.
 //!
 //! The rows that a matrix test of `broker/terminalization_matrix.rs` already
-//! checks in full are not repeated here. The Python file drives the interim
-//! writers; the rows run against the 0004 writers that keep their kinds:
+//! checks in full are not repeated here. The rows run against the 0004
+//! writers that keep their kinds:
 //! `horsies_finish_workflow_success` writes `COMPLETE_LOCKED`,
 //! `horsies_finish_failed_attempt` writes `FAIL_RUNNING`,
 //! `horsies_finish_stale_attempt` (with no retry) writes `FAIL_STALE` and
@@ -341,8 +341,7 @@ mod kind_vocabulary {
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
-    /// Python `tests/integration/test_history_maintenance_sql.py::test_the_miss_classes_of_the_database_are_the_equivalence_classes`:
-    /// two kinds share a class of `horsies_terminalization_family` exactly
+    /// Two kinds share a class of `horsies_terminalization_family` exactly
     /// when they share a class of `equivalence_class_of`. A terminal write
     /// that missed answers `AlreadyApplied` by the database class; the core
     /// judges a replay by its own.
@@ -2049,8 +2048,7 @@ mod workflow_scoped_batches {
         cleanup_workflows(&pool, &[live_workflow_id, ready_link_workflow]).await;
     }
 
-    /// Python `test_lifecycle_commands.py::TestIllegalStatesAreUnrepresentable::test_required_workflow_status_is_implied_by_the_variant`:
-    /// no command names the workflow status that its guard needs; the variant
+    /// No command names the workflow status that its guard needs; the variant
     /// means it. The pause sweep acts only under a PAUSED workflow and the
     /// cancel sweep only under a CANCELLED one, so neither acts for the other.
     #[tokio::test]

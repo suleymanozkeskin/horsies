@@ -149,9 +149,8 @@ impl PostgresBroker {
         requeue_stale_claimed_pass(open.main(), self.statement_log(), stale_after).await
     }
 
-    /// Return claimed rows that no child started to the queue (Python
-    /// `horsies.core.worker.release.release_claims`, one call of at most
-    /// [`crate::MAX_RELEASED_CLAIMS`] rows). A row that is
+    /// Return claimed rows that no child started to the queue (one call of at
+    /// most [`crate::MAX_RELEASED_CLAIMS`] rows). A row that is
     /// CLAIMED by the command's worker at its claim generation goes back to
     /// PENDING with every claim and run field cleared; any other row is not
     /// touched. `ISOLATED` also writes the `ISOLATED` class and wakes each
@@ -210,8 +209,7 @@ impl PostgresBroker {
     }
 
     /// Write the failed attempt of a task whose child reported a result
-    /// (Python `horsies.core.worker.failed_attempt.finish_failed_attempt`,
-    /// claimed-row rule `REFUSE`): `horsies_finish_failed_attempt`, one
+    /// (claimed-row rule `REFUSE`): `horsies_finish_failed_attempt`, one
     /// statement in autocommit on the main core pool, checked out as
     /// reserved work. Under the full fence (worker, claim generation, and
     /// the retry count of a retry) it writes the attempt row and the retry,
@@ -234,8 +232,7 @@ impl PostgresBroker {
     }
 
     /// Write the end of an attempt whose child ended without a result
-    /// (Python `horsies.core.worker.failed_attempt.finish_ended_attempt`,
-    /// claimed-row rule `RELEASE`): a row still CLAIMED by this worker at
+    /// (claimed-row rule `RELEASE`): a row still CLAIMED by this worker at
     /// this claim generation goes back to the queue with no attempt row
     /// (`Released`); any other row is written or refused as
     /// [`PostgresBroker::finish_failed_attempt`] does. One statement, as
@@ -252,8 +249,7 @@ impl PostgresBroker {
         attempt_writes::finish_unreported_attempt(open.main(), self.statement_log(), command).await
     }
 
-    /// Write the plain successes of one worker (Python
-    /// `horsies.core.lifecycle.persistence.apply_fused_batch`):
+    /// Write the plain successes of one worker:
     /// `horsies_complete_tasks_fused`, one statement in autocommit for 1 to
     /// 64 rows, on the main core pool, checked out as batch work. Each row
     /// keeps its own fence (`worker_id` and its claim generation) and
@@ -289,8 +285,7 @@ impl PostgresBroker {
         complete_plain_successes(open.main(), self.statement_log(), worker_id, batch).await
     }
 
-    /// Write phase 1 of a workflow task's success (Python
-    /// `horsies.core.worker.workflow_success.finish_workflow_success`):
+    /// Write phase 1 of a workflow task's success:
     /// `horsies_finish_workflow_success`, one statement in autocommit on the
     /// main core pool, checked out as reserved work. Under the full fence it
     /// writes the attempt row, the move to history and the phase-2 record of

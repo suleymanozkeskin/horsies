@@ -6,9 +6,7 @@
 //! no family row, is refused with [`BrokerError::ClientFamilyMismatch`], not
 //! retryable. A family row whose value is not a client family is corrupt
 //! stored data: it is refused with [`BrokerError::UnknownStoredFamily`], not
-//! retryable, and nothing is written. Reads are not checked. Python
-//! reference: `python/horsies/core/baseline/install.py` (`ClientFamily`,
-//! `RecordedFamily`, `_INSERT_FAMILY_SQL`).
+//! retryable, and nothing is written. Reads are not checked.
 
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::error::BrokerError;

@@ -1,5 +1,5 @@
 //! The workflow recovery failure bound against stored rows that raise on
-//! every pass. Python: `tests/integration/test_workflow_recovery_limit.py`.
+//! every pass.
 //!
 //! Each test enters from the pass that the reaper calls and asserts on stored
 //! rows; each has its own database, because a global pass reads every

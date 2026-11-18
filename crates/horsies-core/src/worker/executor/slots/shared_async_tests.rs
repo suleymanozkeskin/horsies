@@ -1,7 +1,4 @@
-//! Ports of Python `tests/unit/test_shared_slot_pool.py` rows of
-//! `TestPlacement`, `TestRecycleReason`, `TestSeats`, `TestRecycle`,
-//! `TestDeadline`, `TestTheStopOfARun`, `TestWorkLeftAfterAReturn` and
-//! `TestBlockedLoop`: a shared async pool driven by scripted children that
+//! A shared async pool driven by scripted children that
 //! report the stop of each run with frames.
 //!
 //! Python's child cancels a run at its deadline and reports each step; the

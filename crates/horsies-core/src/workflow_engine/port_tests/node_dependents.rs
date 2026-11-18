@@ -1,8 +1,5 @@
 //! Whether phase 1 of a node's finalize names dependents, and the phase-2
-//! form that the worker takes from it. Python:
-//! `tests/integration/test_workflow_node_dependents.py`, with the three rows
-//! that read `has_dependents` of the node write before phase 1 returned the
-//! fact.
+//! form that the worker takes from it.
 //!
 //! Phase 1 reads whether a node of the same workflow lists the node in its
 //! dependencies (`horsies_node_has_dependents`). Dependencies are written at

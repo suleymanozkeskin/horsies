@@ -321,8 +321,7 @@ mod release {
     }
 
     /// A release clears every claim and run field and the finalizing
-    /// marker, as Python's `UNCLAIM_CLAIMED_TASK_SQL` (`core/worker/sql.py`):
-    /// a released PENDING row names no worker, no claim and no run.
+    /// marker: a released PENDING row names no worker, no claim and no run.
     #[tokio::test]
     #[serial]
     async fn a_release_clears_every_claim_and_run_field() {

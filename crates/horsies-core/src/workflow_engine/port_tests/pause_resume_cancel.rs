@@ -1,7 +1,7 @@
 //! Pause, resume and cancel. Python: the cancel and pause/resume classes of
 //! `tests/integration/test_workflow_handle.py`, and
-//! `test_workflow_pause_notification.py`, `test_pause_abandon_after_resume.py`,
-//! `test_cascade_resume_bug.py`, `test_resume_dependency_results.py`, and the
+//! `test_workflow_pause_notification.py`, `test_cascade_resume_bug.py`,
+//! `test_resume_dependency_results.py`, and the
 //! pause and crash rows of `tests/e2e/test_layer6_workflow_advanced.py`.
 
 use std::time::Duration;
@@ -476,8 +476,7 @@ async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
 /// parent node (case 1.6: a terminal child under a RUNNING parent node), so
 /// one refusal shows that the advance ran and the recovery pass did not.
 ///
-/// The message names the parent advance and the child whose advance failed,
-/// as the Python resume did (`tests/dualrun/reference/workflow_resume_caller.py`).
+/// The message names the parent advance and the child whose advance failed.
 #[tokio::test]
 #[serial]
 async fn a_failed_parent_advance_after_the_resume_commit_is_resume_recovery_failed() {
@@ -696,8 +695,7 @@ fn assert_refused_by_a_running_workflow(
     }
 }
 
-/// `test_pause_abandon_after_resume.py::test_claim_filter_dispatches_a_claim_resumed_before_its_abandon`:
-/// a claim whose workflow was resumed is dispatched; its node and task stay.
+/// A claim whose workflow was resumed is dispatched; its node and task stay.
 /// The core settles the claim check in one statement, so a resume commits
 /// before or after it, never between the read and the abandon.
 #[tokio::test]
@@ -725,7 +723,6 @@ async fn the_claim_filter_dispatches_a_claim_whose_workflow_was_resumed() {
     db.drop().await;
 }
 
-/// `test_pause_abandon_after_resume.py::test_batch_abandon_refuses_after_a_committed_resume`
 #[tokio::test]
 #[serial]
 async fn the_batch_abandon_refuses_after_a_committed_resume() {
@@ -756,8 +753,7 @@ async fn the_batch_abandon_refuses_after_a_committed_resume() {
     db.drop().await;
 }
 
-/// `test_pause_abandon_after_resume.py::test_child_starts_a_task_resumed_before_its_abandon`
-/// (the abandon half): the start-time abandon of one node refuses after a
+/// The start-time abandon of one node refuses after a
 /// committed resume, so the start can run the task. The start half is
 /// `worker::executor::child_host::start_tests::a_resume_before_the_abandon_starts_the_task_on_the_next_attempt`.
 #[tokio::test]

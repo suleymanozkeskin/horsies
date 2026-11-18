@@ -1,12 +1,7 @@
 //! Phase 2 of a finished workflow task, the parent advance after it, and the
 //! phase-2 recovery pass of the reaper, on a
 //! client handle whose children come from the client's
-//! [`ChildSpecSource`]: the entry points of the Python worker's
-//! `FinalizeMixin._finalize_workflow_phase` and `_drive_parent_propagations`
-//! (`python/horsies/core/worker/finalize.py`) and of its reaper's phase-2
-//! recovery and workflow recovery pass (`python/horsies/core/worker/reaper.py`),
-//! which call them through
-//! `horsies._core` in place of their own statements.
+//! [`ChildSpecSource`].
 //!
 //! Each runs on the main core pool with the reserve
 //! ([`CheckoutClass::Reserved`]): per-task writes of a worker and the
@@ -188,8 +183,7 @@ impl PostgresBroker {
 }
 
 impl PostgresBroker {
-    /// One phase-2 recovery pass of the reaper (Python
-    /// `drive_phase2_recovery`, `python/horsies/core/workflows/phase2_recovery.py`):
+    /// One phase-2 recovery pass of the reaper:
     /// the phase-2 records older than `grace_ms` and under
     /// `quarantine_after_attempts`, oldest first, at most `max_rows`, each in
     /// its own transaction (`horsies_workflow_phase2_recover` with the child
@@ -217,8 +211,7 @@ impl PostgresBroker {
 }
 
 impl PostgresBroker {
-    /// The reaper's global workflow recovery pass (Python
-    /// `recover_stuck_workflows_global`, `python/horsies/core/workflows/recovery.py`):
+    /// The reaper's global workflow recovery pass:
     /// cases 0, 1, 1.5 and 1.6 from their discovery statements and cases 2/3
     /// and 4 from the audit page, each candidate in its own transaction with
     /// the child starts it owes (children from `source`), then the count of

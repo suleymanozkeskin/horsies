@@ -1,7 +1,5 @@
 //! Tests of the rules of shared children: verdicts at a kill, stop reports,
-//! ends at a loss, backstops, placement and recycle (Python
-//! `tests/unit/test_shared_stop.py`, `test_slot_pool_shared.py`,
-//! `test_thread_slots.py`).
+//! ends at a loss, backstops, placement and recycle.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;

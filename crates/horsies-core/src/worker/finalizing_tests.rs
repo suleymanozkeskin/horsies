@@ -126,7 +126,6 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
     remove(&pool, id).await;
 }
 
-/// Python `test_finalize_status_guard.py::test_the_finalizing_marker_refuses_a_null_claim_generation`:
 /// `horsies_mark_finalizing` requires the claim time, so a NULL claim time
 /// is refused with 22023 and nothing can turn off the generation half.
 #[tokio::test]

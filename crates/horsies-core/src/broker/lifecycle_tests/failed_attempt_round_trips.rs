@@ -1,9 +1,7 @@
-//! Port of Python `tests/integration/test_failed_attempt_round_trips.py`:
-//! round trips of a failed attempt, counted at the wire.
+//! Round trips of a failed attempt, counted at the wire.
 //!
-//! Python's failure and timeout writes are one read of the retry facts and
-//! one statement. The core reads no row before the statement (differences
-//! ledger, row 18), so each write is one statement. The count is taken
+//! The core reads no row before the statement (differences ledger, row 18),
+//! so each failure and timeout write is one statement. The count is taken
 //! through the counting proxy on a core pool of one connection, after the
 //! statement is prepared on the connection, with no checkout ping (Python's
 //! `pre_ping_off` case; the ping rule of a reused connection belongs to the

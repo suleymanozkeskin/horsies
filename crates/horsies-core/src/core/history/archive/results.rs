@@ -32,9 +32,8 @@ pub fn encode_result_envelope(
     })
 }
 
-/// Decode one stored result payload to its JSON value (Python
-/// `decode_result_envelope`, `core/history/archive/results.py:28-51`), for
-/// the history vector tests. A `serde_json::Value` holds an integer outside
+/// Decode one stored result payload to its JSON value, for the history
+/// vector tests. A `serde_json::Value` holds an integer outside
 /// the `i64` and `u64` range as an `f64`, so no production path reads a
 /// result this way: the reads take [`decode_result_envelope_text`]. Pure.
 #[cfg(test)]
@@ -51,9 +50,8 @@ pub(crate) fn decode_result_envelope(
         .map_err(|_| corrupt(ArchiveDomain::Result, "JSONDecodeError"))
 }
 
-/// The text of one stored result payload, checked as Python's
-/// `decode_result_envelope` checks it (`core/history/archive/results.py:28-51`),
-/// without building a value. Pure.
+/// The text of one stored result payload, checked as
+/// `decode_result_envelope` checks it, without building a value. Pure.
 ///
 /// Checks the envelope version, codec and content type, then the digest,
 /// then the payload under the strict read rule of a stored text

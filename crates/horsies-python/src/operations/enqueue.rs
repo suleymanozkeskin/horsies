@@ -434,10 +434,11 @@ fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, Py
 }
 
 /// Enqueue one task. The core's refusals that need no connection run first
-/// (`CheckedSend::check`), as Python's `_prepare_enqueue` ran before its
-/// schema install: a refused send answers `SendValidationFailed` with no
-/// connect and no statement. Then the schema is installed once per handle; a
-/// failed connect or install is `SendEnqueueFailed`, as Python's enqueue
+/// (`CheckedSend::check`), as `_prepare_enqueue` ran before the schema
+/// install (`horsies/core/brokers/postgres.py` at `v0.7.0`): a refused send
+/// answers `SendValidationFailed` with no connect and no statement. Then the
+/// schema is installed once per handle; a failed connect or install is
+/// `SendEnqueueFailed`, as Python's enqueue
 /// reports it. Writes; a caller that leaves early sees the outcome as
 /// unknown, and a resend of the same request with the send kind `REPEAT` is
 /// safe.

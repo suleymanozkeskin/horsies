@@ -256,7 +256,6 @@ mod tests {
 
     #[test]
     fn the_failed_attempt_writes_log_on_the_lifecycle_logger() {
-        // Python `horsies.core.worker.failed_attempt`.
         assert_eq!(
             route(horsies_core::log_targets::FAILED_ATTEMPT),
             Some(LoggerName::Lifecycle)
@@ -265,7 +264,6 @@ mod tests {
 
     #[test]
     fn the_workflow_success_logs_on_the_lifecycle_logger() {
-        // Python `horsies.core.worker.workflow_success`.
         assert_eq!(
             route(horsies_core::log_targets::WORKFLOW_SUCCESS),
             Some(LoggerName::Lifecycle)
@@ -274,8 +272,7 @@ mod tests {
 
     #[test]
     fn the_success_batch_outcomes_log_on_the_lifecycle_logger() {
-        // Python `horsies.core.lifecycle.persistence`; the batch logs each
-        // row through `log_terminalization_outcome`.
+        // The batch logs each row through `log_terminalization_outcome`.
         assert_eq!(
             route(horsies_core::log_targets::TERMINALIZATION_OUTCOME),
             Some(LoggerName::Lifecycle)

@@ -1,6 +1,6 @@
-//! Ports of Python `tests/integration/test_failed_attempt_finish.py` and of
-//! the fence cases of `tests/integration/test_finalize_status_guard.py` for
-//! the two one-statement attempt writers.
+//! The two one-statement attempt writers: the cases of Python
+//! `tests/integration/test_failed_attempt_finish.py`, and the fence of a
+//! stale claim generation.
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
@@ -326,9 +326,8 @@ async fn a_changed_retry_count_is_part_of_the_fence() {
     cleanup(&pool, seeded.task_id).await;
 }
 
-/// Python `test_finalize_status_guard.py::test_fused_finalize_rejects_stale_claim_generation`,
-/// for the failed attempt: a stale claim generation of the same worker
-/// writes nothing.
+/// The failed attempt: a stale claim generation of the same worker writes
+/// nothing.
 #[tokio::test]
 #[serial]
 async fn a_stale_claim_generation_writes_no_failure() {
@@ -352,7 +351,6 @@ async fn a_stale_claim_generation_writes_no_failure() {
     cleanup(&pool, seeded.task_id).await;
 }
 
-/// Python `test_finalize_status_guard.py::test_workflow_success_rejects_stale_claim_generation`.
 #[tokio::test]
 #[serial]
 async fn a_stale_claim_generation_writes_no_workflow_success() {
@@ -382,7 +380,6 @@ async fn a_stale_claim_generation_writes_no_workflow_success() {
     cleanup(&pool, seeded.task_id).await;
 }
 
-/// Python `test_workflow_success.py::TestProgram::test_a_plain_task_is_refused_before_any_write`.
 #[tokio::test]
 #[serial]
 async fn a_plain_task_success_through_the_workflow_writer_is_refused() {

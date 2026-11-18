@@ -1,5 +1,4 @@
-//! The parent side of one child: its socket, its frames and its process
-//! (Python `core/worker/slots.py`, `Child` and `FrameProtocol`).
+//! The parent side of one child: its socket, its frames and its process.
 //!
 //! Verdict rules, in this order:
 //! - A result is a complete frame, and nothing else.

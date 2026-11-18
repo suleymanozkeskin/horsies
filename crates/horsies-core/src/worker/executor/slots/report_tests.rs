@@ -1,9 +1,7 @@
 //! The finalize decision of a child report: what the worker writes for each
-//! end that a child reported (Python `python/horsies/core/lifecycle/classify.py`,
-//! `classify` and `terminalization_for_refused_retry`, and
-//! `python/horsies/core/worker/finalize.py`, `_attempt_failure_of`).
+//! end that a child reported.
 //!
-//! Python decides on typed reports first and writes after. The core builds
+//! The core builds
 //! the write of each failure with a pure function of the report and the
 //! claim (`outcome::worker_failure_write`, `task_error_write`,
 //! `killed_child_write`, `timeout_write`); those are tested here without a
@@ -70,8 +68,7 @@ fn error_envelope(error: &TaskError) -> ResultEnvelopeText {
     )
 }
 
-/// Python `test_lifecycle_classification.py::TestFailures::test_worker_failure_manufactures_its_own_payload`:
-/// the task produced nothing, so the worker writes its own account as the
+/// The task produced nothing, so the worker writes its own account as the
 /// result: a `BROKER_ERROR` error whose message is the detail and whose
 /// data names the task. The detail is the reason of the task and of its
 /// attempt, and the write never retries.
@@ -105,9 +102,7 @@ fn a_worker_failure_records_its_detail_as_the_result_and_the_reason() {
     }
 }
 
-/// Python `TestFailures::test_worker_failure_without_detail_still_records_a_reason`
-/// and `test_failed_attempt.py::TestAttemptOfAReport::test_a_worker_failure`:
-/// a worker failure with no detail records `Worker failure` as the reason of
+/// A worker failure with no detail records `Worker failure` as the reason of
 /// the task, and as the message and the reason of its attempt.
 #[test]
 fn a_worker_failure_without_detail_records_the_fallback_text() {
@@ -232,9 +227,7 @@ fn a_timeout_records_its_text_as_the_attempt_reason() {
     }
 }
 
-/// Python `TestFailures::test_string_error_codes_survive_unchanged` and
-/// `test_failed_attempt.py::TestAttemptOfAReport::test_a_task_error`: a task
-/// error with a code of its own keeps that code, the task's own envelope is
+/// A task error with a code of its own keeps that code, the task's own envelope is
 /// the stored result, and the attempt carries the task's message and no
 /// reason.
 #[test]
@@ -257,8 +250,7 @@ fn a_task_error_keeps_its_own_code_payload_and_message() {
     );
 }
 
-/// Python `test_failed_attempt.py::TestErrorCodeText::test_the_stored_spelling`:
-/// the stored code of an outcome code, of an operational code and of a code
+/// The stored code of an outcome code, of an operational code and of a code
 /// of the task's own is its spelling.
 #[test]
 fn each_failure_stores_the_spelling_of_its_code() {
@@ -333,8 +325,7 @@ fn the_write_of_a_report_is_the_same_for_the_same_report() {
     );
 }
 
-/// Python `test_lifecycle_classification.py::TestEveryRowEndingCommandCarriesTheDispatchedClaim`
-/// (the failure writes): the write of a worker failure and of a task error
+/// The failure writes: the write of a worker failure and of a task error
 /// carries the worker and the claim generation of this dispatch, to the
 /// microsecond. Its statement refuses a row that a later claim holds
 /// (`a_reported_end_on_a_later_claim_of_the_row_writes_nothing`).
@@ -665,10 +656,7 @@ async fn remove_workflow(pool: &TestPool, workflow_id: Uuid) {
         .expect("remove the test workflow");
 }
 
-/// Python `TestFailures::test_undecodable_payload_fails_as_a_serialization_error`,
-/// `::test_undecodable_payload_leaves_the_reason_column_alone` and
-/// `test_failed_attempt.py::TestAttemptOfAReport::test_an_undecodable_result`:
-/// a result that does not read as an envelope fails the task with
+/// A result that does not read as an envelope fails the task with
 /// `WORKER_SERIALIZATION_ERROR` and no failed reason; its attempt is FAILED,
 /// with the decode diagnosis as its message and no reason.
 #[tokio::test]
@@ -750,8 +738,7 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
     remove_workflow(&pool, workflow_id).await;
 }
 
-/// Python `tests/integration/test_worker_finalize_after.py::test_task_expired_workflow_task_advances_workflow_without_reaper`:
-/// the child expired the claimed task of node 0 before it started; node 1
+/// The child expired the claimed task of node 0 before it started; node 1
 /// waits for node 0. The worker writes no task row and replays phase 2
 /// alone, with no recovery: node 0 fails with the `TASK_EXPIRED` result,
 /// node 1 is skipped, and the workflow (`on_error` `fail`) fails.
@@ -957,8 +944,7 @@ fn row_ending_reports() -> Vec<(&'static str, Seed, AttemptEnd)> {
     ]
 }
 
-/// Python `test_lifecycle_classification.py::TestEveryRowEndingCommandCarriesTheDispatchedClaim::test_a_classified_command`
-/// and `::test_a_refused_retry`: every write that ends the row is fenced
+/// Every write that ends the row is fenced
 /// on the worker and the claim generation of this dispatch. The row is
 /// RUNNING under a claim of the same worker one microsecond after the
 /// dispatch, as after a lapsed lease and a new claim. Each reported end
@@ -997,12 +983,10 @@ async fn a_reported_end_on_a_later_claim_of_the_row_writes_nothing() {
     }
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_an_orphan_that_the_child_cancelled_owes_nothing`,
-/// `::test_the_finalize_sends_no_orphan_cancel` (`ORPHAN_CANCELLED`, and
-/// `WORKFLOW_CHECK_FAILED`, which version 2 spells `NODE_NOT_LINKED`), and
-/// `TestAbortsThatWriteNothing::test_aborts_are_no_ops` for a workflow
-/// task: the child's stop before start wrote what each of these stops
-/// needs, the orphan cancel included, so the worker writes nothing. Each
+/// The stops `ORPHAN_CANCELLED`, `NODE_NOT_LINKED` (version 1 spelled it
+/// `WORKFLOW_CHECK_FAILED`) and the aborts of a workflow task: the child's
+/// stop before start wrote what each of these stops needs, the orphan cancel
+/// included, so the worker writes nothing. Each
 /// stop settles as nothing owed; the live row is unchanged, and no attempt
 /// row and no history row exist.
 #[tokio::test]
@@ -1202,8 +1186,7 @@ async fn stored_error_message(pool: &TestPool, task_id: Uuid) -> Option<String> 
     .expect("read the stored error message")
 }
 
-/// Python `_retry_finalize_future` (`python/horsies/core/worker/finalize.py:1957`):
-/// the crash-recovery write of a lost child fails once with a database
+/// The crash-recovery write of a lost child fails once with a database
 /// error that may clear; the write sent again stores
 /// `Retry after future-stage finalize error: ` and the first message as the
 /// task's error message, and as the attempt's message and failed reason.

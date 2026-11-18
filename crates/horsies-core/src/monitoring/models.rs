@@ -323,8 +323,7 @@ pub struct DownSlotInfo {
     pub failed_boots: u64,
 }
 
-/// Whether any slot of a worker was down (Python `SlotHealthKind`,
-/// `python/horsies/monitoring/execution_classes.py:42`).
+/// Whether any slot of a worker was down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]

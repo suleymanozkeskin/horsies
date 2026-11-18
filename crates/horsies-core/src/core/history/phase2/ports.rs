@@ -1,11 +1,9 @@
-//! Ports of the Python phase-2 tests: consumption from history, the caller's
-//! plan setting, the quarantine copy and the locator keys.
+//! The phase-2 rules: consumption from history, the caller's plan setting,
+//! the quarantine copy and the locator keys.
 //!
-//! Python specification: `tests/integration/test_task_history_phase2_consumption.py`,
-//! `test_phase2_consume_plan.py`, `test_task_history_phase2_quarantine.py` and
-//! the core rows of `test_task_history_workflow_recovery_prototypes.py`. Each
-//! test runs in one transaction that it rolls back, on the shared migrated
-//! database.
+//! Python specification: `tests/integration/test_phase2_consume_plan.py` and
+//! `test_task_history_phase2_quarantine.py`. Each test runs in one
+//! transaction that it rolls back, on the shared migrated database.
 
 use serial_test::serial;
 use uuid::Uuid;
@@ -658,8 +656,7 @@ fn span_from(text: &str, start: usize) -> String {
     text[start..].chars().take(400).collect()
 }
 
-/// `tests/unit/test_task_history_phase2.py::TestLockOrder::test_n6_order_workflow_then_node_then_pending`:
-/// on its main path the consumption locks the workflow row, then the node
+/// On its main path the consumption locks the workflow row, then the node
 /// row, then the pending row, each `FOR UPDATE` (the lock order of the
 /// engine).
 #[test]
@@ -687,8 +684,7 @@ fn consumption_locks_the_workflow_then_the_node_then_the_pending_row() {
     }
 }
 
-/// `tests/unit/test_task_history_phase2.py::TestPrunedProbe::test_history_read_carries_both_partition_keys`:
-/// the history read of the consumption names both partition keys of the one
+/// The history read of the consumption names both partition keys of the one
 /// leaf that holds the row (class and terminal time) and the task id, after
 /// the comment that rejects the fan-out over every leaf.
 #[test]
@@ -705,8 +701,7 @@ fn the_history_read_names_both_partition_keys_of_its_leaf() {
     assert!(comment < probe);
 }
 
-/// `tests/unit/test_task_history_phase2.py::TestPrunedProbe::test_composite_node_lock_uses_structural_pinning`:
-/// the node lock of the consumption names the node row id and its workflow,
+/// The node lock of the consumption names the node row id and its workflow,
 /// so a locator cannot reach a node of another workflow.
 #[test]
 fn the_node_lock_is_pinned_by_its_row_id_and_its_workflow() {
@@ -742,8 +737,7 @@ fn listed_place(kind: Phase2DispositionKind) -> usize {
     }
 }
 
-/// `tests/unit/test_task_history_phase2.py::TestDispositionVocabulary::test_sql_and_decoder_vocabularies_are_closed_together`
-/// and `TestDecoder::test_unknown_disposition_raises`: each disposition of the
+/// Each disposition of the
 /// decoder is a text that the baseline body of `horsies_phase2_consume`
 /// returns, and it reads back as its kind; the durable dispositions are among
 /// them; any other text is a contract error that names it.
@@ -770,8 +764,7 @@ fn each_disposition_of_the_consume_function_reads_and_an_unknown_one_is_refused(
     }
 }
 
-/// `tests/unit/test_task_history_phase2.py::TestDispositionVocabulary::test_pending_deletes_exist_only_on_durable_paths`:
-/// the body of `horsies_phase2_consume` deletes the pending row in two
+/// The body of `horsies_phase2_consume` deletes the pending row in two
 /// statements, on its durable paths: the workflow is already terminal, and
 /// the node write.
 #[test]
@@ -784,8 +777,7 @@ fn the_consumption_deletes_the_pending_row_in_two_statements() {
     );
 }
 
-/// `tests/unit/test_task_history_phase2.py::TestDispositionVocabulary::test_the_type_is_created_before_the_function`
-/// and `::test_type_carries_the_progression_context`: the baseline creates
+/// The baseline creates
 /// the row type `horsies_phase2_disposition` before `horsies_phase2_consume`,
 /// and the type carries the workflow status, depth, root and `on_error`.
 #[test]

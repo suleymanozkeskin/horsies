@@ -1,5 +1,4 @@
-//! Pins of the retry rule. Python references: `tests/unit/test_retry_utils.py`,
-//! `tests/unit/test_retry_decision.py`, `tests/integration/test_stored_timeout_refusal.py`.
+//! Pins of the retry rule.
 
 use super::*;
 
@@ -649,9 +648,7 @@ fn the_delay_is_at_least_one_second() {
 
 // --- stored retry limit ----------------------------------------------------
 //
-// Python `stored_max_retries` (`python/horsies/core/codec/task_options.py:80-103`);
-// `tests/unit/test_retry_utils.py::TestParseRetryPolicy` and
-// `tests/integration/test_enqueue_retry_limit.py`
+// Python `tests/integration/test_enqueue_retry_limit.py`
 // (`test_valid_policies_store_their_limits`,
 // `test_a_malformed_policy_is_refused_without_a_row`).
 

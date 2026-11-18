@@ -174,8 +174,7 @@ mod checked_send_tests {
         )
     }
 
-    /// Python refuses an empty key before any I/O (`_enqueue_key`, through
-    /// `ScopedIdempotencyKey`): the send answers `VALIDATION_FAILED`. The
+    /// An empty key is refused before any I/O: the send answers `VALIDATION_FAILED`. The
     /// check needs no connection, so a caller runs it before its connect.
     #[test]
     fn an_empty_idempotency_key_is_refused_by_the_check() {
@@ -550,8 +549,7 @@ static GET_TASK_INFO: TypedStatement =
 ///
 /// Each row also has `read_at`, the `statement_timestamp()` of this
 /// statement: the database clock, one value for every row. The web worker
-/// list measures ages from it (Python measures them with the web host clock,
-/// `tests/dualrun/reference/web_routes/workers.py:108-119`).
+/// list measures ages from it.
 const LIST_WORKER_STATES_SQL: &str = "\
 WITH RECURSIVE latest AS (
     (
@@ -694,7 +692,7 @@ pub enum SchemaInitializationMode {
 }
 
 /// The stored values of one send command, checked: only the database can
-/// refuse it now (Python `SendCommand`). Built by [`SendCommand::prepare`]
+/// refuse it now. Built by [`SendCommand::prepare`]
 /// and [`PostgresBroker::prepare_send_command`].
 ///
 /// The version-1 fingerprint leaves the task id and `sent_at` out, so one
@@ -737,7 +735,7 @@ impl SendCommand {
         check_sent_input(input)?;
         // The options are read with the strict rule before the retry limit,
         // as `CheckedSend::check` reads them, so a text that does not read
-        // names its reader's error (Python `_parse_enqueue_task_options`).
+        // names its reader's error.
         let _options = parse_optional_object(task_options)
             .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
@@ -792,7 +790,8 @@ pub struct CheckedSend<'a> {
 
 impl<'a> CheckedSend<'a> {
     /// The refusals of one send that need no connection, in the order of
-    /// Python's `_prepare_enqueue`, which runs before the schema install:
+    /// `_prepare_enqueue` (`horsies/core/brokers/postgres.py` at `v0.7.0`),
+    /// which ran before the schema install:
     /// both `enqueued_at` and `enqueue_delay_seconds`; a `sent_at` in the
     /// future of a send that starts now; an input that the rules of a user
     /// value refuse (`check_sent_input`); options that do not read by the
@@ -845,8 +844,7 @@ impl<'a> CheckedSend<'a> {
             })?,
         };
         // The options are read with the strict rule before the retry limit,
-        // so a text that does not read names its reader's error (Python
-        // `_parse_enqueue_task_options`).
+        // so a text that does not read names its reader's error.
         let _options = parse_optional_object(task_options)
             .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
@@ -1503,8 +1501,7 @@ impl PostgresBroker {
     /// statement in autocommit on the main core pool, checked out as batch
     /// work, after the client family check ([`Self::enqueue_checked`];
     /// Python `PostgresBroker.enqueue_async`). A caller that connects or
-    /// installs the schema first runs the check before those steps, as
-    /// Python's `_prepare_enqueue` ran before its install. Returns the id of
+    /// installs the schema first runs the check before those steps. Returns the id of
     /// the task that holds the send: the sent id (minted here when
     /// `predetermined_task_id` is `None`), or the task that holds the
     /// idempotency key with the same command.
@@ -1666,7 +1663,7 @@ impl PostgresBroker {
     }
 
     /// The stored values of an unkeyed send with no deadline and no delay,
-    /// without a write (Python `PostgresBroker.prepare_send_command`): the
+    /// without a write: the
     /// values [`PostgresBroker::enqueue`] writes for the same arguments, with
     /// the broker's default rerun-input posture ([`SendCommand::prepare`]).
     /// One command serves every row of the send, for example each slot of a
@@ -2050,8 +2047,7 @@ impl PostgresBroker {
 
     /// The claimed tasks of a claim pass that must not be dispatched because
     /// their workflow is PAUSED or CANCELLED, after the settle wrote what
-    /// each of them needs (Python `_filter_nonrunnable_workflow_tasks`,
-    /// `core/worker/claiming.py:649-760`), through
+    /// each of them needs, through
     /// `horsies_workflow_claimed_tasks_settle`
     /// ([`crate::broker::workflow_claim_settle`]):
     /// - PAUSED: this worker's claim at its claim generation is abandoned,
@@ -2472,9 +2468,7 @@ impl PostgresBroker {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// One probe of the raw result wait, as Python's `_probe_result_row`
-    /// (the dual-run reference `tests/dualrun/reference/result_caller.py`
-    /// runs it): one statement through the staged result function
+    /// One probe of the raw result wait: one statement through the staged result function
     /// ([`read_task_result`], with the broker's [`ResultReaderSeen`]). While
     /// that function is not published, the live probe and the staged detail
     /// read run instead ([`Self::raw_result_probe_unstaged`]). An absence
@@ -3738,8 +3732,7 @@ mod filter_non_runnable_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    /// The bounded lookup of the interim function, which Python's claim
-    /// filter calls (`core/worker/sql.py:234-239`).
+    /// The bounded lookup of the interim function.
     const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str =
         "SELECT id, status FROM horsies_find_non_runnable_workflow_tasks($1)";
 

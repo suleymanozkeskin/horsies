@@ -455,14 +455,12 @@ fn a_timeout_retries_when_the_policy_names_it() {
     );
 }
 
-/// One retry of `TASK_TIMEOUT` after 30 s (Python
-/// `test_task_timeout_order.py::_TIMEOUT_RETRY_OPTIONS`).
+/// One retry of `TASK_TIMEOUT` after 30 s.
 const ONE_TIMEOUT_RETRY_AFTER_30_S: &str = r#"{"retry_policy": {"max_retries": 1,
     "intervals": [30], "backoff_strategy": "fixed", "jitter": false,
     "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
 
-/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_a_retry_is_written_only_after_the_exit`
-/// (the command; the order is
+/// The command of a retry after a timeout (the order is
 /// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
 /// the timeout write of a task whose policy lists `TASK_TIMEOUT` is a
 /// `TASK_TIMEOUT` failure that asks for the retry: the retry count of the
@@ -684,8 +682,7 @@ fn stored_error_message(result_json: &str) -> serde_json::Value {
     stored["err"]["message"].clone()
 }
 
-/// Python `_retry_finalize_future` (`python/horsies/core/worker/finalize.py:1957`):
-/// a crash-recovery write sent again after a database error stores
+/// A crash-recovery write sent again after a database error stores
 /// `Retry after future-stage finalize error: ` and the message of the first
 /// send, as the error message and as the attempt's message and failed
 /// reason. The code, the retry, the fence and the error `data` are those of
@@ -964,8 +961,7 @@ async fn a_child_that_dies_with_a_task_takes_the_crash_path() {
     }
 }
 
-/// The free slots of an isolated pool, for the soft-cap start check (Python
-/// `test_queue_cap_hold.py::TestFreeChildren`): a ready child that waits for
+/// The free slots of an isolated pool, for the soft-cap start check: a ready child that waits for
 /// a task is one free slot; a submitted task takes it at once, before the
 /// slot takes the task from the queue; a stopping pool has none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

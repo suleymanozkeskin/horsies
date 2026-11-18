@@ -179,8 +179,6 @@ async fn a_node_of_a_live_workflow_completes_and_promotes_its_dependent() {
 /// node and deletes the record; the ended workflow promotes nothing: the
 /// dependent keeps the status that the end left it (a cancel skips a PENDING
 /// node; a failure leaves it PENDING), and the workflow keeps its status.
-/// Python `tests/integration/test_workflow_node_finalize.py::
-/// test_a_node_of_an_ended_workflow_completes_and_enqueues_nothing`.
 #[tokio::test]
 #[serial]
 async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {

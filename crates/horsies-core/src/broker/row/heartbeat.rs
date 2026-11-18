@@ -7,8 +7,6 @@ use uuid::Uuid;
 /// Heartbeats are written by workers while tasks are CLAIMED or RUNNING,
 /// and read by the recovery system to detect stale tasks (worker crashes).
 /// The table has no key: no column set is held unique.
-///
-/// Python equivalent: `TaskHeartbeatModel` in `python/horsies/core/models/task_pg.py`.
 #[derive(Debug, Clone)]
 pub struct HeartbeatRow {
     pub task_id: Uuid,

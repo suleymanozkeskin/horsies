@@ -1,8 +1,7 @@
 //! What phase 2 writes for one finished node of a chain A -> B: the node
 //! write is idempotent, `on_error` decides between failing and pausing, a
 //! paused workflow stores the result and promotes nothing, and a task with no
-//! node changes nothing. Python: the behaviour rows of
-//! `tests/integration/test_workflow_completion_path.py`.
+//! node changes nothing.
 //!
 //! Each node's task finishes as a worker finishes it (phase 1, then phase 2).
 

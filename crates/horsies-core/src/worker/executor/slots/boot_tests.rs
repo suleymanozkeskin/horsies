@@ -1,5 +1,4 @@
-//! Ports of Python `tests/unit/test_slot_pool.py` rows of `TestBoot` and
-//! `TestDownSlots`: the boot of isolated slots with scripted children, the
+//! The boot of isolated slots with scripted children, the
 //! restart rules in a running pool, down slots, and the stop of a booting
 //! or down slot.
 
@@ -96,11 +95,9 @@ async fn a_start_hook_that_fails_at_boot_fails_the_pool_at_once() {
     stop_pool(pool, spawner).await;
 }
 
-/// Python `TestBoot::test_boot_failure_is_bounded_and_named`: a child that
-/// dies before its ready frame counts; the third counted attempt fails the
-/// pool with the cause and the exit. The text of the failure is Python's
-/// `describe_pool_failure` (`python/horsies/core/worker/slots.py:852`):
-/// the cause names no loss, and the detail names the loss and the exit once.
+/// A child that dies before its ready frame counts; the third counted
+/// attempt fails the pool with the cause and the exit. In the text of the
+/// failure, the cause names no loss, and the detail names the loss and the exit once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_boot_that_fails_three_times_fails_the_pool_with_its_cause() {
     let dir = TestDir::new();

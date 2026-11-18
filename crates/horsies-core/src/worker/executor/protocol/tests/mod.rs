@@ -974,8 +974,7 @@ fn run_end_of(end: &str) -> Result<RunEnd, MalformedFrame> {
     }
 }
 
-/// Python `test_lifecycle_classification.py::TestSentinelParsing::test_every_child_sentinel_parses`:
-/// each stop reason reads from its wire spelling, the one place that
+/// Each stop reason reads from its wire spelling, the one place that
 /// compares the text. `NODE_NOT_LINKED` is the version-2 spelling of
 /// Python's `WORKFLOW_CHECK_FAILED`.
 #[test]
@@ -1498,7 +1497,7 @@ fn the_core_stopped_code_is_a_named_child_code() {
 }
 
 // ---------------------------------------------------------------------------
-// The step parser and the read plan (Python `tests/unit/test_frame_parser.py`)
+// The step parser and the read plan
 // ---------------------------------------------------------------------------
 
 /// A frame with `meta_bytes` of metadata and `body_bytes` of body. The

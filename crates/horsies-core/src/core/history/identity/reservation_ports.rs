@@ -1,7 +1,6 @@
-//! Ports of the Python key reservation tests: the window bound, ownership of
-//! the terminal step, replay inside the window, reuse after it, and cleanup.
+//! The key reservation rules: the window bound, ownership of the terminal
+//! step, replay inside the window, reuse after it, and cleanup.
 //!
-//! Python specification: `tests/integration/test_task_history_key_reservations.py`.
 //! Each test runs in one transaction that it rolls back, on the shared
 //! migrated database, under a key digest of its own.
 

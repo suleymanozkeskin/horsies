@@ -297,9 +297,7 @@ mod tests {
 
     const TASK: Uuid = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
 
-    /// Python's texts of the refusals
-    /// (`tests/dualrun/reference/cancel_caller.py::cancel_answer`), each
-    /// with the task id in its text form.
+    /// The texts of the refusals, each with the task id in its text form.
     #[test]
     fn each_refusal_has_python_s_message() {
         assert_eq!(
@@ -317,9 +315,7 @@ mod tests {
         );
     }
 
-    /// Python's texts of the failures
-    /// (`tests/dualrun/reference/cancel_caller.py::db_err` and
-    /// `::stored_data_err`): the cause's text after the action.
+    /// The texts of the failures: the cause's text after the action.
     #[test]
     fn each_failure_has_python_s_message_and_keeps_its_cause() {
         let failed = TaskActionError::cancel_failed(

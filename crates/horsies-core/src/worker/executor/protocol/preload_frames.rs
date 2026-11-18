@@ -1,5 +1,5 @@
 //! Frames from the preload process to the worker parent (Python
-//! `core/worker/preload.py`, `core/worker/preload_main.py`). The worker
+//! `core/worker/preload_main.py`). The worker
 //! sends the preload the init frame of [`super::ParentFrame`], and asks for a
 //! child with [`SPAWN_REQUEST_BYTE`] plus one descriptor through
 //! `SCM_RIGHTS`; that request is not a frame.

@@ -2,10 +2,7 @@
 //! gets, the parent node of an ended parent, the stored output, and workflows
 //! with no node. The completion check runs as the tree recovery pass runs it
 //! (`horsies_workflow_try_complete` under the workflow row lock), and the
-//! parent node advances through `horsies_workflow_child_finish`. Python:
-//! `tests/integration/test_success_policy_completion_repro.py`,
-//! `tests/integration/test_workflow_finalization_contract.py`,
-//! `tests/integration/test_workflow_sql_equivalence.py`.
+//! parent node advances through `horsies_workflow_child_finish`.
 
 use serial_test::serial;
 use uuid::Uuid;
@@ -419,7 +416,7 @@ async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() 
     assert_eq!(row.error, Some(first_error));
 }
 
-/// `test_workflow_finalization_contract.py`: a workflow with eight terminal
+/// A workflow with eight terminal
 /// nodes completes with its explicit output copied unchanged, or with
 /// Python's outputless result (`python/horsies/core/workflows/engine.py:3973-3983`), for a
 /// small and a 64 KiB result; with a FAILED node it fails and stores no
@@ -816,8 +813,7 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
     );
 }
 
-/// `test_workflow_finalization_contract.py::test_finalization_queues_the_parent_of_a_child_only`:
-/// the completion check reads the parent link under the workflow row lock and
+/// The completion check reads the parent link under the workflow row lock and
 /// owes the parent advance of a child workflow that it ends, never of a root.
 #[tokio::test]
 #[serial]

@@ -1,10 +1,7 @@
-//! The listener contract against a live PostgreSQL: ports of the core rows of
-//! Python `tests/e2e/test_fanout_saturation.py`.
+//! The listener contract against a live PostgreSQL.
 //!
-//! Python's listener hands one queue per `listen()` call; the core's
-//! [`Listener`] hands one [`PayloadSubscription`] per
-//! subscription. The rows that pin Python's queue API (double unsubscribe,
-//! unknown queue, unlisten) and the measurement rows are not core.
+//! The core's [`Listener`] hands one [`PayloadSubscription`] per
+//! subscription.
 //!
 //! `DATABASE_URL` names the server; each test creates its own empty database
 //! through the core's test support (`src/test_support/database.rs`) and drops

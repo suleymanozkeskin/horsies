@@ -1144,8 +1144,7 @@ mod tests {
         );
     }
 
-    /// Python `test_broker_listener.py::TestHealthMonitor::test_steady_activity_probes_at_most_once_per_interval`:
-    /// notifications that keep arriving start at most one probe per
+    /// Notifications that keep arriving start at most one probe per
     /// [`PROBE_AFTER_ACTIVITY`]; with no notification the probe waits for
     /// [`PROBE_AFTER_SILENCE`].
     #[test]

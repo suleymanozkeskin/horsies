@@ -177,8 +177,7 @@ pub enum AttemptEnd {
     EndUnknown { pid: ProcessId },
 }
 
-/// The start of the crash reason of a child lost with no result (Python
-/// `_finalize_child_loss`, `python/horsies/core/worker/finalize.py`).
+/// The start of the crash reason of a child lost with no result.
 pub const LOST_CHILD_REASON_PREFIX: &str = "Worker child lost: ";
 
 impl AttemptEnd {

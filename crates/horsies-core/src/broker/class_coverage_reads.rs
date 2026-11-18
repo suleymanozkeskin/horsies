@@ -2,9 +2,8 @@
 //! ([`PostgresBroker::get_class_coverage`]) and the class report
 //! ([`PostgresBroker::get_class_report`]).
 //!
-//! Python reference: `tests/dualrun/reference/class_coverage_reads.py`. Python
-//! runs each read as several statements in one transaction. Here each read is
-//! one autocommit statement, so its parts read one snapshot and one `now()`.
+//! Each read is one autocommit statement, so its parts read one snapshot and
+//! one `now()`.
 //! Both reads run on the main core pool; the reaper's fleet check
 //! ([`read_class_coverage`]) runs the same statement there as reserved work.
 //! The parts come back as JSON arrays in one row. Every part is bounded by a
@@ -38,18 +37,15 @@ use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
 
 /// The most snapshot rows inside the live window that a read takes. A worker
 /// writes `WORKER_STATE_LIVE_WINDOW_S` / snapshot interval rows into the
-/// window: 4 at the default 30 s, 120 at the 1 s floor (Python
-/// `LIVE_SNAPSHOT_ROW_LIMIT`, `class_coverage_reads.py:58-61`).
+/// window: 4 at the default 30 s, 120 at the 1 s floor.
 pub const LIVE_SNAPSHOT_ROW_LIMIT: usize = 20_000;
 
 /// The most (queue, class) streams with `PENDING` rows that a read takes:
-/// 1,000 queues with all three classes (Python `PENDING_STREAM_LIMIT`,
-/// `class_coverage_reads.py:63-65`).
+/// 1,000 queues with all three classes.
 pub const PENDING_STREAM_LIMIT: usize = 3_000;
 
 /// The most (queue, class, priority) groups of `PENDING` rows that the report
-/// reads. A queue priority is 1 to 100, so one stream has at most 100 (Python
-/// `PENDING_HEAD_LIMIT`, `class_coverage_reads.py:67-69`).
+/// reads. A queue priority is 1 to 100, so one stream has at most 100.
 pub const PENDING_HEAD_LIMIT: usize = 10_000;
 
 /// The live window in seconds, as the statements take it (`$1`).
@@ -458,7 +454,7 @@ fn decoded_part<T: DeserializeOwned>(part: &str, value: Value) -> Result<T, Clas
 /// The [`Execution`] of a `horsies_tasks.execution` value. The column has a
 /// CHECK on the three class names (`horsies_tasks_execution_known`), so
 /// another value is a defect of the schema, and the read panics with the
-/// value (Python `_stored_execution`, `class_coverage_reads.py:279-289`).
+/// value.
 fn stored_execution(value: &str) -> Execution {
     Execution::from_stored(value).unwrap_or_else(|| {
         panic!(
@@ -469,9 +465,8 @@ fn stored_execution(value: &str) -> Execution {
 
 #[cfg(test)]
 mod tests {
-    //! The named bounds and the part decoding, without a database. Python
-    //! reference: `tests/dualrun/reference/class_coverage_reads.py:58-69`, `:169-235`
-    //! (a part at its bound answers; one row past it refuses the read).
+    //! The named bounds and the part decoding, without a database: a part at
+    //! its bound answers; one row past it refuses the read.
     use super::*;
     use serde_json::json;
 

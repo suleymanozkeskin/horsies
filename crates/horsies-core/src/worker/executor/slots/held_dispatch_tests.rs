@@ -1,6 +1,5 @@
-//! Ports of Python `tests/unit/test_runner_heartbeat.py` rows that need an
-//! isolated pool with scripted children: which dispatches the runner beats
-//! hold when a slot goes down.
+//! Which dispatches the runner beats hold when a slot goes down, on an
+//! isolated pool with scripted children.
 
 use std::sync::Arc;
 use std::time::Duration;

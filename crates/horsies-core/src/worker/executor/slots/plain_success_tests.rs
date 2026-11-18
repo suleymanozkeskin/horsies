@@ -1,7 +1,5 @@
 //! The success of a plain task through the finalize batcher, on the test
-//! database (Python `tests/unit/test_worker_helpers.py`,
-//! `TestFinalizeAfterSlotOutcome::test_finished_task_goes_to_persist`, and
-//! `python/horsies/core/worker/finalize.py:1386-1436`).
+//! database.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -164,7 +162,7 @@ async fn a_plain_success_on_a_row_this_claim_does_not_hold_writes_nothing() {
     assert_eq!(history_status(&pool, claimed.task_id).await, None);
 }
 
-/// The plain rows of one batch in Python `test_finalize_batch.py`.
+/// The plain rows of one batch.
 const BATCH_ROWS: usize = 8;
 /// The batch queue bound of the writer of the deadlock test (Python
 /// `QUEUE_ROOM`).
@@ -261,8 +259,7 @@ async fn seed_workflow_node_task(
     .expect("seed a RUNNING workflow node");
 }
 
-/// Python `tests/integration/test_finalize_batch.py::test_two_flushers_and_workflow_node_finalizes_do_not_deadlock`:
-/// the plain successes of two batches (the batcher of a worker pool of 5
+/// The plain successes of two batches (the batcher of a worker pool of 5
 /// runs two flushers) and the successes of four nodes of one workflow
 /// (phase 1, then phase 2) settle at the same time. Every write ends, no
 /// row is refused, and no row stays live.
@@ -346,8 +343,7 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
         .expect("remove the workflow");
 }
 
-/// Python `tests/integration/test_round_trips.py::test_a_plain_success_finalize_is_one_statement`
-/// (case `pre_ping_on`; the `pre_ping_off` case is
+/// The `pre_ping_on` case (the `pre_ping_off` case is
 /// `broker::lifecycle_tests::finalize_batch_rows::a_batch_of_rows_is_one_round_trip`):
 /// a plain success that the outcome writer settles through the batcher is
 /// one round trip on a warm connection of a broker whose pools ping a
@@ -386,8 +382,7 @@ async fn a_plain_success_settle_is_one_round_trip() {
     proxied.close().await;
 }
 
-/// Python `tests/integration/test_round_trips.py::test_a_workflow_check_failure_finalize_sends_nothing`:
-/// a workflow task whose child stopped before start because no node links
+/// A workflow task whose child stopped before start because no node links
 /// it (the orphan self-heal off) owes nothing, and its settle sends no
 /// statement. The row stays CLAIMED
 /// (`settle_tests::a_task_whose_node_is_not_linked_stays_claimed`).

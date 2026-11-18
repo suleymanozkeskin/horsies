@@ -1,7 +1,6 @@
 //! The promotion of dependents: the join on the promotion path, what a
 //! promoted node and its task row store, the guards of the promotion write,
-//! and a run across levels. Python:
-//! `tests/integration/test_workflow_promotion_batched.py`.
+//! and a run across levels.
 //!
 //! Each node's task finishes as a worker finishes it (phase 1, then phase 2),
 //! so a dependent is promoted by the core's phase 2. The nodes run on
@@ -352,11 +351,8 @@ async fn sole_waiter_on(pool: &TestPool, holder_pid: i32) -> i32 {
     panic!("no backend waits on backend {holder_pid}");
 }
 
-/// Replaces the port of
-/// `TestPromotionWrite.test_the_promotion_write_leaves_a_node_ready_when_the_workflow_is_not_running`
-/// (`tests/integration/test_workflow_promotion_batched.py:578`). That test
-/// covers a promotion whose caller does not hold the workflow row lock: a
-/// pause can land after its dependents read, and the promoted nodes stay
+/// A promotion whose caller does not hold the workflow row lock lets a
+/// pause land after its dependents read, and the promoted nodes stay
 /// READY with no task. Recovery case 0 runs
 /// `horsies_workflow_node_reevaluate`, which locks the workflow row
 /// `FOR UPDATE` before it reads or writes a node, so that interleaving
@@ -701,10 +697,9 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
     db.drop().await;
 }
 
-/// `test_workflow_recovery_limit.py` (`BAD_GOOD_UNTIL`): a stored deadline
-/// that does not parse is refused at promotion. Python passes the stored text
-/// to the database, which refuses it, so the promotion raises; the dependent
-/// never gets a task without its deadline.
+/// A stored deadline (`BAD_GOOD_UNTIL`) that does not parse is refused at
+/// promotion: the database refuses the stored text, so the promotion raises;
+/// the dependent never gets a task without its deadline.
 #[tokio::test]
 #[serial]
 async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {

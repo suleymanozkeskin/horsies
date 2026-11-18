@@ -87,8 +87,7 @@ pub enum EnqueuePreparationError {
     },
     /// The task options hold an integer outside [`MIN_OPTIONS_INTEGER`] to
     /// [`MAX_OPTIONS_INTEGER`]. No count, delay or limit of that size has a
-    /// meaning. Python's send refuses it with the same text
-    /// (`options_integer_out_of_range`, `python/horsies/core/codec/task_options.py`).
+    /// meaning.
     #[error(
         "task_options JSON holds an integer outside {MIN_OPTIONS_INTEGER} to {MAX_OPTIONS_INTEGER}"
     )]

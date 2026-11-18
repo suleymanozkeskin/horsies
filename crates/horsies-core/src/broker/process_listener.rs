@@ -52,9 +52,7 @@ pub const WORKER_PONG_CHANNEL_PREFIX: &str = "horsies_worker_pong_";
 /// follows it.
 pub const SESSION_CHECK_CHANNEL_PREFIX: &str = "horsies_check_";
 
-/// The longest the worker boot's session check waits for its NOTIFY
-/// (Python's `SESSION_CAPABILITY_TIMEOUT`,
-/// `python/horsies/core/brokers/session_capability.py:13`).
+/// The longest the worker boot's session check waits for its NOTIFY.
 pub const SESSION_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The channel name of a fixed name, or of a generated name whose length the
@@ -642,9 +640,7 @@ mod tests {
         first.block_on(pool.close());
     }
 
-    /// Python `tests/integration/test_tcp_user_timeout.py::test_both_listener_connections_carry_the_timeout`
-    /// and `::test_the_monitoring_listener_carries_the_timeout`: the listener
-    /// of a broker built from a config connects to the session URL with the
+    /// The listener of a broker built from a config connects to the session URL with the
     /// socket settings of that config, a TCP user timeout that is not the
     /// default included. The monitoring event stream subscribes on this
     /// listener (`web::events`), and its plan sets the settings on the
@@ -828,15 +824,11 @@ mod tests {
         )
     }
 
-    /// Python `test_broker_listener.py::TestListenerResultSurface::test_start_returns_err_on_connect_failure`,
-    /// `::test_start_err_preserves_original_exception`,
-    /// `::test_listen_returns_err_on_connect_failure` and
-    /// `::test_listen_many_returns_err_on_connect_failure`: a listener whose
-    /// server refuses the connection refuses its first subscriptions, of a
-    /// wake and of the payloads of two channels, with the failed connect
-    /// kept as the cause; the refusal may clear. (Python names the channel
-    /// in the message of `listen`; the core's refusal is the start of the
-    /// one listener of every channel.)
+    /// A listener whose server refuses the connection refuses its first
+    /// subscriptions, of a wake and of the payloads of two channels, with the
+    /// failed connect kept as the cause; the refusal may clear. The refusal
+    /// is the start of the one listener of every channel, so it names no
+    /// channel.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_listener_that_cannot_connect_refuses_its_first_subscriptions_with_the_cause() {
         let listener = ProcessListener::on_session_url(REFUSED_URL, DEFAULT_SOCKET_SETTINGS);

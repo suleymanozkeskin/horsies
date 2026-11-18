@@ -1,6 +1,4 @@
-//! Ports of Python `tests/unit/test_slot_pool.py` rows about one child
-//! process (`TestExitDescription`, `TestChildSend`, and the argument rows
-//! of `TestBoot` and `TestInterpreterFlags`): how its exit reads and is
+//! One child process: how its exit reads and is
 //! described, the arguments it gets, a frame that reaches it whole, and a
 //! frame cut by its death.
 

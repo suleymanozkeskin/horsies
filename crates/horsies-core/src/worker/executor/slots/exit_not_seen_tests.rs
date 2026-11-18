@@ -240,10 +240,7 @@ async fn a_deadline_kill_with_no_exit_seen_ends_unknown() {
     held.stop().await;
 }
 
-/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_nothing_is_written_while_the_child_runs`
-/// (and the order of `::test_a_retry_is_written_only_after_the_exit` and
-/// `::test_a_database_error_comes_after_the_kill`), with stale RUNNING
-/// recovery on: at the deadline the slot kills the child (the spawner reaps
+/// With stale RUNNING recovery on: at the deadline the slot kills the child (the spawner reaps
 /// it), and while its exit is not seen, within the kill wait, the task has no
 /// end. The worker writes an end only after the answer
 /// (`worker::worker`, `Worker::dispatch`), so nothing is written while the
@@ -283,11 +280,7 @@ async fn a_deadline_kill_gives_no_end_before_the_exit_is_seen() {
 /// sends the result: past the deadline by two seconds.
 const LATE_RESULT_AFTER_S: u64 = 3;
 
-/// Python `test_task_timeout_order.py::TestSlotAnsweredAfterTheDeadline::test_a_result_after_the_deadline_is_still_a_timeout`,
-/// `::test_the_finalizer_drops_a_result_that_came_after_the_timer`,
-/// `::test_a_failed_write_after_a_late_answer_is_retried_as_the_timeout_write`
-/// (the slot half) and `tests/integration/test_task_timeout.py::test_timeout_after_the_slot_answered_is_still_a_timeout`
-/// (the slot half): a complete result frame that reaches the socket after
+/// A complete result frame that reaches the socket after
 /// the deadline is not read; the end is the timeout. The late writer is a
 /// process of the child in a session of its own (`perl`, `POSIX::setsid`),
 /// so the kill of the child's session does not end it, and it holds the
@@ -338,8 +331,7 @@ async fn a_result_that_reaches_the_socket_after_the_deadline_is_not_read() {
     held.stop().await;
 }
 
-/// Python `test_isolated_left_work.py::TestFinalize::test_no_exit_seen_writes_nothing_with_stale_recovery_on`
-/// (the slot half): the body returned with work left, then the child was
+/// The body returned with work left, then the child was
 /// lost and its exit not seen. The left work may still run, so the end is
 /// not known.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -408,8 +400,7 @@ async fn a_deadline_kill_waits_for_the_late_exit_with_recovery_off() {
     held.stop().await;
 }
 
-/// Python `test_isolated_left_work.py::TestFinalize::test_no_exit_seen_writes_after_a_late_exit_with_stale_recovery_off`:
-/// after a return with work left and a loss whose exit came late, the task
+/// After a return with work left and a loss whose exit came late, the task
 /// ends with what its body returned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_loss_after_a_return_ends_with_the_return_once_the_late_exit_is_seen() {
@@ -427,10 +418,7 @@ async fn a_loss_after_a_return_ends_with_the_return_once_the_late_exit_is_seen()
     held.stop().await;
 }
 
-/// Python `TestLossWithStaleRecoveryOff::test_a_stop_before_the_exit_writes_nothing`,
-/// `TestNoExitSeen::test_with_stale_recovery_off_a_stop_ends_the_wait` and
-/// `test_isolated_left_work.py::TestFinalize::test_a_worker_stop_before_the_late_exit_writes_nothing`:
-/// a stop while the slot waits for the exit ends the attempt unknown.
+/// A stop while the slot waits for the exit ends the attempt unknown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_before_the_late_exit_ends_the_attempt_unknown() {
     let held = HeldPool::start(&after_one_run("exec sleep 60"), ExitNotSeen::WaitForExit);
@@ -562,8 +550,7 @@ impl HeldSharedPool {
     }
 }
 
-/// Python `test_thread_dispatch.py::TestFinalizeThread::test_a_kill_with_no_exit_seen_writes_nothing_here`
-/// (the slot half): a thread child closed at a deadline is killed when no
+/// A thread child closed at a deadline is killed when no
 /// run has time left; its exit is not seen, so the end is not known.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_thread_child_killed_past_its_deadlines_with_no_exit_seen_ends_unknown() {
@@ -594,9 +581,7 @@ async fn a_thread_child_killed_past_its_deadlines_with_no_exit_seen_ends_unknown
     held.stop().await;
 }
 
-/// Python `test_shared_dispatch.py::TestBackstopDecision::test_no_exit_seen_writes_nothing`
-/// (the slot half) and `test_shared_slot_pool.py::TestReturnedRunAtAKill::test_work_in_its_cancel_rounds_takes_the_loss_when_no_exit_was_seen`:
-/// a run that reported its return, on a child lost with no exit seen, ends
+/// A run that reported its return, on a child lost with no exit seen, ends
 /// unknown: the work it left may still run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_returned_run_on_a_child_lost_with_no_exit_seen_ends_unknown() {
@@ -627,8 +612,7 @@ async fn a_returned_run_on_a_child_lost_with_no_exit_seen_ends_unknown() {
     held.stop().await;
 }
 
-/// Python `test_shared_dispatch.py::TestBackstopDecision::test_with_stale_recovery_off_a_late_exit_gives_the_kill_verdict`
-/// (the slot half): the backstop kills a frozen thread child; its exit is
+/// The backstop kills a frozen thread child; its exit is
 /// seen only after the kill wait, and the run then ends at its timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_late_exit_after_the_backstop_kill_gives_the_timeout_with_recovery_off() {
@@ -667,9 +651,7 @@ async fn a_late_exit_after_the_backstop_kill_gives_the_timeout_with_recovery_off
     held.stop().await;
 }
 
-/// Python `test_shared_slot_pool.py::TestSeats::test_every_task_of_a_child_is_in_the_heartbeat_registry`
-/// and `test_shared_thread_slot_pool.py::TestSeats::test_every_task_of_a_child_is_in_the_heartbeat_registry`:
-/// every run of a shared child is held for the runner beats while it runs,
+/// Every run of a shared child is held for the runner beats while it runs,
 /// and released at its end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_run_of_a_shared_child_is_held_while_it_runs() {

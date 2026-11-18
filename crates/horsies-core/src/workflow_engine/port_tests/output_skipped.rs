@@ -1,5 +1,4 @@
 //! A COMPLETED workflow whose output node has no result, through the engine.
-//! Python: `tests/integration/test_workflow_output_skipped.py`.
 //!
 //! A success case that does not require the output node lets a workflow be
 //! COMPLETED while that node is SKIPPED or FAILED. A sub-workflow node is

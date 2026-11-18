@@ -1,6 +1,4 @@
-//! Ports of Python `tests/unit/test_task_timeout_order.py`,
-//! `test_isolated_left_work.py` and `tests/integration/test_task_timeout.py`
-//! rows: the timeout write of a row in each state and its replay, the bound
+//! The timeout write of a row in each state and its replay, the bound
 //! of the wait for a killed child, and the end of an isolated task whose
 //! body returned.
 
@@ -38,16 +36,14 @@ use crate::worker::retry::read_stored_options;
 // Bounds
 // ---------------------------------------------------------------------------
 
-/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_the_wait_for_the_exit_has_the_kill_bound`:
-/// after the kill at a deadline, the slot waits at most 30 s for the exit
+/// After the kill at a deadline, the slot waits at most 30 s for the exit
 /// (`slots/isolated.rs`, `end_after_kill`).
 #[test]
 fn the_wait_for_the_exit_of_a_killed_child_has_the_kill_bound() {
     assert_eq!(CHILD_KILL_WAIT, Duration::from_secs(30));
 }
 
-/// Python `test_isolated_left_work.py::TestMarkerBounds::test_the_parent_waits_past_the_child_bound_after_a_return`:
-/// a child whose loop turns reports the end of the left work before the
+/// A child whose loop turns reports the end of the left work before the
 /// parent kills it for reporting nothing. The child's bound (Python
 /// `child_runner.py`, `task_loop.py`): 1 s of grace, three cancel rounds
 /// of 0.1 s, the 5 s connection wait and the 5 s statements of the marker,
@@ -108,8 +104,7 @@ fn the_leftover_backstop_keeps_its_time() {
 // A second return
 // ---------------------------------------------------------------------------
 
-/// Python `test_isolated_left_work.py::TestHandle::test_a_second_return_is_a_defect`:
-/// a second return report of one task is out of turn; the child is
+/// A second return report of one task is out of turn; the child is
 /// killed, and the task ends with what its body returned first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_return_report_kills_the_child_and_keeps_the_first_return() {
@@ -282,8 +277,7 @@ fn timed_out() -> AttemptEnd {
     }
 }
 
-/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_a_plain_task_failure_runs_no_phase_2`:
-/// the timeout of a plain task fails its row and owes no phase 2.
+/// The timeout of a plain task fails its row and owes no phase 2.
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
@@ -308,8 +302,7 @@ async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_a_claimed_row_is_requeued_only_after_the_exit`
-/// (the write; the order after the exit is the slot's): a row that its
+/// The write; the order after the exit is the slot's. A row that its
 /// child never set RUNNING goes back to the queue.
 #[tokio::test]
 #[serial]
@@ -329,11 +322,8 @@ async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `test_task_timeout_order.py::TestTimeoutWriteOutcomes::test_a_row_another_actor_holds_is_left_alone`
-/// and `::test_a_status_outside_the_locked_read_is_a_failed_write`: the
-/// timeout write of a row that this claim does not hold changes nothing.
-/// (Python reports a row in another status as a failed write; the core
-/// reads both as a row it does not hold.)
+/// The timeout write of a row that this claim does not hold changes
+/// nothing. A row in another status is a row this claim does not hold.
 #[tokio::test]
 #[serial]
 async fn a_timeout_of_a_row_this_claim_does_not_hold_changes_nothing() {
@@ -423,8 +413,7 @@ async fn wakes_before_sentinel(
     panic!("the sentinel wake was not seen; payloads {payloads:?}");
 }
 
-/// Python `tests/integration/test_task_timeout.py::test_timeout_marks_running_task_failed`
-/// and `::test_timeout_replay_of_a_plain_task_runs_no_phase_2`: the timeout of
+/// The timeout of
 /// a RUNNING plain row that this claim holds fails the row with
 /// `TASK_TIMEOUT` (`FAIL_RUNNING`), with one attempt that failed and does
 /// not retry, and wakes the queue once in that statement. The same write
@@ -573,9 +562,7 @@ fn phase_two_owed(written: Result<UnreportedAttemptWrite, FinalizeError>) -> Pha
     }
 }
 
-/// Python `tests/integration/test_task_timeout.py::test_timeout_replay_uses_committed_result_without_duplicate_attempt`
-/// and `test_task_timeout_order.py::TestTimeoutWriteOutcomes::test_a_row_failed_by_this_claim_replays_phase_2`:
-/// the timeout write of a workflow task, sent again after it committed and
+/// The timeout write of a workflow task, sent again after it committed and
 /// before its phase 2 ran (a lost reply), writes nothing and owes the phase
 /// 2 of the committed failure as a replay. The task keeps one attempt, and
 /// its phase-2 record waits for that phase 2.
@@ -627,8 +614,7 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
         .expect("remove the workflow");
 }
 
-/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_a_workflow_task_fails_then_phase_2_runs_after_the_exit`
-/// (the write, on the database): the timeout of a workflow task fails its
+/// The write, on the database: the timeout of a workflow task fails its
 /// row with `TASK_TIMEOUT` and no retry, then phase 2 runs: it consumes the
 /// phase-2 record, fails the node, and fails the one-node workflow.
 #[tokio::test]

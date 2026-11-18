@@ -1,5 +1,4 @@
-//! Group commit of the plain-success writes of one worker (Python
-//! `core/worker/finalize_batch.py`).
+//! Group commit of the plain-success writes of one worker.
 //!
 //! The outcome writer hands each plain success to [`FinalizeBatcher::submit`]
 //! and waits for the answer of its own row. The batcher writes the queued

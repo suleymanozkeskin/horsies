@@ -21,8 +21,6 @@
 //! statement stays with the caller (`partitions::manager`, as a
 //! [`crate::db::PartitionDdl`]): it cannot run in a function. A row outside
 //! the documented values is `HistoryError::Contract`.
-//!
-//! Python: `python/horsies/core/history/partitions/retirement.py`.
 
 use chrono::{DateTime, Utc};
 
@@ -702,8 +700,6 @@ pub(crate) async fn drop_detached_leaf_in(
 
 #[cfg(test)]
 mod tests {
-    //! Python specification: `tests/unit/test_history_retirement_rows.py`.
-
     use super::*;
     use chrono::TimeZone;
 

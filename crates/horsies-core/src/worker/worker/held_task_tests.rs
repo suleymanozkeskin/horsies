@@ -1,6 +1,4 @@
-//! Worker runs that hold one task in a scripted child (Python
-//! `tests/unit/test_runner_heartbeat.py` and
-//! `tests/unit/test_worker_helpers.py::TestHandleFinalizeError`).
+//! Worker runs that hold one task in a scripted child.
 //!
 //! - The child is a `/bin/sh` script ([`child_holding_its_first_run`]): it
 //!   boots, reads the run frame and answers nothing, so the task stays held
@@ -191,12 +189,10 @@ fn child_pid(pid_file: &Path) -> i32 {
         .expect("the pid file holds a pid")
 }
 
-/// Python `test_runner_heartbeat.py::test_start_slots_launches_the_heartbeat_on_the_pool_registry`:
-/// the worker runs its runner heartbeats on the dispatches that its
+/// The worker runs its runner heartbeats on the dispatches that its
 /// children hold. The RUNNING task that the child holds gets a runner beat
-/// of the worker; the stop ends the run with no error. Python
-/// `test_finalize_batch.py::test_the_row_is_written_only_after_its_attempt_ended`
-/// (the worker half): while the child holds the run, the worker writes no
+/// of the worker; the stop ends the run with no error. While the child holds
+/// the run, the worker writes no
 /// end of it: the row stays RUNNING with no history row.
 #[tokio::test]
 #[serial_test::serial]
@@ -257,8 +253,7 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     std::fs::remove_dir_all(&dir).expect("remove the test folder");
 }
 
-/// Python `test_runner_heartbeat.py::test_a_heartbeat_that_fails_closed_stops_the_worker_non_zero`:
-/// a trigger refuses every runner beat of the worker, so no beat lands for
+/// A trigger refuses every runner beat of the worker, so no beat lands for
 /// the RUNNING task that the child holds. Past the fail-closed window the
 /// watchdog kills the child and stops the worker: the run ends with
 /// `RunnerHeartbeatLost`, not retryable, a failed run

@@ -1,10 +1,9 @@
-//! Ports of the Python reaper retention tests: the maintenance pass registers
+//! The reaper retention: the maintenance pass registers
 //! the declared periods and keeps a leaf inside its period, row retention
 //! keeps recent and running records, and a finished row lands in a leaf of
 //! its class.
 //!
 //! Python specification: `tests/integration/test_reaper_registers_declared_classes.py`,
-//! `test_reaper_partition_pruning_wiring.py`, `test_reaper_retention_cleanup.py`,
 //! `test_retention_class_at_enqueue.py` and `test_retention_period_classes.py`.
 //! Each test runs on its own database: the reaper pass and the class registry
 //! are global to a database.

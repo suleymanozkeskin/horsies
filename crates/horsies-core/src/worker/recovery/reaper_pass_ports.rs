@@ -291,7 +291,7 @@ fn a_candidate_whose_crash_retries_are_spent_fails() {
     assert_eq!(command.retry, StaleRetry::NoRetry);
 }
 
-/// The stored options of Python `tests/unit/test_stale_running.py`: a fixed
+/// The stored options of the stale recovery tests: a fixed
 /// policy of 3 retries after 5, 10 and 20 s, with no jitter, for the codes
 /// `auto_retry_for`.
 fn fixed_policy_for(auto_retry_for: &[&str]) -> String {
@@ -307,10 +307,7 @@ fn fixed_policy_for(auto_retry_for: &[&str]) -> String {
     .to_string()
 }
 
-/// Python `tests/unit/test_stale_running.py::TestCrashRetryRequest`
-/// (`test_a_policy_that_names_the_crash_retries_with_its_delay`,
-/// `test_no_policy_does_not_retry`, `test_a_policy_for_other_codes_does_not_retry`):
-/// a policy that names the crash retries from the scanned count after the
+/// A policy that names the crash retries from the scanned count after the
 /// interval of the next attempt (count 1: the second interval, 10 s). No
 /// policy, or a policy for other codes, does not retry while retries
 /// remain.
@@ -349,8 +346,7 @@ fn the_crash_retry_of_a_candidate_follows_its_stored_policy() {
     );
 }
 
-/// Python `tests/unit/test_stale_running.py::TestFinishParameters::test_the_crash_result_names_the_silent_attempt`:
-/// the crash result is a `WORKER_CRASHED` error whose message is the crash
+/// The crash result is a `WORKER_CRASHED` error whose message is the crash
 /// reason and whose data are the facts of the silent attempt, the
 /// threshold in ms and in s, and the scan's clock.
 #[test]

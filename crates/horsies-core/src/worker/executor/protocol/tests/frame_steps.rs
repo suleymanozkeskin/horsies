@@ -1,6 +1,5 @@
-//! The step parser and the read plan, case by case. Python's version-1
-//! parser (`tests/unit/test_frame_parser.py`) had these cases; the core
-//! reader is the parser of every child now. Pure: no channel.
+//! The step parser and the read plan, case by case. The core reader is the
+//! parser of every child. Pure: no channel.
 
 use super::*;
 

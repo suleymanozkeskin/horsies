@@ -53,9 +53,7 @@ async fn database_time(pool: &TestPool) -> DateTime<Utc> {
         .expect("database time")
 }
 
-/// Python `tests/integration/test_schedule_state_rows.py`,
-/// `test_the_due_read_returns_the_rows_at_or_before_the_database_time`:
-/// rows due at the database time, soonest first, only of the given
+/// Rows due at the database time, soonest first, only of the given
 /// names, and the database time of the read, also when nothing is due.
 #[tokio::test]
 #[serial_test::serial]
@@ -99,9 +97,7 @@ async fn due_read_returns_the_database_time_and_the_rows_due_at_it() {
     }
 }
 
-/// Python `test_schedule_state_rows.py`,
-/// `test_start_stores_new_and_changed_rows_from_the_database_time`: the
-/// start read returns the rows and the database time; the start write
+/// The start read returns the rows and the database time; the start write
 /// creates a new row, moves a changed row and keeps its run record, and
 /// leaves a row with the same digest alone.
 #[tokio::test]
@@ -187,8 +183,7 @@ async fn start_read_and_write_follow_the_stored_digests() {
     }
 }
 
-/// Python `test_schedule_state_rows.py`,
-/// `test_the_heal_creates_missing_rows_and_leaves_existing_rows`. A second
+/// The heal creates missing rows and leaves existing rows. A second
 /// heal of the same name creates nothing and keeps the first row's
 /// `next_run_at` (the old per-row insert, `insert_state_if_absent`, is the
 /// heal of one row).

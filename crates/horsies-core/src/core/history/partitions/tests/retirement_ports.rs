@@ -3,8 +3,7 @@
 //! `horsies_begin_leaf_detach`, `horsies_record_leaf_detached` and
 //! `horsies_drop_detached_leaf`.
 //!
-//! Python specification: `tests/integration/test_task_history_partition_lifecycle.py`
-//! (`TestRetentionFunctionsPath`). The two rows that replace the record with
+//! The two rows that replace the record with
 //! `MISSING` and `STILL_ATTACHED` are the pure test
 //! `retirement::tests::the_record_of_a_completed_detach_maps_to_its_state`.
 

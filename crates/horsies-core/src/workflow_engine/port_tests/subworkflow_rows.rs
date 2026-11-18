@@ -874,10 +874,8 @@ async fn two_root_children_run_together_and_their_join_is_enqueued() {
     super::support::end_workflows(&pool, &[parent_id]).await;
 }
 
-/// `test_workflow_child_start_task_options.py::TestChildStartReadsTheTaskFunctionOptions`:
-/// `test_options_of_a_fast_root_raise_before_any_insert` (options that do not
-/// parse, options that are not an object) and
-/// `test_options_merged_with_good_until_raise_before_any_insert`: a child
+/// Root task options that do not parse or are not an object, alone or
+/// merged with a deadline: a child
 /// whose root task options do not read refuses its child start before any
 /// child row. The phase 2 that promotes the sub-workflow node fails, and the
 /// step rolls back: the upstream node is not written, the sub-workflow node
@@ -935,8 +933,7 @@ async fn a_child_whose_root_options_do_not_read_refuses_its_start_and_the_step_r
     db.drop().await;
 }
 
-/// `test_workflow_engine_coverage.py::TestEnqueueSubworkflowTask::test_child_task_good_until_options_merge`:
-/// a child whose root task has a deadline starts at promotion; the deadline
+/// A child whose root task has a deadline starts at promotion; the deadline
 /// is merged into the task options of the child's root node and set on its
 /// task row.
 #[tokio::test]

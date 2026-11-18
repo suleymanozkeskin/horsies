@@ -1,8 +1,7 @@
 //! Contained finalize-first pruning driver, on the core pools.
 //!
-//! Python: `python/horsies/core/history/maintenance/pruning.py`. The pass
-//! report names each refusal by the class name of the Python outcome and
-//! counts a leaf as Python does, so both clients report the same facts.
+//! The pass report names each refusal by its outcome name
+//! (`LeafInspection::outcome_name`).
 
 use crate::broker::core_rows::StatementLog;
 use crate::core::history::commands::{
@@ -409,8 +408,6 @@ pub(crate) async fn prune_expired_partitions_within(
 
 #[cfg(test)]
 mod tests {
-    //! Python specification: `tests/integration/test_history_catalog_active_index.py`.
-
     use std::collections::BTreeSet;
     use std::sync::PoisonError;
 

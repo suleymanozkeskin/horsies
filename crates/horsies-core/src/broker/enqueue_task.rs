@@ -302,9 +302,7 @@ mod tests {
             BrokerError::EnqueueConflictUnverifiable { task_id, .. } if task_id == sent
         ));
         assert!(!unverifiable.is_retryable());
-        // The texts that a Python send gets (Python
-        // `tests/unit/test_enqueue_task.py::TestResults::test_a_payload_mismatch_names_the_task_id`,
-        // `::test_an_unverifiable_conflict_is_a_failure_that_is_not_retryable`).
+        // The texts that a Python send gets.
         let mismatch = enqueue_result(EnqueueTaskOutcome::PayloadMismatch, sent, "t")
             .expect_err("a payload mismatch is an error");
         assert!(

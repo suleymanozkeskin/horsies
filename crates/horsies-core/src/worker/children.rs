@@ -1,8 +1,5 @@
 //! The children of a worker: one pool of each kind of child that the
-//! worker's profile names, on one board, started through the spawner thread
-//! (Python `core/worker/worker.py`, `_slot_pool_config`,
-//! `_pending_task_limit`, `_start_slots`, `_claim_capacity`, `_down_slots`;
-//! `core/worker/child_pool.py`, the init frame of each child kind).
+//! worker's profile names, on one board, started through the spawner thread.
 //!
 //! - [`ChildLaunch`]: what every child runs, from the host.
 //! - [`preload_plan`]: the preload process of the profile, when its children
@@ -110,8 +107,7 @@ pub fn preload_plan(profile: &WorkerProfile, launch: &ChildLaunch) -> Option<Pre
 }
 
 /// The most tasks that may wait for a slot or a seat in one pool: twice the
-/// claim budget of the worker (Python `_pending_task_limit`,
-/// `python/horsies/core/worker/worker.py:529-536`): `2 * max(seats +
+/// claim budget of the worker: `2 * max(seats +
 /// prefetch_buffer, claimed_per_worker)`, with no claimed limit as 0.
 pub fn pending_task_limit(profile: &WorkerProfile, prefetch_buffer: u32) -> NonZeroUsize {
     let claimed_per_worker = match profile.claim.claimed_per_worker {
@@ -192,8 +188,7 @@ pub fn exit_not_seen(recovery: &RecoveryConfig) -> ExitNotSeen {
     }
 }
 
-/// The CPUs of the worker and its children (Python `plan_cpu_placement`,
-/// `python/horsies/core/worker/worker.py:614-618`). `OWN_CORE` that the machine
+/// The CPUs of the worker and its children. `OWN_CORE` that the machine
 /// cannot give fails the start before any child starts.
 pub fn plan_placement(parent_cpu: ParentCpu) -> Result<CpuPlacement, PlacementRefused> {
     match parent_cpu {

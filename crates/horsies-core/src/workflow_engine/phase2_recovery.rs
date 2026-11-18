@@ -7,8 +7,7 @@
 //! whose recovery raises persistently is counted by
 //! `horsies_workflow_phase2_record_raise`; at the bound its workflow fails
 //! closed with `WORKFLOW_RECOVERY_LIMIT_REACHED` and its evidence is
-//! quarantined. Python: `drive_phase2_recovery`
-//! (`core/workflows/phase2_recovery.py:381-576`).
+//! quarantined.
 
 use uuid::Uuid;
 
@@ -31,8 +30,7 @@ use super::WorkflowError;
 
 /// The phase-2 records older than the grace window (`$1` milliseconds) and
 /// under the attempt bound (`$2`), oldest first, at most `$3`. The record
-/// kind is read by `horsies_workflow_phase2_recover`, not here. Python:
-/// `DISCOVER_PENDING_SQL` (`core/workflows/phase2_recovery.py:72-82`).
+/// kind is read by `horsies_workflow_phase2_recover`, not here.
 static DISCOVER_PENDING: TypedStatement = TypedStatement::new(
     "phase2_discover_pending",
     "SELECT task_id
@@ -49,8 +47,7 @@ static DISCOVER_PENDING: TypedStatement = TypedStatement::new(
 );
 
 /// The count of the records at or over the attempt bound `$1`, which
-/// discovery no longer selects. Python: `COUNT_OVER_ATTEMPT_BOUND_SQL`
-/// (`core/workflows/phase2_recovery.py:100-103`).
+/// discovery no longer selects.
 static COUNT_OVER_ATTEMPT_BOUND: TypedStatement = TypedStatement::new(
     "phase2_count_over_attempt_bound",
     "SELECT count(*) AS over_attempt_bound
@@ -60,8 +57,7 @@ static COUNT_OVER_ATTEMPT_BOUND: TypedStatement = TypedStatement::new(
 );
 
 /// The workflow and the node of a phase-2 record, for the limit error of a
-/// raise. Python: `RAISED_ROW_CONTEXT_SQL`
-/// (`core/workflows/phase2_recovery.py:179-187`).
+/// raise.
 static RAISED_RECORD_CONTEXT: TypedStatement = TypedStatement::new(
     "phase2_raised_record_context",
     "SELECT p.workflow_id, n.task_index
@@ -139,8 +135,7 @@ pub(crate) enum Phase2Limit {
     LiveNodesFinish,
 }
 
-/// What a quarantine verdict means for the record. Python:
-/// `core/history/phase2/quarantine.py:174-185`.
+/// What a quarantine verdict means for the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuarantineResult {
     /// `REPOINTED`, `PENDING_GONE`, `ALREADY_QUARANTINED`.
@@ -419,8 +414,7 @@ async fn advance_after_recovery(
 /// Counts one persistent raise of a record: the context read (the workflow
 /// and the node of the record, for the limit error), then
 /// `horsies_workflow_phase2_record_raise`, each one statement on the main
-/// core pool with the reserve. Python: `_record_raised_row`
-/// (`core/workflows/phase2_recovery.py:594-678`).
+/// core pool with the reserve.
 ///
 /// The limit error names `attempt_bound` passes: the function writes the
 /// limit when the attempt count after the raise reaches the bound, and
@@ -966,9 +960,7 @@ mod tests {
         cleanup_case(&pool, good_workflow, good_task).await;
     }
 
-    /// Python `tests/integration/test_task_history_phase2_consumption.py::TestDurableDispositions::test_terminal_workflow_supersedes_without_touching_the_node`:
-    /// the supersede rule of `horsies_phase2_consume`, the function that
-    /// Python's phase 2 calls: the record of a node of an ended workflow is
+    /// The supersede rule of `horsies_phase2_consume`: the record of a node of an ended workflow is
     /// deleted and the node is not written. The core's phase 2 writes the
     /// node instead (`horsies_workflow_node_finish`;
     /// `engine/task_complete_tests.rs::a_node_of_an_ended_workflow_completes_and_enqueues_nothing`).
@@ -1135,8 +1127,7 @@ mod tests {
 
     /// The recovery reads the record's kind (the baseline record has no
     /// status column) and recovers a `FAIL_RUNNING` record with the FAILED
-    /// node status (Python `core/workflows/phase2_recovery.py`, discovery and
-    /// `terminal_status_of_pending_kind`).
+    /// node status.
     #[tokio::test]
     #[serial]
     async fn recovery_reads_the_kind_of_a_failure_record_and_fails_its_node() {
@@ -1260,8 +1251,7 @@ mod tests {
     /// The quarantine step of the recovery loop on the baseline function
     /// (#861): a row whose consumption keeps retaining is quarantined at the
     /// attempt bound, and its pending row points at the verified copy.
-    /// Python: `python/horsies/core/workflows/phase2_recovery.py:681-725`
-    /// (`_quarantine_exhausted_row`). The history row and the pending row
+    /// The history row and the pending row
     /// agree on schema version 2: the consumer refuses it
     /// (`SOURCE_VERSION_CONFLICT`), and the copy check accepts it. Two earlier
     /// passes retained the row; this pass reaches the bound of 3, the smallest

@@ -1,5 +1,4 @@
-//! Port of Python `tests/integration/test_claim_per_class.py`: the claim per
-//! execution class, against the baseline `horsies_claim`.
+//! The claim per execution class, against the baseline `horsies_claim`.
 //!
 //! - Each budget claims the classes that the routes give it, in priority
 //!   order within the merge of those classes, and never a class routed

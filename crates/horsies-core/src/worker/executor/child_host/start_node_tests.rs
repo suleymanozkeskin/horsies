@@ -4,9 +4,7 @@
 //! for a plain task, and misses with `NODE_NOT_LINKED` when the node is not
 //! open; the child's stop before start then cancels the owned orphan when
 //! the orphan self-heal of the run is on, and leaves the row CLAIMED when it
-//! is off (Python `test_workflow_node_handoff.py`, `child_runner.py`
-//! `_confirm_ownership_and_set_running`, `_after_missed_start`,
-//! `test_lifecycle_classification.py::TestOrphanedWorkflowTask`).
+//! is off (Python `test_workflow_node_handoff.py`).
 //!
 //! These tests drove the worker's in-process start before it was removed
 //! (#764); they now drive the start of the child.
@@ -411,8 +409,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
     remove_case(&pool, Some(workflow_id), task_id).await;
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_enabled_cancels_the_orphan`:
-/// with the orphan self-heal of the run on, the start of a workflow task
+/// With the orphan self-heal of the run on, the start of a workflow task
 /// that no node links ends `ORPHAN_CANCELLED`, and the stop before start
 /// moved the row to history as CANCELLED with `WORKFLOW_CHECK_FAILED`, in
 /// the child.
@@ -446,8 +443,7 @@ async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
     remove_case(&pool, None, task_id).await;
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
-/// with the orphan self-heal of the run off, the start ends
+/// With the orphan self-heal of the run off, the start ends
 /// `NODE_NOT_LINKED`, and the row stays CLAIMED by this claim with no
 /// history row.
 #[tokio::test]

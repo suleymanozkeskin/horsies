@@ -5,8 +5,7 @@ broker builds the frozen dataclasses of ``horsies.core.models.health`` and
 ``horsies.core.models.class_coverage`` from them, and maps a failure record
 to its error. A history limit that Python's statement refused is answered by
 the handle before any core call: a refused limit needs no database. The rows
-and their order are the core's; the dual-run pair
-(``tests/dualrun/test_worker_state_reads.py``) compares them with Python's.
+and their order are the core's.
 """
 
 from __future__ import annotations

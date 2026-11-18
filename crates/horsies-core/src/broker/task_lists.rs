@@ -163,7 +163,7 @@ mod tests {
         }
     }
 
-    /// Python `tests/unit/test_broker_task_lists.py`: the refusal texts.
+    /// The refusal texts.
     #[test]
     fn a_threshold_outside_the_range_is_invalid_input_with_python_text() {
         for (minutes, refusal) in [

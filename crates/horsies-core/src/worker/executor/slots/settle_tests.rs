@@ -1,5 +1,4 @@
-//! Ports of Python `tests/unit/test_shared_dispatch.py` and
-//! `test_thread_dispatch.py` rows of the worker side of shared tasks: the
+//! The worker side of shared tasks: the
 //! route of a shared row, the capacity of a worker with shared children,
 //! and the write of each end of a run (`OutcomeWriter::settle`) on the
 //! database.
@@ -84,9 +83,8 @@ fn unusable_shared_async_rows() -> Vec<Unusable> {
     ]
 }
 
-/// Python `test_shared_dispatch.py::TestRoute::test_a_shared_row_with_no_usable_timeout_or_grace_is_refused_on_a_seat`
-/// (both plans) and `TestDispatch::test_a_refused_shared_row_goes_to_a_seat_on_either_shape`
-/// (the route half): the refusal runs on a seat, never on an isolated
+/// A shared row with no usable timeout or grace, on both plans: the refusal
+/// runs on a seat, never on an isolated
 /// child and never back to the queue.
 #[test]
 fn every_unusable_shared_async_row_is_refused_on_a_seat_on_either_plan() {
@@ -112,9 +110,8 @@ fn every_unusable_shared_async_row_is_refused_on_a_seat_on_either_plan() {
     }
 }
 
-/// Python `test_shared_dispatch.py::TestRoute::test_a_worker_with_no_shared_children_refuses_it_in_an_isolated_child`
-/// and `TestDispatch::test_a_worker_with_no_shared_children_sends_the_refusal_isolated`
-/// (the route half).
+/// A worker with no shared children refuses a shared row in an isolated
+/// child.
 #[test]
 fn a_worker_with_only_isolated_children_refuses_an_unusable_shared_row_in_an_isolated_child() {
     let plan = ClaimPlan::for_children(1, 0, 0);
@@ -136,9 +133,7 @@ fn a_worker_with_only_isolated_children_refuses_an_unusable_shared_row_in_an_iso
     }
 }
 
-/// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_only_shared_children_is_valid`
-/// and `test_thread_dispatch.py::TestCapacityAndConfig::test_a_worker_with_only_thread_children_is_valid`:
-/// a worker with only shared children has one budget per kind, and its
+/// A worker with only shared children has one budget per kind, and its
 /// seats are its capacity.
 #[test]
 fn a_worker_with_only_shared_children_has_their_seats_as_its_capacity() {
@@ -334,10 +329,7 @@ const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "
     "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
     "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_result_takes_the_path_of_an_isolated_result`,
-/// `::test_the_result_of_a_refusal_takes_the_path_of_an_isolated_result` and
-/// `TestFinalizeKilledRun::test_a_run_that_returned_before_the_kill_writes_its_result`:
-/// a reported result of a shared run completes its row.
+/// A reported result of a shared run completes its row.
 #[tokio::test]
 #[serial]
 async fn a_reported_result_of_a_shared_run_completes_the_row() {
@@ -373,11 +365,7 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_reported_deadline_writes_the_timeout`
-/// and `TestFinalizeKilledRun::test_a_run_past_its_deadline_writes_the_timeout`,
-/// `test_thread_dispatch.py::TestFinalizeThread::test_a_task_past_its_deadline_writes_the_timeout`,
-/// and `tests/integration/test_task_timeout.py::test_timeout_retries_when_opted_in`:
-/// the timeout retries by the policy at the placement of the end; an
+/// The timeout retries by the policy at the placement of the end; an
 /// isolated placement moves the row to the `ISOLATED` class. The attempt
 /// records `TASK_TIMEOUT` and will retry.
 #[tokio::test]
@@ -499,8 +487,7 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `test_shared_dispatch.py::TestFinalizeKilledRun::test_the_run_that_blocked_the_loop_retries_isolated`
-/// and `::test_a_neighbour_of_a_blocked_loop_gets_its_own_code`: each run
+/// Each run
 /// of a child killed for a blocked loop fails with its own code.
 #[tokio::test]
 #[serial]
@@ -683,10 +670,7 @@ fn loop_kill(code: LoopKillCode, retry: RetryPlacement) -> AttemptEnd {
     }
 }
 
-/// Python `tests/integration/test_shared_kill_writes.py::test_the_task_that_blocked_the_loop_retries_isolated`,
-/// `::test_a_neighbour_fails_with_its_code_when_its_policy_does_not_name_it`
-/// and `::test_a_neighbour_retries_in_its_class_when_its_policy_names_the_code`
-/// (the writes; the verdict of each run at the kill is
+/// The writes of a kill for a blocked loop (the verdict of each run at the kill is
 /// `shared_rules_tests::a_run_of_a_lost_child_gets_the_verdict_of_its_kill`):
 /// the run that blocked the loop retries in an isolated child when its
 /// policy names `TASK_BLOCKED_LOOP`; a neighbour fails with
@@ -731,10 +715,9 @@ async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code()
     }
 }
 
-/// Python `tests/integration/test_shared_kill_writes.py::test_a_run_that_returned_before_the_kill_writes_what_it_returned`
-/// and `::test_the_retry_of_a_run_that_returned_before_the_kill_stays_in_its_class`
-/// (the writes; a run that returned before the kill ends with what it
-/// returned: `shared_rules_tests::a_death_the_worker_did_not_cause_takes_the_crash_path`,
+/// The writes of a run that returned before the kill (a run that returned
+/// before the kill ends with what it returned:
+/// `shared_rules_tests::a_death_the_worker_did_not_cause_takes_the_crash_path`,
 /// `::a_kill_past_deadlines_isolates_only_the_culprit`): the run returned
 /// `UPSTREAM_DOWN`. A policy that retries timeouts only fails it with that
 /// code and one attempt that does not retry; a policy that names the code
@@ -769,7 +752,6 @@ async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
     }
 }
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_task_that_reached_no_child_is_requeued`.
 #[tokio::test]
 #[serial]
 async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
@@ -807,8 +789,7 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `tests/integration/test_soft_cap_start_check.py::test_stop_returns_the_held_rows_to_their_queue`:
-/// at the stop, a row that waited for its queue cap goes back to the queue
+/// At the stop, a row that waited for its queue cap goes back to the queue
 /// with the claim fence (`worker::worker::return_held_rows` settles each
 /// held row so).
 #[tokio::test]
@@ -999,8 +980,7 @@ async fn seed_unlinked_workflow_task(pool: &TestPool, queue: &str) -> ClaimedTas
     }
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
-/// a child reports `NODE_NOT_LINKED` only when its stop before start left
+/// A child reports `NODE_NOT_LINKED` only when its stop before start left
 /// the orphan, with the self-heal off; the worker writes nothing, and the
 /// row stays CLAIMED by this claim. The cancel with the self-heal on runs in
 /// the child (`child_host::start_node_tests`).
@@ -1040,13 +1020,7 @@ fn unreachable_writer() -> OutcomeWriter {
 /// The retry waits of one write stage: 0.5 s, 1 s and 2 s.
 const ONE_STAGE_OF_WAITS: Duration = Duration::from_millis(3_500);
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_failed_timeout_write_is_retried_as_the_timeout_write`,
-/// `TestFinalizeKilledRun::test_a_database_error_of_the_write_is_retryable`,
-/// `::test_the_retry_of_a_failed_kill_write_writes_the_same_verdict`,
-/// `::test_a_crash_error_retries_as_a_crash`, `TestTimeoutWriteRetry::*`,
-/// `test_thread_dispatch.py::TestFinalizeThread::test_a_failed_timeout_write_after_the_kill_is_retried_as_that_write`,
-/// and `test_task_timeout_order.py::TestTheKillComesFirst::test_a_database_error_comes_after_the_kill`
-/// (the write and its log lines; the order is
+/// The write and its log lines (the order is
 /// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
 /// a write that keeps failing is sent again up to its bound; a timeout
 /// runs its crash recovery stage after the last retry of its own write, a
@@ -1171,10 +1145,9 @@ fn a_shared_async_row_runs_on_a_seat_with_its_stored_grace() {
     );
 }
 
-/// Python `test_thread_dispatch.py::TestRoute::test_a_row_of_the_thread_budget_runs_on_a_thread_seat`,
-/// `::test_a_thread_row_with_no_usable_timeout_is_refused_on_a_seat`,
-/// `::test_a_worker_with_no_thread_children_runs_it_isolated` and
-/// `::test_an_isolated_row_is_not_served_by_thread_children_only`.
+/// A row of the thread budget runs on a thread seat; one with no usable
+/// timeout is refused on a seat; a worker with no thread children runs it
+/// isolated; thread children alone do not serve an isolated row.
 #[test]
 fn a_shared_thread_row_runs_on_a_thread_seat_or_is_refused_there() {
     let with_threads = ClaimPlan::for_children(1, 0, 1);
@@ -1223,8 +1196,7 @@ fn a_shared_thread_row_runs_on_a_thread_seat_or_is_refused_there() {
     );
 }
 
-/// Python `test_thread_dispatch.py::TestRequest::test_a_timeout_out_of_bounds_is_a_defect`:
-/// the bound is in the type of the timeout, so a run cannot carry one out
+/// The bound is in the type of the timeout, so a run cannot carry one out
 /// of bounds.
 #[test]
 fn a_seat_timeout_out_of_its_bounds_cannot_be_built() {

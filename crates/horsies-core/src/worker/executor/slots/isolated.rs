@@ -1,7 +1,5 @@
 //! One isolated slot: boot a child, serve tasks on it one at a time, hold
-//! the deadline of each, recycle or replace the child (Python
-//! `core/worker/slots.py`, `_run_generation`, `_read_answer`,
-//! `_end_after_return`; `core/worker/dispatch.py`, the deadline kill).
+//! the deadline of each, recycle or replace the child.
 //!
 //! Rules of one task:
 //! - The deadline starts when the run frame is sent. At the deadline the

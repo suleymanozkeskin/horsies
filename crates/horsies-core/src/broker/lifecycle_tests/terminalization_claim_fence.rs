@@ -1,5 +1,3 @@
-//! Port of Python `tests/integration/test_terminalization_claim_fence.py`.
-//!
 //! A worker's lease lapses, the reaper requeues the task, and the same
 //! worker claims it again: the row is CLAIMED by that worker once more, so
 //! only the claim generation tells the two dispatches apart. The post-claim
@@ -239,8 +237,7 @@ async fn child_prestart_fences_on_claim_generation_cancelled() {
 /// The orphan cancel of the stop before start fences on the claim
 /// generation: a row that the same worker claimed again is not cancelled
 /// and gets no history row; the orphan of the dispatched generation is
-/// cancelled (Python
-/// `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_orphan_cancel_fences_on_the_dispatched_generation`).
+/// cancelled.
 #[tokio::test]
 #[serial]
 async fn child_prestart_orphan_cancel_fences_on_claim_generation() {

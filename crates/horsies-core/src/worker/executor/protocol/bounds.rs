@@ -1,5 +1,5 @@
-//! The bounds of frame fields (Python `core/worker/child_protocol.py`,
-//! `core/models/worker_profile.py`, `core/models/tasks.py`).
+//! The bounds of frame fields (Python `core/models/worker_profile.py`,
+//! `core/models/tasks.py`).
 //!
 //! Text bounds count characters (Unicode scalar values), as Python's `len`.
 

@@ -96,7 +96,7 @@ Where each release sends these statements:
   statements in one transaction.
 - `locked-completion`: no path of the v0.7.0 worker sends
   `horsies_complete_locked_task`. A locked completion goes to
-  `horsies_finish_workflow_success` (`finalize.py:1285-1292`), and a plain
+  `horsies_finish_workflow_success` (`finalize.py:1285-1292` at `v0.7.0`), and a plain
   success to `horsies_complete_task_fused`. The scenario has no pair.
 - `workflow-success-phase2-dependent`: the v0.7.0 harness seeds one-node
   workflows only. The scenario has no pair.

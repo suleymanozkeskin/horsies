@@ -1,7 +1,6 @@
 //! Workflow recovery: the reaper's global pass and the tree pass of a resume.
 //!
-//! Each candidate is one step on the core statement layer (Python
-//! `core/workflows/recovery.py`, one `SAVEPOINT` per candidate):
+//! Each candidate is one step on the core statement layer:
 //!
 //! - case 0: `horsies_workflow_node_reevaluate`, in a transaction with its owed child starts;
 //! - cases 1 and 1.5: `horsies_workflow_nodes_enqueue_ready`, in a transaction with its owed child starts;
@@ -145,7 +144,7 @@ impl RecoveryPassFailure {
 }
 
 // ---------------------------------------------------------------------------
-// Discovery statements (Python's case queries, `core/workflows/recovery.py:207-311`)
+// Discovery statements
 // ---------------------------------------------------------------------------
 
 /// Case 0: PENDING nodes of a RUNNING workflow whose dependencies are all terminal. `$1`: the row cap, NULL for
@@ -225,8 +224,7 @@ WHERE wt.status = 'READY'
 LIMIT CAST($2 AS bigint)";
 
 /// Case 1.6: a RUNNING sub-workflow node whose child workflow is terminal, in a RUNNING parent. Every link
-/// path writes the parent node RUNNING, so Python's selection covers every linked node
-/// (`GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL`, `core/workflows/recovery.py:266-276`).
+/// path writes the parent node RUNNING, so the selection covers every linked node.
 const GLOBAL_CASE1_6_STALE_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.sub_workflow_id
 FROM horsies_workflow_tasks wt
@@ -1194,9 +1192,8 @@ fn decode_rows<T>(
 }
 
 /// Cases 2/3 and 4 of the global pass: one audit page of `max_rows` RUNNING workflows, then one statement per
-/// candidate that renews the page claim with its work (Python `_recover_stuck_workflows_global`,
-/// `core/workflows/recovery.py:1229-1390`). The completion of a child that has a parent is followed by its parent
-/// advance as its own step. The claim is released at the end while this pass still owns it.
+/// candidate that renews the page claim with its work. The completion of a child that has a parent is followed by
+/// its parent advance as its own step. The claim is released at the end while this pass still owns it.
 ///
 /// Errors: the audit statement failed (both case metrics note it).
 async fn recover_global_workflow_end_states(
@@ -1760,9 +1757,9 @@ async fn fail_tree_orphan(
 
 /// The stored error of a RUNNING workflow with no node rows (recovery case 4): its start did not finish.
 ///
-/// Python stores `{"error_code": "E400", ...}` (`core/workflows/recovery.py:1001-1008, 1199-1206`), which is
-/// not a catalog error; the core stores the catalog code `WORKFLOW_START_INCOMPLETE` (approved rule), with
-/// Python's message.
+/// Python 0.7.0 stored `{"error_code": "E400", ...}` (`horsies/core/workflows/recovery.py` at `v0.7.0`), which
+/// is not a catalog error; the core stores the catalog code `WORKFLOW_START_INCOMPLETE` (approved rule), with
+/// the message of 0.7.0.
 fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serde_json::Error> {
     serde_json::to_string(&TaskError {
         error_code: OperationalErrorCode::WorkflowStartIncomplete.into(),
@@ -3623,9 +3620,7 @@ mod cap_tests {
 
     /// Recovery case 0 marks a PENDING node READY with its task row, in one transaction: a task insert that
     /// raises (a stored `good_until` that the database cannot read) rolls the READY mark back, and the node
-    /// stays PENDING with no task. Python runs each case 0 candidate in a savepoint
-    /// (`python/horsies/core/workflows/recovery.py:93-94`, `:712-760`). A READY node left behind would be selected
-    /// again by case 1 in the same pass.
+    /// stays PENDING with no task. A READY node left behind would be selected again by case 1 in the same pass.
     #[tokio::test]
     #[serial]
     async fn a_case_0_node_whose_task_insert_raises_stays_pending() {

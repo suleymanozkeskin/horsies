@@ -432,8 +432,7 @@ fn a_killed_child_loss_reads_as_a_kill_by_the_worker() {
     assert!(lost.to_string().contains("killed by the worker"));
 }
 
-/// The free seats of a shared pool, for the soft-cap start check (Python
-/// `test_queue_cap_hold.py::TestFreeChildren`): every seat of an open child
+/// The free seats of a shared pool, for the soft-cap start check: every seat of an open child
 /// is free; a submitted task takes one at once; a stopping pool has none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_free_seats_of_an_open_child_less_the_submitted_tasks() {

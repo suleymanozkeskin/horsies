@@ -1,6 +1,4 @@
-//! The tick and the fire on the baseline schema (Python
-//! `tests/integration/test_schedule_state_rows.py`,
-//! `tests/integration/test_scheduler_single_connection_pool.py`): one
+//! The tick and the fire on the baseline schema: one
 //! `horsies_fire_schedule` statement per due schedule, on the core pool the
 //! tick is given.
 
@@ -370,8 +368,7 @@ async fn a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fires_eac
     cleanup(&pool, &schedule.task_name, &schedule.name).await;
 }
 
-/// Python `test_scheduler_single_connection_pool.py::test_due_schedule_enqueues_with_a_one_connection_runtime_pool`:
-/// a tick needs one connection: the due read and the fire run on a pool of
+/// A tick needs one connection: the due read and the fire run on a pool of
 /// one connection, with no second connection for a lock.
 #[tokio::test]
 #[serial]
@@ -603,8 +600,7 @@ async fn the_slot_task_id_of_the_database_matches_its_vectors_and_layout() {
         slot_task_id(&pool, "daily", slot).await,
         slot_task_id(&pool, "daily", slot + chrono::Duration::seconds(60)).await
     );
-    // Python `test_schedule_slot_task_id.py::test_another_name_or_another_microsecond_gives_another_id`
-    // and `::test_one_instant_in_another_time_zone_gives_one_id`: one more
+    // One more
     // microsecond inside the same millisecond gives another id, and the
     // instant written in another zone gives the same id.
     assert_ne!(

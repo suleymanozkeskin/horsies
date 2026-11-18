@@ -1,5 +1,4 @@
-//! The boot of one slot's child, of any kind, by the restart rules
-//! (Python `core/worker/slots.py`, `_boot_child`, `_boot_attempt`). The
+//! The boot of one slot's child, of any kind, by the restart rules. The
 //! rules read every slot of the worker on the [`PoolBoard`].
 
 use std::num::NonZeroU32;

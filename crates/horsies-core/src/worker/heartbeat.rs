@@ -34,8 +34,7 @@ static CLAIMER_HEARTBEAT: TypedStatement = TypedStatement::new(
 /// Extends `claim_expires_at` to keep active claims from expiring while the
 /// worker is alive. The new expiry is the database time plus the lease, so it
 /// does not move with the worker clock. The `claimed_at` age guard ($3)
-/// prevents renewing claims that are unreasonably old. Python:
-/// `RENEW_CLAIM_LEASE_SQL` (`core/worker/sql.py`).
+/// prevents renewing claims that are unreasonably old.
 const RENEW_CLAIM_LEASE_SQL: &str = "\
 UPDATE horsies_tasks
 SET claim_expires_at = NOW() + $2 * INTERVAL '1 millisecond',
@@ -68,11 +67,10 @@ const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 5;
 ///
 /// In addition to inserting heartbeat rows, this also renews claim leases
 /// (extending `claim_expires_at`) so the reaper does not reclaim tasks that
-/// belong to a live worker. Matches Python's combined heartbeat + lease renewal.
+/// belong to a live worker.
 ///
 /// `claim_lease_ms`: lease duration used to compute new `claim_expires_at`.
-///     Every claim has a lease (Python `claiming.py:697-708`), so every beat
-///     renews.
+///     Every claim has a lease, so every beat renews.
 /// `max_claim_renew_age_ms`: safety cap — claims older than this are NOT renewed.
 ///
 /// The first beat runs at start, then one per `interval` (Python
@@ -147,8 +145,8 @@ pub fn spawn_claimer_heartbeat(
 
 /// Write the claimer beats and renew the lease of every claim this worker
 /// holds, in one transaction on the main core pool of `broker`
-/// ([`CheckoutClass::Reserved`]) (Python `core/worker/health.py`: the beat
-/// insert, then the lease update on the database clock with the age guard).
+/// ([`CheckoutClass::Reserved`]): the beat insert, then the lease update on
+/// the database clock with the age guard.
 ///
 /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
 /// its pools again; [`BrokerError::Statement`] for a failed checkout,
@@ -225,9 +223,8 @@ mod tests {
         pool
     }
 
-    /// Python `core/worker/health.py`: the claimer beat and the lease renewal
-    /// run in one transaction, and the new lease is the database time plus
-    /// the lease length.
+    /// The claimer beat and the lease renewal run in one transaction, and the
+    /// new lease is the database time plus the lease length.
     #[tokio::test]
     #[serial]
     async fn the_claimer_beat_renews_the_lease_on_the_database_clock() {

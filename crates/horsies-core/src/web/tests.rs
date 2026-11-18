@@ -1821,9 +1821,7 @@ async fn a_node_index_outside_the_integer_column_is_not_found() {
     );
 }
 
-/// Python `tests/unit/test_monitoring_task_detail_absence.py`,
-/// `TestWebRoute::test_each_reason_is_not_found`: the 404 text of each
-/// absence reason.
+/// The 404 text of each absence reason.
 #[test]
 fn each_absence_reason_has_the_not_found_text_of_python() {
     for (reason, text) in [
@@ -1838,9 +1836,7 @@ fn each_absence_reason_has_the_not_found_text_of_python() {
     }
 }
 
-/// Python `tests/unit/test_monitoring_task_detail_absence.py`,
-/// `TestWebRoute::test_a_query_failure_is_not_a_not_found`: a task detail
-/// read that fails is never answered as an absent task. A history contract
+/// A task detail read that fails is never answered as an absent task. A history contract
 /// violation is a server error (500); a database failure (the router's pool
 /// is lazy and unreachable) is unavailable (503).
 #[tokio::test]

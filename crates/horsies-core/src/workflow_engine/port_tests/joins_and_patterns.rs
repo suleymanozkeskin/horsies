@@ -1,6 +1,6 @@
 //! Join rules and composed DAG shapes, driven node by node through phase 2.
-//! Python: `tests/integration/test_workflow_join.py`,
-//! `test_workflow_composed_patterns.py`, `test_workflow_dag_patterns.py`.
+//! Python: `tests/integration/test_workflow_join.py` and
+//! `test_workflow_composed_patterns.py`.
 //!
 //! The nodes run on [`PORT_QUEUE`], which no worker test claims, so a live
 //! task left on the shared database stays where it is.
@@ -705,8 +705,7 @@ async fn on_error_pause_pauses_before_a_policy_that_could_still_succeed() {
     super::support::end_workflows(&pool, &[workflow_id]).await;
 }
 
-/// `test_workflow_dag_patterns.py::TestDAGPatterns.test_ready_siblings_priority_order`:
-/// promoted siblings carry their node priority, and the claim takes the
+/// Promoted siblings carry their node priority, and the claim takes the
 /// smaller number first.
 #[tokio::test]
 #[serial]

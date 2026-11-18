@@ -2,9 +2,8 @@
 //! the recency bound of the stale probe, and the key reservation of a task
 //! whose move finds no history leaf.
 //!
-//! Python specification: `tests/integration/test_task_history_heartbeat_partitions.py`
-//! and `test_task_history_identity_prototypes.py`. The rest of the
-//! move-to-history rows are in `broker/lifecycle_tests/task_history_terminalization_*.rs`.
+//! The rest of the move-to-history rows are in
+//! `broker/lifecycle_tests/task_history_terminalization_*.rs`.
 //! Each test runs in one transaction that it rolls back, on the shared
 //! migrated database; a move that must be refused runs in a savepoint, so the
 //! test reads the live state after the refusal.

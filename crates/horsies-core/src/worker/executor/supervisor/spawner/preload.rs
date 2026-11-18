@@ -1,7 +1,5 @@
 //! The preload fork path of the spawner thread (Linux): one preload process
-//! imports code once and forks a child for each spawn request (Python
-//! `core/worker/preload.py`; `core/worker/slots.py`, `_start_preload`,
-//! `_watch_preload`, `Child._start_forked`).
+//! imports code once and forks a child for each spawn request.
 //!
 //! The two waits of the path are states of the spawner loop with a
 //! deadline, not blocking calls: the start waits at most

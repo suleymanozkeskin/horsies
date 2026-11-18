@@ -1,11 +1,9 @@
 //! The post-claim filter of the worker: a claimed task of a PAUSED or
 //! CANCELLED workflow is not dispatched; this worker's claim of it ends, and
-//! its node goes back to READY (PAUSED) or is skipped (CANCELLED). Python:
-//! `tests/integration/test_worker_filter_nonrunnable.py`.
+//! its node goes back to READY (PAUSED) or is skipped (CANCELLED).
 //!
-//! Python's filter returns the claimed rows that stay runnable; the core's
-//! (`PostgresBroker::filter_non_runnable_workflow_tasks`) returns the ids it
-//! filtered out. Each test leaves claimed rows, so it uses its own database.
+//! The filter (`PostgresBroker::filter_non_runnable_workflow_tasks`) returns
+//! the ids it filtered out. Each test leaves claimed rows, so it uses its own database.
 
 use crate::test_support::sql::{self, TestPool};
 use chrono::{DateTime, Utc};
