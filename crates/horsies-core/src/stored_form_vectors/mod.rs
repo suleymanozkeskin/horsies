@@ -70,13 +70,17 @@ pub(crate) fn task_error_of(
     notation: &Value,
     stored_data: Option<&Value>,
 ) -> TaskError {
-    let data = match stored_data {
-        Some(stored) => Some(stored.clone()),
+    let data_value = match stored_data {
+        Some(stored) => Some(stored),
         None => match &notation["data"] {
             Value::Null => None,
-            given => Some(given.clone()),
+            given => Some(given),
         },
     };
+    let data = data_value.map(|value| {
+        crate::core::codec::JsonText::of(value)
+            .unwrap_or_else(|refused| panic!("{name}: the data does not write: {refused}"))
+    });
     let exception = match &notation["exception"] {
         Value::Null => None,
         record => Some(
@@ -93,8 +97,10 @@ pub(crate) fn task_error_of(
                     .unwrap_or_else(|| panic!("{name}: a sub-workflow id is text")),
             )
             .unwrap_or_else(|error| panic!("{name}: {error}")),
-            sub_workflow_summary: SubWorkflowSummary::from_stored_value(&sub_workflow["summary"])
-                .unwrap_or_else(|refused| panic!("{name}: {refused}")),
+            sub_workflow_summary: SubWorkflowSummary::from_stored_text(
+                &sub_workflow["summary"].to_string(),
+            )
+            .unwrap_or_else(|refused| panic!("{name}: {refused}")),
         }),
     };
     TaskError {

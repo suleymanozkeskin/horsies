@@ -91,10 +91,7 @@ See [workflows](../concepts/workflows/workflow-api) and [subworkflows](../concep
 
 ## Does it have monitoring?
 
-There is a terminal-based TUI called syce, capable of displaying the status of your workers, tasks and workflows in detail.
-See [syce](../monitoring/syce-overview)
-
-A web UI ships with horsies. Install the `horsies[web]` extra and run `horsies web`.
+A web UI ships with horsies. It shows the status of your workers, tasks and workflows. Install the `horsies[web]` extra and run `horsies web`.
 See [web UI overview](../monitoring/web-ui-overview)
 
 ## Does horsies provide guidance files for coding agents?

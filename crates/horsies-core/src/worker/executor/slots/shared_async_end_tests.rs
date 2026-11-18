@@ -16,7 +16,7 @@ use super::scripted::{
     isolated_config, isolated_init, layout, leftover_cancel, leftover_stuck, ok_envelope,
     process_ended, read_frame, reported, result_frame, run_ref, run_stuck, send, serving,
     shared_async_init, shared_config, shared_result, shell, short_of_descriptors, start_shared,
-    submit_isolated, submit_shared, take, task, ticket, tickets, timeout_ms, until, TestDir,
+    submit_isolated, submit_shared, take_init, task, ticket, tickets, timeout_ms, until, TestDir,
     SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::seat_runs::{
@@ -27,8 +27,8 @@ use super::shared_stop::{ChildKill, LoopHolder};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    BlockedWhere, BodyEnd, CancelGraceMs, ChildFrame, ParentFrame, ProcessId, ReportedBootCause,
-    RunEnd, RunRef, SharedWork,
+    BlockedWhere, BodyEnd, CancelGraceMs, ChildFrame, ProcessId, ReportedBootCause, RunEnd, RunRef,
+    SharedWork,
 };
 use crate::worker::executor::supervisor::{
     BootFailureCause, ChildExit, ChildLost, LossCause, PartialFrame, ReapedExit, Spawner,
@@ -495,7 +495,7 @@ async fn a_seat_setup_that_fails_is_a_boot_failure_of_the_shared_pool() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failing_start_hook_of_a_shared_child_fails_the_pool() {
     let init = shared_async_init(2);
-    let script = format!("{}exit 173", take(&ParentFrame::Init(init.clone())));
+    let script = format!("{}exit 173", take_init());
     let spawner = Spawner::start().unwrap();
     let (pool, board) = async_pool(&spawner, 1, shared_config(shell(&script), init));
 

@@ -8,10 +8,16 @@ Partitioned tables are read through their parent, with the leaf of each row
 attaches to a partitioned ``horsies_`` parent, with its bound (detached
 leaves come from the leaf catalog). The transaction is rolled back at the
 end; the capture changes no data and no setting that outlives it.
+
+The notification section: ``open_listener`` listens on the channels of a
+run before the run writes; ``collect_notifications`` sends a marker after
+the run and reads every notification up to it; ``capture_with_notifications``
+adds them to the snapshot as the ``NOTIFICATIONS`` table.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, LiteralString, cast
@@ -20,6 +26,12 @@ import psycopg
 from psycopg import pq, sql
 
 from horsies.core.types.result import Err, Ok, Result
+from tests.dualrun.catalog import (
+    BASELINE_CATALOG,
+    NOTIFICATIONS,
+    NOTIFIED_CATALOG,
+    notification_row,
+)
 from tests.dualrun.cells import (
     RawRow,
     RawSnapshot,
@@ -493,3 +505,161 @@ def _clock_value(record: tuple[object, ...] | None) -> datetime:
             raise AssertionError(
                 f'the clock read returned {record!r}, not one timestamp'
             )
+
+
+# ---- Notifications ----
+
+NOTIFICATION_LIMIT: Final = 50_000
+"""Most notifications that one run may send; more fail the capture."""
+
+NOTIFICATION_WAIT: Final = timedelta(seconds=10)
+"""Longest wait for the capture marker after the run."""
+
+MARKER_CHANNEL: Final = 'horsies_dualrun_capture_marker'
+"""The channel of the capture marker. No production code sends on it."""
+
+
+@dataclass(frozen=True, slots=True)
+class Notification:
+    """One notification that a run sent."""
+
+    channel: str
+    payload: str
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationListener:
+    """An autocommit connection that listens on ``channels`` and on ``MARKER_CHANNEL``.
+
+    The caller closes ``connection``.
+    """
+
+    connection: Connection
+    channels: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ListenFailed:
+    """The listener did not connect or a ``LISTEN`` failed; no listener is open."""
+
+    cause: psycopg.Error
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationReadFailed:
+    """The marker send or the read of the notifications raised a database error."""
+
+    cause: psycopg.Error
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationMarkerMissing:
+    """The marker did not arrive within ``wait``; the notifications read so far are not complete."""
+
+    wait: timedelta
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationLimitExceeded:
+    """The run sent more than ``limit`` notifications before the marker."""
+
+    limit: int
+
+
+NotificationError = (
+    NotificationReadFailed | NotificationMarkerMissing | NotificationLimitExceeded
+)
+
+
+def open_listener(
+    conninfo: str, channels: tuple[str, ...]
+) -> Result[NotificationListener, ListenFailed]:
+    """A new autocommit connection to ``conninfo`` that listens on
+    ``channels`` and on ``MARKER_CHANNEL``. Notifications of transactions
+    that commit after this returns reach it."""
+    try:
+        connection = psycopg.connect(conninfo, autocommit=True)
+    except psycopg.Error as exc:
+        return Err(ListenFailed(cause=exc))
+    try:
+        for channel in (*channels, MARKER_CHANNEL):
+            _ = connection.execute(
+                sql.SQL('LISTEN {}').format(sql.Identifier(channel))
+            )
+    except psycopg.Error as exc:
+        connection.close()
+        return Err(ListenFailed(cause=exc))
+    return Ok(NotificationListener(connection=connection, channels=channels))
+
+
+def _send_marker(sender: Connection, token: str) -> None:
+    """Commit a marker notification on ``sender``. Raises ``psycopg.Error``."""
+    with sender.transaction():
+        _ = sender.execute(
+            'SELECT pg_notify(%(channel)s, %(token)s)',
+            {'channel': MARKER_CHANNEL, 'token': token},
+        ).fetchall()
+
+
+def collect_notifications(
+    listener: NotificationListener, sender: Connection
+) -> Result[tuple[Notification, ...], NotificationError]:
+    """Every notification that reached ``listener``, in arrival order, up to a
+    marker that ``sender`` (an idle connection, asserted) commits now.
+
+    PostgreSQL delivers the notifications of committed transactions in
+    commit order, so every notification committed before the marker
+    arrives before it. Waits at most ``NOTIFICATION_WAIT`` and reads at most
+    ``NOTIFICATION_LIMIT`` notifications.
+    """
+    status = sender.info.transaction_status
+    assert (
+        status is pq.TransactionStatus.IDLE
+    ), f'the marker needs an idle connection, not {status.name}'
+    token = uuid.uuid4().hex
+    received: list[Notification] = []
+    try:
+        _send_marker(sender, token)
+        for notify in listener.connection.notifies(
+            timeout=NOTIFICATION_WAIT.total_seconds()
+        ):
+            match notify.channel, notify.payload:
+                case (channel, payload) if channel == MARKER_CHANNEL and payload == token:
+                    return Ok(tuple(received))
+                case (channel, _) if channel == MARKER_CHANNEL:
+                    continue
+                case (channel, payload):
+                    if len(received) >= NOTIFICATION_LIMIT:
+                        return Err(NotificationLimitExceeded(limit=NOTIFICATION_LIMIT))
+                    received.append(Notification(channel=channel, payload=payload))
+    except psycopg.Error as exc:
+        return Err(NotificationReadFailed(cause=exc))
+    return Err(NotificationMarkerMissing(wait=NOTIFICATION_WAIT))
+
+
+def capture_with_notifications(
+    connection: Connection,
+    notifications: tuple[Notification, ...],
+    window: RunWindow,
+) -> Result[NormalizedSnapshot, CaptureError]:
+    """The snapshot of the baseline tables (``read_raw_snapshot``) and of
+    ``notifications`` as the ``NOTIFICATIONS`` table, normalized by
+    ``NOTIFIED_CATALOG``. A notification on a channel without a payload rule
+    is a defect of the caller (asserted)."""
+    match read_raw_snapshot(connection, BASELINE_CATALOG):
+        case Err(error):
+            return Err(error)
+        case Ok(raw):
+            pass
+    sent = RawTable(
+        name=NOTIFICATIONS.name,
+        rows=tuple(
+            notification_row(notification.channel, notification.payload)
+            for notification in notifications
+        ),
+    )
+    return normalize_snapshot(
+        RawSnapshot(tables=(*raw.tables, sent), partition_tree=raw.partition_tree),
+        NOTIFIED_CATALOG,
+        window,
+    )

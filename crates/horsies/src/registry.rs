@@ -348,6 +348,11 @@ mod tests {
     #[test]
     fn queue_priority_is_the_configured_one_else_100() {
         assert_eq!(queue_priority(&custom_config(), "critical"), 1);
+        assert_eq!(queue_priority(&custom_config(), "bulk"), 90);
+        assert_eq!(
+            queue_priority(&custom_config(), "unknown"),
+            DEFAULT_PRIORITY
+        );
         assert_eq!(
             queue_priority(&default_config(), "default"),
             DEFAULT_PRIORITY

@@ -80,6 +80,7 @@ A binary that serves both calls `horsies::child_mode()` first and serves the chi
 
 **Do not call the blocking views in a handler.** On a thread where a tokio runtime is current they run nothing and return `ASYNC_CONTEXT`. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread).
 
+<!-- rust-check: skip elided -- a Wrong / Correct pair of statements -->
 ```rust
 // Wrong: returns TaskSendError::AsyncContext and writes nothing
 let handle = receipt.blocking().send(input);

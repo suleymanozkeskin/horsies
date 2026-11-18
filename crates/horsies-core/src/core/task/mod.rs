@@ -2,7 +2,6 @@ pub mod error;
 pub mod execution;
 pub mod fn_trait;
 pub mod info;
-pub mod macros;
 pub mod options;
 pub mod result;
 pub mod send_types;

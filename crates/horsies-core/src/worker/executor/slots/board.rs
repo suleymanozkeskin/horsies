@@ -224,6 +224,9 @@ pub struct PoolBoard {
     first_generation_in: CancellationToken,
     /// Woken when a new-kind baseline is queued.
     new_kind: Notify,
+    /// Woken when a child becomes ready to take a task after a boot. Holds
+    /// at most one wake while no one waits.
+    child_ready: Notify,
 }
 
 impl PoolBoard {
@@ -260,6 +263,7 @@ impl PoolBoard {
             drain_deadline: CancellationToken::new(),
             first_generation_in: CancellationToken::new(),
             new_kind: Notify::new(),
+            child_ready: Notify::new(),
         }
     }
 
@@ -380,6 +384,21 @@ impl PoolBoard {
         }
     }
 
+    /// A child became ready to take a task after a boot: an isolated slot
+    /// waits for its first task of a generation, or a shared child is open
+    /// with a free seat for the first time in its generation. Wakes the
+    /// claim loop once; wakes noted while no one waits are kept as one.
+    pub(crate) fn note_child_ready(&self) {
+        self.child_ready.notify_one();
+    }
+
+    /// Wait until a child becomes ready to take a task after a boot
+    /// ([`Self::note_child_ready`]). A wake noted before the wait returns at
+    /// once. Cancel-safe: a wait dropped before it returns loses no wake.
+    pub async fn child_ready(&self) {
+        self.child_ready.notified().await;
+    }
+
     /// Log a start with slots down: how many slots serve, and why each down
     /// slot is down (Python `_log_degraded_start`).
     fn log_degraded_start(&self) {
@@ -466,7 +485,7 @@ impl PoolBoard {
                 Condition::Serving => {
                     tracing::error!(
                         failure = ?failure,
-                        "the worker's child pool failed: no replacement child can start",
+                        "Worker cannot start a child: {failure}",
                     );
                     slots.condition = Condition::Failed(failure);
                 }

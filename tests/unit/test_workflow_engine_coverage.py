@@ -154,6 +154,11 @@ class TestValidateArgsFromMap:
     def test_none_value_returns_none(self) -> None:
         assert _validate_args_from_map({'x': None}) is None
 
+    @pytest.mark.parametrize('flag', [True, False])
+    def test_bool_value_returns_none(self, flag: bool) -> None:
+        # bool is a subclass of int: True and False are not the indexes 1 and 0.
+        assert _validate_args_from_map({'x': flag}) is None
+
     def test_mixed_valid_and_invalid_returns_none(self) -> None:
         assert _validate_args_from_map({'x': 0, 'y': 'bad'}) is None
 

@@ -6,7 +6,8 @@ snapshot code, because both databases ran the same writes.
 
 Two sequences:
 
-- ``run_function_calls``: ``tests/integration/baseline_function_calls.sql``,
+- ``run_function_calls``:
+  ``crates/horsies-core/src/sql_tests/cases/baseline_function_calls.sql``,
   which calls every SQL function of the baseline (claim, completions,
   failures with retry, expiry, cancels, phase 2, history moves, key
   reservations). The fixed ids of the script are replaced by new UUIDv7
@@ -54,7 +55,13 @@ from tests.dualrun.values import (
 from horsies.core.utils.url import sqlalchemy_url
 
 FUNCTION_CALLS_SQL: Final = (
-    Path(__file__).parent.parent / 'integration' / 'baseline_function_calls.sql'
+    Path(__file__).parent.parent.parent
+    / 'crates'
+    / 'horsies-core'
+    / 'src'
+    / 'sql_tests'
+    / 'cases'
+    / 'baseline_function_calls.sql'
 )
 _FIXED_ID: Final = re.compile(r"'(00000000-0000-7000-8000-[0-9a-f]{12})'")
 _NEW_IDS_SQL: Final[LiteralString] = (

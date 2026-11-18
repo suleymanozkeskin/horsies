@@ -11,19 +11,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Self
 
+from horsies._catalog import monitoring_bounds
 from horsies.core.types.result import Err, Ok, Result
 
-MAX_TASK_PAGE_REACH: Final = 500
-"""Maximum ``offset + limit`` accepted by the bounded two-side merge."""
+MAX_TASK_PAGE_REACH: Final = monitoring_bounds.MAX_TASK_PAGE_REACH
+"""Maximum ``offset + limit`` accepted by the bounded two-side merge (the core's bound)."""
 
-MAX_TASK_PAGE_LIMIT: Final = 200
-"""Maximum rows on one ``list_tasks`` page."""
+MAX_TASK_PAGE_LIMIT: Final = monitoring_bounds.MAX_TASK_PAGE_LIMIT
+"""Maximum rows on one ``list_tasks`` page (the core's bound)."""
 
-MAX_BREAKDOWN_LIMIT: Final = 500
-"""Maximum groups in one ``task_breakdown`` answer."""
+MAX_BREAKDOWN_LIMIT: Final = monitoring_bounds.MAX_BREAKDOWN_LIMIT
+"""Maximum groups in one ``task_breakdown`` answer (the core's bound)."""
 
-MAX_WORKFLOW_RUNS_LIMIT: Final = 200
-"""Maximum runs in one ``list_workflow_runs`` answer."""
+MAX_WORKFLOW_RUNS_LIMIT: Final = monitoring_bounds.MAX_WORKFLOW_RUNS_LIMIT
+"""Maximum runs in one ``list_workflow_runs`` answer (the core's bound)."""
 
 
 @dataclass(frozen=True, slots=True)

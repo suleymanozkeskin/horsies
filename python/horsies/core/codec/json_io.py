@@ -14,7 +14,7 @@ plain JSON-native shape first, then handed to ``dumps_json``.
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional, Union
+from typing import Dict, Final, List, Union
 
 from horsies.core.codec.json_value import (
     JSON_TEXT_TOO_DEEP,
@@ -35,6 +35,18 @@ Json = Union[None, bool, int, float, str, List['Json'], Dict[str, 'Json']]
 
 class SerializationError(Exception):
     """Raised when a value cannot be serialized to or deserialized from JSON."""
+
+
+class EmptyJsonTextError(SerializationError):
+    """The text or payload to read is empty. An empty text is not JSON.
+
+    ``loads_json`` and ``loads_json_bytes`` return it. It is a
+    ``SerializationError``, so a caller that handles that type handles it too.
+    """
+
+
+EMPTY_JSON_TEXT: Final = 'JSON parse failed: the text is empty'
+"""The message of ``EmptyJsonTextError``."""
 
 
 type SerdeResult[T] = Result[T, SerializationError]
@@ -94,11 +106,14 @@ def dumps_canonical_json(value: object) -> str:
     )
 
 
-def loads_json(s: Optional[str]) -> SerdeResult[Json]:
+def loads_json(s: str) -> SerdeResult[Json]:
     """Deserialize a JSON string.
 
-    Returns Ok(None) for empty/None input. Wraps json.JSONDecodeError as
-    SerializationError so callers handle a single error type.
+    An empty text is ``Err(EmptyJsonTextError)``: it is not JSON. The JSON
+    text ``null`` is ``Ok(None)``. The input is never ``None``: a caller with
+    a nullable column checks NULL before the call. Wraps
+    json.JSONDecodeError as SerializationError so callers handle a single
+    error type.
 
     Routes through ``parse_constant=_reject_nonstandard_json_constant`` so
     Python's lenient acceptance of ``NaN`` / ``Infinity`` / ``-Infinity``
@@ -117,8 +132,8 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
     is too deep for ``json.loads`` itself gets the same Err from the
     ``RecursionError`` arm.
     """
-    if not s:
-        return Ok(None)
+    if s == '':
+        return Err(EmptyJsonTextError(EMPTY_JSON_TEXT))
     try:
         parsed: Json = json.loads(
             s,
@@ -140,19 +155,14 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
 def loads_json_bytes(payload: bytes) -> SerdeResult[Json]:
     """Deserialize a stored payload whose codec declares UTF-8 JSON.
 
-    The strict rules of ``loads_json`` apply, with two differences that a
-    stored payload needs:
-
-    - Empty bytes are an Err. ``loads_json`` returns Ok(None) for empty text,
-      which here would read as the JSON value ``null``.
-    - Bytes that are not UTF-8 are an Err. ``json.loads`` on bytes detects
-      UTF-16 and UTF-32 and skips a byte order mark, so it accepts formats
-      that the codec does not declare.
+    The bytes are decoded as UTF-8, then read by ``loads_json``, so empty
+    bytes are ``Err(EmptyJsonTextError)`` as an empty text is. Bytes that are
+    not UTF-8 are an Err: ``json.loads`` on bytes detects UTF-16 and UTF-32
+    and skips a byte order mark, so it accepts formats that the codec does
+    not declare.
 
     The error text names a byte offset, not a byte: the payload is task input.
     """
-    if not payload:
-        return Err(SerializationError('JSON parse failed: payload is empty'))
     try:
         text = payload.decode('utf-8')
     except UnicodeDecodeError as exc:

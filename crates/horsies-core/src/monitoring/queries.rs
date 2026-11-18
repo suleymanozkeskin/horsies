@@ -32,7 +32,14 @@ use super::models::{
     TaskDetailRead, TaskListPage, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
 };
 
+/// The most `offset + limit` of one task list page.
 pub const MAX_TASK_PAGE_REACH: i64 = 500;
+/// The most rows of one task list page.
+pub const MAX_TASK_PAGE_LIMIT: i64 = 200;
+/// The most groups of one task breakdown.
+pub const MAX_BREAKDOWN_LIMIT: i64 = 500;
+/// The most runs of one workflow runs list.
+pub const MAX_WORKFLOW_RUNS_LIMIT: i64 = 200;
 const ERROR_FACET_CAP: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,9 +247,9 @@ impl TaskBreakdownQuery {
     }
 
     pub fn with_limit(mut self, limit: i64) -> Result<Self, PaginationRefused> {
-        if !(1..=500).contains(&limit) {
+        if !(1..=MAX_BREAKDOWN_LIMIT).contains(&limit) {
             return Err(PaginationRefused {
-                reason: format!("limit must be between 1 and 500; got {limit}"),
+                reason: format!("limit must be between 1 and {MAX_BREAKDOWN_LIMIT}; got {limit}"),
             });
         }
         self.limit = limit;
@@ -289,9 +296,9 @@ impl TaskListQuery {
                 reason: format!("offset must be at least 0; got {offset}"),
             });
         }
-        if !(1..=200).contains(&limit) {
+        if !(1..=MAX_TASK_PAGE_LIMIT).contains(&limit) {
             return Err(PaginationRefused {
-                reason: format!("limit must be between 1 and 200; got {limit}"),
+                reason: format!("limit must be between 1 and {MAX_TASK_PAGE_LIMIT}; got {limit}"),
             });
         }
         let reach = offset.checked_add(limit).ok_or_else(|| PaginationRefused {
@@ -335,9 +342,11 @@ impl WorkflowRunsQuery {
     }
 
     pub fn with_limit(mut self, limit: i64) -> Result<Self, PaginationRefused> {
-        if !(1..=200).contains(&limit) {
+        if !(1..=MAX_WORKFLOW_RUNS_LIMIT).contains(&limit) {
             return Err(PaginationRefused {
-                reason: format!("limit must be between 1 and 200; got {limit}"),
+                reason: format!(
+                    "limit must be between 1 and {MAX_WORKFLOW_RUNS_LIMIT}; got {limit}"
+                ),
             });
         }
         self.limit = limit;
@@ -639,8 +648,9 @@ pub async fn task_breakdown(
     let statuses = status_texts(&query.filters.statuses);
     let categories = category_texts(&query.filters.error_categories);
     let taxonomy = builtin_taxonomy();
-    // `with_limit` bounds the limit to 1..=500.
-    let limit = i32::try_from(query.limit).expect("the breakdown limit is at most 500");
+    // `with_limit` bounds the limit to 1..=MAX_BREAKDOWN_LIMIT.
+    let limit =
+        i32::try_from(query.limit).expect("the breakdown limit is at most MAX_BREAKDOWN_LIMIT");
     let rows = broker
         .query_main(
             &statement
@@ -695,9 +705,10 @@ pub async fn list_tasks(
     let taxonomy = builtin_taxonomy();
     let sort_key = query.sort_by.as_str();
     let sort_direction = query.sort_direction.sql();
-    // `with_pagination` bounds both to the page reach (500).
-    let offset = i32::try_from(query.offset).expect("the page offset is at most 500");
-    let limit = i32::try_from(query.limit).expect("the page limit is at most 200");
+    // `with_pagination` bounds both to the page reach (MAX_TASK_PAGE_REACH).
+    let offset =
+        i32::try_from(query.offset).expect("the page offset is at most MAX_TASK_PAGE_REACH");
+    let limit = i32::try_from(query.limit).expect("the page limit is at most MAX_TASK_PAGE_LIMIT");
     let rows = broker
         .query_main(
             &statement
@@ -811,8 +822,9 @@ pub async fn list_workflow_runs(
 ) -> MonitoringResult<Vec<WorkflowRunSummary>> {
     let operation = "workflow runs query";
     let statement = &MONITORING_WORKFLOW_RUNS;
-    // `with_limit` bounds the limit to 1..=200.
-    let limit = i32::try_from(query.limit).expect("the run limit is at most 200");
+    // `with_limit` bounds the limit to 1..=MAX_WORKFLOW_RUNS_LIMIT.
+    let limit =
+        i32::try_from(query.limit).expect("the run limit is at most MAX_WORKFLOW_RUNS_LIMIT");
     let rows = broker
         .query_main(
             &statement

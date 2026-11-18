@@ -24,18 +24,20 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use horsies_core::{
-    build_failed_error, merged_child_input, node_failure_result, params_refused_error,
-    subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture, ChildSpecRequest,
-    ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec, NodeInput, RefusedMember,
-    TaskError,
+    build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
+    params_refused_error, subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture,
+    ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec,
+    NodeInput, RefusedMember, TaskError,
 };
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use super::definition::WorkflowDefinition;
+use super::node::unread_node_member;
 use super::spec::{SpecBody, SpecNode, WorkflowSpec};
 use super::spec_data::client_spec;
 use super::sub_workflow::NodeParams;
-use crate::task::body::decode_checked;
+use crate::task::body::{decode_checked, DecodeFailure};
 use crate::{AppConfig, ErrorCode, HorsiesError, ValidationReport};
 
 /// The hook that builds a child from params, as the error texts of a child
@@ -49,9 +51,15 @@ const MAX_SUBWORKFLOW_DEPTH: usize = 32;
 /// The params text of a sub-workflow node that gives no params.
 const NO_PARAMS_TEXT: &str = "{}";
 
-/// The build of a definition with params: its spec from the params text.
-pub(crate) type ParamsBuild =
-    Arc<dyn Fn(&str) -> Result<WorkflowSpec, ParamsBuildRefused> + Send + Sync + 'static>;
+/// The text from which `()` params decode: a params text with no member.
+const UNIT_PARAMS_TEXT: &str = "null";
+
+/// The build of a definition with params: its spec from the params text
+/// (first argument) and the names of the members of that text that hold
+/// `args_from` results (second argument).
+pub(crate) type ParamsBuild = Arc<
+    dyn Fn(&str, &[String]) -> Result<WorkflowSpec, ParamsBuildRefused> + Send + Sync + 'static,
+>;
 
 /// A check case of a workflow builder: one spec.
 pub(crate) type CaseBuild =
@@ -60,12 +68,17 @@ pub(crate) type CaseBuild =
 /// Why the build of a definition with params gave no spec.
 #[derive(Debug, Clone)]
 pub(crate) enum ParamsBuildRefused {
-    /// The params member `key` does not decode to the field of that name;
-    /// `build_with` did not run. The node stores `WORKER_SERIALIZATION_ERROR`.
+    /// The params member `key` does not decode to the field of that name, or
+    /// no field takes it; `build_with` did not run. The node stores
+    /// `WORKER_SERIALIZATION_ERROR`.
     Member { key: String, cause: String },
-    /// The params do not decode as a whole, `build_with` refused, or the
-    /// spec it built has another output type. The node stores
-    /// `WORKFLOW_ENQUEUE_FAILED`.
+    /// The params do not decode as a whole (a field with no member, for
+    /// one); `build_with` did not run. `text` is the decode's text. The node
+    /// stores `WORKFLOW_ENQUEUE_FAILED` with the text after Python's prefix
+    /// `Subworkflow build failed: `.
+    Undecodable { text: String },
+    /// `build_with` refused, or the spec it built has another output type.
+    /// The node stores `WORKFLOW_ENQUEUE_FAILED`.
     Failed(HorsiesError),
 }
 
@@ -101,15 +114,16 @@ impl Definition {
     /// The definition `D` with params: `D::build_with` over the params
     /// text, with the output type checked.
     pub(crate) fn with_params<D: WorkflowDefinition>() -> Self {
-        let build: ParamsBuild =
-            Arc::new(|text: &str| -> Result<WorkflowSpec, ParamsBuildRefused> {
-                let params = decode_params::<D::Params>(text)?;
+        let build: ParamsBuild = Arc::new(
+            |text: &str, result_members: &[String]| -> Result<WorkflowSpec, ParamsBuildRefused> {
+                let params = decode_params::<D::Params>(text, result_members)?;
                 let spec =
                     run_user_build(|| D::build_with(params)).map_err(ParamsBuildRefused::Failed)?;
                 spec.check_output_type::<D::Output>()
                     .map_err(ParamsBuildRefused::Failed)?;
                 Ok(spec)
-            });
+            },
+        );
         Self {
             name: D::name().to_owned(),
             definition_key: D::definition_key().to_owned(),
@@ -248,7 +262,9 @@ impl WorkflowRegistry {
     /// Python's check of the registered workflows: each definition without
     /// params and each check case is built, checked against the registry and
     /// the app's queues, and walked into its sub-workflows down to the depth
-    /// limit. A nesting is reported only when it fails for certain.
+    /// limit. A nesting is reported only when it fails for certain. The spec
+    /// of a check case without a definition key is reported (`HRS-016`) and
+    /// not checked further.
     pub(crate) fn check_findings(&self) -> Vec<HorsiesError> {
         let registered = self.read();
         let mut findings = Vec::new();
@@ -262,7 +278,10 @@ impl WorkflowRegistry {
             .collect::<Vec<WorkflowSpec>>();
         for case in &registered.check_cases {
             match std::panic::catch_unwind(AssertUnwindSafe(|| (case.build)())) {
-                Ok(Ok(spec)) => self.check_root(&registered, &spec, &mut findings),
+                Ok(Ok(spec)) => match keyless_spec(&spec) {
+                    Some(refused) => findings.push(refused),
+                    None => self.check_root(&registered, &spec, &mut findings),
+                },
                 Ok(Err(refused)) => findings.push(
                     HorsiesError::new(format!(
                         "workflow builder '{}' refused a check case",
@@ -386,10 +405,13 @@ impl WorkflowRegistry {
     /// 2. The builder input that the core merges ([`merged_child_input`]):
     ///    its node failures fail the node.
     /// 3. A definition without params gives its spec; one with params
-    ///    decodes the input with its params type and runs `build_with`. A
-    ///    member that does not decode fails the node with
-    ///    `WORKER_SERIALIZATION_ERROR`; a failed build, or a spec that the
-    ///    conversion refuses, with `WORKFLOW_ENQUEUE_FAILED`.
+    ///    decodes the input with its params type ([`decode_params`]) and runs
+    ///    `build_with`. A member that does not decode, or that no params field
+    ///    takes, fails the node with `WORKER_SERIALIZATION_ERROR`; params
+    ///    that do not decode as a whole with `WORKFLOW_ENQUEUE_FAILED` and
+    ///    the decode's text ([`params_decode_failed_error`]); a failed build,
+    ///    or a spec that the conversion refuses, with
+    ///    `WORKFLOW_ENQUEUE_FAILED` and the class of the error.
     /// 4. The spec, converted to the core's spec data with the classes of
     ///    the app's queues.
     ///
@@ -421,7 +443,7 @@ impl WorkflowRegistry {
         };
         let built = match &definition.kind {
             DefinitionKind::WithoutParams(spec) => Ok((**spec).clone()),
-            DefinitionKind::WithParams(build) => build(input.text()),
+            DefinitionKind::WithParams(build) => build(input.text(), input.args_from_keys()),
         };
         let failure = match built {
             Ok(spec) => match client_spec(&spec, &self.config) {
@@ -437,6 +459,12 @@ impl WorkflowRegistry {
                 },
                 &input,
                 BUILD_WITH,
+            ),
+            Err(ParamsBuildRefused::Undecodable { text }) => params_decode_failed_error(
+                request.parent_workflow_id,
+                &request.parent_workflow_name,
+                request.task_index,
+                &text,
             ),
             Err(ParamsBuildRefused::Failed(error)) => built_failed(request, &error),
         };
@@ -537,35 +565,111 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// The params of a definition, decoded from the params text with the params
-/// type. `()` reads `{}` and `null`, as a task with no parameters does.
-fn decode_params<P: DeserializeOwned + 'static>(text: &str) -> Result<P, ParamsBuildRefused> {
-    let is_unit = TypeId::of::<P>() == TypeId::of::<()>();
-    let text = match (is_unit, text.trim()) {
-        (true, NO_PARAMS_TEXT) => "null",
-        _ => text,
+/// The params of a definition, decoded from the params text `text` with the
+/// params type `P`, with the rule of the static check of a node's params
+/// ([`decode_check`](super::node::decode_check)):
+///
+/// - `()` reads `null` and `{}`, as a task with no parameters does, and
+///   takes no member ([`decode_unit_params`]).
+/// - Another type decodes `text`. Then each member that is not an
+///   `args_from` member (named in `result_members`) must bind to a field of
+///   `P` at every depth: the encoding of the decoded params holds it
+///   ([`unread_node_member`]). This is Python's refusal of a key that no
+///   parameter of `build_with` takes, also for a params type that does not
+///   deny unknown fields. The `args_from` members hold results: they are
+///   decoded and not compared.
+///
+/// Errors: [`ParamsBuildRefused::Member`] for a member whose value does not
+/// decode or that binds to no field, named by the first key of its path;
+/// [`ParamsBuildRefused::Undecodable`] for a failure of the params as a
+/// whole (a field with no member, for one). Pure.
+fn decode_params<P: Serialize + DeserializeOwned + 'static>(
+    text: &str,
+    result_members: &[String],
+) -> Result<P, ParamsBuildRefused> {
+    let refused = |failure: DecodeFailure| params_refusal::<P>(&failure);
+    match TypeId::of::<P>() == TypeId::of::<()>() {
+        true => decode_unit_params::<P>(text),
+        false => {
+            let params = decode_checked::<P>(text.as_bytes()).map_err(refused)?;
+            let compared = static_members(text, result_members).map_err(refused)?;
+            let compared: Vec<&str> = compared.iter().map(String::as_str).collect();
+            unread_node_member(text.as_bytes(), &params, &compared).map_err(refused)?;
+            Ok(params)
+        }
+    }
+}
+
+/// The params `()` from the params text `text`. An object with no member
+/// reads as `null`; the first member of an object binds to no field, with
+/// the text that the static check gives for a task with no parameters. A
+/// value that is not an object goes to the decode as it is: `null` decodes,
+/// and the decode refuses the others.
+///
+/// Errors: [`ParamsBuildRefused::Member`] for a member;
+/// [`ParamsBuildRefused::Undecodable`] for a text that does not decode as
+/// `()`. Pure.
+fn decode_unit_params<P: DeserializeOwned>(text: &str) -> Result<P, ParamsBuildRefused> {
+    use serde_json::Value;
+    let refused = |failure: DecodeFailure| params_refusal::<P>(&failure);
+    let unit_text = match decode_checked::<Value>(text.as_bytes()).map_err(refused)? {
+        Value::Object(members) => match members.into_iter().next() {
+            Some((key, _value)) => {
+                return Err(ParamsBuildRefused::Member {
+                    cause: format!("{key}: unknown field `{key}`, there are no fields"),
+                    key,
+                });
+            }
+            None => UNIT_PARAMS_TEXT,
+        },
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) => {
+            text
+        }
     };
-    decode_checked::<P>(text.as_bytes()).map_err(|failure| {
-        let key = failure
-            .path
-            .split(['.', '['])
-            .next()
-            .filter(|key| !key.is_empty())
-            .map(str::to_owned);
-        match key {
-            Some(key) => ParamsBuildRefused::Member {
-                key,
-                cause: failure.to_string(),
-            },
-            None => ParamsBuildRefused::Failed(
-                HorsiesError::new(format!(
-                    "the params do not decode as {}: {failure}",
-                    std::any::type_name::<P>()
-                ))
-                .with_code(ErrorCode::WorkflowKwargsNotSerializable),
-            ),
+    decode_checked::<P>(unit_text.as_bytes()).map_err(refused)
+}
+
+/// The members of the params text `text` that are not named in
+/// `result_members`: the static members of the node input. A text that is
+/// not an object has none. Pure.
+///
+/// Errors: the decode failure of a text that does not read as JSON.
+fn static_members(text: &str, result_members: &[String]) -> Result<Vec<String>, DecodeFailure> {
+    use serde_json::Value;
+    Ok(match decode_checked::<Value>(text.as_bytes())? {
+        Value::Object(members) => members
+            .into_iter()
+            .map(|(key, _value)| key)
+            .filter(|key| !result_members.contains(key))
+            .collect(),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) => {
+            Vec::new()
         }
     })
+}
+
+/// The refusal of the params type `P` for `failure`: at a member, named by
+/// the first key of its path ([`ParamsBuildRefused::Member`]); at the params
+/// as a whole ([`ParamsBuildRefused::Undecodable`]). Pure.
+fn params_refusal<P>(failure: &DecodeFailure) -> ParamsBuildRefused {
+    let key = failure
+        .path
+        .split(['.', '['])
+        .next()
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    match key {
+        Some(key) => ParamsBuildRefused::Member {
+            key,
+            cause: failure.to_string(),
+        },
+        None => ParamsBuildRefused::Undecodable {
+            text: format!(
+                "the params do not decode as {}: {failure}",
+                std::any::type_name::<P>()
+            ),
+        },
+    }
 }
 
 /// The child spec of a sub-workflow node for the check, or `None` when the
@@ -579,7 +683,9 @@ fn child_for_check(
 ) -> Option<WorkflowSpec> {
     match &definition.kind {
         DefinitionKind::WithoutParams(spec) => Some((**spec).clone()),
-        DefinitionKind::WithParams(build) => match build(params_text) {
+        // The walk builds no child of a node with `args_from` members: every
+        // member of the params text is a static member.
+        DefinitionKind::WithParams(build) => match build(params_text, &[]) {
             Ok(spec) => Some(spec),
             Err(ParamsBuildRefused::Member { key, cause }) => {
                 findings.push(
@@ -587,6 +693,12 @@ fn child_for_check(
                         .with_code(ErrorCode::WorkflowKwargsNotSerializable)
                         .with_note(format!("node '{}': param '{key}': {cause}", node.node_id))
                         .with_help("fix the param, or the params type of the definition"),
+                );
+                None
+            }
+            Err(ParamsBuildRefused::Undecodable { text }) => {
+                findings.push(
+                    HorsiesError::new(text).with_code(ErrorCode::WorkflowKwargsNotSerializable),
                 );
                 None
             }
@@ -605,6 +717,24 @@ fn duplicate(definition: &Definition, cause: String) -> HorsiesError {
     ))
     .with_code(ErrorCode::WorkflowDuplicateDefinitionKey)
     .with_help("give each workflow definition its own name and definition key")
+}
+
+/// The refusal of the spec of a check case that has no definition key, or
+/// a blank one (Python `WorkflowSpec._require_definition_key`, which the
+/// check of a workflow builder runs); `None` for a keyed spec. Pure.
+fn keyless_spec(spec: &WorkflowSpec) -> Option<HorsiesError> {
+    match spec.definition_key().map(str::trim) {
+        Some(key) if !key.is_empty() => None,
+        Some(_) | None => Some(
+            HorsiesError::new("WorkflowSpec is missing definition_key")
+                .with_code(ErrorCode::WorkflowNoDefinitionKey)
+                .with_note(format!(
+                    "workflow '{}' has no stable definition_key",
+                    spec.name()
+                ))
+                .with_help("set a definition key such as 'your.workflow.v1' on the builder"),
+        ),
+    }
 }
 
 fn unregistered_child(spec: &WorkflowSpec, node: &SpecNode, definition_key: &str) -> HorsiesError {

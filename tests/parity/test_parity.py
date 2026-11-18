@@ -17,7 +17,7 @@ import pytest
 
 from horsies.core.types.result import Err, Ok
 from tests.dualrun.databases import DualRunDatabase
-from tests.parity.runner import Client, compare_sides, run_side, rust_binary
+from tests.parity.runner import Client, PingReport, compare_sides, run_side, rust_binary
 from tests.parity.scenarios import SCENARIOS, Scenario
 
 pytestmark = [pytest.mark.e2e]
@@ -43,6 +43,10 @@ def test_the_rust_client_leaves_what_the_python_client_leaves(
             pass
         case Err(failed):
             pytest.fail(f'the Rust side failed: {failed.detail}')
+    pings = [entry for entry in python.report.values() if isinstance(entry, PingReport)]
+    assert all(
+        ping == PingReport(workers=len(scenario.profiles), targeted=1) for ping in pings
+    ), f'the Python pings: {pings}'
     result = compare_sides(python, rust)
     assert result.snapshot_differences == (), '\n'.join(result.snapshot_differences)
     assert result.planned_seen, 'the client family rows are not PYTHON and RUST'

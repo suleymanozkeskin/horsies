@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use super::subworkflow_matrix::{
     after, assert_ok_value, assert_subworkflow_error, drive, fail_child, get, given_params_node,
-    mark, nested_slow_middle, node_result, ok_child, outputless_entry, outputless_parent, parent,
-    registry, success_surface_parent, SLOW_KEY,
+    mark, matrix_children, nested_slow_middle, node_result, ok_child, outputless_entry,
+    outputless_parent, parent, success_surface_parent, SLOW_KEY,
 };
 use super::support::{
     child_of, code, err, error_of, finish_phase1, handle, node, node_status, ok, shared_pool, spec,
@@ -26,13 +26,15 @@ use crate::broker::attempt_writes::{
 use crate::broker::core_rows::StatementLog;
 use crate::broker::expiry_and_orphans::expire_pending_pass;
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
-use crate::core::registry::workflow::RegisteredWorkflowSpec;
-use crate::core::{WorkflowSpec, WorkflowSpecRegistry};
-use crate::workflow_engine::engine::on_workflow_task_complete;
-use crate::workflow_engine::phase2_recovery::drive_phase2_recovery;
-use crate::workflow_engine::recovery::{recover_stuck_workflows, GLOBAL_SCAN_ROW_CAP};
+use crate::core::WorkflowSpec;
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::engine::on_workflow_task_complete_with;
+use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
+use crate::workflow_engine::recovery::{
+    recover_stuck_workflows_observed_with, GLOBAL_SCAN_ROW_CAP,
+};
+use crate::workflow_engine::steps::ChildBuild;
 
 /// Python `_run_workflow_recovery`: quarantine bound of the phase-2 drain.
 const QUARANTINE_AFTER_ATTEMPTS: u32 = 25;
@@ -62,22 +64,20 @@ fn slow_parent(name: &str, value: &str) -> WorkflowSpec {
 }
 
 /// One recovery pass; returns the work it applied.
-async fn recovery_pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> u64 {
-    let phase2 = drive_phase2_recovery(
+async fn recovery_pass(pool: &PgPool, child_specs: &TestChildSpecs) -> u64 {
+    let phase2 = drive_phase2_recovery_with(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        registry,
+        ChildBuild::Client(child_specs),
         0,
         GLOBAL_SCAN_ROW_CAP,
         QUARANTINE_AFTER_ATTEMPTS,
-        &RetentionConfig::default(),
     )
     .await
     .expect("the phase-2 drain");
-    let report = recover_stuck_workflows(
+    let report = recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        registry,
+        ChildBuild::Client(child_specs),
         FAILURE_LIMIT,
-        &RetentionConfig::default(),
     )
     .await
     .expect("the stuck-workflow scan");
@@ -154,7 +154,7 @@ async fn cancel_before_the_child_starts_skips_the_node_and_starts_no_child() {
             ],
             Some(1),
         ),
-        &registry(),
+        &matrix_children(),
     )
     .await;
 
@@ -171,9 +171,9 @@ async fn cancel_before_the_child_starts_skips_the_node_and_starts_no_child() {
 #[serial]
 async fn cancel_of_a_completed_workflow_changes_nothing() {
     let pool = shared_pool().await;
-    let registry = registry();
-    let workflow_id = start(&pool, &success_surface_parent(), &registry).await;
-    drive(&pool, workflow_id, &registry).await;
+    let child_specs = matrix_children();
+    let workflow_id = start(&pool, &success_surface_parent(), &child_specs).await;
+    drive(&pool, workflow_id, &child_specs).await;
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 
     handle(&pool, workflow_id).cancel().await.expect("cancel()");
@@ -195,7 +195,7 @@ async fn cancel_reaches_the_middle_and_the_leaf_workflow() {
             vec![sub_workflow_node(0, &nested_slow_middle())],
             Some(0),
         ),
-        &registry(),
+        &matrix_children(),
     )
     .await;
     let middle_id = child_of(&pool, workflow_id, 0).await;
@@ -224,7 +224,7 @@ async fn pause_of_the_parent_pauses_its_running_child() {
     let workflow_id = start(
         &pool,
         &slow_parent("pause_running_child", "pause_me"),
-        &registry(),
+        &matrix_children(),
     )
     .await;
     let child_id = child_of(&pool, workflow_id, 0).await;
@@ -246,19 +246,22 @@ async fn pause_of_the_parent_pauses_its_running_child() {
 #[serial]
 async fn pause_then_resume_of_the_parent_completes_parent_and_child() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = matrix_children();
     let workflow_id = start(
         &pool,
         &slow_parent("pause_resume_completes", "resume_me"),
-        &registry,
+        &child_specs,
     )
     .await;
     let child_id = child_of(&pool, workflow_id, 0).await;
     let workflow_handle = handle(&pool, workflow_id);
 
     assert!(workflow_handle.pause().await.expect("pause()"));
-    assert!(workflow_handle.resume().await.expect("resume()"));
-    drive(&pool, workflow_id, &registry).await;
+    assert!(workflow_handle
+        .resume(&TestChildSpecs::empty())
+        .await
+        .expect("resume()"));
+    drive(&pool, workflow_id, &child_specs).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
     assert_eq!(workflow_status(&pool, child_id).await, "COMPLETED");
@@ -276,7 +279,7 @@ async fn cancel_of_a_paused_parent_cancels_its_paused_child() {
     let workflow_id = start(
         &pool,
         &slow_parent("pause_then_cancel", "pause_cancel_me"),
-        &registry(),
+        &matrix_children(),
     )
     .await;
     let child_id = child_of(&pool, workflow_id, 0).await;
@@ -299,7 +302,7 @@ async fn cancel_of_a_paused_parent_cancels_its_paused_child() {
 #[serial]
 async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() {
     let db = IsolatedDatabase::create().await;
-    let registry = registry();
+    let child_specs = matrix_children();
     let workflow_id = start(
         &db.pool,
         &parent(
@@ -310,7 +313,7 @@ async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() 
             ],
             Some(1),
         ),
-        &registry,
+        &child_specs,
     )
     .await;
     mark_node_completed(&db.pool, workflow_id, 0, serde_json::json!("gate")).await;
@@ -322,9 +325,9 @@ async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() 
     .await
     .expect("leave the child node READY");
 
-    assert!(recovery_pass(&db.pool, &registry).await >= 1);
+    assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
     let child_id = child_of(&db.pool, workflow_id, 1).await;
-    drive(&db.pool, workflow_id, &registry).await;
+    drive(&db.pool, workflow_id, &child_specs).await;
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
     assert_eq!(workflow_status(&db.pool, child_id).await, "COMPLETED");
@@ -339,8 +342,8 @@ async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() 
 #[serial]
 async fn recovery_writes_an_ended_child_into_its_running_parent_node() {
     let db = IsolatedDatabase::create().await;
-    let registry = registry();
-    let succeeded = start(&db.pool, &success_surface_parent(), &registry).await;
+    let child_specs = matrix_children();
+    let succeeded = start(&db.pool, &success_surface_parent(), &child_specs).await;
     let failed = start(
         &db.pool,
         &parent(
@@ -348,15 +351,15 @@ async fn recovery_writes_an_ended_child_into_its_running_parent_node() {
             vec![sub_workflow_node(0, &fail_child())],
             Some(0),
         ),
-        &registry,
+        &child_specs,
     )
     .await;
     for workflow_id in [succeeded, failed] {
-        drive(&db.pool, workflow_id, &registry).await;
+        drive(&db.pool, workflow_id, &child_specs).await;
         revert_end(&db.pool, workflow_id, true).await;
     }
 
-    assert!(recovery_pass(&db.pool, &registry).await >= 1);
+    assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
 
     assert_eq!(workflow_status(&db.pool, succeeded).await, "COMPLETED");
     assert_ok_value(&get(&db.pool, succeeded).await, serde_json::json!(11));
@@ -373,17 +376,17 @@ async fn recovery_writes_an_ended_child_into_its_running_parent_node() {
 #[serial]
 async fn recovery_completes_a_child_whose_task_completed_and_then_its_parent() {
     let db = IsolatedDatabase::create().await;
-    let registry = registry();
+    let child_specs = matrix_children();
     let workflow_id = start(
         &db.pool,
         &slow_parent("recovery_parent_crashed_mid_child", "recovered_child"),
-        &registry,
+        &child_specs,
     )
     .await;
     let child_id = child_of(&db.pool, workflow_id, 0).await;
     mark_node_completed(&db.pool, child_id, 0, serde_json::json!("recovered_child")).await;
 
-    assert!(recovery_pass(&db.pool, &registry).await >= 1);
+    assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
 
     assert_eq!(workflow_status(&db.pool, child_id).await, "COMPLETED");
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
@@ -400,13 +403,13 @@ async fn recovery_completes_a_child_whose_task_completed_and_then_its_parent() {
 #[serial]
 async fn recovery_rebuilds_an_outputless_map_with_the_failed_child_error() {
     let db = IsolatedDatabase::create().await;
-    let registry = registry();
-    let workflow_id = start(&db.pool, &outputless_parent(), &registry).await;
-    drive(&db.pool, workflow_id, &registry).await;
+    let child_specs = matrix_children();
+    let workflow_id = start(&db.pool, &outputless_parent(), &child_specs).await;
+    drive(&db.pool, workflow_id, &child_specs).await;
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
     revert_end(&db.pool, workflow_id, false).await;
 
-    assert!(recovery_pass(&db.pool, &registry).await >= 1);
+    assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
     let got = get(&db.pool, workflow_id).await;
@@ -502,12 +505,12 @@ async fn fail_attempt(pool: &PgPool, task_id: Uuid) -> FailedAttempt {
 async fn start_retry_parent(
     pool: &PgPool,
     name: &str,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) -> (Uuid, Uuid, Uuid) {
     let workflow_id = start(
         pool,
         &parent(name, vec![sub_workflow_node(0, &retry_child())], Some(0)),
-        registry,
+        child_specs,
     )
     .await;
     let child_id = child_of(pool, workflow_id, 0).await;
@@ -524,15 +527,8 @@ async fn start_retry_parent(
     (workflow_id, child_id, task_id)
 }
 
-fn retry_registry() -> WorkflowSpecRegistry {
-    let mut registry = registry();
-    registry
-        .register(RegisteredWorkflowSpec {
-            spec: retry_child(),
-            spec_builder: None,
-        })
-        .expect("register the retry child");
-    registry
+fn retry_children() -> TestChildSpecs {
+    matrix_children().with_spec(retry_child())
 }
 
 /// `test_subworkflow_child_retries_succeed_eventually`: the child task fails
@@ -541,9 +537,9 @@ fn retry_registry() -> WorkflowSpecRegistry {
 #[serial]
 async fn a_child_task_that_succeeds_on_its_retry_completes_the_parent() {
     let pool = shared_pool().await;
-    let registry = retry_registry();
+    let child_specs = retry_children();
     let (workflow_id, child_id, task_id) =
-        start_retry_parent(&pool, "child_retries_succeed_eventually", &registry).await;
+        start_retry_parent(&pool, "child_retries_succeed_eventually", &child_specs).await;
 
     match fail_attempt(&pool, task_id).await {
         FailedAttempt::Retried => {}
@@ -554,7 +550,7 @@ async fn a_child_task_that_succeeds_on_its_retry_completes_the_parent() {
         &pool,
         task_id,
         &ok(serde_json::json!("succeeded_on_attempt_2")),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -572,9 +568,9 @@ async fn a_child_task_that_succeeds_on_its_retry_completes_the_parent() {
 #[serial]
 async fn a_child_task_that_spends_its_retries_fails_the_parent() {
     let pool = shared_pool().await;
-    let registry = retry_registry();
+    let child_specs = retry_children();
     let (workflow_id, child_id, task_id) =
-        start_retry_parent(&pool, "child_retries_exhaust", &registry).await;
+        start_retry_parent(&pool, "child_retries_exhaust", &child_specs).await;
 
     let mut attempts = 0;
     let mut ended = None;
@@ -586,11 +582,10 @@ async fn a_child_task_that_spends_its_retries_fails_the_parent() {
         }
     }
     let _ = ended.expect("the retries end");
-    on_workflow_task_complete(
+    on_workflow_task_complete_with(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &registry,
-        &RetentionConfig::default(),
+        ChildBuild::Client(&child_specs),
     )
     .await
     .expect("phase 2 of the last failure");
@@ -612,13 +607,7 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
     expiring.good_until = Some(Utc::now() - chrono::Duration::milliseconds(100));
     let mut expired_child = spec("e2e_sub_expired_workflow", vec![expiring]);
     expired_child.output_index = Some(0);
-    let mut registry = registry();
-    registry
-        .register(RegisteredWorkflowSpec {
-            spec: expired_child.clone(),
-            spec_builder: None,
-        })
-        .expect("register the expiring child");
+    let child_specs = matrix_children().with_spec(expired_child.clone());
     let workflow_id = start(
         &db.pool,
         &parent(
@@ -626,7 +615,7 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
             vec![sub_workflow_node(0, &expired_child)],
             Some(0),
         ),
-        &registry,
+        &child_specs,
     )
     .await;
     let child_id = child_of(&db.pool, workflow_id, 0).await;
@@ -638,7 +627,7 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
             .expired()
             >= 1
     );
-    assert!(recovery_pass(&db.pool, &registry).await >= 1);
+    assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
 
     assert_eq!(workflow_status(&db.pool, child_id).await, "FAILED");
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "FAILED");

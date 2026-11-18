@@ -25,12 +25,11 @@ tick.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, assert_never
+from typing import assert_never
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from horsies._core import CoreHandle, PruneFailed, PrunePassRecord
-from horsies.core.types.core_failure import CoreOperationFailed
 
 from ..commands import (
     DETACH_STATEMENT_TIMEOUT_MS,
@@ -76,7 +75,6 @@ __all__ = [
     'DETACH_STATEMENT_TIMEOUT_MS',
     'HistoryLeafSwept',
     'PRUNE_BOUNDS',
-    'PRUNING_SUBJECT',
     'PrunePass',
     'PrunePassSummary',
     'prune_expired_partitions',
@@ -430,10 +428,6 @@ def summary_of_pass(prune: PrunePass) -> PrunePassSummary:
     )
 
 
-PRUNING_SUBJECT: Final = 'CoreHandle.prune_expired_partitions_async'
-"""The subject of a ``CoreOperationFailed`` of the core pruning pass."""
-
-
 async def prune_expired_partitions_in_core(handle: CoreHandle) -> PrunePassSummary:
     """One pruning pass in the core (``CoreHandle.prune_expired_partitions_async``):
     the steps of ``prune_expired_partitions`` with ``StagedLoaderPublisher``
@@ -445,9 +439,10 @@ async def prune_expired_partitions_in_core(handle: CoreHandle) -> PrunePassSumma
 
     Returns the summary of the core's record. Raises:
 
-    - ``CoreOperationFailed`` when the pass has no report (the connect, the
-      client family check or the candidate read failed); nothing was
-      detached or dropped;
+    - the record's ``CoreFailure`` (the core's class of the cause, with the
+      subject ``prune_expired_partitions``) when the pass has no report (the
+      connect, the client family check or the candidate read failed);
+      nothing was detached or dropped;
     - ``CoreError`` when the core of this process cannot run the pass.
 
     A cancel of the caller does not stop the pass: the core runs it to its
@@ -464,7 +459,7 @@ async def prune_expired_partitions_in_core(handle: CoreHandle) -> PrunePassSumma
                 errors=tuple(record.errors),
                 reach=PruneReach(record.reach),
             )
-        case PruneFailed(message=message, retryable=retryable):
-            raise CoreOperationFailed(PRUNING_SUBJECT, message, retryable)
+        case PruneFailed(exception=exception):
+            raise exception
         case _ as unreachable:
             assert_never(unreachable)

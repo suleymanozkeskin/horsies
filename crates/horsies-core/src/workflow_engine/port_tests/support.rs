@@ -9,8 +9,10 @@
 //! Times that the engine compares with the database clock are set with
 //! `NOW()` in SQL, so the test clock never enters a comparison.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -23,31 +25,38 @@ use crate::broker::attempt_writes::{
 use crate::broker::lifecycle_tests::support::{
     database_options, unpinged_single_connection_pool, WireProxy,
 };
+use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage_in_pool, CoverageOutcome,
 };
 use crate::core::lifecycle::{OwnedClaim, TerminalizationOutcome};
-use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+use crate::core::workflow::handle_types::HandleResult;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
-use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::core::{
+    AnyNode, OnError, OutcomeCode, RetrievalCode, SubWorkflowSummary, TaskError, TaskResult,
+    WorkflowSpec, WorkflowStatus, WorkflowTaskStatus,
+};
 use crate::db::CheckoutClass;
+use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::worker::execution::{
     finalize_workflow_phase, persist_failed_attempt, persist_ok_result, FinalizeOutcome,
     PhaseTwoForm,
 };
-use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::{
-    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
+    on_workflow_task_complete_with, WorkflowTaskCompletion, WorkflowTaskCompletionError,
+};
+use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::lifecycle::resume_client_workflow;
+use crate::workflow_engine::query::{
+    wait_workflow_end, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
+    TerminalErrorStatus, WorkflowEnd, WorkflowWait,
 };
 use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
-use crate::workflow_engine::start::start_workflow;
 use crate::workflow_engine::steps::{
     advance_parents, ChildBuild, OwedParentAdvances, ParentAdvance,
 };
@@ -671,7 +680,6 @@ pub(super) fn task_node(index: usize, task_name: &str) -> AnyNode {
         dependencies: Vec::new(),
         args_from: std::collections::HashMap::new(),
         workflow_ctx_from: None,
-        workflow_ctx_from_refs: None,
         queue: Some(PORT_QUEUE.to_owned()),
         priority: Some(100),
         allow_failed_deps: false,
@@ -727,56 +735,58 @@ pub(super) fn required(cases: &[&[usize]]) -> SuccessPolicy {
     }
 }
 
-/// A registry that resolves each of `children` by its definition key.
-pub(super) fn registry_of(children: &[WorkflowSpec]) -> WorkflowSpecRegistry {
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    for child in children {
-        registry
-            .register(RegisteredWorkflowSpec {
-                spec: child.clone(),
-                spec_builder: None,
-            })
-            .unwrap_or_else(|error| panic!("register child '{}': {error}", child.name));
-    }
-    registry
+/// The child specs that resolve each of `children` by its definition key.
+pub(super) fn child_specs_of(children: &[WorkflowSpec]) -> TestChildSpecs {
+    TestChildSpecs::of(children)
 }
 
-/// A broker on `pool` for the start and the handle.
+/// A broker on `pool` for the start and the reads.
 pub(super) fn broker(pool: &PgPool) -> Arc<PostgresBroker> {
     Arc::new(PostgresBroker::from_pool(pool.clone()))
 }
 
-/// Starts `spec` through the core start with `workflow_id`, or a new id.
+/// Starts `spec` through the core's start of a client spec
+/// (`PostgresBroker::start_client_workflow`) with `workflow_id`, or a new
+/// id, the children of its sub-workflow roots from `child_specs`, and no
+/// resend. Returns the id with the outcome.
 pub(super) async fn try_start(
     pool: &PgPool,
     spec: &WorkflowSpec,
     workflow_id: Option<Uuid>,
-    registry: &WorkflowSpecRegistry,
-) -> crate::core::WorkflowStartResult<WorkflowHandle<serde_json::Value>> {
-    start_workflow(
-        &broker(pool),
-        spec,
-        workflow_id,
-        registry,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
+    child_specs: &TestChildSpecs,
+) -> (Uuid, Result<ClientStartOutcome, ClientStartError>) {
+    let workflow_id = workflow_id.unwrap_or_else(Uuid::new_v4);
+    let started = broker(pool)
+        .start_client_workflow(
+            &child_specs.client_spec(spec),
+            workflow_id,
+            Utc::now(),
+            false,
+            child_specs,
+        )
+        .await;
+    (workflow_id, started)
 }
 
 /// Starts `spec` with a new id through the core start, and returns the id.
+///
+/// Panics: a start that is refused or finds an existing workflow.
 pub(super) async fn start(
     pool: &PgPool,
     spec: &WorkflowSpec,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) -> Uuid {
-    let workflow_id = Uuid::new_v4();
-    match try_start(pool, spec, Some(workflow_id), registry).await {
-        Ok(handle) => assert_eq!(handle.workflow_id(), workflow_id),
-        Err(error) => panic!("start of workflow '{}' failed: {error:?}", spec.name),
+    match try_start(pool, spec, None, child_specs).await {
+        (workflow_id, Ok(ClientStartOutcome::Started)) => workflow_id,
+        (workflow_id, Ok(outcome)) => panic!(
+            "start of workflow '{}' ({workflow_id}) wrote nothing: {outcome:?}",
+            spec.name
+        ),
+        (workflow_id, Err(error)) => panic!(
+            "start of workflow '{}' ({workflow_id}) failed: {error:?}",
+            spec.name
+        ),
     }
-    workflow_id
 }
 
 /// The time an unreachable pool waits for a connection.
@@ -797,22 +807,245 @@ pub(super) fn unreachable_pool() -> PgPool {
         )
 }
 
-/// A handle whose broker pool is [`unreachable_pool`].
-pub(super) fn unreachable_handle(workflow_id: Uuid) -> WorkflowHandle<serde_json::Value> {
+/// The reads and operations of one workflow through the core functions
+/// that a client's handle calls, on a broker of one pool.
+pub(super) struct WorkflowOps {
+    workflow_id: Uuid,
+    broker: Arc<PostgresBroker>,
+}
+
+impl WorkflowOps {
+    /// The end of the workflow, waiting up to `timeout`, with its stored
+    /// values as text (`query::wait_workflow_end`).
+    pub(super) async fn end(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<WorkflowWait, WorkflowError> {
+        wait_workflow_end(&self.broker, self.workflow_id, timeout).await
+    }
+
+    /// The result of the workflow, waiting up to `timeout` for its end
+    /// ([`Self::end`]), read here as a client reads it ([`result_of_end`]).
+    pub(super) async fn get(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<TaskResult<serde_json::Value>, WorkflowError> {
+        Ok(result_of_end(self.workflow_id, self.end(timeout).await?))
+    }
+
+    /// The status of the workflow (`PostgresBroker::workflow_status`).
+    pub(super) async fn status(&self) -> HandleResult<WorkflowStatus> {
+        self.broker.workflow_status(self.workflow_id).await
+    }
+
+    /// The nodes of the workflow that store a result
+    /// (`PostgresBroker::workflow_node_results`).
+    pub(super) async fn node_results(&self) -> HandleResult<NodeResultsRead> {
+        self.broker.workflow_node_results(self.workflow_id).await
+    }
+
+    /// The stored result of each node with a node id ([`Self::node_results`]),
+    /// each envelope read. Panics for a missing workflow.
+    pub(super) async fn results(
+        &self,
+    ) -> HandleResult<HashMap<String, TaskResult<serde_json::Value>>> {
+        match self.node_results().await? {
+            NodeResultsRead::WorkflowAbsent => {
+                panic!("no workflow has the id {}", self.workflow_id)
+            }
+            NodeResultsRead::Nodes(nodes) => Ok(nodes
+                .into_iter()
+                .filter_map(|node| {
+                    let result = stored_result(&node.result);
+                    node.node_id.map(|node_id| (node_id, result))
+                })
+                .collect()),
+        }
+    }
+
+    /// The stored result of the node `node_id`
+    /// (`PostgresBroker::workflow_node_result`).
+    pub(super) async fn node_result(
+        &self,
+        node_id: &str,
+    ) -> HandleResult<Option<StoredNodeResult>> {
+        self.broker
+            .workflow_node_result(self.workflow_id, node_id)
+            .await
+    }
+
+    /// The result of the node `node_id` ([`Self::node_result`]), its
+    /// envelope read and its value read as `V`. Panics for a node that
+    /// stores no result, or a value that does not read as `V`.
+    pub(super) async fn result_for<V: serde::de::DeserializeOwned>(
+        &self,
+        node_id: &str,
+    ) -> HandleResult<TaskResult<V>> {
+        let stored = self.node_result(node_id).await?.unwrap_or_else(|| {
+            panic!(
+                "node {node_id} of workflow {} stores no result",
+                self.workflow_id
+            )
+        });
+        Ok(match stored_result(&stored.result) {
+            TaskResult::Ok(value) => {
+                TaskResult::Ok(serde_json::from_value(value).unwrap_or_else(|error| {
+                    panic!("the result of node {node_id} does not read: {error}")
+                }))
+            }
+            TaskResult::Err(error) => TaskResult::Err(error),
+        })
+    }
+
+    /// The nodes of the workflow (`PostgresBroker::workflow_nodes`).
+    pub(super) async fn nodes(&self) -> HandleResult<NodesRead> {
+        self.broker.workflow_nodes(self.workflow_id).await
+    }
+
+    /// The nodes of the workflow ([`Self::nodes`]), each read
+    /// ([`NodeInfo::of_stored`]). Panics for a missing workflow.
+    pub(super) async fn tasks(&self) -> HandleResult<Vec<NodeInfo>> {
+        match self.nodes().await? {
+            NodesRead::WorkflowAbsent => panic!("no workflow has the id {}", self.workflow_id),
+            NodesRead::Nodes(nodes) => Ok(nodes.into_iter().map(NodeInfo::of_stored).collect()),
+        }
+    }
+
+    /// `PostgresBroker::cancel_workflow`.
+    pub(super) async fn cancel(&self) -> HandleResult<bool> {
+        self.broker.cancel_workflow(self.workflow_id).await
+    }
+
+    /// `PostgresBroker::pause_workflow`.
+    pub(super) async fn pause(&self) -> HandleResult<bool> {
+        self.broker.pause_workflow(self.workflow_id).await
+    }
+
+    /// The resume of a client whose children come from `child_specs`
+    /// (`lifecycle::resume_client_workflow`).
+    pub(super) async fn resume(&self, child_specs: &TestChildSpecs) -> HandleResult<bool> {
+        resume_client_workflow(&self.broker, self.workflow_id, child_specs).await
+    }
+}
+
+/// The result of the end of `workflow_id`, read as a client reads it: the
+/// stored result envelope of a COMPLETED workflow (of an outputless one, the
+/// `results_by_id` map of its envelope, each entry an envelope); the stored
+/// error of a FAILED, CANCELLED or EXPIRED workflow, or the code of its
+/// status when it stores none; the code of a PAUSED, missing or unfinished
+/// workflow. The read is the clients'; the tests read the core's stored
+/// values through it. Panics for a stored value that does not read.
+pub(super) fn result_of_end(
+    workflow_id: Uuid,
+    wait: WorkflowWait,
+) -> TaskResult<serde_json::Value> {
+    match wait {
+        WorkflowWait::NotFound => TaskResult::Err(TaskError::builtin(
+            RetrievalCode::WorkflowNotFound,
+            format!("workflow {workflow_id} not found"),
+        )),
+        WorkflowWait::TimedOut => TaskResult::Err(TaskError::builtin(
+            RetrievalCode::WaitTimeout,
+            format!("workflow {workflow_id} is not terminal"),
+        )),
+        WorkflowWait::Ended(WorkflowEnd::Paused) => TaskResult::Err(TaskError::builtin(
+            OutcomeCode::WorkflowPaused,
+            "workflow is paused awaiting intervention",
+        )),
+        WorkflowWait::Ended(WorkflowEnd::Ended {
+            status,
+            error: None,
+        }) => TaskResult::Err(TaskError::builtin(
+            ended_code(status),
+            format!("workflow {workflow_id} is {}", status.wire_value()),
+        )),
+        WorkflowWait::Ended(WorkflowEnd::Ended {
+            error: Some(text), ..
+        }) => TaskResult::Err(stored_error(&text)),
+        WorkflowWait::Ended(WorkflowEnd::Completed { result }) => {
+            let text = result
+                .unwrap_or_else(|| panic!("COMPLETED workflow {workflow_id} stores no result"));
+            completed_result(&text)
+        }
+    }
+}
+
+/// The code of an ended status with no stored error.
+fn ended_code(status: TerminalErrorStatus) -> OutcomeCode {
+    match status {
+        TerminalErrorStatus::Failed => OutcomeCode::WorkflowFailed,
+        TerminalErrorStatus::Cancelled => OutcomeCode::WorkflowCancelled,
+        TerminalErrorStatus::Expired => OutcomeCode::WorkflowExpired,
+    }
+}
+
+/// The stored result of a COMPLETED workflow: its envelope, or for an
+/// outputless workflow the `results_by_id` map of its envelope.
+fn completed_result(text: &str) -> TaskResult<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("the stored result is not JSON: {error}: {text}"));
+    match value.get("__h_outputless_terminals__") {
+        Some(serde_json::Value::Bool(true)) => TaskResult::Ok(value["ok"]["results_by_id"].clone()),
+        Some(_) | None => stored_result(text),
+    }
+}
+
+/// One stored node, read as a client reads it (`tasks()`): its status, its
+/// result envelope and its sub-workflow summary.
+#[derive(Debug)]
+pub(super) struct NodeInfo {
+    pub(super) index: i32,
+    pub(super) name: String,
+    pub(super) status: WorkflowTaskStatus,
+    pub(super) result: Option<TaskResult<serde_json::Value>>,
+    pub(super) started_at: Option<DateTime<Utc>>,
+    pub(super) completed_at: Option<DateTime<Utc>>,
+    pub(super) sub_workflow_id: Option<Uuid>,
+    pub(super) sub_workflow_summary: Option<SubWorkflowSummary>,
+}
+
+impl NodeInfo {
+    /// The node of `stored`. Panics for a stored value that does not read.
+    pub(super) fn of_stored(stored: StoredNode) -> Self {
+        let status = serde_json::from_value(serde_json::Value::String(stored.status.clone()))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "node {} stores the status {:?}: {error}",
+                    stored.task_index, stored.status
+                )
+            });
+        let sub_workflow_summary = stored.sub_workflow_summary.as_deref().map(stored_summary);
+        Self {
+            index: stored.task_index,
+            name: stored.task_name,
+            status,
+            result: stored.result.as_deref().map(stored_result),
+            started_at: stored.started_at,
+            completed_at: stored.completed_at,
+            sub_workflow_id: stored.sub_workflow_id,
+            sub_workflow_summary,
+        }
+    }
+}
+
+/// A stored sub-workflow summary (`horsies_workflow_tasks.sub_workflow_summary`).
+pub(super) fn stored_summary(text: &str) -> SubWorkflowSummary {
+    SubWorkflowSummary::from_stored_text(text)
+        .unwrap_or_else(|refused| panic!("the stored summary does not read: {refused}: {text}"))
+}
+
+/// The reads and operations of `workflow_id` on a broker of
+/// [`unreachable_pool`].
+pub(super) fn unreachable_handle(workflow_id: Uuid) -> WorkflowOps {
     handle(&unreachable_pool(), workflow_id)
 }
 
-/// A handle on `workflow_id` with an empty registry and default policies.
-pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowHandle<serde_json::Value> {
-    WorkflowHandle::new(
+/// The reads and operations of `workflow_id` on a broker of `pool`.
+pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowOps {
+    WorkflowOps {
         workflow_id,
-        broker(pool),
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-        )),
-        PayloadPolicy::default(),
-        RetentionConfig::default(),
-    )
+        broker: broker(pool),
+    }
 }
 
 /// Takes the live task of a node to RUNNING under [`WORKER`], with the process
@@ -853,9 +1086,9 @@ pub(super) async fn finish_task(
     pool: &PgPool,
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) {
-    try_finish_task(pool, task_id, outcome, registry)
+    try_finish_task(pool, task_id, outcome, child_specs)
         .await
         .expect("phase 2 of the workflow task");
 }
@@ -865,14 +1098,13 @@ pub(super) async fn try_finish_task(
     pool: &PgPool,
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
     let _ = finish_phase1(pool, task_id, outcome).await;
-    on_workflow_task_complete(
+    on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        registry,
-        &RetentionConfig::default(),
+        ChildBuild::Client(child_specs),
     )
     .await
 }
@@ -919,13 +1151,13 @@ pub(super) async fn finish_node(
     workflow_id: Uuid,
     task_index: i32,
     outcome: &TaskResult<serde_json::Value>,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) -> Uuid {
     let task_id = node(pool, workflow_id, task_index)
         .await
         .task_id
         .unwrap_or_else(|| panic!("node {task_index} of {workflow_id} has no task"));
-    finish_task(pool, task_id, outcome, registry).await;
+    finish_task(pool, task_id, outcome, child_specs).await;
     task_id
 }
 
@@ -938,7 +1170,7 @@ pub(super) async fn finish_node(
 pub(super) async fn complete_workflow(
     pool: &PgPool,
     workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) {
     let broker = broker(pool);
     let advance = match complete_in_tree(&broker, workflow_id)
@@ -948,7 +1180,7 @@ pub(super) async fn complete_workflow(
         TreeCompletion::Written { advance } => advance,
         TreeCompletion::Unchanged => ParentAdvance::NotOwed,
     };
-    drive_parent_advances(&broker, OwedParentAdvances::of(advance), registry).await;
+    drive_parent_advances(&broker, OwedParentAdvances::of(advance), child_specs).await;
 }
 
 /// Advances the parent node above the terminal child `child_workflow_id`,
@@ -958,12 +1190,12 @@ pub(super) async fn complete_workflow(
 pub(super) async fn advance_parent_of(
     pool: &PgPool,
     child_workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) {
     drive_parent_advances(
         &broker(pool),
         OwedParentAdvances::of(ParentAdvance::Owed { child_workflow_id }),
-        registry,
+        child_specs,
     )
     .await;
 }
@@ -971,17 +1203,13 @@ pub(super) async fn advance_parent_of(
 async fn drive_parent_advances(
     broker: &PostgresBroker,
     owed: OwedParentAdvances,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) {
-    let retention = RetentionConfig::default();
     advance_parents(
         broker,
         CheckoutClass::Reserved,
         owed,
-        ChildBuild::Registry {
-            registry,
-            retention: &retention,
-        },
+        ChildBuild::Client(child_specs),
     )
     .await
     .unwrap_or_else(|failure| {
@@ -1143,16 +1371,13 @@ pub(super) async fn worker_phase_one(
 /// top-level workflows).
 pub(super) async fn worker_phase_two(
     broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
     task: &RunningNodeTask,
     done: PhaseOneDone,
 ) {
     let owed = finalize_workflow_phase(
         broker,
-        ChildBuild::Registry {
-            registry,
-            retention: &RetentionConfig::default(),
-        },
+        ChildBuild::Client(child_specs),
         task.task_id,
         &task.queue_name,
         true,

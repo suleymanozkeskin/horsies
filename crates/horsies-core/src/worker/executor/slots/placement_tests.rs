@@ -10,16 +10,14 @@ use std::time::Duration;
 
 use super::scripted::{
     idle_child, isolated_config, isolated_init, process_ended, read_frame, send, serving, shell,
-    start_isolated, take, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    start_isolated, take_init, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::worker::executor::placement::{
     allowed_cpus, parse_cpu_list, plan_own_core, ChildCpus, CpuIds, CpuPlacement, WorkerThreads,
     MAX_CPU_ID,
 };
-use crate::worker::executor::protocol::{
-    ChildFrame, ParentFrame, ProcessId, ReadyFrame, RssReading,
-};
+use crate::worker::executor::protocol::{ChildFrame, ProcessId, ReadyFrame, RssReading};
 use crate::worker::executor::supervisor::{BootFailureCause, Spawner, CHILD_BOOT_ATTEMPTS};
 
 const START_WAIT: Duration = Duration::from_secs(30);
@@ -61,7 +59,7 @@ fn ready() -> ChildFrame {
 fn child_that_reports_its_cpus(file: &str) -> String {
     format!(
         "{}grep Cpus_allowed_list /proc/$$/status > {file}; {}{}exit 3",
-        take(&ParentFrame::Init(isolated_init())),
+        take_init(),
         send(&[ready()]),
         read_frame(),
     )
@@ -80,10 +78,7 @@ fn cpus_in(file: &str) -> CpuIds {
 async fn a_refused_child_placement_kills_the_child_and_fails_its_start() {
     let dir = TestDir::new();
     let inited = dir.file("inited");
-    let script = format!(
-        "{}echo $$ >> {inited}; exec sleep 60",
-        take(&ParentFrame::Init(isolated_init())),
-    );
+    let script = format!("{}echo $$ >> {inited}; exec sleep 60", take_init(),);
     let config = IsolatedPoolConfig {
         child_cpus: ChildCpus::Set(cpus(&[MAX_CPU_ID])),
         ..isolated_config(shell(&script))

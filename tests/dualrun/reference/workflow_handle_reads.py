@@ -45,11 +45,9 @@ from horsies.core.models.workflow.handle import (
     WorkflowHandle,
     WorkflowTaskInfo,
     _broker_task_error,
-    _completed_without_stored_result,
     _decode_per_task_envelope,
     _decode_stored_workflow_error,
     _decode_workflow_envelope,
-    _empty_stored_error,
     _terminal_outcome_code,
     _TerminalErrorStatus,
     _wait_inside_task_result,
@@ -67,6 +65,36 @@ from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 logger = get_logger('workflow.handle')
+
+
+def _completed_without_stored_result(
+    workflow_id: str, stored_form: Literal['NULL', 'empty'],
+) -> TaskResult[Any, TaskError]:
+    """``RESULT_DESERIALIZATION_ERROR`` for a ``COMPLETED`` workflow row whose
+    result column is NULL or empty, as the handle read it before the switch."""
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message=(
+                f'Workflow {workflow_id} is COMPLETED and its stored result '
+                f'is {stored_form}'
+            ),
+            data={'workflow_id': workflow_id},
+        ),
+    )
+
+
+def _empty_stored_error(workflow_id: str) -> TaskResult[Any, TaskError]:
+    """``RESULT_DESERIALIZATION_ERROR`` for an empty stored workflow error, as
+    the handle read it before the switch."""
+    logger.warning('Workflow %s error payload is empty', workflow_id)
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message='Workflow error payload is empty',
+            data={'workflow_id': workflow_id},
+        ),
+    )
 
 
 def _event_loop_limit_task_result(
