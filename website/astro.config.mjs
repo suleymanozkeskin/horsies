@@ -19,12 +19,14 @@ export default defineConfig({
 		'/rust/internals/operational-indexes': '/horsies/internals/operational-indexes/',
 		'/rust/monitoring/action-semantics': '/horsies/monitoring/action-semantics/',
 		'/rust/monitoring/web-ui-overview': '/horsies/monitoring/web-ui-overview/',
-		'/rust/monitoring/syce-overview': '/horsies/monitoring/syce-overview/',
 		'/rust/operations/autovacuum-tuning': '/horsies/operations/autovacuum-tuning/',
 		'/rust/workers/heartbeats-recovery': '/horsies/workers/heartbeats-recovery/',
 		'/rust/workers/worker-architecture': '/horsies/workers/worker-architecture/',
 		'/rust/scheduling/scheduler-overview': '/horsies/scheduling/scheduler-overview/',
 		'/rust/questions-and-answers': '/horsies/questions-and-answers/',
+		// The removed Syce Overview page redirects to the web UI page.
+		'/monitoring/syce-overview': '/horsies/monitoring/web-ui-overview/',
+		'/rust/monitoring/syce-overview': '/horsies/monitoring/web-ui-overview/',
 		// A Rust API page that the 0.8.0 client replaced redirects to its new page.
 		'/rust/tasks/error-handling': '/horsies/rust/tasks/errors/',
 		'/rust/tasks/retry-policy': '/horsies/rust/tasks/defining-tasks/',
@@ -144,7 +146,6 @@ export default defineConfig({
 						{
 							label: 'Monitoring',
 							items: [
-								{ label: 'Syce Overview', slug: 'monitoring/syce-overview' },
 								{ label: 'Worker & Database Health', slug: 'monitoring/worker-health' },
 								{ label: 'Web UI Overview', slug: 'monitoring/web-ui-overview' },
 								{ label: 'Web UI Deployment & Auth', slug: 'monitoring/web-ui-deployment' },

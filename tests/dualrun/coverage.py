@@ -22,6 +22,7 @@ from tests.dualrun.rules import (
     NormalisedId,
     SnapshotCatalog,
     StoredJson,
+    TimeOrderBeforeRun,
     TimeOrderOnly,
     TimeWithin,
 )
@@ -241,7 +242,7 @@ def rule_fits_type(rule: ColumnRule, column_type: DatabaseType) -> bool:
             return True
         case NormalisedId():
             return column_type in _ID_TYPES
-        case TimeOrderOnly() | TimeWithin():
+        case TimeOrderOnly() | TimeOrderBeforeRun() | TimeWithin():
             return column_type is DatabaseType.TIMESTAMPTZ
         case StoredJson(storage=storage):
             match storage:

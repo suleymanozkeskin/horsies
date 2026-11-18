@@ -2,17 +2,13 @@
 //!
 //! A workflow start pre-builds the child of each sub-workflow root
 //! (`start_statement.rs`), and a step that promotes a sub-workflow node owes
-//! its child start (`child_start.rs`). Both ask for the child's spec in the
-//! same way ([`crate::workflow_engine::steps::ChildBuild`]):
-//!
-//! - `Registry`: the registered definitions of the Rust client
-//!   ([`crate::core::registry::workflow::WorkflowSpecRegistry`]); the
-//!   retention config of the process gives the class of each task queue.
-//! - `Client`: a [`ChildSpecSource`] of a client that builds the child in its
-//!   own language, such as the `build_with` of the Python client, which the
-//!   bridge runs on its callback thread. The answer is a [`ClientSpec`], the
-//!   spec that the client sent as data, with the retention class of each
-//!   task queue that the client resolved.
+//! its child start (`child_start.rs`). Both ask the client's
+//! [`ChildSpecSource`] for the child's spec
+//! ([`crate::workflow_engine::steps::ChildBuild`]): the client builds the
+//! child in its own language, such as the `build_with` of the Python client,
+//! which the bridge runs on its callback thread. The answer is a
+//! [`ClientSpec`], the spec that the client sent as data, with the retention
+//! class of each task queue that the client resolved.
 //!
 //! The core checks the depth limit before it asks: a child past
 //! [`crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH`] fails its node,
@@ -26,41 +22,27 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{TaskError, WorkflowSpec};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::steps::ChildBuild;
 pub use crate::workflow_engine::steps::ChildStartSource;
 
-/// Where the child builds of one process get their specs: the registered
-/// definitions of the Rust client, or the client's [`ChildSpecSource`]. A
-/// worker, a handle or a reaper holds one and lends it to each step.
+/// Where the child builds of one process get their specs: the client's
+/// [`ChildSpecSource`]. A worker, a handle or a reaper holds one and lends
+/// it to each step.
 #[derive(Clone)]
 pub enum ChildSpecs {
-    /// The registered definitions of the Rust client.
-    Registry(Arc<WorkflowSpecRegistry>),
-    /// A client that builds each child in its own language.
+    /// A client that builds each child in its own language and sends its
+    /// spec as data, with the class of each task queue.
     Client(Arc<dyn ChildSpecSource>),
 }
 
-impl From<Arc<WorkflowSpecRegistry>> for ChildSpecs {
-    /// The registered definitions of the Rust client.
-    fn from(registry: Arc<WorkflowSpecRegistry>) -> Self {
-        Self::Registry(registry)
-    }
-}
-
 impl ChildSpecs {
-    /// The build that a step takes: the task queues of a registry child take
-    /// their class from `retention`; a client child carries its own classes.
-    pub(crate) fn build<'a>(&'a self, retention: &'a RetentionConfig) -> ChildBuild<'a> {
+    /// The build that a step takes: a client child carries the classes of
+    /// its task queues.
+    pub(crate) fn build(&self) -> ChildBuild<'_> {
         match self {
-            Self::Registry(registry) => ChildBuild::Registry {
-                registry: registry.as_ref(),
-                retention,
-            },
             Self::Client(source) => ChildBuild::Client(source.as_ref()),
         }
     }
@@ -191,25 +173,22 @@ impl ChildSpecUnavailable {
 /// Where the retention class of a task queue of one spec comes from.
 #[derive(Debug, Clone)]
 pub(crate) enum QueueClasses<'a> {
-    /// The retention config of the process (a spec of the Rust client).
-    Config(&'a RetentionConfig),
     /// The classes that the client resolved for the spec, by queue name
     /// ([`ClientSpec`]).
     Client(Cow<'a, BTreeMap<String, String>>),
 }
 
 impl QueueClasses<'_> {
-    /// The retention class key that a task node on `queue` stores: `None`
-    /// for forever from the config; a client's key as the client wrote it.
+    /// The retention class key that a task node on `queue` stores: the
+    /// client's key as the client wrote it.
     ///
     /// Errors: [`WorkflowError::Validation`] for a client queue with no
     /// class. The parse of the spec data refuses such a spec, so this names
     /// a spec that did not come from that parse.
-    pub(crate) fn class_key(&self, queue: &str) -> Result<Option<String>, WorkflowError> {
+    pub(crate) fn class_key(&self, queue: &str) -> Result<&str, WorkflowError> {
         match self {
-            Self::Config(retention) => Ok(retention.resolve_queue_class(queue)),
             Self::Client(classes) => match classes.get(queue) {
-                Some(key) => Ok(Some(key.clone())),
+                Some(key) => Ok(key.as_str()),
                 None => Err(WorkflowError::Validation(format!(
                     "the client resolved no retention class for queue {queue:?} of the spec"
                 ))),
@@ -298,10 +277,7 @@ mod tests {
     fn a_client_queue_without_a_class_is_refused() {
         let classes = BTreeMap::from([("default".to_owned(), "standard_30d".to_owned())]);
         let client = QueueClasses::Client(Cow::Owned(classes));
-        assert_eq!(
-            client.class_key("default").expect("mapped"),
-            Some("standard_30d".to_owned())
-        );
+        assert_eq!(client.class_key("default").expect("mapped"), "standard_30d");
         assert!(matches!(
             client.class_key("bulk"),
             Err(WorkflowError::Validation(message)) if message.contains("\"bulk\"")

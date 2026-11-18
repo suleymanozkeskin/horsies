@@ -203,6 +203,14 @@ class TestBuildChild:
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt kwargs JSON for subworkflow task 3'
 
+    def test_an_empty_stored_input_fails_the_node(self) -> None:
+        # A node without params stores '{}'; an empty text is corrupt data.
+        error = _failure(build_child(_broker(), _node(node_input=''), {}))
+
+        assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.message == 'Corrupt kwargs JSON for subworkflow task 3'
+        assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
+
     def test_an_input_that_does_not_decode_to_build_with_fails_the_node(self) -> None:
         error = _failure(build_child(_broker(), _node(node_input='{"value": "x"}'), {}))
 
@@ -215,11 +223,34 @@ class TestBuildChild:
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt args_from JSON for subworkflow task 3'
 
+    def test_an_empty_args_from_text_fails_the_node(self) -> None:
+        # A node without args_from stores NULL; an empty text is corrupt data.
+        error = _failure(build_child(_broker(), _node(args_from=''), {}))
+
+        assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.message == 'Corrupt args_from JSON for subworkflow task 3'
+        assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
+
     def test_an_args_from_index_that_is_not_an_int_fails_the_node(self) -> None:
         error = _failure(build_child(_broker(), _node(args_from='{"value": "0"}'), {}))
 
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'args_from has non-int values for subworkflow task 3'
+
+    @pytest.mark.parametrize('flag', ['true', 'false'])
+    def test_an_args_from_index_that_is_a_bool_fails_the_node(self, flag: str) -> None:
+        # bool is a subclass of int: true and false are not the indexes 1 and 0.
+        error = _failure(
+            build_child(
+                _broker(),
+                _node(args_from=f'{{"value": {flag}}}'),
+                {0: TaskResult(ok=4), 1: TaskResult(ok=5)},
+            ),
+        )
+
+        assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.message == 'args_from has non-int values for subworkflow task 3'
+        assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
 
     def test_an_args_from_key_that_names_a_static_kwarg_fails_the_node(self) -> None:
         error = _failure(
@@ -421,6 +452,29 @@ class TestBuildChildSpec:
             '__builtin_task_code__': OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED.value,
         }
         assert envelope['err']['data'] == {'definition_key': 'child_build.missing.v1'}
+
+    @pytest.mark.parametrize(
+        ('changes', 'message'),
+        [
+            pytest.param(
+                {'node_input': ''}, 'Corrupt kwargs JSON for subworkflow task 3', id='input',
+            ),
+            pytest.param(
+                {'args_from': ''}, 'Corrupt args_from JSON for subworkflow task 3', id='args_from',
+            ),
+        ],
+    )
+    def test_an_empty_stored_text_answers_the_node_failure(
+        self, changes: dict[str, Any], message: str,
+    ) -> None:
+        answer = build_child_spec(cast(Any, _broker()), _request(**changes))
+
+        assert isinstance(answer, ChildSpecRefused)
+        assert answer.message == message
+        envelope = json.loads(answer.failure_result)
+        assert envelope['err']['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+        }
 
     def test_a_build_that_raises_answers_the_node_failure(self) -> None:
         """The node gives the child no params: ``BrokenChild.build_with``

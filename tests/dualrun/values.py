@@ -328,10 +328,42 @@ class LabelledText:
 
 
 @dataclass(frozen=True, slots=True)
+class MeasureToken:
+    """The place of a run measure (``RunMeasure``) inside a text."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredText:
+    """A text of a ``RunMeasuresInText`` path whose run measures are tokens.
+
+    ``parts`` holds the literal text and the tokens in text order.
+    """
+
+    parts: tuple[str | MeasureToken, ...]
+
+
+def render_measure(token: MeasureToken) -> str:
+    """Text of a run measure token: ``<name>``."""
+    return f'<{token.name}>'
+
+
+@dataclass(frozen=True, slots=True)
 class JsonDocument:
     """A stored JSON value, parsed; path-rule leaves are normalized values."""
 
     root: JsonNode[NormalizedValue]
+
+
+@dataclass(frozen=True, slots=True)
+class UnparsedDocument:
+    """A cell of a stored JSON column whose text is not JSON, compared as
+    that text (a bytea cell: its bytes as UTF-8 text). A test writes such
+    text on purpose to check how a reader refuses it. Ids inside it stay raw,
+    so a text that names a run's id differs between runs."""
+
+    text: str
 
 
 NormalizedValue = (
@@ -347,7 +379,9 @@ NormalizedValue = (
     | DigestMatches
     | DigestMismatch
     | LabelledText
+    | MeasuredText
     | JsonDocument
+    | UnparsedDocument
 )
 
 
@@ -404,6 +438,10 @@ def sort_token(value: OrderKeyValue) -> tuple[int, str]:
             return (12, text)
         case LabelledText(parts=parts):
             return (13, render_text(parts, lambda label: sort_token(label)[1]))
+        case MeasuredText(parts=parts):
+            return (14, render_text(parts, render_measure))
+        case UnparsedDocument(text=text):
+            return (15, text)
 
 
 def render_value(value: OrderKeyValue) -> str:
@@ -439,6 +477,10 @@ def render_value(value: OrderKeyValue) -> str:
             return text
         case LabelledText(parts=parts):
             return render_text(parts, render_value)
+        case MeasuredText(parts=parts):
+            return render_text(parts, render_measure)
+        case UnparsedDocument(text=text):
+            return f'<not json {text!r}>'
 
 
 @dataclass(frozen=True, slots=True)

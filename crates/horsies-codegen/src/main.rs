@@ -11,6 +11,8 @@
 //!   (`horsies_core::manifest_schema::SCHEDULER_MANIFEST`) in the same form.
 //! - `_catalog/workflow_spec.py`: the workflow spec data
 //!   (`horsies_core::manifest_schema::WORKFLOW_SPEC_DATA`) in the same form.
+//! - `_catalog/release_bounds.py` and `_catalog/monitoring_bounds.py`:
+//!   integer constants of horsies-core (`constants::CONSTANT_MODULES`).
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:
@@ -24,6 +26,7 @@
 //! `check` and fails on a stale file.
 
 mod catalogs;
+mod constants;
 mod core_stub;
 mod manifest;
 mod output;

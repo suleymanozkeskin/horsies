@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies._core import (
+    CoreConnectionError,
     CoreStopped,
     MonitoringFailed,
     MonitoringJson,
@@ -30,7 +31,6 @@ from horsies._core import (
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.models.tasks import Execution
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring import (
@@ -211,17 +211,22 @@ class TestFailures:
     @pytest.mark.parametrize('retryable', [True, False])
     @pytest.mark.asyncio
     async def test_a_database_failure_keeps_its_message_and_retry_rule(self, retryable: bool) -> None:
+        cause = CoreConnectionError('task list query', 'connection refused', retryable)
         result, _ = await _list(
-            _record(MonitoringFailed, code='DB_OPERATION_FAILED', message=MESSAGE, retryable=retryable),
+            _record(
+                MonitoringFailed,
+                code='DB_OPERATION_FAILED',
+                message=MESSAGE,
+                retryable=retryable,
+                exception=cause,
+            ),
         )
 
         match result:
             case Err(MonitoringQueryDbOperationFailed() as error):
                 assert error.message == MESSAGE
                 assert error.retryable is retryable
-                assert isinstance(error.exception, CoreOperationFailed)
-                assert error.exception.subject == 'horsies.monitoring.list_tasks'
-                assert error.exception.message == MESSAGE
+                assert error.exception is cause
             case _:
                 raise AssertionError(f'expected a database failure: {result!r}')
 

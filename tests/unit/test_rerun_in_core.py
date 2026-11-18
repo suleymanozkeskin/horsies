@@ -15,13 +15,12 @@ from uuid import UUID
 import pytest
 
 from horsies.core.history.rerun.operations import (
-    RERUN_SUBJECT,
     RerunEnqueuePolicy,
     RerunSourceLive,
     RerunTask,
     rerun_task,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies._core import CorePreconditionFailed
 
 pytestmark = [pytest.mark.unit]
 
@@ -88,10 +87,10 @@ async def test_an_unregistered_class_raises_before_any_write() -> None:
 async def test_a_database_of_another_family_raises_before_any_write(stored: str | None) -> None:
     connection = _connection(class_registered=True, client_family=stored, location='LIVE')
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with pytest.raises(CorePreconditionFailed) as raised:
         _ = await _rerun(connection)
 
-    assert raised.value.subject == RERUN_SUBJECT
+    assert raised.value.subject == 'rerun_task'
     assert raised.value.retryable is False
     assert 'PYTHON' in raised.value.message
     assert connection.execute.await_count == 1

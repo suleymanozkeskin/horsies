@@ -25,11 +25,9 @@ use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
     OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::StatementFailure;
 use crate::worker::execution::{
     finalize_workflow_phase, FinalizeError, FinalizeStage, PhaseTwoForm,
@@ -257,12 +255,7 @@ async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
 async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
         broker,
-        ChildBuild::Registry {
-            registry: &WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
-            retention: &RetentionConfig::default(),
-        },
+        ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
         Uuid::new_v4(),
         QUEUE,
         false,

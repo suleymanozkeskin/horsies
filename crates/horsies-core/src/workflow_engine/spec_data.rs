@@ -432,7 +432,6 @@ fn any_node(
             true => None,
             false => Some(node.workflow_ctx_from),
         },
-        workflow_ctx_from_refs: None,
         queue: body.queue,
         priority: body.priority,
         allow_failed_deps: node.allow_failed_deps,

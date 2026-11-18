@@ -558,13 +558,15 @@ pub(crate) fn recovery_limit_error(
             failure.detail(),
         )),
         exception: None,
-        data: Some(serde_json::json!({
-            "workflow_id": workflow_id.to_string(),
-            "case": case.stored_name(),
-            "task_index": case.task_index(),
-            "failed_passes": failed_passes,
-            "exception_type": error_type,
-        })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "case": case.stored_name(),
+                "task_index": case.task_index(),
+                "failed_passes": failed_passes,
+                "exception_type": error_type,
+            }),
+        )),
         kind: crate::core::TaskErrorKind::Plain,
     }
 }
@@ -839,7 +841,7 @@ mod tests {
         assert!(message.contains("Validation"));
         assert!(message.contains("node options do not parse"));
         assert_eq!(
-            error.data,
+            error.data_value(),
             Some(serde_json::json!({
                 "workflow_id": workflow_id.to_string(),
                 "case": "ready_not_enqueued",

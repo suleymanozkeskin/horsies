@@ -153,10 +153,12 @@ pub(crate) fn prestart_expiry_result(
     worker_id: &str,
 ) -> Result<String, BrokerError> {
     let mut task_error = TaskError::builtin(OutcomeCode::TaskExpired, EXPIRY_MESSAGE);
-    task_error.data = Some(serde_json::json!({
-        "task_id": task_id.to_string(),
-        "worker_id": worker_id,
-    }));
+    task_error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &serde_json::json!({
+            "task_id": task_id.to_string(),
+            "worker_id": worker_id,
+        }),
+    ));
     Ok(serde_json::to_string(
         &TaskResult::<serde_json::Value>::Err(task_error),
     )?)

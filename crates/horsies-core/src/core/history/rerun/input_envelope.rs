@@ -403,8 +403,7 @@ pub(crate) fn validate_integer_domain(_text: &str) -> Result<(), String> {
 }
 
 /// Index one past the string's closing quote.
-#[cfg(not(feature = "arbitrary-precision"))]
-fn end_of_string(bytes: &[u8], open: usize) -> usize {
+pub(crate) fn end_of_string(bytes: &[u8], open: usize) -> usize {
     let mut index = open + 1;
     while index < bytes.len() {
         match bytes[index] {
@@ -417,8 +416,7 @@ fn end_of_string(bytes: &[u8], open: usize) -> usize {
 }
 
 /// Index one past the number token's last byte.
-#[cfg(not(feature = "arbitrary-precision"))]
-fn end_of_number(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn end_of_number(bytes: &[u8], start: usize) -> usize {
     let mut index = start;
     while index < bytes.len()
         && matches!(bytes[index], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')

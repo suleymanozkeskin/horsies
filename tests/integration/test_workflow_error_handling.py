@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 import pytest
@@ -2573,8 +2574,6 @@ class TestWorkflowStartErrors:
         that waits for it (allow_failed_deps): the start statement and that
         child start run in one transaction. A trigger refuses the insert of
         the second child's workflow row."""
-        import uuid
-
         session, broker, app = setup
         task_a = make_simple_task(app, 'rollback_test')
         suffix = uuid.uuid4().hex[:8]

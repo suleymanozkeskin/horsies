@@ -521,7 +521,7 @@ fn prepare_write(
         Err(
             other @ (EnqueuePreparationError::StrictJson { .. }
             | EnqueuePreparationError::Json { .. }
-            | EnqueuePreparationError::NumberDomain { .. }
+            | EnqueuePreparationError::OptionsIntegerOutOfRange
             | EnqueuePreparationError::InvalidTaskOptions
             | EnqueuePreparationError::Fingerprint(_)),
         ) => {

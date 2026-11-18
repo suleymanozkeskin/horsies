@@ -1,166 +1,139 @@
 <p align="center">
-  <img src="https://suleymanozkeskin.github.io/horsies-rust/galloping-horsie.jpg" alt="Horsies Logo" width="200" style="border-radius: 20px" />
+  <img src="https://suleymanozkeskin.github.io/horsies/galloping-horsie.svg" alt="Horsies Logo" width="200" style="border-radius: 20px" />
 </p>
 
-# Horsies Rust
+# horsies
 
-**PostgreSQL-backed background task queue and workflow engine for Rust.**
+**The Rust client of horsies, a PostgreSQL-backed task queue and workflow engine.**
 
-Rust port of [horsies](https://github.com/suleymanozkeskin/horsies) (Python).
-
-[**Full Documentation**](https://suleymanozkeskin.github.io/horsies-rust/) | [**crates.io**](https://crates.io/crates/horsies) | [**GitHub**](https://github.com/suleymanozkeskin/horsies-rust)
+[**Documentation**](https://suleymanozkeskin.github.io/horsies/rust/) | [**crates.io**](https://crates.io/crates/horsies) | [**GitHub**](https://github.com/suleymanozkeskin/horsies)
 
 ---
 
-## Features
+The crate runs on `horsies-core`, the engine that the Python package `horsies` also runs on: one schema, one set of SQL functions, one worker parent and one scheduler serve both clients. The crate holds the typed API: tasks, sends and result reads, workflows, schedules, worker profiles, monitoring reads and the CLI runner.
 
-- Typed task inputs and outputs
-- Structured `TaskError` values
-- Workflow DAGs with typed node wiring
-- PostgreSQL broker with LISTEN/NOTIFY
-- PgBouncer transaction-pool support with a direct/session URL for partition
-  maintenance and LISTEN/NOTIFY, plus PgBouncer prepared-statement tracking
-  (`max_prepared_statements > 0`)
-- Automatic schema initialization on normal startup paths
-- Worker heartbeats and stale-task recovery
-- Recurring scheduler for interval, hourly, daily, weekly, and monthly jobs
-- Optional axum monitoring API and embedded browser dashboard
-- `app.check()` / `app.check_live()` validation before runtime
+- Task bodies never run in the worker process. The worker starts the app's own binary again as a child process, for each of the three execution classes (`isolated`, `shared_async`, `shared_thread`).
+- One binary is the producer, the worker, each child and the scheduler: `main` builds the app and hands the command line to `horsies::cli::run`.
+- A database belongs to one client: the core refuses a database that the Python client installed, and a database of `0.1.0-alpha`.
+
+From 0.8.0, `horsies`, `horsies-core`, `horsies-macros` and the Python package carry one version number.
 
 ## Quick Start
 
+```bash
+cargo add horsies
+cargo add tokio --features rt-multi-thread,macros
+```
+
 ```rust
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::process::ExitCode;
 use std::time::Duration;
 
-use horsies::{task, AppConfig, Horsies, TaskError, TaskResult};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AddNumbersInput {
-    a: i32,
-    b: i32,
-}
-
-#[task("add_numbers")]
-async fn add_numbers(input: AddNumbersInput) -> Result<i32, TaskError> {
-    Ok(input.a + input.b)
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = AppConfig::for_database_url("postgresql://localhost/mydb");
-    let mut app = Horsies::new(config)?;
-
-    add_numbers::register(&mut app)?;
-    app.check()?;
-
-    let handle = add_numbers::send(AddNumbersInput { a: 2, b: 3 }).await?;
-
-    match handle.get(Some(Duration::from_secs(30))).await {
-        TaskResult::Ok(value) => println!("result = {}", value),
-        TaskResult::Err(err) => eprintln!("task failed: {:?}", err.error_code),
-    }
-
-    Ok(())
-}
-```
-
-## Workflow Example
-
-```rust
 use horsies::{
-    task, HorsiesError, TaskError, TaskResult, WorkflowDefConfig, WorkflowDefinition,
-    WorkflowSpecBuilder,
+    task, AppConfig, ChildPreload, Horsies, IsolatedChildCount, IsolatedChildren,
+    IsolatedSetting, TaskError, TaskOutcome, WaitLimit, WorkerProfile,
 };
 
-#[task("fetch_data")]
-async fn fetch_data() -> Result<String, TaskError> {
-    Ok("raw".to_owned())
+const DATABASE_URL: &str = "postgresql://postgres:postgres@localhost:5432/horsies";
+
+#[task("greet")]
+async fn greet(name: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("hello, {name}"))
 }
 
-#[task("process_data")]
-async fn process_data(data: TaskResult<String>) -> Result<String, TaskError> {
-    let data = match data {
-        TaskResult::Ok(v) => v,
-        TaskResult::Err(err) => {
-            return Err(TaskError::new(
-                "UPSTREAM_FAILED",
-                format!("fetch failed: {:?}", err.error_code),
-            ))
+/// Every process builds the same app: the producer, the worker and each child.
+fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
+    let profile = WorkerProfile {
+        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
+            IsolatedChildCount::try_from(2)?,
+        )),
+        preload: ChildPreload::NoPreload,
+        ..WorkerProfile::default()
+    };
+    let config = AppConfig {
+        worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
+        ..AppConfig::for_database_url(DATABASE_URL)
+    };
+    let mut app = Horsies::new(config)?;
+    let _greet = greet::register(&mut app)?;
+    Ok(app)
+}
+
+async fn send_greeting() -> Result<(), Box<dyn std::error::Error>> {
+    let handle = greet::send("world".to_owned()).await?;
+    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    match handle.get(limit).await? {
+        TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
+        TaskOutcome::Failed(error) => println!("greet failed: {}", error.code().text()),
+    }
+    Ok(())
+}
+
+fn run_send(_app: Horsies) -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("the runtime did not start: {error}");
+            return ExitCode::FAILURE;
         }
     };
-
-    Ok(format!("processed: {}", data))
+    match runtime.block_on(send_greeting()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
-struct ExampleWorkflow;
-
-impl WorkflowDefinition for ExampleWorkflow {
-    type Output = String;
-    type Params = ();
-
-    fn name() -> &'static str { "example_workflow" }
-    fn definition_key() -> &'static str { "example.workflow.v1" }
-
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(fetch_data::node()?.node_id("fetch"));
-        let process = builder.task(
-            process_data::node()?
-                .node_id("process")
-                .waits_for(fetch)
-                .arg_from(process_data::params::data(), fetch),
-        );
-
-        Ok(WorkflowDefConfig::new().output(process))
+fn main() -> ExitCode {
+    let app = match build_app() {
+        Ok(app) => app,
+        Err(refused) => {
+            eprintln!("{refused}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match std::env::args_os().nth(1) {
+        Some(command) if command == "send" => run_send(app),
+        Some(_) | None => horsies::cli::run(app),
     }
 }
 ```
+
+```bash
+cargo run -- worker --profile default   # the worker
+cargo run -- send                       # in a second terminal: prints "hello, world"
+cargo run -- check                      # checks the app without a database
+```
+
+`Horsies::new` does no I/O: the app connects at its first operation and installs the schema there. The worker starts this binary again for each child, and `horsies::cli::run` serves the child; build the app there and start nothing else before it.
+
+## Cargo Features
+
+| Feature | Default | Content |
+| --- | --- | --- |
+| `cli` | on | `horsies::cli::run` (worker, scheduler and check from the app's binary) and the `horsies` binary (`web`, `get-docs`, `skills install`). |
+| `web` | off | `horsies::web`: the axum mount of the core's monitoring handler and web UI. |
+| `tokio-postgres` | off | Rerun of a task in the caller's `tokio_postgres::Transaction`. |
+| `sqlx` | off | Rerun of a task in the caller's `sqlx::Transaction<'_, Postgres>`. |
+
+Minimum Rust version: 1.91.
 
 ## Documentation
 
-- [Getting Started](https://suleymanozkeskin.github.io/horsies-rust/quick-start/getting-started/)
-- [Defining Tasks](https://suleymanozkeskin.github.io/horsies-rust/tasks/defining-tasks/)
-- [Sending Tasks](https://suleymanozkeskin.github.io/horsies-rust/tasks/sending-tasks/)
-- [Defining Workflows](https://suleymanozkeskin.github.io/horsies-rust/quick-start/03-defining-workflows/)
-- [Workflow API](https://suleymanozkeskin.github.io/horsies-rust/concepts/workflows/workflow-api/)
-- [Scheduler Overview](https://suleymanozkeskin.github.io/horsies-rust/scheduling/scheduler-overview/)
-- [Web UI Overview](https://suleymanozkeskin.github.io/horsies-rust/monitoring/web-ui-overview/)
+- [Getting Started](https://suleymanozkeskin.github.io/horsies/rust/quick-start/getting-started/)
+- [Defining Tasks](https://suleymanozkeskin.github.io/horsies/rust/tasks/defining-tasks/)
+- [Sending Tasks](https://suleymanozkeskin.github.io/horsies/rust/tasks/sending-tasks/)
+- [Workflow API](https://suleymanozkeskin.github.io/horsies/rust/concepts/workflows/workflow-api/)
+- [Worker Setup](https://suleymanozkeskin.github.io/horsies/rust/workers/worker-setup/)
+- [Schedule Config](https://suleymanozkeskin.github.io/horsies/rust/scheduling/schedule-config/)
+- [Web UI Mount](https://suleymanozkeskin.github.io/horsies/rust/monitoring/web-ui-mount/)
+- [Switching to 0.8.0](https://suleymanozkeskin.github.io/horsies/rust/migrations/switching-to-0-8-0/) from `0.1.0-alpha`
 
-## Cargo features
-
-| Feature | Default | Purpose |
-| --- | --- | --- |
-| `web` | off | Embedded browser dashboard and axum API. |
-| `arbitrary-precision` | off | Byte-exact rerun-input fingerprints over integers outside the i64/u64 domain. |
-
-`arbitrary-precision` turns on `serde_json/arbitrary_precision`, which changes
-`serde_json` number handling for the whole build graph. Under it, every
-`#[serde(flatten)]`, `#[serde(tag = "...")]` and `#[serde(untagged)]` container
-in the graph rejects a typed float. Leave it off unless you need the exact
-integer lexeme.
-
-Without the feature, an integer literal outside the i64/u64 domain is rejected
-at enqueue rather than rounded.
-
-## Monitoring
-
-Enable the `web` feature to use the embedded browser dashboard and axum API.
-
-```bash
-cargo build --release --features web
-horsies web ./config/horsies.toml
-```
-
-The dashboard merges live tasks with retained task history. It also shows
-workflows, workers, and schedules. Deployments can remain view-only or enable
-task and workflow actions behind an auth policy.
-
-[**Web UI Setup & Authentication**](https://suleymanozkeskin.github.io/horsies-rust/monitoring/web-ui-deployment/)
-
-Horsies also includes **Syce**, a terminal UI. The current Syce release does
-not support the task-history schema.
-
-[**Syce Setup & Usage**](https://suleymanozkeskin.github.io/horsies-rust/monitoring/syce-overview/)
+The changes of each release are in the [changelog](https://github.com/suleymanozkeskin/horsies/blob/main/CHANGELOG.md).
 
 ## License
 

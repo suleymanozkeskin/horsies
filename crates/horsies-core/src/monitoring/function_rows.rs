@@ -976,19 +976,28 @@ pub(super) fn workflow_run(
 
 /// The error text of a node: the message of the error that its stored
 /// result holds. The node `error` column has no writer (the result holds
-/// the error). No result, a result with a value, and an error with no
-/// message give `None`. Errors: a result that does not decode, as the
-/// reason, naming the node.
+/// the error). No result (NULL), a result with a value, and an error with
+/// no message give `None`. Errors: a result that does not decode, as the
+/// reason, naming the node. An empty text is such a result: no writer
+/// stores it, so it is corrupt data, not "no result".
 fn node_error_from_result(task_index: i32, result: Option<&str>) -> Result<Option<String>, String> {
-    let Some(text) = result else {
-        return Ok(None);
+    let text = match result {
+        None => return Ok(None),
+        Some("") => {
+            return Err(format!(
+                "stored result of workflow node {task_index} does not decode: the stored text \
+                 is empty"
+            ))
+        }
+        Some(text) => text,
     };
-    // Python `_node_error` reads the text with `loads_json`: an empty text
-    // and the JSON value `null` are no result.
-    if text.is_empty() || text.trim_matches([' ', '\t', '\n', '\r']) == "null" {
+    // Python `_node_error` reads the text with `loads_json`: the JSON value
+    // `null` is no result.
+    if text.trim_matches([' ', '\t', '\n', '\r']) == "null" {
         return Ok(None);
     }
-    match serde_json::from_str::<TaskResult<serde_json::Value>>(text) {
+    // The value is not read: the envelope is checked and the ok slot skipped.
+    match serde_json::from_str::<TaskResult<serde::de::IgnoredAny>>(text) {
         Ok(TaskResult::Ok(_)) => Ok(None),
         Ok(TaskResult::Err(error)) => Ok(normalize_optional_text(error.message.as_deref())),
         Err(cause) => Err(format!(
@@ -1367,7 +1376,7 @@ mod tests {
         ));
 
         assert_eq!(node_error_from_result(0, None).expect("decodes"), None);
-        for no_result in ["", "null", " null\n"] {
+        for no_result in ["null", " null\n"] {
             assert_eq!(
                 node_error_from_result(0, Some(no_result)).expect("no result"),
                 None,
@@ -1392,5 +1401,21 @@ mod tests {
             .expect_err("a result that is not JSON is refused");
 
         assert!(reason.contains("workflow node 4"), "{reason}");
+    }
+
+    /// No writer stores an empty result text, so a stored one is corrupt
+    /// data: it is refused as a result that does not decode, naming the node
+    /// and the cause. NULL stays "no result". Python `_node_error` refuses it
+    /// too (`loads_json` refuses an empty text).
+    #[test]
+    fn an_empty_stored_result_is_refused_naming_the_node() {
+        let reason =
+            node_error_from_result(5, Some("")).expect_err("an empty result text is refused");
+
+        assert_eq!(
+            reason,
+            "stored result of workflow node 5 does not decode: the stored text is empty"
+        );
+        assert_eq!(node_error_from_result(5, None).expect("decodes"), None);
     }
 }

@@ -1205,6 +1205,47 @@ class TestRunTaskEntryErrorPaths:
         err = parsed.get('err') or parsed.get('error')
         assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value}
 
+    def test_args_json_empty_text(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """An empty args text is not JSON (None is no args) → WORKER_SERIALIZATION_ERROR."""
+        patches = _make_run_task_patches()
+        _run_entry_defaults['args_json'] = ''
+
+        with _apply_patches(patches):
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+
+        assert ok is True
+        assert reason == 'SerializationError: JSON parse failed: the text is empty'
+        parsed = _parse_task_result(payload)
+        err = parsed.get('err')
+        assert err is not None
+        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value}
+        assert err['message'] == 'JSON parse failed: the text is empty'
+
+    def test_args_json_none_is_no_args(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """NULL args (the claim sends None) reach the task with no positional args."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
+        mock_task.task_ok_type = int
+        mock_task.return_value = TaskResult(ok=42)
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+        _run_entry_defaults['args_json'] = None
+
+        with _apply_patches(patches):
+            ok, payload, _reason = wire_of(_run_task_entry(**_run_entry_defaults))
+
+        assert ok is True
+        parsed = _parse_task_result(payload)
+        assert parsed.get('err') is None
+        assert parsed.get('ok') == 42
+
     def test_args_json_not_a_list(
         self,
         _run_entry_defaults: dict[str, Any],
@@ -2073,6 +2114,9 @@ class TestExpireClaimedBeforeStart:
                     task_id=uuid.UUID(TASK_ID),
                     message='connection lost',
                     retryable=True,
+                    exception=core.CoreConnectionError(
+                        'expire_owned_claim', 'connection lost', True,
+                    ),
                 ),
             ],
         )
