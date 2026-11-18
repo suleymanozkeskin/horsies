@@ -591,6 +591,26 @@ unless it starts with "Added".
 - **A pool size outside the core's bounds is refused.** `Horsies::new`
   refuses `broker.pool_size` outside 1 to 10,000 and `broker.max_overflow`
   above 10,000, with the field name.
+- **The core reads only the connection settings that it supports.** These
+  are the URL and its supported query parameters (`host`, `port`, `user`,
+  `password`, `dbname`, `application_name`, `options`, `connect_timeout`,
+  `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `sslnegotiation`,
+  `channel_binding`, `target_session_attrs`, `load_balance_hosts`), the TLS
+  files that the URL names, `PGPASSWORD` and `~/.pgpass`, as in the Python
+  client. Another libpq parameter (for example `hostaddr`), a parameter of
+  sqlx (`ssl-mode`, `ssl-root-cert`, `ssl-ca`, `ssl-cert`, `ssl-key`,
+  `statement-cache-capacity`), an unknown parameter, a parameter given
+  twice, a URL with no host, and a libpq environment variable that libpq
+  would apply are refused by name when the first pool opens; `check_live`
+  reports the refusal. The keepalive parameters and `tcp_user_timeout` are
+  refused in the URL: set them in `PostgresConfig`. The alpha opened its
+  connections with sqlx 0.8: it applied `PGHOST`, `PGHOSTADDR`, `PGPORT`,
+  `PGUSER`, `PGDATABASE`, `PGSSLMODE`, `PGSSLROOTCERT`, `PGSSLCERT`,
+  `PGSSLKEY`, `PGAPPNAME`, `PGOPTIONS` and `PGPASSFILE` when the URL did
+  not set the parameter, read the sqlx parameters, and ignored every other
+  parameter with a warning, `connect_timeout`, `target_session_attrs`,
+  `channel_binding`, `sslnegotiation` and `load_balance_hosts` included.
+  Those five now apply.
 - **A worker profile with a preload is refused.** A Rust worker starts each
   child with `exec` of its own binary, so `Horsies::new` refuses a profile
   whose `preload` is `Library` (the default) or `App`, with the path
