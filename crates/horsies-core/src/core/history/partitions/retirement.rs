@@ -1093,4 +1093,43 @@ mod tests {
             ));
         }
     }
+
+    /// The pass hands each sweep only the candidates of its kind, in
+    /// candidate order: the period leaves to the history sweep, the
+    /// heartbeat leaves to the heartbeat sweep.
+    #[test]
+    fn each_kind_keeps_its_leaves_in_candidate_order() {
+        let candidate = |name: &str, kind: &str| CandidateRow {
+            leaf_name: name.to_owned(),
+            class_key: "standard_1d".to_owned(),
+            class_kind: kind.to_owned(),
+            lower_anchor: lower(),
+            upper_anchor: lower() + chrono::Duration::days(1),
+            attachment: "ATTACHED".to_owned(),
+        };
+        let candidates = prune_candidates_of(
+            vec![
+                candidate("history_a", "PERIOD"),
+                candidate("heartbeat_a", "HEARTBEAT"),
+                candidate("history_b", "PERIOD"),
+            ],
+            3,
+        )
+        .unwrap();
+        let names = |leaves: Vec<LeafRef>| -> Vec<String> {
+            leaves
+                .iter()
+                .map(|leaf| leaf.leaf_name().to_owned())
+                .collect()
+        };
+
+        assert_eq!(
+            names(candidates.of_kind(RetiredClassKind::Period)),
+            vec!["history_a".to_owned(), "history_b".to_owned()]
+        );
+        assert_eq!(
+            names(candidates.of_kind(RetiredClassKind::Heartbeat)),
+            vec!["heartbeat_a".to_owned()]
+        );
+    }
 }

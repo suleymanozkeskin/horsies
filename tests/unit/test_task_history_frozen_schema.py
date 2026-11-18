@@ -13,7 +13,6 @@ import re
 
 import pytest
 
-from horsies.core.history.ddl.classes import finite_class_parent_name
 from tests.baseline_sql import baseline_function_statements, baseline_sql, baseline_table
 from tests.unit.test_terminal_writer_inventory import history_insert_columns
 
@@ -203,17 +202,3 @@ class TestSupportRelations:
         )
 
 
-class TestClassRegistrationValidation:
-    def test_parent_name_derivation(self) -> None:
-        assert (
-            finite_class_parent_name('finite_30d_v1')
-            == 'horsies_task_history_finite_30d_v1'
-        )
-
-    def test_rejects_keys_that_break_relation_naming(self) -> None:
-        with pytest.raises(ValueError, match='safe relation name'):
-            finite_class_parent_name('30-days!')
-
-    def test_rejects_overlong_derived_names(self) -> None:
-        with pytest.raises(ValueError, match='safe relation name'):
-            finite_class_parent_name('k' * 60)
