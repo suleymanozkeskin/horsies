@@ -1,8 +1,67 @@
+//! The store round trip on a database of its own.
+//!
+//! The other test binaries of the crate share the database of
+//! `ACME_DATABASE_URL` and load the Acme catalog into it. This test counts
+//! and reads every Acme table, so it runs on a new database on the same
+//! server: the configured database name with [`OWN_DATABASE_SUFFIX`].
+
+use std::collections::BTreeMap;
 use std::env;
 
 use acme_showcase::domain::{Order, OrderLine, Product, ReturnCase, StockLevel, ORDER_PLACED};
-use acme_showcase::{ensure_database, resolve_database_settings, Store};
+use acme_showcase::settings::{resolve_database_settings_from, ACME_URL_VARIABLE};
+use acme_showcase::{ensure_database, resolve_database_settings, DatabaseSettings, Store};
 use chrono::Utc;
+use sqlx::{Connection, PgConnection};
+use url::Url;
+
+/// The suffix of the database name of this test, after the configured
+/// database name.
+const OWN_DATABASE_SUFFIX: &str = "_store_roundtrip";
+
+/// The longest database name that PostgreSQL keeps: `NAMEDATALEN - 1` bytes.
+/// PostgreSQL cuts a longer name without an error, so the test refuses it.
+const DATABASE_NAME_BOUND_BYTES: usize = 63;
+
+/// The settings of the database of this test: the server, the credentials
+/// and the URL form of `configured`, with the database name of
+/// [`OWN_DATABASE_SUFFIX`]. Panics when the name is above
+/// [`DATABASE_NAME_BOUND_BYTES`] or the URL does not parse.
+fn own_database_settings(configured: &DatabaseSettings) -> DatabaseSettings {
+    let name = format!("{}{OWN_DATABASE_SUFFIX}", configured.database_name);
+    assert!(
+        name.len() <= DATABASE_NAME_BOUND_BYTES,
+        "the database name {name:?} of the test has more than {DATABASE_NAME_BOUND_BYTES} bytes; \
+         set a shorter database name in {ACME_URL_VARIABLE}"
+    );
+    let mut url = Url::parse(&configured.url).expect("the configured database URL parses");
+    url.set_path(&format!("/{name}"));
+    let environment = BTreeMap::from([(ACME_URL_VARIABLE.to_owned(), url.to_string())]);
+    resolve_database_settings_from(&environment, &BTreeMap::new())
+        .expect("the settings of the database of the test")
+}
+
+/// Drops the database of `settings` and its open sessions, when it exists.
+/// A run that panics leaves its database; the next run drops it before the
+/// create. Panics when the maintenance database refuses the connection or
+/// the drop.
+async fn drop_own_database(settings: &DatabaseSettings) {
+    let mut maintenance = PgConnection::connect(&settings.maintenance_dsn)
+        .await
+        .expect("connect to the maintenance database");
+    let statement = format!(
+        "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
+        settings.database_name.replace('"', "\"\"")
+    );
+    sqlx::query(&statement)
+        .execute(&mut maintenance)
+        .await
+        .expect("drop the database of the test");
+    maintenance
+        .close()
+        .await
+        .expect("close the maintenance connection");
+}
 
 #[tokio::test]
 async fn schema_and_store_round_trip() {
@@ -11,8 +70,13 @@ async fn schema_and_store_round_trip() {
         // authority; the disposable gate supplies this variable explicitly.
         return;
     }
-    let settings = resolve_database_settings().expect("settings");
-    ensure_database(&settings).await.expect("database");
+    let configured = resolve_database_settings().expect("settings");
+    let settings = own_database_settings(&configured);
+    drop_own_database(&settings).await;
+    assert!(
+        ensure_database(&settings).await.expect("database"),
+        "the database of the test is new"
+    );
     let store = Store::connect(&settings).await.expect("connect");
     store.ensure_schema().await.expect("schema");
 
@@ -162,4 +226,6 @@ async fn schema_and_store_round_trip() {
             .expect("consume")
             .consumed
     );
+    store.close().await;
+    drop_own_database(&settings).await;
 }
