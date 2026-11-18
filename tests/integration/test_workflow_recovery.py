@@ -151,7 +151,7 @@ class TestWorkflowRecovery:
         # Simulate cross-process recovery: the task isn't registered in
         # the recovery worker's app.tasks. Pre-fix this discarded the
         # real err and produced a synthetic WORKER_CRASHED.
-        app.tasks.unregister('recover_unregistered_err_a')
+        del app.tasks['recover_unregistered_err_a']
         assert app.tasks.get('recover_unregistered_err_a') is None
 
         recovered = await _run_phase2_recovery(session, broker)

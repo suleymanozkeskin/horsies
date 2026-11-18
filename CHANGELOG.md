@@ -673,6 +673,20 @@ before you upgrade a 0.7 deployment.
 - **`PostgresBroker.create_single_connection_engine` and
   `BrokerResources.session_async_engine` are removed.**
 
+- **Client helpers with no caller in the library.** From
+  `horsies.core.types.result`: `do`, `do_async`, `as_result`,
+  `as_async_result` and `OkErr`. From `horsies.core.errors`:
+  `workflow_validation_error` and `task_definition_error` (construct
+  `WorkflowValidationError` or `TaskDefinitionError`). From
+  `horsies.core.utils.imports`: `unload_file_path` and
+  `compute_package_path_from_fs`. From `horsies.core.workflows.registry`:
+  `get_task_node`, `get_subworkflow_node`, `get_node` and
+  `is_workflow_registered`. Also `TaskRegistry.unregister` (use
+  `del app.tasks[name]`, which raises `NotRegistered` for a name that is not
+  registered), `WF_TASK_TERMINAL_VALUES` of `horsies.core.models.workflow`
+  (use `WORKFLOW_TASK_TERMINAL_STATES`), and `BANNER` and `format_banner`
+  of `horsies.core.banner`. The package `horsies` exports none of them.
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the

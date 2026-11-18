@@ -23,8 +23,6 @@ from horsies.core.errors import (
     _find_user_frame,
     _should_use_colors,
     raise_collected,
-    task_definition_error,
-    workflow_validation_error,
 )
 
 pytestmark = pytest.mark.unit
@@ -776,76 +774,6 @@ class TestRaiseCollected:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             raise_collected(report)
         assert '3 previous errors' in exc_info.value.message
-
-
-# =============================================================================
-# Helper Factory Tests
-# =============================================================================
-
-
-class TestHelperFactories:
-    """Tests for workflow_validation_error() and task_definition_error() factories."""
-
-    def test_workflow_validation_error_basic(self) -> None:
-        err = workflow_validation_error('bad workflow')
-        assert isinstance(err, WorkflowValidationError)
-        assert err.message == 'bad workflow'
-
-    def test_workflow_validation_error_with_all_fields(self) -> None:
-        err = workflow_validation_error(
-            'cycle',
-            code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
-            notes=['A->B', 'B->A'],
-            help_text='remove cycle',
-        )
-        assert err.code == ErrorCode.WORKFLOW_CYCLE_DETECTED
-        assert err.notes == ['A->B', 'B->A']
-        assert err.help_text == 'remove cycle'
-
-    def test_workflow_validation_error_explicit_location(self) -> None:
-        loc = SourceLocation(file='wf.py', line=5)
-        err = workflow_validation_error('err', location=loc)
-        assert err.location is loc
-
-    def test_workflow_validation_error_auto_location(self) -> None:
-        """Auto-detects location when not explicitly provided."""
-        err = workflow_validation_error('auto')
-        # Function attempts frame-based auto-detection; should not raise
-        assert isinstance(err, WorkflowValidationError)
-
-    def test_task_definition_error_basic(self) -> None:
-        err = task_definition_error('bad task')
-        assert isinstance(err, TaskDefinitionError)
-        assert err.message == 'bad task'
-
-    def test_task_definition_error_with_function_location(self) -> None:
-        def sample_task() -> int:
-            return 1
-
-        err = task_definition_error(
-            'no return type',
-            code=ErrorCode.TASK_NO_RETURN_TYPE,
-            fn=sample_task,
-        )
-        assert err.code == ErrorCode.TASK_NO_RETURN_TYPE
-        assert err.location is not None
-        assert err.location.file.endswith('test_errors.py')
-
-    def test_task_definition_error_without_fn(self) -> None:
-        """No fn means no location derived from function; auto-detection fills in."""
-        err = task_definition_error('err', fn=None)
-        # location is auto-detected from call stack (not from a function object)
-        assert isinstance(err, TaskDefinitionError)
-        assert err.message == 'err'
-
-    def test_task_definition_error_with_notes_and_help(self) -> None:
-        err = task_definition_error(
-            'invalid',
-            notes=['detail 1'],
-            help_text='fix it',
-        )
-        assert err.notes == ['detail 1']
-        assert err.help_text == 'fix it'
 
 
 # =============================================================================

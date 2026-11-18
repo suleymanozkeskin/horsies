@@ -88,7 +88,7 @@ def build_child_spec(
     Raises:
         SerializationError: a value of a child node row does not serialize,
             or task options do not parse (a defect of the task function, as
-            in ``build_child``). The operation that asked rolls its step
+            in ``build_child_within_depth``). The operation that asked rolls its step
             back; see the module documentation for where the exception goes.
     """
     node = ChildOfNode(
