@@ -79,6 +79,11 @@ RUST_BINARY_ENV: Final = 'HORSIES_PARITY_RUST_BIN'
 PYTHON_APP_LOCATOR: Final = 'tests.parity.app:app'
 
 TERMINAL_WAIT: Final = timedelta(seconds=120)
+WORKER_READY_LINE: Final = 'worker ready'
+"""The line that the core worker logs once its startup coverage and its
+children are done (`crates/horsies-core/src/worker/worker.rs`)."""
+READY_LOG_BYTES: Final = 1_000_000
+"""The tail of a worker log that the ready check reads."""
 TERMINAL_POLL: Final = timedelta(milliseconds=250)
 SEND_WAIT: Final = timedelta(seconds=60)
 STOP_WAIT: Final = timedelta(seconds=60)
@@ -237,6 +242,9 @@ _OPEN_WORKFLOWS_SQL: Final[LiteralString] = (
 )
 _ENDED_TASKS_SQL: Final[LiteralString] = (
     'SELECT count(*) FROM horsies_task_history WHERE task_id = ANY(%s)'
+)
+_SCHEDULE_TABLE_SQL: Final[LiteralString] = (
+    "SELECT to_regclass('horsies_schedule_state') IS NOT NULL"
 )
 _SCHEDULE_STATE_SQL: Final[LiteralString] = (
     'SELECT next_run_at > now(), run_count FROM horsies_schedule_state '
@@ -441,11 +449,25 @@ def _start_processes(
     commands: SideCommands, scenario: Scenario, env: dict[str, str], log_dir: Path,
 ) -> list[StartedProcess]:
     """One worker per profile of `scenario`, then the scheduler of a
-    scenario with `ScheduleSlots`, each with its own log file."""
-    started = [
+    scenario with `ScheduleSlots`, each with its own log file.
+
+    The first worker starts alone, and the others start once its log shows
+    `WORKER_READY_LINE`: on a fresh database a worker whose startup coverage
+    meets the coverage gate of another starting worker refuses its boot
+    (`coverage_gate_busy`), on both clients. A first worker that exits or
+    does not get ready within `TERMINAL_WAIT` is reported by the next wait of
+    the side."""
+    first, *others = scenario.profiles
+    started = [_start_process('worker-0', [*commands.worker, f'--profile={first}'], env, log_dir)]
+    _ = _wait_until(
+        started,
+        lambda: WORKER_READY_LINE in _tail(started[0].log_path, limit=READY_LOG_BYTES),
+        'worker-0 ready',
+    )
+    started.extend(
         _start_process(f'worker-{position}', [*commands.worker, f'--profile={profile}'], env, log_dir)
-        for position, profile in enumerate(scenario.profiles)
-    ]
+        for position, profile in enumerate(others, start=1)
+    )
     match scenario.scheduler:
         case ScheduleSlots():
             started.append(_start_process('scheduler', commands.scheduler, env, log_dir))
@@ -510,6 +532,20 @@ def _slots_ended(connection: psycopg.Connection[tuple[object, ...]]) -> bool:
     return ended == (len(slots),)
 
 
+def _schedule_state_written(connection: psycopg.Connection[tuple[object, ...]]) -> bool:
+    """The state row of the schedule exists. Before a process of the side
+    installed the schema, the table does not exist, and no row is written."""
+    match connection.execute(_SCHEDULE_TABLE_SQL).fetchone():
+        case (True,):
+            return connection.execute(
+                _SCHEDULE_STATE_SQL, (parity.SCHEDULE_NAME,),
+            ).fetchone() is not None
+        case (False,):
+            return False
+        case other:
+            raise AssertionError(f'to_regclass of the schedule state table returned {other!r}')
+
+
 def _fire_slots(
     connection: psycopg.Connection[tuple[object, ...]],
     schedule: ScheduleSlots,
@@ -524,9 +560,7 @@ def _fire_slots(
     )
     exists = _wait_until(
         processes,
-        lambda: connection.execute(
-            _SCHEDULE_STATE_SQL, (parity.SCHEDULE_NAME,),
-        ).fetchone() is not None,
+        lambda: _schedule_state_written(connection),
         f'the state row of schedule {parity.SCHEDULE_NAME} written',
     )
     if exists is not None:
