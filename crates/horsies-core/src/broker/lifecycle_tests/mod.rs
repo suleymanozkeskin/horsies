@@ -6,6 +6,7 @@
 //! the core does not have yet is `#[ignore]` and names its issue.
 
 mod autocommit_outcomes;
+mod claim_per_class;
 mod claim_start_release;
 mod failed_attempt_finish;
 mod failed_attempt_round_trips;
