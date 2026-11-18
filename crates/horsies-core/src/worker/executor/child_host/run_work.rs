@@ -620,6 +620,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn work_a_body_starts_belongs_to_its_run_and_ends_in_rounds() {
         let scope = RunScope::new();
+        #[expect(
+            clippy::async_yields_async,
+            reason = "the body returns the handle of the work it started; that work is left work"
+        )]
         let body = scope.spawn_body("app.tasks.body", async {
             spawn_in_run("outer", async {
                 spawn_in_run("inner", tokio::time::sleep(Duration::from_secs(60)))
@@ -745,6 +749,10 @@ mod tests {
     async fn work_that_holds_its_thread_is_stuck_after_the_rounds() {
         let scope = RunScope::new();
         let started = Instant::now();
+        #[expect(
+            clippy::async_yields_async,
+            reason = "the body returns the handle of the work it started; that work is left work"
+        )]
         let body = scope.spawn_body("app.tasks.body", async {
             spawn_in_run("holds", async {
                 std::thread::sleep(Duration::from_secs(2));
@@ -773,6 +781,10 @@ mod tests {
     async fn work_of_a_timed_run_is_timed_under_the_run_until_it_ends() {
         let polls = RunPolls::new(std::time::Instant::now());
         let scope = RunScope::timed(polls.clone());
+        #[expect(
+            clippy::async_yields_async,
+            reason = "the body returns the handle of the work it started; that work is left work"
+        )]
         let body = scope.spawn_body("app.tasks.body", async {
             spawn_in_run("holds", async {
                 std::thread::sleep(Duration::from_millis(400));

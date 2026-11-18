@@ -275,6 +275,10 @@ mod tests {
             .enable_all()
             .build()
             .expect("a caller runtime starts");
+        #[expect(
+            clippy::async_yields_async,
+            reason = "the block hands out the handle of the driver; the test keeps it, not its end"
+        )]
         let _driver = first.block_on(async {
             spawn_on_process_runtime(async move {
                 while let Some(value) = receiver.recv().await {
