@@ -47,7 +47,7 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 
 `enqueue()` and `enqueue_async()` require `sent_at`, the call time of the send, which the row stores. A send that repeats a task id is the same send when the stored command fingerprint and `sent_at` equal its own, and answers with that task id; otherwise it is `PAYLOAD_MISMATCH`. A resend therefore passes the `sent_at` of the first send.
 
-They also require `send_kind` (`SendKind` from `horsies.core.brokers.enqueue_task`): `SendKind.FIRST` for the first send of a task id, `SendKind.REPEAT` for a resend. A repeat reads the task history first, so a resend of a task that finished answers with its task id, or `PAYLOAD_MISMATCH`, and the task does not run again. A first send does not read history.
+They also require `send_kind` (`from horsies import SendKind`): `SendKind.FIRST` for the first send of a task id, `SendKind.REPEAT` for a resend. A repeat reads the task history first, so a resend of a task that finished answers with its task id, or `PAYLOAD_MISMATCH`, and the task does not run again. A first send does not read history.
 
 `BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`. `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`: the failures that the sync form adds, where nothing ran. Both are exported from `horsies`.
 
@@ -59,7 +59,7 @@ These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ens
 - The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They do not return `LOOP_RUNNER_FAILED`. They still return `ASYNC_CONTEXT` on a thread that runs an event loop.
 - `BrokerEnqueueError`, `BrokerSyncCallError`, `TaskSendError` and the return type of `ensure_schema_initialized()` keep the two variants, so an exhaustive `match` names them.
 
-When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. The core errors are in `horsies._core`:
+When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. Import the core errors from `horsies`:
 
 | Core error | When | `retryable` | After the failure |
 | ---------- | ---- | ----------- | ----------------- |
@@ -71,7 +71,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 
 #### Process-State Refusals
 
-`ForkedAfterCoreStart` and `CoreStopped` are states of the process, not of one call. The core refuses every later call in the process, so a retry in the same process gets the same refusal.
+`ForkedAfterCoreStart` and `CoreStopped` are states of the process, not of one call. The core refuses every later call in the process, so a retry in the same process gets the same refusal. Import both from `horsies`.
 
 - Every call that runs on the core raises them. No call returns them as a result, and no result type has a variant for them.
 - This covers the task sends and the four retry methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
@@ -84,7 +84,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 | `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task. `args` are `(core_pid, this_pid, advice)` | Start child processes that call horsies with the `spawn` or `forkserver` start method. Or start the core after the fork: the core starts at the first call that runs on it, so fork before the parent's first call |
 | `CoreStopped` | A background task of the core panicked: a defect in horsies, not a failure of the database or of your code. The core then stops in this process. `args` are the `(subject, cause)` of the first panic | Restart the process: the core does not start again in it. Report the panic's subject and cause as a defect |
 
-When the core ran the call and the call failed, `exception` is the core's class of the cause, from `horsies._core`. The declared type of `exception` does not change:
+When the core ran the call and the call failed, `exception` is the core's class of the cause. Import each class from `horsies`. The declared type of `exception` does not change:
 
 | Class | When | Fields |
 | ----- | ---- | ------ |

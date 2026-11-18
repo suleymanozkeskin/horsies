@@ -127,13 +127,12 @@ result = app.get_result(UUID(stored_task_id))
 
 ## The class of a database failure
 
-In 0.7, the `exception` field of a database failure held the exception of the driver (SQLAlchemy or psycopg). In 0.8.0, it holds one class of `horsies._core`: `CoreServerError`, `CoreConnectionError`, `CoreContractViolation` or `CorePreconditionFailed`. Examples are `BrokerOperationFailed.exception`, `TaskSendEnqueueFailed.exception`, `TaskActionDbOperationFailed.exception` and `HandleDbOperationFailed.exception`. The declared types do not change.
+In 0.7, the `exception` field of a database failure held the exception of the driver (SQLAlchemy or psycopg). In 0.8.0, it holds one class of the core: `CoreServerError`, `CoreConnectionError`, `CoreContractViolation` or `CorePreconditionFailed`. Examples are `BrokerOperationFailed.exception`, `TaskSendEnqueueFailed.exception`, `TaskActionDbOperationFailed.exception` and `HandleDbOperationFailed.exception`. The declared types do not change.
 
 Code that tests the class of `exception` against a SQLAlchemy or psycopg class must test the core classes. The SQLSTATE of a server error is `CoreServerError.sqlstate`:
 
 ```python
-from horsies import BrokerOperationFailed
-from horsies._core import CoreServerError
+from horsies import BrokerOperationFailed, CoreServerError
 
 
 def server_sqlstate(error: BrokerOperationFailed) -> str | None:
@@ -144,13 +143,13 @@ def server_sqlstate(error: BrokerOperationFailed) -> str | None:
             return None
 ```
 
-The fields of each class are in [Calls That Run on the Core](/horsies/tasks/error-types/#calls-that-run-on-the-core). These classes, and the errors of the next section, come from the extension `horsies._core`, and its type stubs are generated from the core. Import them from `horsies._core`.
+The fields of each class are in [Calls That Run on the Core](/horsies/tasks/error-types/#calls-that-run-on-the-core). These classes, and the errors of the next section, are defined in the extension `horsies._core`, and its type stubs are generated from the core. Import them from `horsies`.
 
 The code enums `BrokerErrorCode`, `TaskSendErrorCode`, `WorkflowStartErrorCode`, `HandleErrorCode`, `OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`, `TaskStatus`, `TaskAttemptOutcome`, `WorkflowStatus`, `WorkflowTaskStatus`, `TaskAbsenceReason`, `MonitoringQueryErrorCode` and `TaskActionErrorCode` are also generated, into `horsies._catalog`. `horsies` and `horsies.monitoring` export them with the same names, and their 0.7 module paths still import them. Their members change only as [Removed and changed members](#removed-and-changed-members) states.
 
 ## Errors after a fork or a core panic
 
-`ForkedAfterCoreStart` and `CoreStopped` are states of the process. The core refuses each later call in that process, so a retry in the same process gets the same refusal. Import both from `horsies._core`.
+`ForkedAfterCoreStart` and `CoreStopped` are states of the process. The core refuses each later call in that process, so a retry in the same process gets the same refusal. Import both from `horsies`.
 
 - Each call that runs on the core raises them, in its sync form and in its async form. No call returns them as a result, and no result type has a variant for them.
 - This covers the sends and their retry methods, `PostgresBroker.enqueue()`, the task, result and health reads, `ensure_schema_initialized()`, `check(live=True)`, the workflow start, the methods of `WorkflowHandle`, `pause_workflow()`, `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`.
@@ -211,9 +210,11 @@ To fix it, restart the process. The core does not start again in the same proces
 | `ClassCapacityNotRecorded`; `ClassCapacity` was `ClassBudgets \| ClassCapacityNotRecorded` | Removed. `ClassCapacity` is `ClassBudgets` | Remove the match arm |
 | `ClassesNotRecorded`, `horsies.monitoring.ClassesNotRecordedInfo`, and the `not_recorded` fields of `ClassCoverage`, `ClassReport` and `ClassReportInfo` | Removed. Each worker snapshot of the baseline schema records these facts | Remove the reads |
 | `SchemaState.CUTOVER_REQUIRED` | Removed. `SchemaState.ZERO_X` names a 0.x database | Match `ZERO_X` |
+| `GroupRow.group` of `horsies.monitoring.task_breakdown` was a `str`; the unclaimed tasks were `'unknown'`. `Breakdown.total` was a `GroupRow` with the group `'TOTAL'` | `GroupRow.group` is `BreakdownValueGroup(value=...)`, or `BreakdownUnclaimedGroup()` for the tasks that no worker claimed (`group_by='worker'` only). A worker with the id `unknown` is a value group of its own. `GroupRow` derives from `BreakdownCounts`. `Breakdown.total` is a `BreakdownCounts`, with no `group` | Match `row.group` on the two classes. Read `total` as counts |
+| `queue_priorities`, `queue_max_concurrency` and `recovery_config` of `WorkerStateSnapshot`, and `WorkerStateInfo.queue_max_concurrency`, were `dict \| None` | `dict`. `{}` when the worker had none set | Test for `{}` where the code tested `None` |
 | `OperationalErrorCode` | One more member: `WORKFLOW_START_INCOMPLETE`. Recovery fails a RUNNING workflow that has no node rows with this code. `TaskError` refuses `'WORKFLOW_START_INCOMPLETE'` as a user code | Add the case to an exhaustive `match`. Rename a user code with this name |
 | `TaskSendPayload.args_json`, `kwargs_json` and `enqueue_sha` | Removed. `TaskSendPayload.input_json` holds the keyword arguments as one JSON object, or `None` for none | Read `input_json` |
-| `PostgresBroker.enqueue()` and `enqueue_async()` with `args_json`, `kwargs_json` and `enqueue_sha` | `input_json` replaces the three. `sent_at` and `send_kind` are required. An `input_json` that is not a JSON object or null, or that repeats a key, gets `INVALID_INPUT` | Give `input_json`, `sent_at` and `send_kind` |
+| `PostgresBroker.enqueue()` and `enqueue_async()` with `args_json`, `kwargs_json` and `enqueue_sha` | `input_json` replaces the three. `sent_at` and `send_kind` are required. An `input_json` that is not a JSON object or null, or that repeats a key, gets `INVALID_INPUT` | Give `input_json`, `sent_at` and `send_kind`. Import `SendKind` from `horsies`: `SendKind.FIRST` for the first send of a task id, `SendKind.REPEAT` for a resend |
 | `PostgresBroker.prepare_send_command()` with `kwargs_json` | Takes `input_json` | Give `input_json` |
 | `RerunInputUnavailable.reference_locator` | Removed. `task_id` and `disposition` stay | Remove the read |
 | `horsies.core.utils.fingerprint.enqueue_fingerprint` | Removed | Remove the call |
@@ -257,6 +258,8 @@ See [Refusals](/horsies/configuration/broker-connections/#refusals).
 | A request body over 1 MiB | – | 413 |
 | `GET /api/workers/classes` | Has the key `not_recorded` | Has no key `not_recorded` |
 | `slot_health` of `GET /api/workers` | Can be `not_recorded` | Never `not_recorded` |
+| `queue_max_concurrency` of `GET /api/workers` | Can be `null` | `{}` when none is set |
+| `GET /api/tasks/breakdown` | `group` is text, `'unknown'` for the unclaimed tasks. `total` has the group `'TOTAL'` | `group` is `{"kind": "value", "value": ...}` or `{"kind": "unclaimed"}`. `total` has no `group` key |
 | The times of each answer | In the zone of the database session | In UTC, with `Z` |
 
 ## The worker liveness lock

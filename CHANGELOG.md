@@ -13,6 +13,20 @@ written in Rust, on a new baseline schema. Read the
 [migration guide to 0.8.0](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-8-0/)
 before you upgrade a 0.7 deployment.
 
+### Added
+
+- **`SendKind` and the core error classes are exported from `horsies`.**
+  `SendKind` is the type of the required `send_kind` of
+  `PostgresBroker.enqueue` and `enqueue_async`: `SendKind.FIRST` for the
+  first send of a task id, `SendKind.REPEAT` for a resend. The core error
+  classes are `CoreServerError`, `CoreConnectionError`,
+  `CoreContractViolation` and `CorePreconditionFailed` (the `exception` of
+  a failed core call), `TooManyPendingCalls`, `CoreCallTimedOut` and
+  `CoreStartFailed` (the `exception` when the core cannot run a call), and
+  `ForkedAfterCoreStart` and `CoreStopped` (raised). Import them from
+  `horsies`. They are defined in `horsies.core.brokers.enqueue_task` and in
+  the extension `horsies._core`.
+
 ### Changed
 
 - **0.8.0 starts on a new database.** The core installs a new baseline
@@ -63,7 +77,8 @@ before you upgrade a 0.7 deployment.
   cause.** Where a call ran on the core and failed, the `exception` field of
   its error (for example `BrokerOperationFailed.exception`,
   `TaskActionDbOperationFailed.exception`,
-  `HandleDbOperationFailed.exception`) holds one class of `horsies._core`:
+  `HandleDbOperationFailed.exception`) holds one class of the core,
+  exported from `horsies`:
   `CoreServerError` (the server answered with an error: `sqlstate` and the
   server's primary `message`), `CoreConnectionError` (no answer from the
   server), `CoreContractViolation` (a row or a stored value broke the
@@ -239,6 +254,27 @@ before you upgrade a 0.7 deployment.
 - **The worker list measures ages to the database clock.** `snapshot_age_s`,
   `stale` and `uptime_s` of `GET /api/workers` are measured to the time of
   the database read; 0.7 measured them to the clock of the web host.
+
+- **A task breakdown keeps the unclaimed tasks apart from a worker named
+  `unknown`.** Each `GroupRow.group` of `horsies.monitoring.task_breakdown`
+  is `BreakdownValueGroup(value=...)` (a worker id, a task name or a queue
+  name) or, for `group_by='worker'` only, `BreakdownUnclaimedGroup()` (the
+  tasks that no worker claimed); it was a `str`. `GroupRow` derives from the
+  new `BreakdownCounts`, and `Breakdown.total` is a `BreakdownCounts` with no
+  `group`; it was a `GroupRow` with the group `'TOTAL'`.
+  `GET /api/tasks/breakdown` writes a group as
+  `{"kind": "value", "value": ...}` or `{"kind": "unclaimed"}`, and `total`
+  with no `group` key. 0.7 labelled the unclaimed tasks and a worker with
+  the id `unknown` both `'unknown'` and kept one row of the two, so the
+  groups summed to less than the total. Match `row.group` on the two
+  classes.
+
+- **The maps of a worker snapshot are a `dict`, never `None`.**
+  `WorkerStateSnapshot.queue_priorities`, `queue_max_concurrency` and
+  `recovery_config`, and `horsies.monitoring.WorkerStateInfo.queue_max_concurrency`
+  (`GET /api/workers`), are `{}` when the worker had none set; 0.7 gave
+  `None` (`null` on the web). The baseline columns are NOT NULL. Test for
+  `{}` where the code tested `None`.
 
 - **Monitoring and web times are in UTC.** The times of the
   `horsies.monitoring` reads and of the web API answers are UTC (`Z` in
