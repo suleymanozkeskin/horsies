@@ -336,7 +336,7 @@ impl ClaimWakes {
             .collect();
         std::future::poll_fn(|context| {
             for wait in waits.iter_mut() {
-                if let Poll::Ready(event) = &mut *wait.poll(context) {
+                if let Poll::Ready(event) = wait.as_mut().poll(context) {
                     return Poll::Ready(event);
                 }
             }
@@ -2192,7 +2192,7 @@ mod tests {
             Duration::from_secs(60),
         );
         tokio::pin!(wait);
-        assert!(&mut *wait.now_or_never().is_none());
+        assert!(wait.as_mut().now_or_never().is_none());
         released.notify_one();
         let wake = tokio::time::timeout(Duration::from_secs(1), wait)
             .await
@@ -2229,7 +2229,7 @@ mod tests {
         tokio::pin!(wait);
         tokio::task::yield_now().await;
         assert!(
-            &mut *wait.now_or_never().is_none(),
+            wait.as_mut().now_or_never().is_none(),
             "no wake while the write runs"
         );
 
@@ -2296,7 +2296,7 @@ mod tests {
             Duration::from_secs(60),
         );
         tokio::pin!(wait);
-        assert!(&mut *wait.now_or_never().is_none());
+        assert!(wait.as_mut().now_or_never().is_none());
         board.note_child_ready();
         let wake = tokio::time::timeout(Duration::from_secs(1), wait)
             .await
