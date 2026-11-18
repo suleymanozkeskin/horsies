@@ -478,6 +478,9 @@ async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
 /// not reset it). The recovery pass of the child's tree writes the same
 /// parent node (case 1.6: a terminal child under a RUNNING parent node), so
 /// one refusal shows that the advance ran and the recovery pass did not.
+///
+/// The message names the parent advance and the child whose advance failed,
+/// as the Python resume did (`tests/dualrun/reference/workflow_resume_caller.py`).
 #[tokio::test]
 #[serial]
 async fn a_failed_parent_advance_after_the_resume_commit_is_resume_recovery_failed() {
@@ -540,6 +543,11 @@ async fn a_failed_parent_advance_after_the_resume_commit_is_resume_recovery_fail
         error.failure_cause(),
         FailureCause::Server(ServerErrorFacts::of_code("P0001", REFUSAL.to_owned()))
     );
+    let message = error.message();
+    let expected_start =
+        format!("Workflow {child} resumed; the parent advance of child workflow {child} failed: ");
+    assert!(message.starts_with(&expected_start), "{message}");
+    assert!(message.contains(REFUSAL), "{message}");
     assert_eq!(workflow_status(&db.pool, child).await, "COMPLETED");
     assert_eq!(node_status(&db.pool, parent, 0).await, "RUNNING");
     assert_eq!(workflow_status(&db.pool, parent).await, "RUNNING");

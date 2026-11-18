@@ -15,7 +15,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -125,7 +125,7 @@ class Facets(BaseModel):
 class BreakdownValueGroup(BaseModel):
     """The tasks whose group column holds ``value``: a worker id, a task name or a queue name."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     kind: Literal['value'] = 'value'
     value: str
@@ -138,7 +138,7 @@ class BreakdownUnclaimedGroup(BaseModel):
     of its own, never this group.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     kind: Literal['unclaimed'] = 'unclaimed'
 

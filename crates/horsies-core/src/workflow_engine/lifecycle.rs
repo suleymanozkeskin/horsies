@@ -480,7 +480,13 @@ pub(crate) async fn resume_with(
     ))
     .await
     .map_err(|failure| {
-        ResumeFailure::Handle(resume_recovery_failed(workflow_id, &failure.error))
+        ResumeFailure::Handle(resume_recovery_failed(
+            workflow_id,
+            AfterResumeCommit::ParentAdvance {
+                child_workflow_id: failure.failed_child_workflow_id,
+            },
+            &failure.error,
+        ))
     })?;
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
     // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree (Python
@@ -491,17 +497,44 @@ pub(crate) async fn resume_with(
         workflow_id,
     ))
     .await
-    .map_err(|error| ResumeFailure::Handle(resume_recovery_failed(workflow_id, &error)))?;
+    .map_err(|error| {
+        ResumeFailure::Handle(resume_recovery_failed(
+            workflow_id,
+            AfterResumeCommit::TreeRecovery,
+            &error,
+        ))
+    })?;
     Ok(true)
 }
 
+/// The work after a resume commit that failed.
+enum AfterResumeCommit {
+    /// The advance of the parent of `child_workflow_id`, a child workflow
+    /// that the resume ended.
+    ParentAdvance { child_workflow_id: Uuid },
+    /// The recovery pass over the tree of the resumed workflow.
+    TreeRecovery,
+}
+
 /// The error of a resume that committed and whose work after the commit failed: `RESUME_RECOVERY_FAILED`, not
-/// retryable (the workflow is RUNNING).
-fn resume_recovery_failed(workflow_id: Uuid, error: &WorkflowError) -> HandleOperationError {
-    HandleOperationError::ResumeRecoveryFailed {
-        message: format!(
+/// retryable (the workflow is RUNNING). The message names the failed work as the Python resume did
+/// (`tests/dualrun/reference/workflow_resume_caller.py`). Pure.
+fn resume_recovery_failed(
+    workflow_id: Uuid,
+    failed: AfterResumeCommit,
+    error: &WorkflowError,
+) -> HandleOperationError {
+    let message = match failed {
+        AfterResumeCommit::ParentAdvance { child_workflow_id } => format!(
+            "Workflow {workflow_id} resumed; the parent advance of child workflow \
+             {child_workflow_id} failed: {error}"
+        ),
+        AfterResumeCommit::TreeRecovery => format!(
             "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
         ),
+    };
+    HandleOperationError::ResumeRecoveryFailed {
+        message,
         workflow_id,
         cause: error.failure_cause(),
     }
