@@ -203,10 +203,8 @@ mod tests {
     fn a_failed_read_keeps_its_code_and_retry_rule() {
         let RawResultOutcome::Failed(failure) = read_outcome(
             task(),
-            Err(BrokerOperationError {
-                code: BrokerErrorCode::InvalidJsonPayload,
+            Err(BrokerOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
-                retryable: false,
                 cause: FailureCause::ContractViolation,
             }),
         ) else {

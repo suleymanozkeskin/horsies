@@ -24,8 +24,8 @@
 //!   its catalog, as a Python sync call inside a running event loop does:
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
 //!   so `retry_send(&error).await` completes the same send),
-//!   `ReadError::AsyncContext`, `BrokerOperationError` with
-//!   `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
+//!   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
+//!   `CheckReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
 //!   start, `HandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
@@ -52,9 +52,9 @@ use std::time::Duration;
 
 use horsies_core::process_runtime::{process_runtime, ProcessRuntimeRefusal};
 use horsies_core::{
-    process_role, thread_role, BrokerErrorCode, BrokerOperationError, ClassCoverage, ClassReport,
-    DatabasePing, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
-    WorkerStateSnapshot,
+    process_role, thread_role, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
+    ClassCoverage, ClassReport, DatabasePing, ProcessRole, SendKind, TaskSendError, ThreadRole,
+    WorkerPong, WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -367,19 +367,16 @@ fn block_read<V>(
 /// A runtime refusal has the broker code `code` of the read.
 fn block_health<V>(
     read: impl Future<Output = Result<V, BrokerOperationError>>,
-    code: BrokerErrorCode,
+    code: BrokerOperationFailedCode,
     blocking_call: &str,
     async_call: &str,
 ) -> Result<V, BrokerOperationError> {
     match place() {
         Place::Runs(runtime) => runtime.block_on(read),
-        Place::AsyncContext => Err(BrokerOperationError {
-            code: BrokerErrorCode::AsyncContext,
+        Place::AsyncContext => Err(BrokerOperationError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
-            retryable: false,
-            cause: horsies_core::FailureCause::PreconditionFailed,
         }),
-        Place::RuntimeRefused(refusal) => Err(BrokerOperationError {
+        Place::RuntimeRefused(refusal) => Err(BrokerOperationError::OperationFailed {
             code,
             message: format!("the read did not start: {refusal}"),
             retryable: refusal_retryable(&refusal),
@@ -452,7 +449,7 @@ impl HorsiesView<'_> {
     pub fn ping_database(&self) -> Result<DatabasePing, BrokerOperationError> {
         block_health(
             self.app.ping_database(),
-            BrokerErrorCode::DbPingFailed,
+            BrokerOperationFailedCode::DbPingFailed,
             "Horsies::ping_database()",
             "app.ping_database()",
         )
@@ -467,7 +464,7 @@ impl HorsiesView<'_> {
     ) -> Result<Vec<WorkerPong>, BrokerOperationError> {
         block_health(
             self.app.ping_workers(target, timeout, min_responses),
-            BrokerErrorCode::WorkerPingFailed,
+            BrokerOperationFailedCode::WorkerPingFailed,
             "Horsies::ping_workers()",
             "app.ping_workers(target, timeout, min_responses)",
         )
@@ -477,7 +474,7 @@ impl HorsiesView<'_> {
     pub fn list_worker_states(&self) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.list_worker_states(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::list_worker_states()",
             "app.list_worker_states()",
         )
@@ -490,7 +487,7 @@ impl HorsiesView<'_> {
     ) -> Result<Option<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.get_worker_state(worker_id),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state()",
             "app.get_worker_state(worker_id)",
         )
@@ -504,7 +501,7 @@ impl HorsiesView<'_> {
     ) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.get_worker_state_history(worker_id, limit),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state_history()",
             "app.get_worker_state_history(worker_id, limit)",
         )
@@ -514,7 +511,7 @@ impl HorsiesView<'_> {
     pub fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
         block_health(
             self.app.get_class_coverage(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_coverage()",
             "app.get_class_coverage()",
         )
@@ -524,7 +521,7 @@ impl HorsiesView<'_> {
     pub fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
         block_health(
             self.app.get_class_report(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_report()",
             "app.get_class_report()",
         )
@@ -658,8 +655,8 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_health_read_on_a_runtime_thread_has_the_async_context_code() {
         let refused = app().blocking().ping_database().unwrap_err();
-        assert_eq!(refused.code, BrokerErrorCode::AsyncContext);
-        assert!(!refused.retryable);
+        assert_eq!(refused.code(), BrokerErrorCode::AsyncContext);
+        assert!(!refused.retryable());
     }
 
     #[tokio::test]

@@ -288,13 +288,13 @@ async fn a_live_snapshot_with_unreadable_budgets_fails_both_reads() {
     let report = broker.get_class_report().await.expect_err("refused");
 
     for error in [coverage, report] {
-        assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-        assert!(!error.retryable);
-        assert!(error.message.contains("w-odd"), "{}", error.message);
+        assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!error.retryable());
+        assert!(error.message().contains("w-odd"), "{}", error.message());
         assert!(
-            error.message.contains("class_capacity is unreadable"),
+            error.message().contains("class_capacity is unreadable"),
             "{}",
-            error.message
+            error.message()
         );
     }
     database.drop().await;
@@ -430,10 +430,10 @@ async fn rows_of_a_class_the_worker_does_not_serve_fail_the_report() {
         .await
         .expect_err("the report is refused");
 
-    assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(!error.retryable);
-    assert!(error.message.contains("w1"), "{}", error.message);
-    assert!(error.message.contains("ISOLATED"), "{}", error.message);
+    assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(!error.retryable());
+    assert!(error.message().contains("w1"), "{}", error.message());
+    assert!(error.message().contains("ISOLATED"), "{}", error.message());
     database.drop().await;
 }
 

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use horsies_core::{
-    BoundedTaskList, BrokerError, BrokerErrorCode, BrokerOperationError, ClassCoverage,
+    BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationFailedCode, ClassCoverage,
     ClassReport, DatabasePing, ExpiredTaskRow, PostgresBroker, StaleMinutes, StaleTaskRow,
     WorkerPong, WorkerStateSnapshot,
 };
@@ -44,7 +44,7 @@ impl Horsies {
     ///
     /// Errors: `DB_PING_FAILED` with the retry classification of the cause.
     pub async fn ping_database(&self) -> Result<DatabasePing, BrokerOperationError> {
-        self.health_broker(BrokerErrorCode::DbPingFailed)
+        self.health_broker(BrokerOperationFailedCode::DbPingFailed)
             .await?
             .ping_database()
             .await
@@ -68,7 +68,7 @@ impl Horsies {
             PingTarget::EveryWorker => None,
             PingTarget::Worker(worker_id) => Some(worker_id.as_str()),
         };
-        self.health_broker(BrokerErrorCode::WorkerPingFailed)
+        self.health_broker(BrokerOperationFailedCode::WorkerPingFailed)
             .await?
             .ping_workers(
                 target_worker_id,
@@ -164,7 +164,7 @@ impl Horsies {
     }
 
     async fn monitoring_broker(&self) -> Result<Arc<PostgresBroker>, BrokerOperationError> {
-        self.health_broker(BrokerErrorCode::MonitoringQueryFailed)
+        self.health_broker(BrokerOperationFailedCode::MonitoringQueryFailed)
             .await
     }
 
@@ -172,7 +172,7 @@ impl Horsies {
     /// once per handle. A failure has the broker code `code` of the read.
     async fn health_broker(
         &self,
-        code: BrokerErrorCode,
+        code: BrokerOperationFailedCode,
     ) -> Result<Arc<PostgresBroker>, BrokerOperationError> {
         self.reads_handle()
             .initialized_broker()
@@ -182,8 +182,8 @@ impl Horsies {
 }
 
 /// The failure of a connect or an install before a health read. Pure.
-fn connect_failure(code: BrokerErrorCode, error: &BrokerError) -> BrokerOperationError {
-    BrokerOperationError {
+fn connect_failure(code: BrokerOperationFailedCode, error: &BrokerError) -> BrokerOperationError {
+    BrokerOperationError::OperationFailed {
         code,
         message: error.to_string(),
         retryable: error.is_retryable(),
@@ -197,13 +197,16 @@ mod tests {
 
     #[test]
     fn a_connect_failure_has_the_code_of_the_read_and_the_retry_rule_of_the_cause() {
-        let failure = connect_failure(BrokerErrorCode::DbPingFailed, &BrokerError::ListenerClosed);
-        assert_eq!(failure.code, BrokerErrorCode::DbPingFailed);
+        let failure = connect_failure(
+            BrokerOperationFailedCode::DbPingFailed,
+            &BrokerError::ListenerClosed,
+        );
+        assert_eq!(failure.code(), horsies_core::BrokerErrorCode::DbPingFailed);
         assert_eq!(
-            failure.retryable,
+            failure.retryable(),
             BrokerError::ListenerClosed.is_retryable()
         );
-        assert!(!failure.message.is_empty());
+        assert!(!failure.message().is_empty());
     }
 
     #[test]

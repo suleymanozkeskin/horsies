@@ -142,8 +142,8 @@ async fn test_ping_workers_rejects_zero_timeout() {
         .ping_workers(PingTarget::EveryWorker, Duration::ZERO, None)
         .await
         .expect_err("a zero timeout is refused");
-    assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
-    assert!(!refused.retryable, "a bad argument is not retryable");
+    assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
+    assert!(!refused.retryable(), "a bad argument is not retryable");
 }
 
 /// Python: `test_worker_health.py::test_ping_workers_reaches_real_worker`.
