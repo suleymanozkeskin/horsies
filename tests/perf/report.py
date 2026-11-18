@@ -48,7 +48,7 @@ def render_summary(result: RunResult) -> str:
         f'| observations per side | {conditions.observations_per_side} |',
         f'| block size | {conditions.block_size} |',
         f'| pre-existing terminal rows | {conditions.ballast_rows} |',
-        f'| result payload | {conditions.payload_bytes} bytes |',
+        f'| payload per operation | {conditions.payload_bytes} bytes |',
         f'| batch | {batch} |',
         f'| fsync | {conditions.fsync} |',
         f'| full_page_writes | {conditions.full_page_writes} |',

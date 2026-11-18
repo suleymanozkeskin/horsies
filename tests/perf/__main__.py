@@ -5,15 +5,16 @@ harness still works and is expected on any change to it; a gate run produces
 evidence that a phase is allowed to proceed, and refuses to start unless the
 conditions that make its numbers meaningful have been stated.
 
-    uv run python -m tests.perf --scenario fused-completion-small-result \\
+    uv run python -m tests.perf --scenario send \\
         --dsn postgresql://postgres:testpassword@localhost:15446/horsies \\
         --scale smoke --control
 
-    uv run python -m tests.perf --scenario fused-completion-small-result \\
+    uv run python -m tests.perf --scenario send \\
         --dsn ... --scale gate --demo-quiesced --control
 
 On the baseline schema every scenario has one implementation, so a gate run
-is a control run (``--control``).
+is a control run (``--control``). The scenarios of this release call public
+operations of the library (``public_calls.py``) and connect with ``--dsn``.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import assert_never
 
 from sqlalchemy import create_engine
 
@@ -31,7 +33,9 @@ from tests.perf.runner import RunResult, run_scenario, server_setting
 from tests.perf.scenarios import (
     SCENARIOS,
     BatchScenario,
+    PublicCallScenario,
     Scenario,
+    SingleRowScenario,
     scenario_by_name,
 )
 from tests.perf.statistics import Verdict
@@ -152,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     if arguments.scale == 'gate' and not arguments.control:
         missing = [
-            scenario.name for scenario in scenarios if scenario.candidate is None
+            scenario.name for scenario in scenarios if not _has_candidate(scenario)
         ]
         if missing:
             parser.error(
@@ -176,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         for scenario in scenarios:
             result = run_scenario(
                 engine,
+                dsn=arguments.dsn,
                 scenario=scenario,
                 observations=_observations_for(
                     scenario,
@@ -238,11 +243,24 @@ def _select_scenarios(selector: str) -> tuple[Scenario, ...]:
         case 'all':
             return SCENARIOS
         case 'candidates':
-            return tuple(
-                scenario for scenario in SCENARIOS if scenario.candidate is not None
-            )
+            return tuple(scenario for scenario in SCENARIOS if _has_candidate(scenario))
         case name:
             return (scenario_by_name(name),)
+
+
+def _has_candidate(scenario: Scenario) -> bool:
+    """The scenario has a second implementation to compare with its baseline.
+
+    A public call scenario has none: both sides run the one call of the
+    release.
+    """
+    match scenario:
+        case SingleRowScenario() | BatchScenario():
+            return scenario.candidate is not None
+        case PublicCallScenario():
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _exit_status(
@@ -276,8 +294,10 @@ def _minimum_observations(scenario: Scenario, scale: str) -> int:
     match scenario:
         case BatchScenario():
             return GATE_BATCHES if scale == 'gate' else SMOKE_BATCHES
-        case _:
+        case SingleRowScenario() | PublicCallScenario():
             return GATE_OBSERVATIONS if scale == 'gate' else SMOKE_OBSERVATIONS
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _observations_for(
@@ -293,8 +313,10 @@ def _block_size_for(scenario: Scenario, requested: int) -> int:
     match scenario:
         case BatchScenario():
             return min(requested, 10)
-        case _:
+        case SingleRowScenario() | PublicCallScenario():
             return requested
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _control_disagreements(result: RunResult) -> list[str]:
