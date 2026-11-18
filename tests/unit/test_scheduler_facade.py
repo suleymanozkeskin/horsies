@@ -35,8 +35,6 @@ from horsies._core import (
     SchedulerStartFailed,
     SchedulerStartRefused,
     SchedulerStopped,
-    SchedulerTicked,
-    SchedulerTickFailed,
 )
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
@@ -321,7 +319,6 @@ class _CoreDouble:
     """The CoreScheduler doubles that one test built, and their answers."""
 
     start: object = field(default_factory=lambda: MagicMock(spec=SchedulerStarted))
-    tick: object = field(default_factory=lambda: MagicMock(spec=SchedulerTicked))
     run: object = field(default_factory=lambda: MagicMock(spec=SchedulerStopped))
     built: list[MagicMock] = field(default_factory=list[MagicMock])
     manifests: list[str] = field(default_factory=list[str])
@@ -330,7 +327,6 @@ class _CoreDouble:
         core = MagicMock()
         core.handle = handle
         core.start_async = AsyncMock(return_value=self.start)
-        core.tick_async = AsyncMock(return_value=self.tick)
         core.run_async = AsyncMock(return_value=self.run)
         core.request_stop = MagicMock()
         self.built.append(core)
@@ -496,43 +492,6 @@ class TestStart:
         core = core_double.only()
         assert core.handle is broker._core_handle
         core.start_async.assert_awaited_once_with()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-class TestTick:
-    async def test_a_tick_before_a_start_is_a_defect(self, core_double: _CoreDouble) -> None:
-        scheduler, _broker = _scheduler(_nightly())
-
-        with pytest.raises(RuntimeError, match='not properly initialized'):
-            await scheduler._check_and_run_schedules()
-
-        assert core_double.built == []
-
-    async def test_a_tick_runs_one_core_tick(self, core_double: _CoreDouble) -> None:
-        scheduler, _broker = _scheduler(_nightly())
-        await scheduler.start()
-
-        await scheduler._check_and_run_schedules()
-
-        core_double.only().tick_async.assert_awaited_once_with()
-
-    async def test_a_tick_that_fired_nothing_raises_with_the_cause(
-        self, core_double: _CoreDouble,
-    ) -> None:
-        core_double.tick = MagicMock(
-            spec=SchedulerTickFailed,
-            message='the due schedule read failed: connection refused',
-            retryable=True,
-        )
-        scheduler, _broker = _scheduler(_nightly())
-        await scheduler.start()
-
-        with pytest.raises(
-            RuntimeError,
-            match='Scheduler tick failed: the due schedule read failed: connection refused',
-        ):
-            await scheduler._check_and_run_schedules()
 
 
 @pytest.mark.unit
