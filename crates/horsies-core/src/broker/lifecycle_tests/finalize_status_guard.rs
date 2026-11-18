@@ -20,7 +20,7 @@ use crate::core::lifecycle::{
     AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationKind,
     TerminalizationOutcome, WorkflowSuccessOutcome,
 };
-use crate::test_support::terminal_writes::{self, StaleFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, StaleFailure};
 
 const RETRY_FACTS_QUEUE: &str = "lifecycle_retry_facts";
 

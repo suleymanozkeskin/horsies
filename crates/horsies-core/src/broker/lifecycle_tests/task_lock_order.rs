@@ -29,7 +29,7 @@ use crate::core::lifecycle::{
     TerminalizationKind, TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::monitoring::cancel_task;
-use crate::test_support::terminal_writes::{self, StaleFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, StaleFailure};
 
 const TASK_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))";
 const RESULT: &str = r#"{"err": "boom"}"#;

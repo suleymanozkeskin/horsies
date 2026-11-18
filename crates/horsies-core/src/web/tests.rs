@@ -2099,7 +2099,7 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
     .execute(&pool)
     .await
     .unwrap();
-    let failed = crate::test_support::terminal_writes::fail_running_task(
+    let failed = crate::test_support::sqlx_terminal_writes::fail_running_task(
         &pool,
         task_id,
         "web-stored-worker",

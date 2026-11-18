@@ -14,7 +14,7 @@ use crate::broker::PostgresBroker;
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 
 use super::*;
 

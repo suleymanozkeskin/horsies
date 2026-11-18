@@ -563,7 +563,7 @@ mod tests {
     use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
     use crate::core::lifecycle::TerminalizationOutcome;
     use crate::test_support::child_specs::TestChildSpecs;
-    use crate::test_support::terminal_writes::{self, TerminalFailure};
+    use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
     use serial_test::serial;
     use sqlx::PgPool;
 

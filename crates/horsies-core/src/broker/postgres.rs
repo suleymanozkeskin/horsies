@@ -1192,6 +1192,114 @@ impl PostgresBroker {
         Ok(broker)
     }
 
+    /// Construct a test broker of `family` on the test database of `url`:
+    /// the core pools of [`crate::broker::pools::handle_for_test_url`].
+    ///
+    /// The broker has no session URL, so it has no listener: result waits
+    /// poll, and an operation that needs a listener is refused with
+    /// [`ListenError::NoSessionUrl`]. Use
+    /// [`from_test_url_and_session_url`](Self::from_test_url_and_session_url)
+    /// for a broker with a listener.
+    #[cfg(test)]
+    pub fn from_test_url(url: &str, family: ClientFamily) -> Self {
+        Self::from_test_url_with_schema_initialization_mode(
+            url,
+            SchemaInitializationMode::MigrateAndValidate,
+            ProcessListener::without_session_url(),
+            family,
+        )
+    }
+
+    /// Construct a test broker of `family` on the test database of `url`,
+    /// with its listener on `session_url`: the process listener of that URL,
+    /// which opens its connection at the first subscription with the default
+    /// socket settings (`DEFAULT_SOCKET_SETTINGS`).
+    #[cfg(test)]
+    pub fn from_test_url_and_session_url(
+        url: &str,
+        session_url: &str,
+        family: ClientFamily,
+    ) -> Self {
+        Self::from_test_url_with_schema_initialization_mode(
+            url,
+            SchemaInitializationMode::MigrateAndValidate,
+            ProcessListener::on_session_url(session_url, DEFAULT_SOCKET_SETTINGS),
+            family,
+        )
+    }
+
+    /// Construct a test monitoring broker of `family` on the test database
+    /// of `url` that never applies migrations or checks the fleet cutover
+    /// gate. It has no session URL, so it has no listener.
+    #[cfg(test)]
+    pub fn from_test_url_observe_only(url: &str, family: ClientFamily) -> Self {
+        Self::from_test_url_with_schema_initialization_mode(
+            url,
+            SchemaInitializationMode::ObserveOnly,
+            ProcessListener::without_session_url(),
+            family,
+        )
+    }
+
+    /// The test broker on `url`. Its sqlx adapter fields hold a pool that
+    /// connects at its first use; a test built from the URL never borrows
+    /// it.
+    #[cfg(test)]
+    fn from_test_url_with_schema_initialization_mode(
+        url: &str,
+        schema_initialization_mode: SchemaInitializationMode,
+        listener: ProcessListener,
+        family: ClientFamily,
+    ) -> Self {
+        let adapter = PgPoolOptions::new().connect_lazy_with(
+            pg_connect_options(url, false).expect("sqlx parses the test database URL"),
+        );
+        Self {
+            core: crate::broker::pools::handle_for_test_url(url),
+            statement_log: StatementLog::Off,
+            session_pool: adapter.clone(),
+            pool: adapter,
+            pgbouncer_transaction_mode: false,
+            retain_rerun_input_default: false,
+            idempotency_reservation_window_micros: IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
+            listener,
+            schema_initialized: tokio::sync::OnceCell::new(),
+            schema_initialization_mode,
+            install_coverage: default_install_coverage(),
+            client_family: family,
+            client_family_admitted: tokio::sync::OnceCell::new(),
+            result_reader: ResultReaderSeen::default(),
+        }
+    }
+
+    /// Construct a test broker of `family` on the test database of `url`
+    /// with an explicit keyed-enqueue reservation window. `None` selects the
+    /// 24-hour contract default.
+    #[cfg(test)]
+    pub fn from_test_url_with_idempotency_reservation_window(
+        url: &str,
+        window: Option<chrono::Duration>,
+        family: ClientFamily,
+    ) -> Result<Self, BrokerError> {
+        Self::from_test_url_with_enqueue_policy(url, false, window, family)
+    }
+
+    /// Construct a test broker of `family` on the test database of `url`
+    /// with both enqueue-time broker policies.
+    #[cfg(test)]
+    pub fn from_test_url_with_enqueue_policy(
+        url: &str,
+        retain_rerun_input_default: bool,
+        window: Option<chrono::Duration>,
+        family: ClientFamily,
+    ) -> Result<Self, BrokerError> {
+        let micros = idempotency_reservation_window_micros(window)?;
+        let mut broker = Self::from_test_url(url, family);
+        broker.retain_rerun_input_default = retain_rerun_input_default;
+        broker.idempotency_reservation_window_micros = micros;
+        Ok(broker)
+    }
+
     /// Connect using a raw database URL, for a client of `family`.
     ///
     /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
@@ -4362,7 +4470,7 @@ mod terminal_at_stamp_tests {
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
         let before = database_now(&pool).await;
 
-        let outcomes = crate::test_support::terminal_writes::fail_running_task(
+        let outcomes = crate::test_support::sqlx_terminal_writes::fail_running_task(
             &pool,
             Uuid::parse_str(&id).expect("test identity must be UUID"),
             "w1",

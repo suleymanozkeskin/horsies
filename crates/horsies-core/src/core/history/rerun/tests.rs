@@ -28,7 +28,7 @@ use crate::db::{
     CheckoutClass, IsolationLevel, ParameterType, RollbackOutcome, SqlScript, StatementBound,
     StatementFailure, TypedStatement,
 };
-use crate::test_support::terminal_writes::{self, TerminalFailure};
+use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 
 mod ports;
 

@@ -3849,7 +3849,7 @@ mod tests {
 
         use crate::broker::attempt_writes::{AttemptFailure, AttemptFailureKind};
         use crate::core::lifecycle::TerminalizationOutcome;
-        use crate::test_support::terminal_writes::{self, TerminalFailure};
+        use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, TerminalFailure};
 
         // A task failure carries an error code; a worker failure carries a
         // failed reason and records a WORKER_FAILURE attempt.
