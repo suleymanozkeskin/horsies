@@ -442,6 +442,37 @@ async fn an_unknown_task_is_pending_gone() {
     transaction.rollback().await.expect("rollback");
 }
 
+/// `TestEvidenceRetention.test_invalid_node_status_raises_typed`: consumption
+/// refuses a node status other than COMPLETED and FAILED. The database
+/// refuses it with `invalid_parameter_value` (22023) before it reads
+/// anything, and the client returns that refusal.
+#[tokio::test]
+#[serial]
+async fn consumption_refuses_a_node_status_that_is_not_terminal() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+
+    let refused = consume_phase2(&mut transaction, Uuid::new_v4(), "RUNNING")
+        .await
+        .expect_err("RUNNING is not a terminal node status");
+
+    assert_eq!(
+        refusal_message(&refused),
+        "terminal node status must be COMPLETED or FAILED"
+    );
+    match &refused {
+        HistoryError::Database(error) => assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .as_deref(),
+            Some("22023")
+        ),
+        other => panic!("expected a database refusal, got {other:?}"),
+    }
+    transaction.rollback().await.expect("rollback");
+}
+
 /// The primary message of a database refusal.
 fn refusal_message(error: &HistoryError) -> String {
     match error {
@@ -593,4 +624,79 @@ async fn a_refused_pending_delete_leaves_the_node_and_both_recovery_rows() {
         1
     );
     transaction.rollback().await.expect("rollback");
+}
+
+/// The text of `horsies_phase2_consume` in the baseline, from its
+/// `CREATE FUNCTION` to the end of its body.
+fn consume_function_text() -> &'static str {
+    let sql = crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL;
+    let start = sql
+        .find("CREATE FUNCTION horsies_phase2_consume(")
+        .expect("the baseline defines horsies_phase2_consume");
+    let length = sql[start..]
+        .find("\n$$;")
+        .expect("the body of horsies_phase2_consume ends");
+    &sql[start..start + length]
+}
+
+/// The first 400 characters of `text` from byte `start`.
+fn span_from(text: &str, start: usize) -> String {
+    text[start..].chars().take(400).collect()
+}
+
+/// `tests/unit/test_task_history_phase2.py::TestLockOrder::test_n6_order_workflow_then_node_then_pending`:
+/// on its main path the consumption locks the workflow row, then the node
+/// row, then the pending row, each `FOR UPDATE` (the lock order of the
+/// engine).
+#[test]
+fn consumption_locks_the_workflow_then_the_node_then_the_pending_row() {
+    let body = consume_function_text();
+    let order = body
+        .find("Lock order:")
+        .expect("the body states its lock order");
+    let workflow = order
+        + body[order..]
+            .find("FROM horsies_workflows w")
+            .expect("the workflow lock");
+    let node = workflow
+        + body[workflow..]
+            .find("FROM horsies_workflow_tasks wt")
+            .expect("the node lock");
+    let pending = node
+        + body[node..]
+            .find("FROM horsies_workflow_phase2_pending")
+            .expect("the pending lock");
+    assert!(workflow < node && node < pending);
+    for start in [workflow, node, pending] {
+        let span = span_from(body, start);
+        assert!(span.contains("FOR UPDATE"), "{span}");
+    }
+}
+
+/// `tests/unit/test_task_history_phase2.py::TestPrunedProbe::test_history_read_carries_both_partition_keys`:
+/// the history read of the consumption names both partition keys of the one
+/// leaf that holds the row (class and terminal time) and the task id, after
+/// the comment that rejects the fan-out over every leaf.
+#[test]
+fn the_history_read_names_both_partition_keys_of_its_leaf() {
+    let body = consume_function_text();
+    let probe = body
+        .find("h.retention_class_key = v_pending.history_class")
+        .expect("the read names the class");
+    assert!(body.contains("h.terminal_at = v_pending.history_anchor"));
+    assert!(body.contains("h.task_id = p_task_id"));
+    let comment = body
+        .find("NOT the rejected fan-out")
+        .expect("the comment of the one-leaf probe");
+    assert!(comment < probe);
+}
+
+/// `tests/unit/test_task_history_phase2.py::TestPrunedProbe::test_composite_node_lock_uses_structural_pinning`:
+/// the node lock of the consumption names the node row id and its workflow,
+/// so a locator cannot reach a node of another workflow.
+#[test]
+fn the_node_lock_is_pinned_by_its_row_id_and_its_workflow() {
+    let body = consume_function_text();
+    assert!(body.contains("wt.id = v_pending.workflow_node_row_id"));
+    assert!(body.contains("wt.workflow_id = v_pending.workflow_id"));
 }
