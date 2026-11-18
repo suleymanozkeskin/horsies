@@ -28,7 +28,7 @@ The API is on the client pages: [Broker Connections](/horsies/configuration/brok
 | `tcp_keepalives_count` | 3 | 1 to 127 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
 | `tcp_user_timeout_ms` | 30000 | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `retain_rerun_input_default` | off | – | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
-| `echo` | off | – | Echo SQL statements to logs. Bound values are not shown |
+| `echo` | off | – | Log each SQL statement at INFO on the logger `horsies.sql` (Rust: the `tracing` target `horsies.sql`): the SQL text as the message, the statement name as the field `statement`. Bound values are not shown. Python: a broker built with `echo=True` sets `horsies.sql` to INFO and, when that logger has no handler, adds one stdout handler per process |
 | `pool_recycle` | 1800 | `-1` (never) or 0 to 4,294,967,295 | Recycle connections after N seconds |
 
 A value outside its range is refused when the config is built. The three keepalive values are checked only when `tcp_keepalives` is on.
@@ -66,7 +66,7 @@ Rules:
 - Workers require `session_database_url` when `pgbouncer_transaction_mode` is on.
 - The two URLs must be different in transaction-pool mode.
 - Worker startup checks session behavior before partition maintenance starts.
-- Syce requires the session URL for real-time updates.
+- The web UI event stream listens on the session URL for real-time updates.
 - PgBouncer-only worker deployment is unsupported.
 - Horsies does not infer PgBouncer mode from port numbers.
 

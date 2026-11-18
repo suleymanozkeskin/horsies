@@ -779,9 +779,9 @@ fn check_input(
         .filter(|(member, _)| !links.args_from.contains_key(*member))
         .collect();
     // The static members were compared above; this decode looks for a
-    // missing field only.
+    // missing field of the input itself (depth 0) only.
     if let Err(failure) = input_check(input.text_with(&without_results).as_bytes(), &[]) {
-        if let Some(member) = missing_field(&failure) {
+        if let (0, Some(member)) = (failure.depth, missing_field(&failure)) {
             if links.args_from.contains_key(member) {
                 report.add(
                     HorsiesError::new(format!(
@@ -799,16 +799,40 @@ fn check_input(
 }
 
 /// The refusal of a node input that does not decode, or that holds a member
-/// that binds to no field, with Python's code for each kind: a member that
-/// binds to no field, a missing field, a value of another type.
+/// that binds to no field, with Python's code for each kind:
+///
+/// - A key of the input itself that binds to no field:
+///   `WORKFLOW_INVALID_KWARG_KEY`, as Python's check of the parameter
+///   names. Its failure has depth 1, the path of the key, or depth 0 from
+///   the check of a task with no parameters, which names the key at the
+///   input itself.
+/// - A key below a member that binds to no field (depth 2 or more):
+///   `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, as Python's strict encode of the
+///   member's value.
+/// - A field of the input itself that has no value (depth 0, the path
+///   `.`): `WORKFLOW_MISSING_REQUIRED_PARAMS`, as Python's check of the
+///   parameters.
+/// - A missing field inside a member's value (depth 1 or more: serde gives
+///   it the path of the value that misses it, `options` or `parcels[0]`):
+///   `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, as Python's strict encode of the
+///   member's value.
+/// - A value of another type: `WORKFLOW_KWARGS_NOT_SERIALIZABLE`.
+///
+/// serde gives a key inside a value that it buffers (an internally tagged
+/// or untagged enum, a flattened struct) the path of that value. A key that
+/// binds to no field inside such a value of a member has depth 1 and gets
+/// `WORKFLOW_INVALID_KWARG_KEY`.
 fn decode_refusal(owner: &str, failure: &DecodeFailure) -> HorsiesError {
     let code = match (
         failure.text.starts_with("unknown field "),
+        failure.depth,
         missing_field(failure),
     ) {
-        (true, _) => ErrorCode::WorkflowInvalidKwargKey,
-        (false, Some(_)) => ErrorCode::WorkflowMissingRequiredParams,
-        (false, None) => ErrorCode::WorkflowKwargsNotSerializable,
+        (true, 0 | 1, _) => ErrorCode::WorkflowInvalidKwargKey,
+        (true, _, _) => ErrorCode::WorkflowKwargsNotSerializable,
+        (false, 0, Some(_)) => ErrorCode::WorkflowMissingRequiredParams,
+        (false, _, Some(_)) => ErrorCode::WorkflowKwargsNotSerializable,
+        (false, _, None) => ErrorCode::WorkflowKwargsNotSerializable,
     };
     HorsiesError::new(format!(
         "the input of node {owner} does not decode as its input type: {failure}"

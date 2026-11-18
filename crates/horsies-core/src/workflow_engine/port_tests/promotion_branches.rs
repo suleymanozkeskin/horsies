@@ -11,13 +11,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    broker, code, ctx_result, error_of, node, node_task_input, ok, registry_of, seed_node,
+    broker, child_specs_of, code, ctx_result, error_of, node, node_task_input, ok, seed_node,
     seed_workflow, shared_pool, spec, stored_result_error, task_node, NodeSeed, WorkflowSeed,
 };
-use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::{WorkflowSpec, WorkflowSpecRegistry};
-use crate::workflow_engine::recovery::recover_stuck_workflow_tree;
+use crate::core::WorkflowSpec;
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::recovery::recover_workflow_tree;
+use crate::workflow_engine::steps::ChildBuild;
 
 /// The child of the sub-workflow node: one task node.
 fn child() -> WorkflowSpec {
@@ -60,15 +61,11 @@ async fn seed_completed_root_and_dependent(
 }
 
 /// The tree recovery pass of `workflow_id`: case 0 promotes node 1.
-async fn recover(pool: &PgPool, workflow_id: Uuid, registry: &WorkflowSpecRegistry) {
-    let _report = recover_stuck_workflow_tree(
-        &broker(pool),
-        registry,
-        workflow_id,
-        &RetentionConfig::default(),
-    )
-    .await
-    .expect("the tree recovery pass");
+async fn recover(pool: &PgPool, workflow_id: Uuid, child_specs: &TestChildSpecs) {
+    let _report =
+        recover_workflow_tree(&broker(pool), ChildBuild::Client(child_specs), workflow_id)
+            .await
+            .expect("the tree recovery pass");
 }
 
 /// Child workflows of `workflow_id`.
@@ -80,9 +77,10 @@ async fn child_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
         .expect("count the child workflows")
 }
 
-/// Node 1 is FAILED with `WORKER_SERIALIZATION_ERROR`, has no task row, and
-/// no child workflow was written.
-async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str) {
+/// Node 1 is FAILED with `WORKER_SERIALIZATION_ERROR`, Python's `message`,
+/// and the workflow id and the node in `data` (Python `_fail_enqueued_task`,
+/// `node_error`); it has no task row, and no child workflow was written.
+async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str, message: &str) {
     let row = node(pool, workflow_id, 1).await;
     assert_eq!(row.status, "FAILED", "{case}");
     assert_eq!(row.task_id, None, "{case}");
@@ -90,6 +88,12 @@ async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str
     assert_eq!(
         code(&error).as_deref(),
         Some("WORKER_SERIALIZATION_ERROR"),
+        "{case}"
+    );
+    assert_eq!(error.message.as_deref(), Some(message), "{case}");
+    assert_eq!(
+        error.data_value(),
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1})),
         "{case}"
     );
     assert_eq!(child_count(pool, workflow_id).await, 0, "{case}");
@@ -104,16 +108,19 @@ async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str
 /// `WORKER_SERIALIZATION_ERROR`, and no task row is written.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1222"]
 async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
     let pool = shared_pool().await;
-    let registry = registry_of(&[]);
-    for args_from in [
-        serde_json::json!({"x": "not_an_int"}),
-        serde_json::json!({"x": 1.5}),
-        serde_json::json!({"x": null}),
-        serde_json::json!({"x": 0, "y": "bad"}),
-        serde_json::json!("{broken"),
+    let child_specs = child_specs_of(&[]);
+    let non_int = "args_from has non-int values for task 1";
+    for (args_from, message) in [
+        (serde_json::json!({"x": "not_an_int"}), non_int),
+        (serde_json::json!({"x": 1.5}), non_int),
+        (serde_json::json!({"x": null}), non_int),
+        (serde_json::json!({"x": 0, "y": "bad"}), non_int),
+        (
+            serde_json::json!("{broken"),
+            "Corrupt args_from JSON for task 1",
+        ),
     ] {
         let case = args_from.to_string();
         let workflow_id = seed_completed_root_and_dependent(&pool, false, |mut dependent| {
@@ -122,9 +129,9 @@ async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
         })
         .await;
 
-        recover(&pool, workflow_id, &registry).await;
+        recover(&pool, workflow_id, &child_specs).await;
 
-        assert_node_1_failed_alone(&pool, workflow_id, &case).await;
+        assert_node_1_failed_alone(&pool, workflow_id, &case, message).await;
     }
 }
 
@@ -133,16 +140,21 @@ async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
 /// `WORKER_SERIALIZATION_ERROR`, and no task row is written.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1222"]
 async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id =
         seed_completed_root_and_dependent(&pool, false, |dependent| dependent.input("broken{json"))
             .await;
 
-    recover(&pool, workflow_id, &registry_of(&[])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "broken{json").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "broken{json",
+        "Corrupt kwargs JSON for task 1",
+    )
+    .await;
 }
 
 /// `TestEnqueueSubworkflowTask::test_corrupt_kwargs_json_fails`: a stored
@@ -150,16 +162,21 @@ async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
 /// `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1120"]
 async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id =
         seed_completed_root_and_dependent(&pool, true, |dependent| dependent.input("broken{json"))
             .await;
 
-    recover(&pool, workflow_id, &registry_of(&[child()])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "broken{json").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "broken{json",
+        "Corrupt kwargs JSON for subworkflow task 1",
+    )
+    .await;
 }
 
 /// `TestEnqueueSubworkflowTask::test_args_from_non_int_values_fails_task`:
@@ -167,7 +184,6 @@ async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
 /// with `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1120"]
 async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id = seed_completed_root_and_dependent(&pool, true, |mut dependent| {
@@ -176,9 +192,15 @@ async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_
     })
     .await;
 
-    recover(&pool, workflow_id, &registry_of(&[child()])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "not_an_int").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "not_an_int",
+        "args_from has non-int values for subworkflow task 1",
+    )
+    .await;
 }
 
 /// `TestEnqueueSubworkflowTask::test_corrupt_args_from_string_fails`: an
@@ -186,7 +208,6 @@ async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_
 /// `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1222"]
 async fn a_sub_workflow_node_whose_args_from_is_a_json_string_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id = seed_completed_root_and_dependent(&pool, true, |mut dependent| {
@@ -195,9 +216,15 @@ async fn a_sub_workflow_node_whose_args_from_is_a_json_string_fails_alone() {
     })
     .await;
 
-    recover(&pool, workflow_id, &registry_of(&[child()])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "\"{broken\"").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "\"{broken\"",
+        "Corrupt args_from JSON for subworkflow task 1",
+    )
+    .await;
 }
 
 /// `TestCheckAndPromoteTask::test_no_dependencies_returns`, with the core's
@@ -213,7 +240,7 @@ async fn a_pending_node_without_dependencies_is_promoted() {
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
     seed_node(&pool, &NodeSeed::task(workflow_id, 0, "PENDING")).await;
 
-    recover(&pool, workflow_id, &registry_of(&[])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
     let row = node(&pool, workflow_id, 0).await;
     assert_eq!(row.status, "ENQUEUED");
@@ -244,7 +271,7 @@ async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
             dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
             seed_node(&pool, &dependent).await;
 
-            recover(&pool, workflow_id, &registry_of(&[])).await;
+            recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
             let input = node_task_input(&pool, workflow_id, 1).await;
             let entry = ctx_result(&input, "node_0");
@@ -259,7 +286,7 @@ async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
             );
             assert_eq!(error.message.as_deref(), Some(expected.as_str()), "{case}");
             assert_eq!(
-                error.data,
+                error.data_value(),
                 Some(serde_json::json!({"dependency_index": 0})),
                 "{case}"
             );
@@ -293,7 +320,7 @@ async fn a_context_entry_of_a_sub_workflow_node_carries_its_stored_summary() {
     dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
     seed_node(&pool, &dependent).await;
 
-    recover(&pool, workflow_id, &registry_of(&[])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
     let input = node_task_input(&pool, workflow_id, 1).await;
     assert_eq!(

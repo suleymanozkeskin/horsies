@@ -6,7 +6,8 @@
 //! - At most [`MAX_VALUE_JSON_DEPTH`] levels of arrays and objects. A stored text may have
 //!   [`MAX_JSON_DEPTH`] levels, so the engine has room for the envelopes that it puts around a value.
 
-use super::strict_read::{MAX_INT_DIGITS, MAX_JSON_DEPTH};
+use super::json_text::JsonText;
+use super::strict_read::{text_shape, MAX_INT_DIGITS, MAX_JSON_DEPTH};
 
 /// Key prefixes that only the engine writes (Python `_RESERVED_KEY_PREFIXES`, `core/codec/typed.py:152`).
 pub const ENGINE_KEY_PREFIXES: [&str; 2] = ["__h_", "__horsies_"];
@@ -110,6 +111,23 @@ pub fn check_user_value(
     match deepest > depth_limit {
         true => Err(UserValueRefused::DeeperThanValueBound { limit: depth_limit }),
         false => Ok(()),
+    }
+}
+
+/// Check a user value from its text, with the rules of [`check_user_value`]: no engine key at any depth, and at
+/// most `depth_limit` levels of arrays and objects. An engine key is reported before a depth past
+/// `depth_limit`; of two engine keys, the first in text order. A [`JsonText`] passed the strict read rule, so it
+/// is never deeper than [`MAX_JSON_DEPTH`] levels and holds no integer of more than [`MAX_INT_DIGITS`] digits.
+///
+/// Pure. The text is read once and no value is built, so an integer outside the `i64` and `u64` range is
+/// checked as it is stored.
+pub fn check_user_value_text(value: &JsonText, depth_limit: usize) -> Result<(), UserValueRefused> {
+    let shape =
+        text_shape(value.get()).expect("the text of a JsonText passed the strict read rule");
+    match (shape.engine_key, shape.deepest > depth_limit) {
+        (Some(key), _) => Err(UserValueRefused::EngineKey { key }),
+        (None, true) => Err(UserValueRefused::DeeperThanValueBound { limit: depth_limit }),
+        (None, false) => Ok(()),
     }
 }
 
@@ -256,6 +274,46 @@ mod tests {
                 key: "__h_x".to_owned()
             })
         );
+    }
+
+    /// The text check gives the refusals of the value check, also for a value whose integers are outside the
+    /// `i64` and `u64` range.
+    #[test]
+    fn the_text_check_gives_the_refusals_of_the_value_check() {
+        let text = |value: &serde_json::Value| JsonText::parse(&value.to_string()).unwrap();
+        for value in [
+            json!({"a": [1, {"b": null}], "note": "__h_task_result__"}),
+            json!({"a": {"__h_x": 1}}),
+            json!({"__builtin_task_code__": "X"}),
+            nested_list(MAX_VALUE_JSON_DEPTH),
+            nested_list(MAX_VALUE_JSON_DEPTH + 1),
+            json!(7),
+        ] {
+            assert_eq!(
+                check_user_value_text(&text(&value), MAX_VALUE_JSON_DEPTH),
+                check_user_value(&value, MAX_VALUE_JSON_DEPTH),
+                "{value}"
+            );
+        }
+        let mut deep_engine_key = json!({"__h_x": 1});
+        for _ in 0..MAX_VALUE_JSON_DEPTH {
+            deep_engine_key = serde_json::Value::Array(vec![deep_engine_key]);
+        }
+        assert_eq!(
+            check_user_value_text(&text(&deep_engine_key), MAX_VALUE_JSON_DEPTH),
+            Err(UserValueRefused::EngineKey {
+                key: "__h_x".to_owned()
+            })
+        );
+        let wide = JsonText::parse(
+            r#"{"wide": 340282366920938463463374607431768211455, "below": [-9223372036854775809]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            check_user_value_text(&wide, 1),
+            Err(UserValueRefused::DeeperThanValueBound { limit: 1 })
+        );
+        assert_eq!(check_user_value_text(&wide, 2), Ok(()));
     }
 
     #[test]

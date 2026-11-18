@@ -108,6 +108,9 @@ pub(crate) struct UnreadMember {
     pub(crate) path: String,
     /// The key of the member: the last part of `path`.
     pub(crate) key: String,
+    /// The number of keys and list positions in `path`: 1 for a member of
+    /// the input itself, 2 for `cfg.retries`, 3 for `items[2].name`.
+    pub(crate) depth: usize,
 }
 
 /// The first member of `given` with a value that is not `null` and that
@@ -163,6 +166,7 @@ fn unread_below(
                         None => Some(UnreadMember {
                             path: member,
                             key: key.clone(),
+                            depth: member_depth(levels_left),
                         }),
                         Some(read_value) => unread_below(value, Some(read_value), &member, below),
                     }
@@ -174,6 +178,7 @@ fn unread_below(
             .map(|(key, _value)| UnreadMember {
                 path: member_path(path, key),
                 key: key.clone(),
+                depth: member_depth(levels_left),
             }),
         (Value::Array(elements), Some(Value::Array(read_elements))) => {
             let below = level_below(levels_left, path);
@@ -212,6 +217,15 @@ fn unread_element(
         true => None,
         false => Some(unread),
     }
+}
+
+/// The depth ([`UnreadMember::depth`]) of a member of the object that
+/// [`unread_below`] reads with `levels_left` levels. The input itself is
+/// read with [`MAX_JSON_DEPTH`] levels, so its members have depth 1, and
+/// each object or list below takes one level and adds one part to the
+/// path. `levels_left` is never more than [`MAX_JSON_DEPTH`].
+fn member_depth(levels_left: usize) -> usize {
+    MAX_JSON_DEPTH - levels_left + 1
 }
 
 /// The levels of nesting allowed below the object or list at `path`.
@@ -254,7 +268,8 @@ pub fn decode_unit_input(input: &[u8]) -> Result<(), StoredTaskError> {
 
 /// `()` from the text `null` or `{}`. A non-empty object names its first
 /// key in serde's words for a type with no fields; any other value names
-/// only its kind. Pure.
+/// only its kind. The failure is at the value itself (`.`, depth 0), also
+/// for a key. Pure.
 pub(crate) fn decode_unit(input: &[u8]) -> Result<(), DecodeFailure> {
     let value = decode_checked::<serde_json::Value>(input)?;
     let text = match &value {
@@ -272,6 +287,7 @@ pub(crate) fn decode_unit(input: &[u8]) -> Result<(), DecodeFailure> {
     };
     Err(DecodeFailure {
         path: ".".to_owned(),
+        depth: 0,
         text,
     })
 }
@@ -371,6 +387,12 @@ pub(crate) struct DecodeFailure {
     /// The field path, `.` for the value itself (serde_path_to_error's
     /// form: `items[2].name`).
     pub(crate) path: String,
+    /// The number of keys and list positions in `path`: 0 for `.`, 1 for
+    /// `amount`, 2 for `cfg.retries` and for `items[2]`. It is counted from
+    /// the parts of the path, not from its text, in which a key may hold
+    /// `.` or `[`. serde gives a key that binds to no field the path of the
+    /// key itself.
+    pub(crate) depth: usize,
     /// The kind of the failure, with [`INPUT_PLACEHOLDER`] for input parts.
     pub(crate) text: String,
 }
@@ -390,10 +412,12 @@ pub(crate) fn decode_checked<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Dec
     let decoded: Result<T, _> = serde_path_to_error::deserialize(&mut deserializer);
     let value = decoded.map_err(|error| DecodeFailure {
         path: error.path().to_string(),
+        depth: error.path().iter().len(),
         text: value_free_decode_text(error.inner()),
     })?;
     deserializer.end().map_err(|error| DecodeFailure {
         path: ".".to_owned(),
+        depth: 0,
         text: value_free_decode_text(&error),
     })?;
     Ok(value)
@@ -487,7 +511,10 @@ fn serialization_error<V>(message: String) -> StoredTaskError {
         error_code: horsies_core::TaskErrorCode::from(
             OperationalErrorCode::WorkerSerializationError,
         ),
-        data: Some(serde_json::Value::Object(data)),
+        data: Some(
+            horsies_core::JsonText::of(&serde_json::Value::Object(data))
+                .expect("an object of two text members writes as strict JSON"),
+        ),
         message: Some(message),
         kind: TaskErrorKind::Plain,
     }
@@ -655,8 +682,8 @@ mod tests {
     }
 
     /// [`unread_member`]: a member that `read` does not hold is named by its
-    /// key path at each depth: in the object, in a nested object, and in an
-    /// element of a list.
+    /// key path and its depth at each depth: in the object, in a nested
+    /// object, and in an element of a list.
     #[test]
     fn an_unread_member_is_named_by_its_key_path_at_each_depth() {
         let read = json!({"a": {"b": 1}, "list": [{"c": 1}, {"c": 2}]});
@@ -667,6 +694,7 @@ mod tests {
             Some(UnreadMember {
                 path: "x".to_owned(),
                 key: "x".to_owned(),
+                depth: 1,
             })
         );
         assert_eq!(
@@ -674,6 +702,7 @@ mod tests {
             Some(UnreadMember {
                 path: "a.y".to_owned(),
                 key: "y".to_owned(),
+                depth: 2,
             })
         );
         assert_eq!(
@@ -681,6 +710,7 @@ mod tests {
             Some(UnreadMember {
                 path: "list[1].z".to_owned(),
                 key: "z".to_owned(),
+                depth: 3,
             })
         );
     }
@@ -704,6 +734,36 @@ mod tests {
         assert_eq!(unread_member(&given, &read), None);
     }
 
+    /// The input of [`a_decode_failure_has_the_depth_of_its_path`]: a key
+    /// that holds `.`.
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DottedKey {
+        #[serde(rename = "a.b")]
+        _inner: Item,
+    }
+
+    /// [`decode_checked`]: the depth of a failure is the number of keys and
+    /// list positions in its path, counted from its parts, so the key `a.b`
+    /// is one part. A key that binds to no field has the path of the key.
+    #[test]
+    fn a_decode_failure_has_the_depth_of_its_path() {
+        let depth = |text: &str| {
+            decode_checked::<DottedKey>(text.as_bytes())
+                .unwrap_err()
+                .depth
+        };
+        assert_eq!(depth("1"), 0);
+        assert_eq!(depth(r#"{"a.b": {"name": "x", "count": 1}} 1"#), 0);
+        assert_eq!(depth(r#"{"a.b": {"name": "x", "count": 1}, "c": 1}"#), 1);
+        assert_eq!(depth(r#"{"a.b": {"name": "x", "count": 1, "c": 1}}"#), 2);
+        let refused =
+            decode_checked::<Order>(br#"{"id": 1, "items": [{"name": "x", "count": "one"}]}"#)
+                .unwrap_err();
+        assert_eq!(refused.path, "items[0].count");
+        assert_eq!(refused.depth, 3);
+    }
+
     #[test]
     fn check_input_refuses_a_value_that_does_not_decode() {
         let wrong_type = check_input::<Order>(br#"{"id": "one", "items": []}"#).unwrap_err();
@@ -725,6 +785,12 @@ mod tests {
         assert_serialization_error(&error);
         let map: BTreeMap<String, u32> = decode_input(b"{}").unwrap();
         assert!(map.is_empty());
+        let none: Option<BTreeMap<String, u32>> = decode_input(b"null").unwrap();
+        assert_eq!(none, None);
+        let empty: Option<BTreeMap<String, u32>> = decode_input(b"{}").unwrap();
+        assert_eq!(empty, Some(BTreeMap::new()));
+        assert_serialization_error(&decode_input::<Option<i32>>(b"{}").unwrap_err());
+        assert_serialization_error(&decode_input::<i32>(b"{}").unwrap_err());
     }
 
     /// A task with no parameters reads `{}` (a send, a workflow node) and
@@ -782,7 +848,7 @@ mod tests {
         );
         assert!(message.contains("Order"), "{message}");
         assert!(!text_of(&error).contains(MARKER));
-        let data = error.data.unwrap();
+        let data: serde_json::Value = error.data.unwrap().decode().unwrap();
         assert!(data["expected_type"].as_str().unwrap().contains("Order"));
         assert_eq!(data["validation_error"].as_str(), Some(message.as_str()));
     }
@@ -835,13 +901,63 @@ mod tests {
         }
     }
 
+    /// An array input is one input value: a task of a `Vec` input decodes
+    /// the whole array, not one value per element.
     #[test]
-    fn a_non_finite_float_is_refused() {
-        match body_result::<f64, ChargeCode>(Ok(f64::NAN)) {
-            TaskResult::Ok(_) => panic!("NaN was encoded"),
+    fn an_array_input_decodes_as_one_value() {
+        let decoded: Vec<i32> = decode_input(b"[1,2,3]").expect("an array input decodes");
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    /// The rules of a stored value hold at every depth of a returned value:
+    /// an engine key inside an array is refused, a value nested to the depth
+    /// bound is encoded, and a value one level deeper is refused.
+    #[test]
+    fn the_return_rules_hold_at_every_depth() {
+        for key in ["__h_task_result__", "__horsies_x", "__builtin_task_code__"] {
+            let value = json!({ "outer": [{ key: 1 }] });
+            match body_result::<serde_json::Value, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => panic!("the engine key {key} inside an array was encoded"),
+                TaskResult::Err(error) => assert_serialization_error(&error),
+            }
+        }
+        let nested = |depth: usize| {
+            let mut value = json!([1]);
+            for _ in 1..depth {
+                value = serde_json::Value::Array(vec![value]);
+            }
+            value
+        };
+        let bound = horsies_core::core::codec::MAX_VALUE_JSON_DEPTH;
+        match body_result::<serde_json::Value, ChargeCode>(Ok(nested(bound))) {
+            TaskResult::Ok(_) => {}
+            TaskResult::Err(error) => panic!("a value at the depth bound was refused: {error}"),
+        }
+        match body_result::<serde_json::Value, ChargeCode>(Ok(nested(bound + 1))) {
+            TaskResult::Ok(_) => panic!("a value past the depth bound was encoded"),
             TaskResult::Err(error) => {
                 assert_serialization_error(&error);
-                assert!(error.message.unwrap().contains("non-finite"));
+                let message = error.message.as_deref().unwrap_or_default();
+                assert!(message.contains("nested deeper than 200"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_finite_float_is_refused() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            match body_result::<f64, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => panic!("{value} was encoded"),
+                TaskResult::Err(error) => {
+                    assert_serialization_error(&error);
+                    assert!(error.message.unwrap().contains("non-finite"), "{value}");
+                }
+            }
+        }
+        for value in [3.5, f64::MAX] {
+            match body_result::<f64, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => {}
+                TaskResult::Err(error) => panic!("{value} was refused: {error}"),
             }
         }
     }
@@ -899,6 +1015,8 @@ mod tests {
                     .clone()
                     .unwrap()
                     .contains("does not read back"));
+                let data: serde_json::Value = error.data.as_ref().unwrap().decode().unwrap();
+                assert_eq!(data["expected_type"], std::any::type_name::<TextNumber>());
                 assert!(!text_of(&error).contains(MARKER));
             }
         }

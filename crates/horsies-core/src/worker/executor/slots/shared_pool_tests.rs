@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
-use super::scripted::{drop_bytes, ScriptCount};
+use super::scripted::{drop_bytes, take_init, ScriptCount};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::placement::ChildCpus;
@@ -197,9 +197,6 @@ fn child_frames(frames: &[ChildFrame]) -> String {
 /// A child script: take the init frame, send ready, take the first run
 /// frame, write `frames`, then do `after`.
 fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &str) -> ChildCommand {
-    let init = encode_parent_frame(&ParentFrame::Init(init_frame(kind)))
-        .unwrap()
-        .to_bytes();
     let ready = encode_child_frame(&ChildFrame::Ready(ReadyFrame {
         pid: ProcessId::new(1).unwrap(),
         rss: RssReading::Unreadable,
@@ -221,7 +218,7 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
     .to_bytes();
     let script = format!(
         r#"{init}printf '{ready}' >&"$0"; {run}printf '{frames}' >&"$0"; {after}"#,
-        init = drop_bytes(ScriptCount::Known(init.len())),
+        init = take_init(),
         ready = printf_bytes(&ready),
         run = drop_bytes(ScriptCount::Known(run.len())),
         frames = child_frames(frames),

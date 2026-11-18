@@ -16,16 +16,11 @@ use super::support::{
     shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed, ParentLink,
     WorkflowSeed,
 };
-use crate::core::{
-    SubWorkflowSummary, TaskError, TaskResult, WorkflowSpecRegistry, WorkflowStatus,
-};
-
-fn empty_registry() -> WorkflowSpecRegistry {
-    WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
-}
+use crate::core::{SubWorkflowSummary, TaskError, TaskResult, WorkflowStatus};
+use crate::test_support::child_specs::TestChildSpecs;
 
 async fn complete(pool: &PgPool, workflow_id: Uuid) {
-    complete_workflow(pool, workflow_id, &empty_registry()).await;
+    complete_workflow(pool, workflow_id, &TestChildSpecs::empty()).await;
 }
 
 /// The summary stored on node 0 of `parent_id`.
@@ -136,7 +131,7 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
             seed_node(&pool, &NodeSeed::task(child_id, task_index, statuses[kind])).await;
         }
 
-        advance_parent_of(&pool, child_id, &empty_registry()).await;
+        advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
         let summary = parent_summary(&pool, parent_id).await;
         assert_eq!(
@@ -195,7 +190,7 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
     let (parent_id, child_id) =
         seed_parent_and_child(&pool, WorkflowSeed::running().status("FAILED")).await;
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let summary = parent_summary(&pool, parent_id).await;
     assert_eq!(
@@ -236,7 +231,7 @@ async fn an_outputless_child_completes_its_parent_node_with_an_ok_null() {
     )
     .await;
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let parent_node = node(&pool, parent_id, 0).await;
     assert_eq!(parent_node.status, "COMPLETED");
@@ -276,7 +271,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
     .await
     .expect("end the parent");
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let written = node(&pool, parent_id, 0).await;
     assert_eq!(written.status, "COMPLETED");
@@ -289,7 +284,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
         .execute(&pool)
         .await
         .expect("change the child result");
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let again = node(&pool, parent_id, 0).await;
     assert_eq!(again.status, "COMPLETED");
@@ -299,8 +294,8 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
 
 /// The error summary of a FAILED child, from its stored workflow error, as
 /// Python takes it (`python/horsies/core/workflows/engine.py:3030-3038`): the `message` of a
-/// JSON object; the first 200 characters of a text that is not JSON; none for
-/// other JSON, an empty text and no text.
+/// JSON object; the first 200 characters of a text that is not JSON, an empty
+/// text included (no writer stores one); none for other JSON and no text.
 #[tokio::test]
 #[serial]
 async fn the_error_summary_of_a_failed_child_follows_python() {
@@ -314,7 +309,7 @@ async fn the_error_summary_of_a_failed_child_follows_python() {
         (Some(r#"{"error_code": "X"}"#), None),
         (Some("42"), None),
         (Some(long.as_str()), Some("x".repeat(200))),
-        (Some(""), None),
+        (Some(""), Some(String::new())),
         (None, None),
     ];
     for (stored, expected) in cases {
@@ -322,7 +317,7 @@ async fn the_error_summary_of_a_failed_child_follows_python() {
         child.error = stored.map(str::to_owned);
         let (parent_id, child_id) = seed_parent_and_child(&pool, child).await;
 
-        advance_parent_of(&pool, child_id, &empty_registry()).await;
+        advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
         assert_eq!(
             parent_summary(&pool, parent_id).await.error_summary,
@@ -343,7 +338,7 @@ async fn a_child_error_stored_as_json_null_is_summarized_as_its_text() {
     child.error = Some("null".to_owned());
     let (parent_id, child_id) = seed_parent_and_child(&pool, child).await;
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     assert_eq!(
         parent_summary(&pool, parent_id).await.error_summary,
@@ -479,20 +474,26 @@ async fn finalization_preserves_explicit_and_default_outputs() {
 /// `test_text_that_is_not_json_names_the_cause`: a workflow whose first
 /// FAILED node stores a result that is not a strict result envelope fails
 /// with the error `RESULT_DESERIALIZATION_ERROR` (the baseline
-/// `horsies_workflow_err_slot`).
+/// `horsies_workflow_err_slot`), whose message is Python's
+/// `_decode_err_only` text for that cause
+/// (`horsies_workflow_unreadable_result_cause`).
 #[tokio::test]
 #[serial]
 async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserialization_error() {
     let pool = shared_pool().await;
     let error = serde_json::json!({"error_code": "BOOM", "message": "boom", "data": null});
+    let marker = "Stored task result does not decode: TaskResult envelope missing \
+                  '__h_task_result__' marker (or marker is not True); got keys";
     let undecodable = [
         (
             "missing marker",
             serde_json::json!({"ok": null, "err": error}).to_string(),
+            format!("{marker} ['err', 'ok']"),
         ),
         (
             "false marker",
             serde_json::json!({"__h_task_result__": false, "ok": null, "err": error}).to_string(),
+            format!("{marker} ['__h_task_result__', 'err', 'ok']"),
         ),
         (
             "extra key",
@@ -500,25 +501,60 @@ async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserializ
                 "__h_task_result__": true, "ok": null, "err": error, "extra_key": "smuggled",
             })
             .to_string(),
+            "Stored task result does not decode: unexpected keys in TaskResult envelope: \
+             ['extra_key']"
+                .to_owned(),
         ),
         (
             "both slots",
             serde_json::json!({"__h_task_result__": true, "ok": 42, "err": error}).to_string(),
+            "Stored task result does not decode: TaskResult envelope has both ok and err \
+             populated; exactly one must be set"
+                .to_owned(),
         ),
         (
             "missing err",
             serde_json::json!({"__h_task_result__": true, "ok": null}).to_string(),
+            "Stored task result does not decode: TaskResult envelope missing required keys \
+             ['err']; got ['__h_task_result__', 'ok']"
+                .to_owned(),
         ),
         (
             "missing ok",
             serde_json::json!({"__h_task_result__": true, "err": error}).to_string(),
+            "Stored task result does not decode: TaskResult envelope missing required keys \
+             ['ok']; got ['__h_task_result__', 'err']"
+                .to_owned(),
         ),
-        ("null", "null".to_owned()),
-        ("a string", "\"a string\"".to_owned()),
-        ("an array", "[]".to_owned()),
-        ("not JSON", "not json at all".to_owned()),
+        (
+            "null",
+            "null".to_owned(),
+            "Stored task result does not decode: TaskResult envelope must be a JSON object; \
+             got NoneType"
+                .to_owned(),
+        ),
+        (
+            "a string",
+            "\"a string\"".to_owned(),
+            "Stored task result does not decode: TaskResult envelope must be a JSON object; \
+             got str"
+                .to_owned(),
+        ),
+        (
+            "an array",
+            "[]".to_owned(),
+            "Stored task result does not decode: TaskResult envelope must be a JSON object; \
+             got list"
+                .to_owned(),
+        ),
+        (
+            "not JSON",
+            "not json at all".to_owned(),
+            // The parser detail after this prefix is the database's text.
+            "Stored task result is not JSON: JSON parse failed: ".to_owned(),
+        ),
     ];
-    for (case, stored) in undecodable {
+    for (case, stored, expected) in undecodable {
         let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
         seed_node(
             &pool,
@@ -536,7 +572,11 @@ async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserializ
             Some("RESULT_DESERIALIZATION_ERROR"),
             "{case}"
         );
-        assert!(error.message.is_some(), "{case}");
+        let message = error.message.as_deref().expect("the error has a message");
+        match case {
+            "not JSON" => assert!(message.starts_with(expected.as_str()), "{case}: {message}"),
+            _ => assert_eq!(message, expected, "{case}"),
+        }
     }
 }
 
@@ -581,7 +621,7 @@ async fn a_parent_advance_of_a_child_with_no_row_writes_nothing() {
         seed_parent_and_child(&pool, WorkflowSeed::running().status("COMPLETED")).await;
     let before = node(&pool, parent_id, 0).await;
 
-    advance_parent_of(&pool, Uuid::new_v4(), &empty_registry()).await;
+    advance_parent_of(&pool, Uuid::new_v4(), &TestChildSpecs::empty()).await;
 
     let after = node(&pool, parent_id, 0).await;
     assert_eq!(after.status, "RUNNING");
@@ -612,7 +652,7 @@ async fn a_child_end_under_a_paused_parent_writes_the_node_and_promotes_nothing(
         .await
         .expect("pause the parent");
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     assert_eq!(node(&pool, parent_id, 0).await.status, "COMPLETED");
     let dependent = node(&pool, parent_id, 1).await;

@@ -64,3 +64,7 @@ pub use horsies_core::{
 pub use horsies_core::{
     OnError, SubWorkflowSummary, WorkflowMeta, WorkflowStatus, WorkflowTaskStatus,
 };
+
+/// A JSON value kept as its stored text: the `output` of a
+/// [`SubWorkflowSummary`].
+pub use horsies_core::JsonText;

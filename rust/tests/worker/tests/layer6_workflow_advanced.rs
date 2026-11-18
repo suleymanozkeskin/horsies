@@ -1,2236 +1,844 @@
-#![allow(clippy::unwrap_used)]
+//! Layer 6: joins, pause and resume, success policies, recovery and
+//! retries of workflows (Python
+//! `tests/e2e/test_layer6_workflow_advanced.py`). The specs are built in the
+//! test process with the typed DSL and started with `Horsies::start`; the
+//! worker runs their nodes, and its reaper runs the workflow recovery.
 
-//! Layer 6 e2e tests: workflow advanced semantics.
-//!
-//! Mirrors Python's `tests/e2e/test_layer6_workflow_advanced.py`.
-//!
-//! Run with:
-//!   cargo test -p horsies-test-worker --test layer6_workflow_advanced -- --test-threads=1
-
-use std::io::Write;
-use std::sync::Arc;
+use std::convert::Infallible;
 use std::time::Duration;
 
+use horsies::{
+    HorsiesError, NodeKey, OnError, OutputlessResults, SubWorkflowParams, SuccessCase,
+    SuccessPolicy, TaskNode, TaskOutcome, TypedNodeRef, WorkflowDefinition, WorkflowHandle,
+    WorkflowSpecBuilder,
+};
+use horsies_test_support::poll;
+use horsies_test_support::rows::{self, NodeRow};
+use horsies_test_support::tokio_postgres::Client;
+use horsies_test_worker::harness::{within, Suite};
+use horsies_test_worker::instance::{Instance, Profile};
+use horsies_test_worker::tasks::{recovery, subworkflow, workflow};
+use serde::de::DeserializeOwned;
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-use horsies::{
-    cancel_workflow, pause_workflow, resolve_node_task_options, resume_workflow, Horsies, OnError,
-    PostgresBroker, SubWorkflowNode, SuccessCase, SuccessPolicy, TaskError, TaskResult, Worker,
-    WorkerConfig, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
-};
-use horsies_test_support::{
-    db,
-    e2e::{
-        db_poll::{wait_for_task_status, wait_for_workflow_terminal},
-        worker::start_worker,
-        workflow::{get_workflow_task_status, get_workflow_tasks, wait_for_workflow_completion},
-    },
-    fixtures,
-};
-use horsies_test_worker::tasks::{
-    wf_ctx_reader, wf_fail, wf_produce_int, wf_retry_then_ok, wf_retry_via_registration,
-    wf_slow_step, wf_step, ChildLabelInput, ProduceIntInput,
-};
+const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+/// The longest wait for a workflow to end, or to reach a node status.
+const WORKFLOW_WAIT: Duration = Duration::from_secs(30);
 
-fn ensure_tasks_registered() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let mut app = Horsies::new(fixtures::default_app_config()).unwrap();
-        horsies_test_worker::tasks::register(&mut app).unwrap();
-    });
+/// The longest wait for a workflow whose node retries three times, 1 s,
+/// 2 s and 4 s apart.
+const RETRY_WAIT: Duration = Duration::from_secs(60);
+
+/// The longest wait for the reaper of a worker to finalize a workflow
+/// again: one recovery pass each second.
+const RECOVERY_WAIT: Duration = Duration::from_secs(30);
+
+/// How long a paused workflow must stay paused.
+const PAUSED_WINDOW: Duration = Duration::from_secs(1);
+
+fn builder(name: &str) -> WorkflowSpecBuilder {
+    let mut builder = WorkflowSpecBuilder::new(name);
+    let _key = builder.definition_key(format!("tests.e2e.{name}.v1"));
+    builder
 }
 
-async fn pool() -> PgPool {
-    ensure_tasks_registered();
-    let p = db::create_pool().await;
-    db::run_migrations(&p).await;
-    static COVERAGE_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-    COVERAGE_READY
-        .get_or_init(|| async {
-            // Lifecycle tests below intentionally run without a live worker.
-            // Warm one worker once so the fleet startup coverage gate has
-            // published the staged reader triple before those APIs run.
-            let worker = start_worker(
-                &db_url(),
-                &["--concurrency", "1"],
-                "worker started",
-                Duration::from_secs(10),
-            );
-            drop(worker);
+/// A step node `id` that returns `completed_<id>`.
+fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
+    suite
+        .function(workflow::step::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::step::params::step(), id.to_owned())
+        .expect("a step input")
+}
+
+/// A slow step node `id` that runs `delay_ms` and returns `completed_<id>`.
+fn slow_step(
+    suite: &Suite,
+    id: &str,
+    delay_ms: u64,
+) -> TaskNode<String, workflow::slow_step::Input> {
+    suite
+        .function(workflow::slow_step::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::slow_step::params::step(), id.to_owned())
+        .and_then(|node| node.set(workflow::slow_step::params::delay_ms(), delay_ms))
+        .expect("a slow step input")
+}
+
+/// A node `id` that returns `value`.
+fn mark(suite: &Suite, id: &str, value: &str) -> TaskNode<String, workflow::mark::Input> {
+    suite
+        .function(workflow::mark::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::mark::params::value(), value.to_owned())
+        .expect("a mark input")
+}
+
+/// A node `id` that returns `value`.
+fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produce_int::Input> {
+    suite
+        .function(workflow::produce_int::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::produce_int::params::value(), value)
+        .expect("a produce input")
+}
+
+/// A node `id` that fails with `DELIBERATE_FAILURE`.
+fn fail(suite: &Suite, id: &str) -> TaskNode<i64, ()> {
+    suite.function(workflow::fail::handle).node().node_id(id)
+}
+
+/// A node `id` that fails with the code named `error_code`.
+fn fail_with(
+    suite: &Suite,
+    id: &str,
+    error_code: &str,
+) -> TaskNode<i64, workflow::fail_with::Input> {
+    suite
+        .function(workflow::fail_with::handle)
+        .node()
+        .node_id(id)
+        .set(
+            workflow::fail_with::params::error_code(),
+            error_code.to_owned(),
+        )
+        .expect("a fail input")
+}
+
+/// A node `id` that needs `succeed_on_attempt` attempts of `token`.
+fn retry_then_ok(
+    suite: &Suite,
+    id: &str,
+    token: &str,
+    succeed_on_attempt: u32,
+) -> TaskNode<String, workflow::retry_then_ok::Input> {
+    suite
+        .function(workflow::retry_then_ok::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::retry_then_ok::params::token(), token.to_owned())
+        .and_then(|node| {
+            node.set(
+                workflow::retry_then_ok::params::succeed_on_attempt(),
+                succeed_on_attempt,
+            )
         })
-        .await;
-    p
+        .expect("a retry input")
 }
 
-fn db_url() -> String {
-    db::db_url()
+/// A node `id` of the recovery queue instance that runs `delay_ms`.
+fn recovery_step(
+    suite: &Suite,
+    id: &str,
+    delay_ms: u64,
+) -> TaskNode<String, recovery::recovery_wf_step::Input> {
+    suite
+        .function(recovery::recovery_wf_step::handle)
+        .node()
+        .node_id(id)
+        .set(recovery::recovery_wf_step::params::step(), id.to_owned())
+        .and_then(|node| node.set(recovery::recovery_wf_step::params::delay_ms(), delay_ms))
+        .expect("a recovery step input")
 }
 
-fn registry() -> WorkflowSpecRegistry {
-    WorkflowSpecRegistry::new()
-}
-
-async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> Uuid {
-    start_wf_with_config(pool, spec, fixtures::default_app_config()).await
-}
-
-async fn start_wf_with_config(
-    pool: &PgPool,
-    spec: &horsies::WorkflowSpec,
-    config: horsies::AppConfig,
-) -> Uuid {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-    let mut app = Horsies::with_broker(config, broker).unwrap();
-    let handle: WorkflowHandle<serde_json::Value> = app
-        .start(spec.clone())
+async fn start<T: DeserializeOwned + 'static>(
+    suite: &Suite,
+    builder: WorkflowSpecBuilder,
+) -> WorkflowHandle<T> {
+    let spec = builder
+        .build()
+        .unwrap_or_else(|refused: HorsiesError| panic!("build the spec: {refused}"));
+    suite
+        .app
+        .start::<T>(&spec)
         .await
-        .unwrap_or_else(|e| panic!("app.start failed: {}", e));
-    handle.workflow_id().to_owned()
+        .unwrap_or_else(|refused| panic!("start the workflow: {refused}"))
 }
 
-async fn wait_for_wf_status(pool: &PgPool, wf_id: &Uuid, target: &str, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-                .bind(wf_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
-        if status.as_deref() == Some(target) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+/// The nodes of a workflow once it ended with `status` within `limit`.
+async fn ended_nodes_within<T>(
+    suite: &Suite,
+    handle: &WorkflowHandle<T>,
+    status: &str,
+    limit: Duration,
+) -> Vec<NodeRow> {
+    let client = suite.client().await;
+    let ended = rows::wait_for_workflow_end(&client, handle.workflow_id(), limit).await;
+    assert_eq!(ended, status, "the workflow status");
+    rows::workflow_nodes(&client, handle.workflow_id()).await
+}
+
+/// The nodes of a workflow once it ended with `status`.
+async fn ended_nodes<T>(suite: &Suite, handle: &WorkflowHandle<T>, status: &str) -> Vec<NodeRow> {
+    ended_nodes_within(suite, handle, status, WORKFLOW_WAIT).await
+}
+
+fn statuses(nodes: &[NodeRow]) -> Vec<&str> {
+    nodes.iter().map(|node| node.status.as_str()).collect()
+}
+
+/// The output of a workflow that completed.
+async fn output<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
+    handle: &WorkflowHandle<T>,
+) -> T {
+    match handle
+        .get(within(WORKFLOW_WAIT))
+        .await
+        .expect("read the workflow")
+    {
+        TaskOutcome::Succeeded(value) => value,
+        TaskOutcome::Failed(error) => panic!("the workflow failed: {error:?}"),
     }
-    panic!(
-        "workflow {} did not reach status {} within {}s",
-        wf_id,
-        target,
-        timeout.as_secs()
-    );
 }
 
-async fn start_registered_wf<T>(pool: &PgPool, spec: &horsies::WorkflowSpec) -> WorkflowHandle<T>
-where
-    T: serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-{
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
-    horsies_test_worker::tasks::register(&mut app).unwrap();
-    app.start(spec.clone())
+/// The failure code of a workflow read through its handle.
+async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
+    handle: &WorkflowHandle<T>,
+) -> String {
+    match handle
+        .get(within(WORKFLOW_WAIT))
         .await
-        .unwrap_or_else(|e| panic!("app.start failed: {}", e))
+        .expect("read the workflow")
+    {
+        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Succeeded(value) => panic!("the workflow succeeded with {value:?}"),
+    }
+}
+
+/// Python `spec_pausable`: A (100 ms), B (200 ms), C (200 ms), D (100 ms),
+/// each after the one before.
+fn pausable(suite: &Suite) -> WorkflowSpecBuilder {
+    let mut spec = builder("pausable");
+    let a = spec.task(slow_step(suite, "a", 100));
+    let b = spec.task(slow_step(suite, "b", 200).waits_for(a));
+    let c = spec.task(slow_step(suite, "c", 200).waits_for(b));
+    let _d = spec.task(slow_step(suite, "d", 100).waits_for(c));
+    spec
+}
+
+/// Wait until node A of a pausable workflow completed while node D is
+/// still PENDING: the workflow runs and has work left.
+async fn wait_for_pause_point(client: &Client, workflow_id: Uuid) {
+    poll::poll_until(
+        WORKFLOW_WAIT,
+        &format!("workflow {workflow_id} completes node A with node D pending"),
+        async || {
+            let nodes = rows::workflow_nodes(client, workflow_id).await;
+            (nodes.len() == 4 && nodes[0].status == "COMPLETED" && nodes[3].status == "PENDING")
+                .then_some(())
+        },
+    )
+    .await;
+}
+
+/// Python `spec_on_error_pause`: A, then B that fails, then C; the workflow
+/// pauses on a failure.
+fn pausing_on_error(suite: &Suite) -> WorkflowSpecBuilder {
+    let mut spec = builder("on_error_pause");
+    let _policy = spec.on_error(OnError::Pause);
+    let a = spec.task(step(suite, "a"));
+    let b = spec.task(fail(suite, "b").waits_for(a));
+    let _c = spec.task(step(suite, "c").waits_for(b));
+    spec
+}
+
+/// Python `spec_linear`: A, B, C, each after the one before; the output is
+/// C.
+fn linear(suite: &Suite, name: &str) -> WorkflowSpecBuilder {
+    let mut spec = builder(name);
+    let a = spec.task(step(suite, "a"));
+    let b = spec.task(step(suite, "b").waits_for(a));
+    let c = spec.task(step(suite, "c").waits_for(b));
+    let _output = spec.output(c);
+    spec
+}
+
+/// Put an ended workflow back to RUNNING with its nodes as they are, as a
+/// finalize that never committed leaves it (Python
+/// `test_recovery_preserves_results`).
+async fn unfinalize(client: &Client, workflow_id: Uuid) {
+    let changed = client
+        .execute(
+            "UPDATE horsies_workflows SET status = 'RUNNING', completed_at = NULL WHERE id = $1",
+            &[&workflow_id],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("put workflow {workflow_id} back to RUNNING: {error}"));
+    assert_eq!(changed, 1, "workflow {workflow_id} has a row");
+}
+
+/// The task of node `task_index` of `workflow_id`, once the node has one.
+async fn node_task(client: &Client, workflow_id: Uuid, task_index: i32) -> Uuid {
+    poll::poll_until(
+        WORKFLOW_WAIT,
+        &format!("node {task_index} of workflow {workflow_id} gets its task"),
+        async || {
+            rows::workflow_node(client, workflow_id, task_index)
+                .await
+                .task_id
+        },
+    )
+    .await
+}
+
+/// The child workflow of node `task_index` of `workflow_id`, once it has
+/// one.
+async fn child_workflow(client: &Client, workflow_id: Uuid, task_index: i32) -> Uuid {
+    poll::poll_until(
+        WORKFLOW_WAIT,
+        &format!("node {task_index} of workflow {workflow_id} starts its child"),
+        async || {
+            rows::workflow_node(client, workflow_id, task_index)
+                .await
+                .sub_workflow_id
+        },
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
-// T6.2: Join=quorum + ctx gating
+// Joins
 // ---------------------------------------------------------------------------
 
+/// Python: `test_layer6_workflow_advanced.py::test_quorum_ctx_gating`. A and
+/// B meet the quorum of two before C ends; D also waits for C, its context
+/// node.
 #[tokio::test]
 #[serial]
 async fn test_quorum_ctx_gating() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(100ms), B(150ms), C(300ms) → D (join=quorum, min_success=2, ctx from C).
-    let mut b = WorkflowSpecBuilder::new("e2e_quorum_ctx");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":150}"#.to_owned()),
-    );
-    let c = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C","delay_ms":300}"#.to_owned()),
-    );
-    b.task(
-        wf_ctx_reader::node()
-            .unwrap()
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated4).await;
+    let mut spec = builder("quorum_ctx_gating");
+    let a = spec.task(slow_step(&suite, "a", 100));
+    let b = spec.task(slow_step(&suite, "b", 150));
+    let c = spec.task(slow_step(&suite, "c", 300));
+    let _d = spec.task(
+        suite
+            .function(workflow::ctx_reader_str::handle)
+            .node()
             .node_id("d")
-            .waits_for(a)
-            .waits_for(bnode)
-            .waits_for(c)
+            .set(workflow::ctx_reader_str::params::source(), "c".to_owned())
+            .expect("a reader input")
+            .waits_for_all([a, b, c])
             .workflow_ctx_from([c])
             .join_quorum(2),
     );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let tasks = get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 4);
-    for t in &tasks {
-        assert_eq!(t.status, "COMPLETED");
-    }
-
-    // D must complete after C (ctx gating).
-    assert!(tasks[3].completed_at.unwrap() >= tasks[2].completed_at.unwrap());
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED"; 4]);
+    assert!(
+        nodes[3].completed_at >= nodes[2].completed_at,
+        "D ended after C: {nodes:?}"
+    );
+    let read = handle
+        .result_for::<String, workflow::WfCode>(&NodeKey::new("d"))
+        .await
+        .expect("read node d");
+    assert_eq!(read, TaskOutcome::Succeeded("completed_c".to_owned()));
 }
 
-// ---------------------------------------------------------------------------
-// T6.2b: Quorum impossible → SKIPPED
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer6_workflow_advanced.py::test_quorum_impossible_skips`.
+/// Two of three dependencies fail, so a quorum of three cannot be met.
 #[tokio::test]
 #[serial]
 async fn test_quorum_impossible_skips() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(fail), B(fail), C(ok) → D (quorum min_success=3, impossible).
-    let mut b = WorkflowSpecBuilder::new("e2e_quorum_impossible");
-    let a = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code":"F1"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"F2"}"#.to_owned()),
-    );
-    let c = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("d")
-            .kwargs(r#"{"step":"D"}"#.to_owned())
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("quorum_impossible");
+    let a = spec.task(fail(&suite, "a"));
+    let b = spec.task(fail(&suite, "b"));
+    let c = spec.task(step(&suite, "c"));
+    let _d = spec.task(
+        step(&suite, "d")
             .waits_for(a)
-            .waits_for(bnode)
+            .waits_for(b)
             .waits_for(c)
             .join_quorum(3),
     );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "FAILED");
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED");
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 2).await,
-        "COMPLETED"
-    );
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 3).await, "SKIPPED");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_subworkflow_mixed_explicit_and_args_from() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-    let mut worker_app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
-    horsies_test_worker::tasks::register(&mut worker_app).unwrap();
-    let (app_config, registry, wf_registry, broker) = worker_app.into_parts().await.unwrap();
-    let worker = Worker::new(
-        broker,
-        Arc::new(registry),
-        Arc::new(wf_registry),
-        app_config,
-        WorkerConfig {
-            concurrency: 4,
-            ..WorkerConfig::default()
-        },
-    )
-    .unwrap();
-    let cancel = worker.cancel_token();
-    let worker_task = tokio::spawn(async move { worker.run().await });
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let mut b = WorkflowSpecBuilder::new("e2e_subworkflow_mixed_input");
-    let produce = b.task(
-        wf_produce_int::node()
-            .unwrap()
-            .node_id("produce")
-            .set_input(ProduceIntInput { value: 21 })
-            .unwrap(),
-    );
-    let child = b.sub_workflow(
-        SubWorkflowNode::<ChildLabelInput, String>::typed("e2e_child_label_pipeline")
-            .node_id("child")
-            .queue("default")
-            .set(ChildLabelInput::field_label(), "count".to_owned())
-            .unwrap()
-            .arg_from(ChildLabelInput::field_input_result(), produce),
-    );
-    b.output(child);
-    let spec = b.build().unwrap();
-
-    let handle: WorkflowHandle<String> = start_registered_wf(&pool, &spec).await;
-    let result = handle.get(Some(Duration::from_secs(15))).await;
-    cancel.cancel();
-    let _ = worker_task.await;
-    match result {
-        TaskResult::Ok(value) => assert_eq!(value, "count=21"),
-        TaskResult::Err(err) => panic!("workflow failed: {}", err),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// T6.2d: A replayed sub-workflow completion must not rewrite a parent node that
-// is already terminal (parity with horsies PR #26 / #42). The child_failed case
-// is load-bearing: the CAS-miss early return is what skips failure propagation,
-// so the parent workflow's error column must stay untouched.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_subworkflow_complete_does_not_rewrite_terminal_parent_node() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let reg = registry();
-
-    // Parent: A (root) -> B (index 1). Rewrite B into a sub-workflow node and pin
-    // it to a terminal COMPLETED state with a sentinel result + fixed completed_at.
-    let mut bld = WorkflowSpecBuilder::new("e2e_subworkflow_replay_guard");
-    bld.on_error(OnError::Fail);
-    let a = bld.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    bld.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("child")
-            .kwargs(r#"{"step":"B"}"#.to_owned())
-            .waits_for(a),
-    );
-    let spec = bld.build().unwrap();
-    let wf_id = start_wf(&pool, &spec).await;
-
-    let preserved_result =
-        serde_json::to_string(&TaskResult::<serde_json::Value>::Ok(serde_json::json!(11))).unwrap();
-    sqlx::query(
-        "UPDATE horsies_workflow_tasks \
-         SET is_subworkflow = TRUE, \
-             sub_workflow_name = 'e2e_replay_child', \
-             task_name = '__sub_workflow:e2e_replay_child', \
-             status = 'COMPLETED', \
-             result = $2, \
-             completed_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' \
-         WHERE workflow_id = $1 AND task_index = 1",
-    )
-    .bind(&wf_id)
-    .bind(&preserved_result)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Replay a FAILED child completion against the already-terminal parent node.
-    horsies::on_subworkflow_complete(
-        &pool,
-        wf_id,
-        1,
-        Uuid::new_v4(),
-        "FAILED",
-        None,
-        &reg,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .unwrap();
-
-    // Parent node B is unchanged on CAS-miss: status, result, and completed_at
-    // (which UPDATE_SUBWORKFLOW_FAILED_SQL would have set to NOW()) are preserved.
-    let (status, result, completed_at_preserved): (String, Option<String>, bool) = sqlx::query_as(
-        "SELECT status, result, completed_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' \
-             FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 1",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(status, "COMPLETED");
-    assert_eq!(result.as_deref(), Some(preserved_result.as_str()));
-    assert!(
-        completed_at_preserved,
-        "completed_at must not be rewritten to NOW() on CAS-miss",
-    );
-
-    // Load-bearing: the CAS-miss short-circuits before the FAILED branch's failure
-    // propagation, so the parent workflow's error column stays NULL.
-    let wf_error: Option<String> =
-        sqlx::query_scalar("SELECT error FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(
-        wf_error.is_none(),
-        "CAS-miss must skip failure propagation, leaving workflow.error NULL, got: {wf_error:?}",
+        statuses(&nodes),
+        vec!["FAILED", "FAILED", "COMPLETED", "SKIPPED"]
     );
 }
 
-// ---------------------------------------------------------------------------
-// T6.2c: Join=any, all deps fail → SKIPPED
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer6_workflow_advanced.py::test_join_any_all_deps_fail_skips`.
 #[tokio::test]
 #[serial]
 async fn test_join_any_all_deps_fail_skips() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_any_all_fail");
-    let a = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code":"F1"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"F2"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned())
-            .waits_for(a)
-            .waits_for(bnode)
-            .join_any(),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "FAILED");
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED");
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 2).await, "SKIPPED");
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("join_any_all_fail");
+    let a = spec.task(fail(&suite, "a"));
+    let b = spec.task(fail(&suite, "b"));
+    let _c = spec.task(step(&suite, "c").waits_for_all([a, b]).join_any());
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(statuses(&nodes), vec!["FAILED", "FAILED", "SKIPPED"]);
 }
 
 // ---------------------------------------------------------------------------
-// T6.4: Pause blocks ready transitions
+// Pause, resume and cancel
 // ---------------------------------------------------------------------------
 
+/// Python: `test_layer6_workflow_advanced.py::test_pause_blocks_ready_transitions`.
 #[tokio::test]
 #[serial]
 async fn test_pause_blocks_ready_transitions() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    let workflow_id = handle.workflow_id();
+    wait_for_pause_point(&client, workflow_id).await;
+    assert!(handle.pause().await.expect("pause"), "the workflow paused");
+    assert_eq!(
+        rows::workflow_status(&client, workflow_id).await.as_deref(),
+        Some("PAUSED")
     );
-
-    // A(100ms) → B(200ms) → C(200ms) → D(100ms)
-    let mut b = WorkflowSpecBuilder::new("e2e_pausable");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":200}"#.to_owned())
-            .waits_for(a),
-    );
-    let c = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C","delay_ms":200}"#.to_owned())
-            .waits_for(bnode),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("d")
-            .kwargs(r#"{"step":"D","delay_ms":100}"#.to_owned())
-            .waits_for(c),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    // Wait for A to complete.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        if get_workflow_task_status(&pool, &wf_id, 0).await == "COMPLETED" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // Pause.
-    let paused = pause_workflow(&pool, wf_id).await.unwrap();
-    assert!(paused, "pause should succeed");
-
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-        .bind(&wf_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "PAUSED");
-
-    // Observe it stays PAUSED for 1s.
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-        .bind(&wf_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "PAUSED");
+    poll::never_during(
+        PAUSED_WINDOW,
+        "the paused workflow leaves PAUSED",
+        async || rows::workflow_status(&client, workflow_id).await.as_deref() != Some("PAUSED"),
+    )
+    .await;
 }
 
-// ---------------------------------------------------------------------------
-// T6.5: Resume continues workflow
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer6_workflow_advanced.py::test_resume_continues_workflow`.
 #[tokio::test]
 #[serial]
 async fn test_resume_continues_workflow() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let reg = registry();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    let workflow_id = handle.workflow_id();
+    wait_for_pause_point(&client, workflow_id).await;
+    assert!(handle.pause().await.expect("pause"), "the workflow paused");
+    assert_eq!(
+        rows::workflow_status(&client, workflow_id).await.as_deref(),
+        Some("PAUSED")
     );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_resume");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
+    assert!(
+        handle.resume().await.expect("resume"),
+        "the workflow resumed"
     );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":200}"#.to_owned())
-            .waits_for(a),
+    let resumed = rows::workflow_status(&client, workflow_id).await;
+    assert!(
+        matches!(resumed.as_deref(), Some("RUNNING" | "COMPLETED")),
+        "the workflow left PAUSED: {resumed:?}"
     );
-    let c = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C","delay_ms":200}"#.to_owned())
-            .waits_for(bnode),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("d")
-            .kwargs(r#"{"step":"D","delay_ms":100}"#.to_owned())
-            .waits_for(c),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        if get_workflow_task_status(&pool, &wf_id, 0).await == "COMPLETED" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    pause_workflow(&pool, wf_id).await.unwrap();
-    wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(3)).await;
-
-    let resumed = resume_workflow(
-        &pool,
-        wf_id,
-        &reg,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .unwrap();
-    assert!(resumed, "resume should succeed");
-
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED"; 4]);
 }
 
-// ---------------------------------------------------------------------------
-// T6.4b: Pause then cancel
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer6_workflow_advanced.py::test_pause_then_cancel`. The
+/// node that was PENDING at the pause is skipped.
 #[tokio::test]
 #[serial]
 async fn test_pause_then_cancel() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_pause_cancel");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":5000}"#.to_owned())
-            .waits_for(a),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned())
-            .waits_for(bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        if get_workflow_task_status(&pool, &wf_id, 0).await == "COMPLETED" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    pause_workflow(&pool, wf_id).await.unwrap();
-    wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(3)).await;
-
-    cancel_workflow(&pool, wf_id).await.unwrap();
-
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-        .bind(&wf_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "CANCELLED");
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    wait_for_pause_point(&client, handle.workflow_id()).await;
+    assert!(handle.pause().await.expect("pause"), "the workflow paused");
+    handle.cancel().await.expect("cancel the workflow");
+    let nodes = ended_nodes(&suite, &handle, "CANCELLED").await;
+    assert_eq!(nodes[3].status, "SKIPPED", "node D: {nodes:?}");
+    assert_eq!(failed_code(&handle).await, "WORKFLOW_CANCELLED");
 }
 
-// ---------------------------------------------------------------------------
-// T6.6: Success policy satisfied
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_success_policy_satisfied() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(ok), B(fail). Success policy: A required, B optional → COMPLETED.
-    let mut b = WorkflowSpecBuilder::new("e2e_sp_satisfied");
-    let _a_ref = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let _b_ref = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"OPT_FAIL"}"#.to_owned()),
-    );
-    b.success_policy(SuccessPolicy {
-        cases: vec![SuccessCase {
-            name: None,
-            required_indices: vec![0],
-        }],
-        optional_indices: Some(vec![1]),
-    });
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    );
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED");
-}
-
-// ---------------------------------------------------------------------------
-// T6.7: Success policy not met
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_success_policy_not_met() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(ok), B(fail). Policy: both required → FAILED.
-    let mut b = WorkflowSpecBuilder::new("e2e_sp_not_met");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"REQUIRED_FAIL"}"#.to_owned()),
-    );
-    b.success_policy(SuccessPolicy {
-        cases: vec![SuccessCase {
-            name: None,
-            required_indices: vec![0, 1],
-        }],
-        optional_indices: None,
-    });
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    );
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED");
-}
-
-// ---------------------------------------------------------------------------
-// T6.8: Multiple success cases (case2 satisfied)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_success_policy_multiple_cases() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(fail), B(ok). Case1 requires A, Case2 requires B → Case2 satisfied → COMPLETED.
-    let mut b = WorkflowSpecBuilder::new("e2e_sp_multi");
-    b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code":"F"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B"}"#.to_owned()),
-    );
-    b.success_policy(SuccessPolicy {
-        cases: vec![
-            SuccessCase {
-                name: None,
-                required_indices: vec![0],
-            },
-            SuccessCase {
-                name: None,
-                required_indices: vec![1],
-            },
-        ],
-        optional_indices: None,
-    });
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "FAILED");
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 1).await,
-        "COMPLETED"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// T6.11a: on_error=PAUSE auto-pauses on failure
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_on_error_pause_stops_workflow() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(ok) → B(fail) → C. on_error=PAUSE.
-    let mut b = WorkflowSpecBuilder::new("e2e_on_error_pause");
-    b.on_error(OnError::Pause);
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"PAUSE_FAIL"}"#.to_owned())
-            .waits_for(a),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned())
-            .waits_for(bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(15)).await;
-
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    );
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED");
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 2).await, "PENDING");
-}
-
-// ---------------------------------------------------------------------------
-// T6.11b: on_error=PAUSE, resume → FAILED (B failed, C SKIPPED)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_on_error_pause_resume_completes() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let reg = registry();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_pause_resume");
-    b.on_error(OnError::Pause);
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"PAUSE_FAIL"}"#.to_owned())
-            .waits_for(a),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned())
-            .waits_for(bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(15)).await;
-
-    let resumed = resume_workflow(
-        &pool,
-        wf_id,
-        &reg,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .unwrap();
-    assert!(resumed);
-
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    );
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED");
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 2).await, "SKIPPED");
-}
-
-// ---------------------------------------------------------------------------
-// T6.9: Recovery preserves results (stuck RUNNING → re-finalized)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_recovery_preserves_results() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let reg = registry();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_recovery_preserve");
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B"}"#.to_owned())
-            .waits_for(a),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    // Simulate stuck: set workflow back to RUNNING.
-    sqlx::query(
-        "UPDATE horsies_workflows SET status = 'RUNNING', completed_at = NULL WHERE id = $1",
-    )
-    .bind(&wf_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Run recovery.
-    let _report = horsies::recover_stuck_workflows(
-        &pool,
-        &reg,
-        0,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .unwrap();
-
-    // Verify recovered back to COMPLETED.
-    let final_status: String =
-        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(final_status, "COMPLETED");
-}
-
-// ---------------------------------------------------------------------------
-// T6.9b: Recovery preserves failed state
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_recovery_preserves_failed_state() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let reg = registry();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_recovery_fail");
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"MID_FAIL"}"#.to_owned())
-            .waits_for(a),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    // Simulate stuck.
-    sqlx::query(
-        "UPDATE horsies_workflows SET status = 'RUNNING', completed_at = NULL WHERE id = $1",
-    )
-    .bind(&wf_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Run recovery.
-    let _ = horsies::recover_stuck_workflows(
-        &pool,
-        &reg,
-        0,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .unwrap();
-
-    // Should be back to FAILED (not COMPLETED).
-    let final_status: String =
-        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(final_status, "FAILED");
-}
-
-// ---------------------------------------------------------------------------
-// T6.9d: Recovery recomputes the first failed task's error (parity with
-// horsies PR #27). Recovery must NOT preserve a stale later error — it
-// recomputes the failure error deterministically (first failed task by index),
-// the same selection as normal completion.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_recovery_recomputes_first_failed_error() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let reg = registry();
-
-    // Two independent root tasks (indices 0 and 1). No worker: we drive the DB
-    // state directly to simulate a workflow stuck mid-finalization that already
-    // has the *later* failure stored as its error.
-    let mut b = WorkflowSpecBuilder::new("e2e_recovery_first_error");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B"}"#.to_owned()),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    // Mark both tasks FAILED with distinct error codes.
-    let first_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::new("FIRST_ERROR", "first failure"),
-    ))
-    .unwrap();
-    let second_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::new("SECOND_ERROR", "second failure"),
-    ))
-    .unwrap();
-
-    sqlx::query(
-        "UPDATE horsies_workflow_tasks SET status = 'FAILED', result = $2, completed_at = NOW() \
-         WHERE workflow_id = $1 AND task_index = 0",
-    )
-    .bind(&wf_id)
-    .bind(&first_result)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE horsies_workflow_tasks SET status = 'FAILED', result = $2, completed_at = NOW() \
-         WHERE workflow_id = $1 AND task_index = 1",
-    )
-    .bind(&wf_id)
-    .bind(&second_result)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Workflow stuck RUNNING with the later failure already stored as error.
-    let stale_error =
-        serde_json::to_string(&TaskError::new("SECOND_ERROR", "second failure")).unwrap();
-    sqlx::query(
-        "UPDATE horsies_workflows \
-         SET status = 'RUNNING', completed_at = NULL, result = NULL, error = $2 \
-         WHERE id = $1",
-    )
-    .bind(&wf_id)
-    .bind(&stale_error)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Run recovery.
-    let _ = horsies::recover_stuck_workflows(
-        &pool,
-        &reg,
-        0,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .unwrap();
-
-    // Workflow finalizes FAILED with the deterministic first failed task error,
-    // replacing the stale later error.
-    let (status, error): (String, Option<String>) =
-        sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(status, "FAILED");
-    let error = error.expect("workflow error should be set");
-    assert!(
-        error.contains("FIRST_ERROR"),
-        "expected first failed task error, got: {error}",
-    );
-    assert!(
-        !error.contains("SECOND_ERROR"),
-        "stale later error should have been replaced, got: {error}",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// T6.4c: Pause idempotent — second pause returns false
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer6_workflow_advanced.py::test_pause_idempotent`.
 #[tokio::test]
 #[serial]
 async fn test_pause_idempotent() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(100ms) → B(200ms) → C(200ms) → D(100ms)
-    let mut b = WorkflowSpecBuilder::new("e2e_pause_idempotent");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":200}"#.to_owned())
-            .waits_for(a),
-    );
-    let c = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C","delay_ms":200}"#.to_owned())
-            .waits_for(bnode),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("d")
-            .kwargs(r#"{"step":"D","delay_ms":100}"#.to_owned())
-            .waits_for(c),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    // Wait for A to complete so workflow is RUNNING.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        if get_workflow_task_status(&pool, &wf_id, 0).await == "COMPLETED" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    let first_pause = pause_workflow(&pool, wf_id).await.unwrap();
-    assert!(first_pause, "first pause should return true");
-
-    let second_pause = pause_workflow(&pool, wf_id).await.unwrap();
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    wait_for_pause_point(&client, handle.workflow_id()).await;
+    assert!(handle.pause().await.expect("pause"), "the first pause");
     assert!(
-        !second_pause,
-        "second pause on already-paused workflow should return false"
+        !handle.pause().await.expect("pause again"),
+        "a second pause of a PAUSED workflow returns false"
     );
 }
 
-// ---------------------------------------------------------------------------
-// T6.5b: Resume on RUNNING workflow is a no-op (returns false)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer6_workflow_advanced.py::test_resume_on_running_noop`.
 #[tokio::test]
 #[serial]
 async fn test_resume_on_running_noop() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let reg = registry();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_resume_noop");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A","delay_ms":100}"#.to_owned()),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":2000}"#.to_owned())
-            .waits_for(a),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    // Wait until workflow is RUNNING.
-    wait_for_wf_status(&pool, &wf_id, "RUNNING", Duration::from_secs(5)).await;
-
-    let resumed = resume_workflow(
-        &pool,
-        wf_id,
-        &reg,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .unwrap();
-    assert!(!resumed, "resume on RUNNING workflow should return false");
-}
-
-// ---------------------------------------------------------------------------
-// T6.7b: Success policy not met — error content check
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_success_policy_not_met_error_content() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // A(ok), B(fail with REQUIRED_FAIL). Policy: both required → FAILED.
-    let mut b = WorkflowSpecBuilder::new("e2e_sp_error_content");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"error_code":"REQUIRED_FAIL"}"#.to_owned()),
-    );
-    b.success_policy(SuccessPolicy {
-        cases: vec![SuccessCase {
-            name: None,
-            required_indices: vec![0, 1],
-        }],
-        optional_indices: None,
-    });
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    // Failed workflows store error details in the `error` column (not `result`).
-    let error_json: Option<String> =
-        sqlx::query_scalar("SELECT error FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-    let error_data: serde_json::Value = serde_json::from_str(
-        error_json
-            .as_deref()
-            .expect("workflow error should be set on failure"),
-    )
-    .unwrap();
-    assert_eq!(
-        error_data.get("error_code").and_then(|v| v.as_str()),
-        Some("REQUIRED_FAIL"),
-    );
-}
-
-// ---------------------------------------------------------------------------
-// T6.10: Workflow task retries and eventually succeeds
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn test_workflow_task_retries() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Create counter file.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let counter_path = tmp.path().to_str().unwrap().to_owned();
-
-    // Retry policy: max 3 retries, 1s fixed intervals, auto-retry on TRANSIENT.
-    let retry_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": 3,
-            "intervals": [1, 1, 1],
-            "backoff_strategy": "fixed",
-            "jitter": false,
-            "auto_retry_for": ["TRANSIENT"],
-        }
-    });
-    let retry_options_str = serde_json::to_string(&retry_options).unwrap();
-
-    let mut b = WorkflowSpecBuilder::new("e2e_wf_retry_ok");
-    b.task(
-        wf_retry_then_ok::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(format!(
-                r#"{{"counter_file":"{}","succeed_on_attempt":2}}"#,
-                counter_path.replace('\\', "\\\\").replace('"', "\\\"")
-            ))
-            .task_options(retry_options_str),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(30)).await;
-    assert_eq!(
-        status, "COMPLETED",
-        "workflow should complete after retry succeeds"
-    );
-
-    // Verify the task completed.
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    );
-
-    // Counter file should show at least 2 attempts.
-    let final_count: i32 = tokio::fs::read_to_string(&counter_path)
-        .await
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    rows::wait_for_workflow_status(&client, handle.workflow_id(), "RUNNING", WORKFLOW_WAIT).await;
     assert!(
-        final_count >= 2,
-        "should have at least 2 attempts, got {}",
-        final_count
+        !handle.resume().await.expect("resume"),
+        "a resume of a RUNNING workflow returns false"
     );
 }
 
-// ---------------------------------------------------------------------------
-// T6.10b: Workflow task retries exhausted → workflow FAILED
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer6_workflow_advanced.py::test_on_error_pause_stops_workflow`.
 #[tokio::test]
 #[serial]
-async fn test_workflow_task_retries_exhausted() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let counter_path = tmp.path().to_str().unwrap().to_owned();
-
-    // succeed_on_attempt=10 but max_retries=3 → 4 attempts total, never succeeds.
-    let retry_options = serde_json::json!({
-        "retry_policy": {
-            "max_retries": 3,
-            "intervals": [1, 1, 1],
-            "backoff_strategy": "fixed",
-            "jitter": false,
-            "auto_retry_for": ["TRANSIENT"],
-        }
-    });
-    let retry_options_str = serde_json::to_string(&retry_options).unwrap();
-
-    let mut b = WorkflowSpecBuilder::new("e2e_wf_retry_exhausted");
-    b.task(
-        wf_retry_then_ok::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(format!(
-                r#"{{"counter_file":"{}","succeed_on_attempt":10}}"#,
-                counter_path.replace('\\', "\\\\").replace('"', "\\\"")
-            ))
-            .task_options(retry_options_str),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(60)).await;
-    assert_eq!(
-        status, "FAILED",
-        "workflow should FAIL after exhausting retries"
-    );
-
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "FAILED");
-
-    // Should have exactly 4 attempts (1 initial + 3 retries).
-    let final_count: i32 = tokio::fs::read_to_string(&counter_path)
-        .await
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert_eq!(
-        final_count, 4,
-        "should have exactly 4 attempts (1 initial + 3 retries), got {}",
-        final_count
-    );
+async fn test_on_error_pause_stops_workflow() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<OutputlessResults>(&suite, pausing_on_error(&suite)).await;
+    rows::wait_for_workflow_status(&client, handle.workflow_id(), "PAUSED", WORKFLOW_WAIT).await;
+    let nodes = rows::workflow_nodes(&client, handle.workflow_id()).await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED", "FAILED", "PENDING"]);
+    assert_eq!(failed_code(&handle).await, "WORKFLOW_PAUSED");
 }
 
-// ---------------------------------------------------------------------------
-// T6.9c: Workflow recovers after worker crash
-// ---------------------------------------------------------------------------
-
-/// Write a recovery config with custom queues (default + recovery).
-fn write_recovery_custom_config() -> tempfile::NamedTempFile {
-    let url = db_url();
-    let config = serde_json::json!({
-        "queue_mode": "custom",
-        "custom_queues": [
-            {"name": "default", "priority": 1, "max_concurrency": 5},
-            {"name": "recovery", "priority": 1, "max_concurrency": 1}
-        ],
-        "broker": {
-            "database_url": url,
-            "pool_pre_ping": true,
-            "pool_size": 5,
-            "max_overflow": 5,
-            "pool_timeout": 10,
-            "pool_recycle": 600,
-            "echo": false
-        },
-        "prefetch_buffer": 0,
-        "max_claim_renew_age_ms": 180000,
-        "recovery": {
-            "auto_requeue_stale_claimed": true,
-            "claimed_stale_threshold_ms": 2000,
-            "auto_fail_stale_running": true,
-            "running_stale_threshold_ms": 2000,
-            "check_interval_ms": 1000,
-            "runner_heartbeat_interval_ms": 1000,
-            "claimer_heartbeat_interval_ms": 1000
-        },
-        "retention": {
-            "worker_state_retention_hours": 1,
-            "terminal_record_retention_hours": 1
-        },
-        "resilience": {
-            "db_retry_initial_ms": 500,
-            "db_retry_max_ms": 5000,
-            "db_retry_max_attempts": 3,
-            "notify_poll_interval_ms": 1000
-        },
-        "resend_on_transient_err": false
-    });
-
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(serde_json::to_string_pretty(&config).unwrap().as_bytes())
-        .unwrap();
-    f.flush().unwrap();
-    f
-}
-
+/// Python: `test_layer6_workflow_advanced.py::test_on_error_pause_resume_completes`.
+/// The resume skips C, whose dependency failed, and the workflow fails.
 #[tokio::test]
 #[serial]
-async fn test_workflow_recovers_after_worker_crash() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let config_file = write_recovery_custom_config();
-    let config_path = config_file.path().to_str().unwrap().to_owned();
-
-    // DAG: A(50ms) → B(50ms) → C(60s)  ──→ E(50ms, recovery queue) → F(50ms, recovery queue)
-    //                         → D(60s)  ──/
-    //
-    // Kill worker after A,B complete and C,D are RUNNING.
-    // Restart worker → reaper marks C,D FAILED → E runs (allow_failed_deps) → F runs → FAILED.
-    let mut b = WorkflowSpecBuilder::new("e2e_recovery_crash");
-    let a = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A","delay_ms":50}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":50}"#.to_owned())
-            .waits_for(a),
-    );
-    let c = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C","delay_ms":60000}"#.to_owned())
-            .waits_for(bnode),
-    );
-    let d = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("d")
-            .kwargs(r#"{"step":"D","delay_ms":60000}"#.to_owned())
-            .waits_for(bnode),
-    );
-    let e = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("e")
-            .kwargs(r#"{"step":"E","delay_ms":50}"#.to_owned())
-            .waits_for(c)
-            .waits_for(d)
-            .allow_failed_deps(true)
-            .queue("recovery"),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("f")
-            .kwargs(r#"{"step":"F","delay_ms":50}"#.to_owned())
-            .waits_for(e)
-            .queue("recovery"),
-    );
-    let spec = b.build().unwrap();
-
-    // Start first worker (must listen on both queues).
-    let mut w1 = start_worker(
-        &config_path,
-        &["--concurrency", "2", "--queues", "default,recovery"],
-        "worker started",
-        Duration::from_secs(20),
-    );
-
-    // The spec contains .queue("recovery") nodes, so the in-process Horsies
-    // that starts the workflow must use Custom queue mode (matching the binary).
-    let mut app_config = fixtures::default_app_config();
-    app_config.queue_mode = horsies::QueueMode::Custom;
-    app_config.custom_queues = Some(vec![
-        horsies::CustomQueueConfig {
-            name: "default".to_owned(),
-            priority: 1,
-            max_concurrency: Some(5),
-        },
-        horsies::CustomQueueConfig {
-            name: "recovery".to_owned(),
-            priority: 1,
-            max_concurrency: Some(1),
-        },
-    ]);
-    let wf_id = start_wf_with_config(&pool, &spec, app_config).await;
-
-    // Wait until A and B are COMPLETED.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while tokio::time::Instant::now() < deadline {
-        let a_status = get_workflow_task_status(&pool, &wf_id, 0).await;
-        let b_status = get_workflow_task_status(&pool, &wf_id, 1).await;
-        if a_status == "COMPLETED" && b_status == "COMPLETED" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED",
-        "A should complete before crash"
-    );
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 1).await,
-        "COMPLETED",
-        "B should complete before crash"
-    );
-
-    // Wait until C and D underlying tasks are RUNNING.
-    let c_task_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 2",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let d_task_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 3",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    let c_task_id = c_task_id.expect("C should be enqueued");
-    let d_task_id = d_task_id.expect("D should be enqueued");
-
-    wait_for_task_status(&pool, &c_task_id, "RUNNING", Duration::from_secs(15)).await;
-    wait_for_task_status(&pool, &d_task_id, "RUNNING", Duration::from_secs(15)).await;
-
-    // Kill worker 1.
-    w1.kill();
-
-    // Start worker 2 — its reaper will detect stale tasks and recovery kicks in.
-    let _w2 = start_worker(
-        &config_path,
-        &["--concurrency", "2", "--queues", "default,recovery"],
-        "worker started",
-        Duration::from_secs(20),
-    );
-
-    // Wait for workflow to reach terminal state.
-    // Recovery chain: reaper marks C,D FAILED → case 1.7 calls on_workflow_task_complete
-    // → E becomes ready → E runs → F runs → workflow finalizes.
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(30)).await;
-    assert_eq!(status, "FAILED", "workflow should be FAILED (C,D crashed)");
-
-    let tasks = get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 6, "expected 6 workflow tasks");
-
-    // A, B: completed before crash.
-    assert_eq!(tasks[0].status, "COMPLETED", "A should be COMPLETED");
-    assert_eq!(tasks[1].status, "COMPLETED", "B should be COMPLETED");
-
-    // C, D: marked FAILED by recovery.
-    assert_eq!(tasks[2].status, "FAILED", "C should be FAILED (crashed)");
-    assert_eq!(tasks[3].status, "FAILED", "D should be FAILED (crashed)");
-
-    // E: COMPLETED — ran after recovery (allow_failed_deps=True).
-    assert_eq!(
-        tasks[4].status, "COMPLETED",
-        "E should be COMPLETED (allow_failed_deps)"
-    );
-
-    // F: COMPLETED — ran after E on recovery queue.
-    assert_eq!(tasks[5].status, "COMPLETED", "F should be COMPLETED");
-}
-
-// ---------------------------------------------------------------------------
-// T6.10c: Workflow task inherits retry options from task registration
-// ---------------------------------------------------------------------------
-//
-// Regression test for the bug where workflow-enqueued tasks lost their retry
-// options because TaskOptions from the task registry were not carried to the
-// workflow node's task_options_json.
-//
-// The key difference from T6.10: retry config comes from the task registration
-// (via `with_task_options()` on the `RegisteredTask`), NOT from `.task_options()`
-// on the `TaskNode`. The node is built without any explicit task_options.
-
-#[tokio::test]
-#[serial]
-async fn test_workflow_task_inherits_retry_from_registration() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    // Create counter file.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let counter_path = tmp.path().to_str().unwrap().to_owned();
-
-    // Build the workflow spec WITHOUT calling .task_options() on the node.
-    // The task "e2e_wf_retry_via_registration" is registered in tasks.rs
-    // with TaskOptions { auto_retry_for: ["TRANSIENT"], retry_policy: fixed([1,1,1]) }.
-    let mut b = WorkflowSpecBuilder::new("e2e_wf_inherited_retry");
-    b.task(
-        wf_retry_via_registration::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(format!(
-                r#"{{"counter_file":"{}","succeed_on_attempt":2}}"#,
-                counter_path.replace('\\', "\\\\").replace('"', "\\\"")
-            )),
-        // NOTE: no .task_options() call here — that's the whole point of this test
-    );
-    let mut spec = b.build().unwrap();
-
-    // Simulate what Horsies::register_workflow() does: resolve task options
-    // from the task registry into the spec's nodes. This is the code path
-    // being tested — the lookup returns the serialized retry options that
-    // the task was registered with.
-    let retry_options_json = serde_json::json!({
-        "auto_retry_for": ["TRANSIENT"],
-        "retry_policy": {
-            "max_retries": 3,
-            "intervals": [1, 1, 1],
-            "backoff_strategy": "fixed",
-            "jitter": false,
-        }
-    });
-    let retry_options_str = serde_json::to_string(&retry_options_json).unwrap();
-    resolve_node_task_options(&mut spec.tasks, &|task_name| {
-        if task_name == "e2e_wf_retry_via_registration" {
-            Some(retry_options_str.clone())
-        } else {
-            None
-        }
-    });
-
-    // Verify the resolution actually set task_options_json on the node.
+async fn test_on_error_pause_resume_completes() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<OutputlessResults>(&suite, pausing_on_error(&suite)).await;
+    rows::wait_for_workflow_status(&client, handle.workflow_id(), "PAUSED", WORKFLOW_WAIT).await;
     assert!(
-        spec.tasks[0].task_options_json.is_some(),
-        "task_options_json should be set by resolve_node_task_options"
+        handle.resume().await.expect("resume"),
+        "the workflow resumed"
     );
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(30)).await;
-    assert_eq!(
-        status, "COMPLETED",
-        "workflow should complete after retry succeeds (retry config inherited from registration)"
-    );
-
-    // Verify the task completed.
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    );
-
-    // Counter file should show at least 2 attempts (first fails with TRANSIENT, second succeeds).
-    let final_count: i32 = tokio::fs::read_to_string(&counter_path)
-        .await
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert!(
-        final_count >= 2,
-        "should have at least 2 attempts (inherited retry), got {}",
-        final_count
-    );
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED", "FAILED", "SKIPPED"]);
 }
 
-// ---------------------------------------------------------------------------
-// T6.13: Non-runnable workflow-task cleanup is scoped to worker ownership
-// (parity with horsies PR #51). A worker must not unclaim/cancel another
-// worker's claimed task when filtering PAUSED/CANCELLED workflow tasks.
-// ---------------------------------------------------------------------------
-
-/// Build + start a single-task workflow (no worker). Returns (wf_id, task_id).
-async fn setup_single_task_workflow(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
-    let mut b = WorkflowSpecBuilder::new("e2e_nonrunnable_ownership");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let spec = b.build().unwrap();
-    let wf_id = start_wf(pool, &spec).await;
-    let task_id: Uuid = sqlx::query_scalar(
-        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
-    )
-    .bind(&wf_id)
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    (wf_id, task_id)
-}
-
-async fn claim_task_as(pool: &sqlx::PgPool, task_id: &Uuid, worker_id: &str) {
-    sqlx::query(
-        "UPDATE horsies_tasks \
-         SET status = 'CLAIMED', claimed = TRUE, claimed_at = NOW(), claimed_by_worker_id = $2 \
-         WHERE id = $1",
-    )
-    .bind(task_id)
-    .bind(worker_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-async fn set_workflow_status(pool: &sqlx::PgPool, wf_id: &Uuid, status: &str) {
-    sqlx::query("UPDATE horsies_workflows SET status = $2 WHERE id = $1")
-        .bind(wf_id)
-        .bind(status)
-        .execute(pool)
-        .await
-        .unwrap();
-}
-
-async fn task_claim_row(pool: &sqlx::PgPool, task_id: &Uuid) -> (String, bool, Option<String>) {
-    sqlx::query_as(
-        "SELECT CASE
-             WHEN detail.location = 'LIVE' THEN live.status
-             ELSE (detail.task_row).status
-         END,
-         CASE WHEN detail.location = 'LIVE' THEN live.claimed ELSE FALSE END,
-         CASE
-             WHEN detail.location = 'LIVE' THEN live.claimed_by_worker_id
-             ELSE NULL
-         END
-         FROM horsies_task_detail_staged($1) AS detail
-         LEFT JOIN horsies_tasks AS live ON live.id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-#[tokio::test]
-#[serial]
-async fn filter_nonrunnable_does_not_touch_other_workers_paused_task() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
-
-    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
-    claim_task_as(&pool, &task_id, "worker-other").await;
-    set_workflow_status(&pool, &wf_id, "PAUSED").await;
-
-    let filtered = broker
-        .filter_non_runnable_workflow_tasks(&[(task_id.clone(), None)], "worker-this")
-        .await
-        .unwrap();
-
-    // Excluded from this worker's dispatch set, but the other worker's claim is intact.
-    assert!(filtered.contains(&task_id));
-    assert_eq!(
-        task_claim_row(&pool, &task_id).await,
-        ("CLAIMED".to_owned(), true, Some("worker-other".to_owned())),
-    );
-    let wt_status: String = sqlx::query_scalar(
-        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(wt_status, "ENQUEUED", "must not reset another worker's row");
-}
-
-#[tokio::test]
-#[serial]
-async fn pause_workflow_cancels_claimed_not_started_task() {
-    // Engine-side proactive cancel (parity with horsies PR #96): a task already
-    // CLAIMED at pause time (e.g. sitting in a worker prefetch buffer, or claimed
-    // by a since-dead worker) — for which the post-claim worker filter will not
-    // run — is cancelled by pause_workflow itself, and its node reset to READY.
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-
-    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
-    claim_task_as(&pool, &task_id, "worker-buffered").await;
-
-    let paused = pause_workflow(&pool, wf_id).await.unwrap();
-    assert!(paused, "workflow should pause");
-
-    assert_eq!(
-        task_claim_row(&pool, &task_id).await,
-        ("CANCELLED".to_owned(), false, None),
-        "claimed-but-not-started task must be cancelled at pause time",
-    );
-    let wt_status: String = sqlx::query_scalar(
-        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(wt_status, "READY", "node reset to READY for resume");
-}
-
-#[tokio::test]
-#[serial]
-async fn filter_nonrunnable_does_not_touch_other_workers_cancelled_task() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
-
-    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
-    claim_task_as(&pool, &task_id, "worker-other").await;
-    set_workflow_status(&pool, &wf_id, "CANCELLED").await;
-
-    let filtered = broker
-        .filter_non_runnable_workflow_tasks(&[(task_id.clone(), None)], "worker-this")
-        .await
-        .unwrap();
-
-    assert!(filtered.contains(&task_id));
-    assert_eq!(
-        task_claim_row(&pool, &task_id).await,
-        ("CLAIMED".to_owned(), true, Some("worker-other".to_owned())),
-    );
-    let wt_status: String = sqlx::query_scalar(
-        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        wt_status, "ENQUEUED",
-        "must not cancel another worker's row"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn filter_nonrunnable_cancels_own_paused_task() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
-
-    let (wf_id, task_id) = setup_single_task_workflow(&pool).await;
-    claim_task_as(&pool, &task_id, "worker-this").await;
-    set_workflow_status(&pool, &wf_id, "PAUSED").await;
-
-    let filtered = broker
-        .filter_non_runnable_workflow_tasks(&[(task_id.clone(), None)], "worker-this")
-        .await
-        .unwrap();
-
-    // This worker owns the claim: the row is cancelled (terminal, not re-claimable)
-    // and the workflow_task reset to READY so resume enqueues a fresh row.
-    assert!(filtered.contains(&task_id));
-    assert_eq!(
-        task_claim_row(&pool, &task_id).await,
-        ("CANCELLED".to_owned(), false, None),
-    );
-    let wt_status: String = sqlx::query_scalar(
-        "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(wt_status, "READY", "own paused task should reset to READY");
-}
-
-// ---------------------------------------------------------------------------
-// T6.x: Cancellation locks backing tasks before the status flip (parity with
-// horsies PR #65). Three facets: a RUNNING backing task whose workflow_task is
-// still ENQUEUED is cancellable (user code starts only after the wf_task
-// RUNNING handoff); a cancelled task is no longer claimable; and a FOR UPDATE
-// lock on the backing task blocks a concurrent FOR UPDATE SKIP LOCKED claim.
-// ---------------------------------------------------------------------------
-
-async fn enqueued_backing_task_id(pool: &PgPool, wf_id: &Uuid) -> Uuid {
-    sqlx::query_scalar(
-        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
-    )
-    .bind(wf_id)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-async fn horsies_task_status(pool: &PgPool, task_id: &Uuid) -> String {
-    sqlx::query_scalar(
-        "SELECT CASE
-             WHEN detail.location = 'LIVE' THEN live.status
-             ELSE (detail.task_row).status
-         END
-         FROM horsies_task_detail_staged($1) AS detail
-         LEFT JOIN horsies_tasks AS live ON live.id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-#[tokio::test]
-#[serial]
-async fn test_cancel_cancels_running_backing_task_with_enqueued_wf_task() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-
-    // Single root task; no worker, so it sits ENQUEUED with a backing
-    // horsies_tasks row.
-    let mut b = WorkflowSpecBuilder::new("e2e_cancel_running_backing");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let spec = b.build().unwrap();
-    let wf_id = start_wf(&pool, &spec).await;
-    let task_id = enqueued_backing_task_id(&pool, &wf_id).await;
-
-    // Simulate the mid-handshake window: backing task RUNNING while the
-    // workflow_task is still ENQUEUED (user code has not started yet).
-    sqlx::query("UPDATE horsies_tasks SET status = 'RUNNING' WHERE id = $1")
-        .bind(&task_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let cancelled = cancel_workflow(&pool, wf_id).await.unwrap();
-    assert!(cancelled);
-
-    assert_eq!(
-        horsies_task_status(&pool, &task_id).await,
-        "CANCELLED",
-        "a RUNNING backing task whose wf_task is still ENQUEUED must be cancelled",
-    );
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 0).await, "SKIPPED");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_cancel_makes_queued_backing_task_unclaimable() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-
-    let mut b = WorkflowSpecBuilder::new("e2e_cancel_unclaimable");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let spec = b.build().unwrap();
-    let wf_id = start_wf(&pool, &spec).await;
-    let task_id = enqueued_backing_task_id(&pool, &wf_id).await;
-
-    let cancelled = cancel_workflow(&pool, wf_id).await.unwrap();
-    assert!(cancelled);
-    assert_eq!(horsies_task_status(&pool, &task_id).await, "CANCELLED");
-
-    // A worker claim must not return the cancelled task.
-    let broker = PostgresBroker::from_pool(pool.clone());
-    let claimed = broker
-        .claim("default", 10, "cancel-race-worker", None)
-        .await
-        .unwrap();
-    assert!(
-        claimed.iter().all(|r| r.id != task_id),
-        "cancelled backing task must not be claimable",
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_backing_task_lock_blocks_concurrent_claim() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-
-    let mut b = WorkflowSpecBuilder::new("e2e_cancel_lock_blocks_claim");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let spec = b.build().unwrap();
-    let wf_id = start_wf(&pool, &spec).await;
-    let task_id = enqueued_backing_task_id(&pool, &wf_id).await;
-
-    // Hold a FOR UPDATE lock on the backing task, as cancellation does before
-    // flipping the workflow status.
-    let mut tx = pool.begin().await.unwrap();
-    let _locked: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
-            .bind(&task_id)
-            .fetch_all(&mut *tx)
-            .await
-            .unwrap();
-
-    // A concurrent worker claim (FOR UPDATE SKIP LOCKED) must skip the locked row.
-    let broker = PostgresBroker::from_pool(pool.clone());
-    let claimed = broker
-        .claim("default", 10, "cancel-race-worker", None)
-        .await
-        .unwrap();
-    assert!(
-        claimed.iter().all(|r| r.id != task_id),
-        "claim must skip a backing task locked by an in-flight cancellation",
-    );
-
-    tx.rollback().await.unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// T6.x: Cancelling a parent cascades to its child workflows (parity with
-// horsies PR #66). A RUNNING child workflow must be cancelled, not left
-// executing.
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer7_subworkflows.py::test_subworkflow_cancel_running_child_cascade`.
+/// The cancel of a workflow cancels its running child workflow.
 #[tokio::test]
 #[serial]
 async fn test_cancel_cascades_to_child_workflow() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-
-    // Two independent RUNNING workflows; link the second as a child of the
-    // first (as a sub-workflow launch would set parent_workflow_id). No worker
-    // runs, so both stay RUNNING with their root tasks ENQUEUED.
-    let mut pb = WorkflowSpecBuilder::new("e2e_cancel_cascade_parent");
-    pb.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("p")
-            .kwargs(r#"{"step":"P"}"#.to_owned()),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let mut spec = builder("cancel_running_child_cascade");
+    let child = spec.sub_workflow(
+        subworkflow::SubSlow::node(SubWorkflowParams::Given(subworkflow::SlowParams {
+            value: "cancel_me".to_owned(),
+            delay_ms: 2_000,
+        }))
+        .expect("a slow child node")
+        .node_id("l7_cancel_running_child"),
     );
-    let parent_id = start_wf(&pool, &pb.build().unwrap()).await;
+    let _output = spec.output(child);
+    let handle = start::<String>(&suite, spec).await;
+    let child_id = child_workflow(&client, handle.workflow_id(), 0).await;
+    rows::wait_for_workflow_status(&client, child_id, "RUNNING", WORKFLOW_WAIT).await;
+    handle.cancel().await.expect("cancel the workflow");
+    let _nodes = ended_nodes(&suite, &handle, "CANCELLED").await;
+    rows::wait_for_workflow_status(&client, child_id, "CANCELLED", WORKFLOW_WAIT).await;
+}
 
-    let mut cb = WorkflowSpecBuilder::new("e2e_cancel_cascade_child");
-    cb.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned()),
-    );
-    let child_id = start_wf(&pool, &cb.build().unwrap()).await;
+// ---------------------------------------------------------------------------
+// Success policies
+// ---------------------------------------------------------------------------
 
-    sqlx::query("UPDATE horsies_workflows SET parent_workflow_id = $1 WHERE id = $2")
-        .bind(&parent_id)
-        .bind(&child_id)
-        .execute(&pool)
+/// Python: `test_layer6_workflow_advanced.py::test_success_policy_satisfied`.
+/// A is required, B is optional and fails: the workflow completes.
+#[tokio::test]
+#[serial]
+async fn test_success_policy_satisfied() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("success_policy_satisfied");
+    let a = spec.task(mark(&suite, "a", "required_A"));
+    let b = spec.task(fail_with(&suite, "b", "OPTIONAL_FAIL"));
+    let _policy =
+        spec.success_policy(SuccessPolicy::new(vec![SuccessCase::new([a])]).optional([b]));
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED", "FAILED"]);
+}
+
+/// A and B are both required; B fails with `REQUIRED_FAIL`.
+fn policy_not_met(suite: &Suite) -> WorkflowSpecBuilder {
+    let mut spec = builder("success_policy_not_met");
+    let a = spec.task(mark(suite, "a", "required_A"));
+    let b = spec.task(fail_with(suite, "b", "REQUIRED_FAIL"));
+    let _policy = spec.success_policy(SuccessPolicy::new(vec![SuccessCase::new([
+        a.untyped(),
+        b.untyped(),
+    ])]));
+    spec
+}
+
+/// Python: `test_layer6_workflow_advanced.py::test_success_policy_not_met`.
+#[tokio::test]
+#[serial]
+async fn test_success_policy_not_met() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = start::<OutputlessResults>(&suite, policy_not_met(&suite)).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED", "FAILED"]);
+}
+
+/// Python: `test_layer6_workflow_advanced.py::test_success_policy_not_met_error_content`.
+/// The workflow error is the error of the failed required node.
+#[tokio::test]
+#[serial]
+async fn test_success_policy_not_met_error_content() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = start::<OutputlessResults>(&suite, policy_not_met(&suite)).await;
+    let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(failed_code(&handle).await, "REQUIRED_FAIL");
+}
+
+/// Python: `test_layer6_workflow_advanced.py::test_success_policy_multiple_cases`.
+/// The first case requires A, which fails; the second requires B, which
+/// completes.
+#[tokio::test]
+#[serial]
+async fn test_success_policy_multiple_cases() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("success_policy_multi");
+    let a = spec.task(fail_with(&suite, "a", "CASE1_FAIL"));
+    let b = spec.task(mark(&suite, "b", "case2_ok"));
+    let _policy = spec.success_policy(SuccessPolicy::new(vec![
+        SuccessCase::new([a]),
+        SuccessCase::new([b]),
+    ]));
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    assert_eq!(statuses(&nodes), vec!["FAILED", "COMPLETED"]);
+}
+
+// ---------------------------------------------------------------------------
+// Recovery
+// ---------------------------------------------------------------------------
+
+/// Python: `test_layer6_workflow_advanced.py::test_recovery_preserves_results`.
+/// A COMPLETED workflow put back to RUNNING is finalized again by the
+/// reaper's workflow recovery, with its output.
+#[tokio::test]
+#[serial]
+async fn test_recovery_preserves_results() {
+    let suite = Suite::start(BIN, Instance::Recovery).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let handle = start::<String>(&suite, linear(&suite, "recovery_linear")).await;
+    let _nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    assert_eq!(output(&handle).await, "completed_c");
+    unfinalize(&client, handle.workflow_id()).await;
+    rows::wait_for_workflow_status(&client, handle.workflow_id(), "COMPLETED", RECOVERY_WAIT).await;
+    assert_eq!(output(&handle).await, "completed_c");
+}
+
+/// Python: `test_layer6_workflow_advanced.py::test_recovery_preserves_failed_state`.
+#[tokio::test]
+#[serial]
+async fn test_recovery_preserves_failed_state() {
+    let suite = Suite::start(BIN, Instance::Recovery).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let mut spec = builder("recovery_linear_fail_mid");
+    let a = spec.task(step(&suite, "a"));
+    let b = spec.task(fail(&suite, "b").waits_for(a));
+    let c = spec.task(step(&suite, "c").waits_for(b));
+    let _output = spec.output(c);
+    let handle = start::<String>(&suite, spec).await;
+    let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    unfinalize(&client, handle.workflow_id()).await;
+    rows::wait_for_workflow_status(&client, handle.workflow_id(), "FAILED", RECOVERY_WAIT).await;
+    assert_eq!(failed_code(&handle).await, "DELIBERATE_FAILURE");
+}
+
+/// Python: `tests/integration/test_workflow_recovery.py::test_recover_failed_recomputes_first_failed_error`.
+/// A workflow put back to RUNNING with the error of its second failed node
+/// is finalized with the error of its first failed node by index.
+#[tokio::test]
+#[serial]
+async fn test_recovery_recomputes_first_failed_error() {
+    let suite = Suite::start(BIN, Instance::Recovery).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let mut spec = builder("recovery_first_error");
+    let _first = spec.task(fail_with(&suite, "first", "FIRST_ERROR"));
+    let _second = spec.task(fail_with(&suite, "second", "SECOND_ERROR"));
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let workflow_id = handle.workflow_id();
+    let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    let changed = client
+        .execute(
+            "UPDATE horsies_workflows SET status = 'RUNNING', completed_at = NULL, \
+             result = NULL, error = (SELECT (result::jsonb -> 'err')::text \
+             FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 1) \
+             WHERE id = $1",
+            &[&workflow_id],
+        )
         .await
-        .unwrap();
-
-    assert!(cancel_workflow(&pool, parent_id).await.unwrap());
-
-    let parent_status: String =
-        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-            .bind(&parent_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let child_status: String =
-        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-            .bind(&child_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(parent_status, "CANCELLED");
-    assert_eq!(
-        child_status, "CANCELLED",
-        "cancellation must cascade to the child workflow",
+        .unwrap_or_else(|error| panic!("store the later error on {workflow_id}: {error}"));
+    assert_eq!(changed, 1, "workflow {workflow_id} has a row");
+    let stale = rows::workflow_error(&client, workflow_id).await;
+    assert!(
+        stale
+            .as_deref()
+            .is_some_and(|error| error.contains("SECOND_ERROR")),
+        "the stored error is the later one: {stale:?}"
     );
+    rows::wait_for_workflow_status(&client, workflow_id, "FAILED", RECOVERY_WAIT).await;
+    assert_eq!(failed_code(&handle).await, "FIRST_ERROR");
+    let recomputed = rows::workflow_error(&client, workflow_id).await;
+    assert!(
+        recomputed
+            .as_deref()
+            .is_some_and(|error| !error.contains("SECOND_ERROR")),
+        "the later error was replaced: {recomputed:?}"
+    );
+}
+
+/// Python: `test_layer6_workflow_advanced.py::test_workflow_recovers_after_worker_crash`.
+/// The worker dies while C and D run. The reaper of the next worker fails
+/// them with `WORKER_CRASHED`; E, which allows failed dependencies, and F
+/// then run on the `recovery` queue, and the workflow fails.
+#[tokio::test]
+#[serial]
+async fn test_workflow_recovers_after_worker_crash() {
+    let suite = Suite::start(BIN, Instance::RecoveryQueues).await;
+    let client = suite.client().await;
+    let mut crashed = suite.worker(Profile::Isolated2).await;
+    let mut spec = builder("recovery_crash");
+    let a = spec.task(recovery_step(&suite, "a", 50));
+    let b = spec.task(recovery_step(&suite, "b", 50).waits_for(a));
+    let c = spec.task(recovery_step(&suite, "c", 60_000).waits_for(b));
+    let d = spec.task(recovery_step(&suite, "d", 60_000).waits_for(b));
+    let e = spec.task(
+        recovery_step(&suite, "e", 50)
+            .waits_for_all([c, d])
+            .allow_failed_deps(true)
+            .queue("recovery"),
+    );
+    let _f = spec.task(
+        recovery_step(&suite, "f", 50)
+            .waits_for(e)
+            .queue("recovery"),
+    );
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let workflow_id = handle.workflow_id();
+    rows::wait_for_node_status(&client, workflow_id, 1, "COMPLETED", WORKFLOW_WAIT).await;
+    for task_index in [2, 3] {
+        let task_id = node_task(&client, workflow_id, task_index).await;
+        rows::wait_for_task_status(&client, task_id, "RUNNING", WORKFLOW_WAIT).await;
+    }
+    crashed.kill_group();
+    let _exit = crashed.wait_exit(Duration::from_secs(5)).await;
+    let _recovering = suite.worker(Profile::Isolated2).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(
+        statuses(&nodes),
+        vec![
+            "COMPLETED",
+            "COMPLETED",
+            "FAILED",
+            "FAILED",
+            "COMPLETED",
+            "COMPLETED"
+        ]
+    );
+    for node_id in ["c", "d"] {
+        let read = handle
+            .result_for::<String, Infallible>(&NodeKey::new(node_id))
+            .await
+            .unwrap_or_else(|error| panic!("read node {node_id}: {error}"));
+        match read {
+            TaskOutcome::Failed(error) => {
+                assert_eq!(error.code().text(), "WORKER_CRASHED", "node {node_id}");
+            }
+            TaskOutcome::Succeeded(value) => panic!("node {node_id} succeeded with {value}"),
+        }
+    }
+    for node in &nodes[4..] {
+        let task_id = node.task_id.expect("a node that ran has its task");
+        let task = rows::read_task(&client, task_id)
+            .await
+            .unwrap_or_else(|| panic!("node {} has no task row", node.task_index));
+        assert_eq!(task.queue_name, "recovery", "node {}", node.task_index);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retries
+// ---------------------------------------------------------------------------
+
+/// Python: `test_layer6_workflow_advanced.py::test_workflow_task_retries`. The
+/// node carries no options: its retry policy is the one of the task's
+/// registration.
+#[tokio::test]
+#[serial]
+async fn test_workflow_task_retries() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("retry_test");
+    let a = spec.task(retry_then_ok(&suite, "a", "wf-retry-ok", 2));
+    let _output = spec.output(a);
+    let handle = start::<String>(&suite, spec).await;
+    let nodes = ended_nodes_within(&suite, &handle, "COMPLETED", RETRY_WAIT).await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED"]);
+    assert_eq!(output(&handle).await, "succeeded_on_attempt_2");
+    assert_eq!(suite.markers.count("wf-retry-ok-attempt-"), 2);
+}
+
+/// Python: `test_layer6_workflow_advanced.py::test_workflow_task_retries_exhausted`.
+/// One attempt and three retries, then the node and the workflow fail.
+#[tokio::test]
+#[serial]
+async fn test_workflow_task_retries_exhausted() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("retry_exhausted");
+    let a = spec.task(retry_then_ok(&suite, "a", "wf-retry-exhausted", 10));
+    let _output = spec.output(a);
+    let handle = start::<String>(&suite, spec).await;
+    let nodes = ended_nodes_within(&suite, &handle, "FAILED", RETRY_WAIT).await;
+    assert_eq!(statuses(&nodes), vec!["FAILED"]);
+    assert_eq!(failed_code(&handle).await, "RETRY_NEEDED");
+    assert_eq!(suite.markers.count("wf-retry-exhausted-attempt-"), 4);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-workflow params
+// ---------------------------------------------------------------------------
+
+/// The old Rust `test_subworkflow_mixed_explicit_and_args_from`: one
+/// sub-workflow node gives its child a static param and the result of an
+/// upstream node (Python `test_layer7_subworkflows.py`,
+/// `test_subworkflow_static_kwargs_preserve_build_with_types` and
+/// `test_subworkflow_build_with_args_from_receives_typed_task_result`, in
+/// one node).
+#[tokio::test]
+#[serial]
+async fn test_subworkflow_mixed_explicit_and_args_from() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("subworkflow_mixed_input");
+    let source: TypedNodeRef<i64> = spec.task(produce(&suite, "produce", 21));
+    let child = spec.sub_workflow(
+        subworkflow::SubLabel::node(SubWorkflowParams::NotGiven)
+            .expect("a label child node")
+            .node_id("child")
+            .set(subworkflow::LabelParams::field_label(), "count".to_owned())
+            .expect("a label param")
+            .arg_from(subworkflow::LabelParams::field_value(), source),
+    );
+    let _output = spec.output(child);
+    let handle = start::<String>(&suite, spec).await;
+    assert_eq!(output(&handle).await, "count=21");
 }

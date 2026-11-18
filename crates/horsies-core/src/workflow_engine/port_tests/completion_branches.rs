@@ -16,10 +16,11 @@ use super::support::{
     workflow_status, LiveStatus, NodeSeed, Notifications, WorkflowSeed,
 };
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::WorkflowSpecRegistry;
-use crate::workflow_engine::engine::{on_workflow_task_complete, WorkflowTaskCompletion};
-use crate::workflow_engine::steps::{node_finish_alone, Dependents, NodeFinishDisposition};
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::engine::{on_workflow_task_complete_with, WorkflowTaskCompletion};
+use crate::workflow_engine::steps::{
+    node_finish_alone, ChildBuild, Dependents, NodeFinishDisposition,
+};
 
 /// The queue of the node rows of these tests.
 const COMPLETION_QUEUE: &str = "port_completion_branch_q";
@@ -60,10 +61,6 @@ async fn seed_owed_phase_two(
     (workflow_id, task_id)
 }
 
-fn empty_registry() -> WorkflowSpecRegistry {
-    WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
-}
-
 /// `TestOnWorkflowTaskComplete::test_paused_workflow_stores_result_without_propagation`:
 /// phase 2 under a PAUSED workflow writes the node and promotes nothing.
 #[tokio::test]
@@ -72,11 +69,10 @@ async fn phase_two_under_a_paused_workflow_writes_the_node_and_promotes_nothing(
     let pool = shared_pool().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "PAUSED", true).await;
 
-    let completion = on_workflow_task_complete(
+    let completion = on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &empty_registry(),
-        &RetentionConfig::default(),
+        ChildBuild::Client(&TestChildSpecs::empty()),
     )
     .await;
 
@@ -136,11 +132,10 @@ async fn the_phase_two_of_on_workflow_task_complete_sends_no_capacity_wake() {
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "RUNNING", false).await;
     let mut listener = Notifications::listen(&pool, &[COMPLETION_CHANNEL]).await;
 
-    let completion = on_workflow_task_complete(
+    let completion = on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &empty_registry(),
-        &RetentionConfig::default(),
+        ChildBuild::Client(&TestChildSpecs::empty()),
     )
     .await;
 

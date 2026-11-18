@@ -2,11 +2,12 @@
 
 dumps_json is strict: it rejects non-JSON-native values (tuple, set, non-str
 dict keys, lone surrogates, non-finite floats) rather than coercing them, and
-emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity),
-numeric literals outside the finite binary64 range, lone surrogates, and an
-object that repeats a key.
-loads_json_bytes is the stored-payload form: strict UTF-8, and empty is an
-error. dumps_canonical_json is the one canonical form for hashed or stored text.
+emits no class tags. loads_json rejects an empty text (EmptyJsonTextError),
+non-RFC-8259 constants (NaN/Infinity), numeric literals outside the finite
+binary64 range, lone surrogates, and an object that repeats a key.
+loads_json_bytes is the stored-payload form: strict UTF-8, then the rules of
+loads_json. dumps_canonical_json is the one canonical form for hashed or stored
+text.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import sys
 import pytest
 
 from horsies.core.codec.json_io import (
+    EmptyJsonTextError,
+    SerializationError,
     dumps_canonical_json,
     dumps_json,
     loads_json,
@@ -168,9 +171,25 @@ class TestDumpsJsonSurrogate:
 class TestLoadsJson:
     """loads_json basics and non-RFC-8259 constant rejection."""
 
-    def test_empty_returns_none(self) -> None:
-        assert loads_json(None).ok_value is None
-        assert loads_json('').ok_value is None
+    def test_an_empty_text_is_an_empty_json_text_error(self) -> None:
+        result = loads_json('')
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, EmptyJsonTextError)
+        assert isinstance(error, SerializationError)
+        assert str(error) == 'JSON parse failed: the text is empty'
+
+    def test_json_null_is_the_value_none(self) -> None:
+        result = loads_json('null')
+        assert not is_err(result)
+        assert result.ok_value is None
+
+    @pytest.mark.parametrize('text', [' ', '\n', '\t\r '], ids=['space', 'newline', 'mixed'])
+    def test_a_whitespace_text_is_a_parse_error_not_an_empty_text(self, text: str) -> None:
+        result = loads_json(text)
+        assert is_err(result)
+        assert not isinstance(result.err_value, EmptyJsonTextError)
+        assert str(result.err_value).startswith('JSON parse failed: ')
 
     def test_round_trip(self) -> None:
         result = loads_json('{"a":[1,2],"b":"x"}')
@@ -456,10 +475,11 @@ class TestLoadsJsonBytes:
         assert not is_err(result)
         assert result.ok_value is None
 
-    def test_empty_payload_is_an_error_not_null(self) -> None:
+    def test_empty_payload_is_an_empty_json_text_error_not_null(self) -> None:
         result = loads_json_bytes(b'')
         assert is_err(result)
-        assert 'empty' in str(result.err_value)
+        assert isinstance(result.err_value, EmptyJsonTextError)
+        assert str(result.err_value) == 'JSON parse failed: the text is empty'
 
     @pytest.mark.parametrize(
         'payload',

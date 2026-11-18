@@ -13,9 +13,14 @@ use super::identity::fingerprint::{
     EnqueueCommandV1, FingerprintError, COMMAND_FINGERPRINT_VERSION,
 };
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
-use super::rerun::input_envelope::validate_integer_domain;
+use super::rerun::input_envelope::{end_of_number, end_of_string};
 use crate::core::codec::{check_json_text, JsonReadError, StrictJsonError};
 use crate::core::task::execution::{stored_execution, Execution, InvalidExecution};
+
+/// The smallest integer that task options may hold (`i64::MIN`).
+pub const MIN_OPTIONS_INTEGER: i64 = i64::MIN;
+/// The largest integer that task options may hold (`u64::MAX`).
+pub const MAX_OPTIONS_INTEGER: u64 = u64::MAX;
 
 /// Facts of a task row that a send, a schedule slot or a rerun writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,8 +85,14 @@ pub enum EnqueuePreparationError {
         field: SendPart,
         source: serde_json::Error,
     },
-    #[error("{field} JSON carries a number outside the supported domain: {detail}")]
-    NumberDomain { field: SendPart, detail: String },
+    /// The task options hold an integer outside [`MIN_OPTIONS_INTEGER`] to
+    /// [`MAX_OPTIONS_INTEGER`]. No count, delay or limit of that size has a
+    /// meaning. Python's send refuses it with the same text
+    /// (`options_integer_out_of_range`, `python/horsies/core/codec/task_options.py`).
+    #[error(
+        "task_options JSON holds an integer outside {MIN_OPTIONS_INTEGER} to {MAX_OPTIONS_INTEGER}"
+    )]
+    OptionsIntegerOutOfRange,
     #[error("task_options JSON must encode an object")]
     InvalidTaskOptions,
     #[error("task_options refused: {0}")]
@@ -203,18 +214,27 @@ fn check_input(input_json: &str) -> Result<(), EnqueuePreparationError> {
 }
 
 /// The task options as a JSON object, read with the strict rule; `None`
-/// for no options or `null`. Refuses text that breaks the strict read rule,
-/// does not parse, holds an integer the parse would round, or is not an
-/// object.
+/// for no options or `null`. Refusals, in this order: text that breaks the
+/// strict read rule; an integer outside [`MIN_OPTIONS_INTEGER`] to
+/// [`MAX_OPTIONS_INTEGER`] (Python's send checks the same range after its
+/// parse); text that does not decode; a value that is not an object.
 pub(crate) fn parse_optional_object(
     value: Option<&str>,
 ) -> Result<Option<Map<String, Value>>, EnqueuePreparationError> {
     let Some(value) = value else {
         return Ok(None);
     };
-    // The options are parsed to read the execution class, so an integer that
-    // the parse would round is refused. The core's strict reader gives the
-    // decode 300 levels of room (Python `core/codec/json_value.py:54-75`).
+    check_json_text(value).map_err(|source| EnqueuePreparationError::StrictJson {
+        field: SendPart::TaskOptions,
+        source,
+    })?;
+    // Checked before the decode, which without `arbitrary-precision` rounds an
+    // integer outside this range or refuses it with a serde_json error.
+    if holds_integer_out_of_range(value) {
+        return Err(EnqueuePreparationError::OptionsIntegerOutOfRange);
+    }
+    // The core's strict reader gives the decode 300 levels of room (Python
+    // `core/codec/json_value.py:54-75`).
     let parsed: Value = crate::core::codec::from_json_str(value).map_err(|error| match error {
         JsonReadError::Refused(source) => EnqueuePreparationError::StrictJson {
             field: SendPart::TaskOptions,
@@ -225,10 +245,6 @@ pub(crate) fn parse_optional_object(
             source,
         },
     })?;
-    validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
-        field: SendPart::TaskOptions,
-        detail,
-    })?;
     match parsed {
         Value::Object(object) => Ok(Some(object)),
         Value::Null => Ok(None),
@@ -236,16 +252,45 @@ pub(crate) fn parse_optional_object(
     }
 }
 
+/// Whether a JSON text holds an integer literal outside
+/// [`MIN_OPTIONS_INTEGER`] to [`MAX_OPTIONS_INTEGER`]. A number with a
+/// fraction or an exponent is a float, not an integer.
+///
+/// Precondition: the text passed the strict read rule, so it is one JSON
+/// value and a number token starts only where this scan looks for one. Each
+/// step moves forward, so the scan ends within the text. Pure.
+fn holds_integer_out_of_range(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => index = end_of_string(bytes, index),
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                index = end_of_number(bytes, index);
+                let lexeme = &text[start..index];
+                let is_integer = !lexeme.contains(['.', 'e', 'E']);
+                let in_range = lexeme.parse::<i64>().is_ok() || lexeme.parse::<u64>().is_ok();
+                if is_integer && !in_range {
+                    return true;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "arbitrary-precision"))]
     #[test]
     fn a_long_integer_is_kept_in_input_and_refused_in_options() {
         // The input is stored as written, so every digit is kept (Python's
-        // limit is 4300 digits). The options are parsed to read the
-        // execution class, so an integer the parse would round is refused.
+        // limit is 4300 digits). An integer of that size in the options has
+        // no meaning, so the send refuses it, with or without
+        // `arbitrary-precision`.
         let big = "123456789012345678901234567890";
         let input = format!("{{\"k\":{big}}}");
         prepare_enqueue_facts(
@@ -274,17 +319,63 @@ mod tests {
             true,
             None,
         )
-        .expect_err("an out-of-domain integer in the options must not be rounded");
+        .expect_err("an integer outside the options range must be refused");
         assert!(
-            matches!(
-                error,
-                EnqueuePreparationError::NumberDomain {
-                    field: SendPart::TaskOptions,
-                    ..
-                }
-            ),
+            matches!(error, EnqueuePreparationError::OptionsIntegerOutOfRange),
             "{error}"
         );
+        assert_eq!(
+            error.to_string(),
+            "task_options JSON holds an integer outside -9223372036854775808 to \
+             18446744073709551615"
+        );
+    }
+
+    /// The range is `i64::MIN` to `u64::MAX`, at any depth; a float, and an
+    /// integer in a string, are not judged. An integer of 400 digits is the
+    /// named refusal, not a decode error.
+    #[test]
+    fn the_options_integer_range_is_i64_min_to_u64_max() {
+        let accepted = [
+            r#"{"retry_policy":{"max_retries":1,"intervals":[1],"max_delay_seconds":18446744073709551615,"auto_retry_for":["X"]}}"#,
+            r#"{"a":[-9223372036854775808,18446744073709551615,-0]}"#,
+            r#"{"a":1.8446744073709551616e19,"b":-1e300,"c":0.5}"#,
+            r#"{"123456789012345678901234567890":"123456789012345678901234567890"}"#,
+            r#"{"a":"escaped quote \" then 123456789012345678901234567890"}"#,
+        ];
+        for options in accepted {
+            assert!(parse_optional_object(Some(options)).is_ok(), "{options}");
+        }
+        let long = "9".repeat(400);
+        let refused = [
+            r#"{"retry_policy":{"max_retries":1,"intervals":[1],"max_delay_seconds":18446744073709551616,"auto_retry_for":["X"]}}"#.to_owned(),
+            r#"{"a":[1,{"b":-9223372036854775809}]}"#.to_owned(),
+            format!(r#"{{"k":{long}}}"#),
+            "18446744073709551616".to_owned(),
+        ];
+        for options in &refused {
+            assert!(
+                matches!(
+                    parse_optional_object(Some(options.as_str())),
+                    Err(EnqueuePreparationError::OptionsIntegerOutOfRange)
+                ),
+                "{options}"
+            );
+        }
+    }
+
+    /// A text that breaks the strict read rule is refused as such before
+    /// its integers are judged.
+    #[test]
+    fn the_strict_read_rule_comes_before_the_integer_range() {
+        let options = r#"{"a":18446744073709551616,"a":1}"#;
+        assert!(matches!(
+            parse_optional_object(Some(options)),
+            Err(EnqueuePreparationError::StrictJson {
+                field: SendPart::TaskOptions,
+                ..
+            })
+        ));
     }
 
     #[test]

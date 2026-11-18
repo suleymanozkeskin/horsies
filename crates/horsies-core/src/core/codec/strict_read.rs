@@ -185,6 +185,29 @@ pub fn check_json_bytes_with(payload: &[u8], rule: TextRule) -> Result<(), Stric
 /// Check a JSON text against the strict read rule and the depth and key rules
 /// of `rule`. Does no I/O and builds no value.
 pub fn check_json_text_with(text: &str, rule: TextRule) -> Result<(), StrictJsonError> {
+    read_text(text, rule).map(|_shape| ())
+}
+
+/// The shape of a JSON text, for the rules of a user value
+/// (`super::user_value::check_user_value_text`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextShape {
+    /// The deepest nesting of arrays and objects: the outermost one is level
+    /// 1; a text with no array and no object is level 0.
+    pub(crate) deepest: usize,
+    /// The first key, in text order, that only the engine writes.
+    pub(crate) engine_key: Option<String>,
+}
+
+/// The shape of a text that passes the strict read rule of a stored text.
+///
+/// Errors: the refusal of [`check_json_text`]. Pure.
+pub(crate) fn text_shape(text: &str) -> Result<TextShape, StrictJsonError> {
+    read_text(text, TextRule::Stored)
+}
+
+/// Read a text under `rule` and give its shape. Pure.
+fn read_text(text: &str, rule: TextRule) -> Result<TextShape, StrictJsonError> {
     if text.is_empty() {
         return Err(StrictJsonError::Empty);
     }
@@ -192,12 +215,17 @@ pub fn check_json_text_with(text: &str, rule: TextRule) -> Result<(), StrictJson
         bytes: text.as_bytes(),
         pos: 0,
         rule,
+        deepest: 0,
+        engine_key: None,
     };
     reader.skip_whitespace();
     reader.value(0)?;
     reader.skip_whitespace();
     match reader.pos == reader.bytes.len() {
-        true => Ok(()),
+        true => Ok(TextShape {
+            deepest: reader.deepest,
+            engine_key: reader.engine_key,
+        }),
         false => Err(reader.syntax(SyntaxReason::TrailingData)),
     }
 }
@@ -206,6 +234,10 @@ struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
     rule: TextRule,
+    /// The deepest level read so far.
+    deepest: usize,
+    /// The first key read so far that only the engine writes.
+    engine_key: Option<String>,
 }
 
 impl Reader<'_> {
@@ -277,6 +309,7 @@ impl Reader<'_> {
                 limit: self.rule.max_depth(),
             });
         }
+        self.deepest = self.deepest.max(depth);
         self.pos += 1; // '{'
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
@@ -292,8 +325,12 @@ impl Reader<'_> {
                 Some(_) => return Err(self.syntax(SyntaxReason::UnexpectedCharacter)),
             }
             let key = self.string()?;
-            if self.rule == TextRule::UserValue && is_engine_key(&key) {
+            let engine_written = is_engine_key(&key);
+            if self.rule == TextRule::UserValue && engine_written {
                 return Err(StrictJsonError::EngineKey { offset: key_offset });
+            }
+            if engine_written && self.engine_key.is_none() {
+                self.engine_key = Some(key.clone());
             }
             if !keys.insert(key) {
                 return Err(StrictJsonError::DuplicateKey { offset: key_offset });
@@ -328,6 +365,7 @@ impl Reader<'_> {
                 limit: self.rule.max_depth(),
             });
         }
+        self.deepest = self.deepest.max(depth);
         self.pos += 1; // '['
         self.skip_whitespace();
         if self.peek() == Some(b']') {

@@ -49,6 +49,7 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import TaskNode, WorkflowDefinition
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_err
+from horsies.core.worker.reaper import ReaperMixin
 from horsies.core.worker.sql import DELETE_EXPIRED_WORKFLOWS_SQL
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.workflows.phase2_recovery import (
@@ -59,7 +60,6 @@ from horsies.core.workflows.phase2_recovery import (
 )
 from horsies.core.workflows.recovery import (
     GLOBAL_SCAN_ROW_CAP,
-    RecoveryPassFailure,
     RecoveryReport,
     recover_stuck_workflow_tree,
     recover_stuck_workflows_global,
@@ -267,6 +267,17 @@ async def _run_pass(harness: Harness) -> RecoveryReport:
         harness.broker,
         failure_limit=LIMIT,
     )
+
+
+class _Reaper(ReaperMixin):
+    """The reaper mixin alone: its recovery call reads only the broker."""
+
+
+async def _run_reaper_pass(harness: Harness) -> RecoveryReport:
+    """The global pass as the reaper runs it (``ReaperMixin._recover_workflows``):
+    in the core, or, in the Python case of the workflow dual-run, the
+    reference in the place of the method."""
+    return await _Reaper()._recover_workflows(harness.broker, failure_limit=LIMIT)
 
 
 async def _run_passes(harness: Harness, count: int) -> list[RecoveryReport]:
@@ -630,12 +641,17 @@ class TestTransientRaises:
     async def test_a_connection_loss_counts_no_candidate_of_the_pass(
         self, harness: Harness,
     ) -> None:
-        """The backend dies in the first candidate. The next candidate gets
-        `PendingRollbackError`, and that is not a verdict on its workflow."""
+        """The backend dies in the first write of each candidate, in the pass
+        that the reaper runs. Each candidate has its own connection, so both
+        losses are transient errors of case 1: no workflow is counted, every
+        node stays READY, and the pass ends with its report. The core's
+        ``a_connection_loss_counts_no_candidate_of_the_pass``
+        (``crates/horsies-core/src/workflow_engine/port_tests/recovery_limit_pass.rs``)
+        checks the same rule on the pass alone."""
         first = await _seed_workflow(harness)
         second = await _seed_workflow(harness)
-        await _seed_node(harness, first, 0, status='READY', options=BAD_GOOD_UNTIL)
-        await _seed_node(harness, second, 0, status='READY', options=BAD_GOOD_UNTIL)
+        await _seed_node(harness, first, 0, status='READY')
+        await _seed_node(harness, second, 0, status='READY')
         await _execute(
             harness,
             """
@@ -656,16 +672,20 @@ class TestTransientRaises:
             """,
         )
 
-        with pytest.raises(RecoveryPassFailure):
-            await _run_pass(harness)
+        try:
+            report = await _run_reaper_pass(harness)
+        finally:
+            await _execute(
+                harness, 'DROP TRIGGER limit_test_kill ON horsies_workflow_tasks',
+            )
+            await _execute(harness, 'DROP FUNCTION limit_test_kill()')
 
-        await _execute(
-            harness, 'DROP TRIGGER limit_test_kill ON horsies_workflow_tasks',
-        )
-        await _execute(harness, 'DROP FUNCTION limit_test_kill()')
+        assert report.metrics['case_1'].errors == 2, report
+        assert report.metrics['case_1'].failures_counted == 0, report
         assert await _failure_rows(harness) == 0
-        assert await _workflow_status(harness, first) == 'RUNNING'
-        assert await _workflow_status(harness, second) == 'RUNNING'
+        for workflow_id in (first, second):
+            assert await _workflow_status(harness, workflow_id) == 'RUNNING'
+            assert await _node_status(harness, workflow_id, 0) == 'READY'
 
 
     async def test_the_real_raise_after_a_connection_loss_is_transient(

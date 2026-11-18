@@ -226,7 +226,7 @@ fn usable_timeout(options: &StoredOptions) -> Result<Option<TaskTimeoutMs>, Stor
             timeout: StoredTimeout::Invalid(refusal),
             ..
         } => Err(StoredOptionsRefusal::TimeoutValueInvalid(refusal_reason(
-            timeout_refusal_message(*refusal),
+            &timeout_refusal_message(*refusal),
         ))),
         StoredOptions::Readable {
             timeout: StoredTimeout::NoTimeout,

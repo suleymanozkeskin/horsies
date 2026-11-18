@@ -313,7 +313,7 @@ async fn the_completion_yield_is_the_share_of_scanned_workflows_that_are_candida
 
     let pass = audit_end_states(
         &PostgresBroker::from_pool(pool.clone()),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &crate::test_support::child_specs::TestChildSpecs::empty(),
         AUDIT_PAGE_ROWS,
         &mut report,
         RecoveryFailurePolicy::LogOnly,

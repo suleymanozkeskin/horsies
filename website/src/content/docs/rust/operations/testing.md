@@ -162,6 +162,7 @@ A schedule's `input` and a node's `input_json` use this form. A rename of a para
 
 `app.check()` builds and checks each workflow definition, each check case of a workflow builder, the task options of each task registered by hand, and each enabled schedule. It needs no database.
 
+<!-- rust-check: skip partial -- build_app is the app builder of the user's binary -->
 ```rust
 #[test]
 fn the_app_passes_its_check() {

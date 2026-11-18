@@ -1068,9 +1068,6 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
 /// A child script: take the init frame, send ready, take the run frame,
 /// then do `after_run`.
 fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
-    let init = encode_parent_frame(&ParentFrame::Init(init_frame()))
-        .expect("the init frame encodes")
-        .to_bytes();
     let ready = encode_child_frame(&ChildFrame::Ready(ReadyFrame {
         pid: ProcessId::new(1).expect("a valid pid"),
         rss: RssReading::Unreadable,
@@ -1078,8 +1075,8 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
     .expect("the ready frame encodes")
     .to_bytes();
     let script = format!(
-        r#"{take_init}; printf '{ready}' >&"$0"; {take_run}; {after_run}"#,
-        take_init = drop_socket_bytes(init.len()),
+        r#"{take_init}printf '{ready}' >&"$0"; {take_run}; {after_run}"#,
+        take_init = crate::worker::executor::slots::scripted::take_init(),
         ready = printf_bytes(&ready),
         take_run = drop_socket_bytes(run_frame_bytes(claimed).len()),
     );
@@ -1277,7 +1274,9 @@ async fn a_fail_closed_kill_reads_as_a_kill_by_the_worker() {
     match answer(receiver).await {
         AttemptEnd::Crashed { reason } => {
             assert!(
-                reason.as_str().starts_with("killed by the worker"),
+                reason
+                    .as_str()
+                    .starts_with("Worker child lost: killed by the worker"),
                 "{reason}"
             );
         }

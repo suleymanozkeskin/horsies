@@ -105,6 +105,7 @@ async fn rerun_with_audit(
 
 Implement `CallerTransaction` for the transaction type of another driver:
 
+<!-- rust-check: skip elided -- the library's trait, shown for reference -->
 ```rust
 use std::future::Future;
 

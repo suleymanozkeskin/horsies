@@ -82,6 +82,7 @@ fn a_chain_builds_with_auto_node_ids() {
     assert_eq!(spec.nodes[1].dependencies, vec![0]);
     assert_eq!(spec.nodes[1].args_from.get("total"), Some(&0));
     assert!(matches!(spec.output, SpecOutput::Node { index: 1, .. }));
+    assert_eq!(spec.on_error(), OnError::Fail);
     spec.check_output_type::<String>().unwrap();
 }
 
@@ -106,7 +107,10 @@ fn more_nodes_than_the_limit_are_refused() {
     for _ in 0..=MAX_WORKFLOW_NODES {
         builder.task(charge());
     }
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowTooManyNodes));
+    let refused = refusal(builder);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowTooManyNodes));
+    assert_eq!(ErrorCode::WorkflowTooManyNodes.as_code_str(), "HRS-038");
+    assert!(refused.message.contains("10001 nodes"), "{refused}");
 }
 
 #[test]
@@ -117,6 +121,24 @@ fn an_invalid_node_id_is_refused() {
     let mut builder = WorkflowSpecBuilder::new("ids");
     builder.task(charge().node_id("x".repeat(MAX_NODE_ID_LENGTH + 1)));
     assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidNodeId));
+    let mut builder = WorkflowSpecBuilder::new("ids");
+    builder.task(charge().node_id("step-1:sub_task.v2"));
+    let spec = builder.build().unwrap();
+    assert_eq!(
+        spec.node_ids().collect::<Vec<_>>(),
+        vec!["step-1:sub_task.v2"]
+    );
+}
+
+/// A refusal of the first gate stops the build: the second gate does not
+/// run, so its refusals are not reported.
+#[test]
+fn a_refusal_of_the_first_gate_stops_the_second_gate() {
+    let mut builder = WorkflowSpecBuilder::new("gates");
+    builder.task(charge().node_id("has space").priority(0));
+    let refused = refusal(builder);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidNodeId));
+    assert!(refused.notes.is_empty(), "{refused}");
 }
 
 #[test]
@@ -203,6 +225,11 @@ fn a_quorum_outside_its_bounds_is_refused() {
     let charged = builder.task(charge());
     builder.task(charge().waits_for(charged).join_quorum(2));
     assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
+    // A quorum node with no dependency can never meet its quorum.
+    let mut builder = WorkflowSpecBuilder::new("join");
+    builder.task(charge());
+    builder.task(charge().join_quorum(1));
+    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
 }
 
 #[test]
@@ -254,9 +281,13 @@ fn a_success_policy_without_a_case_or_a_required_node_is_refused() {
     builder.success_policy(SuccessPolicy::new(vec![SuccessCase::new(
         Vec::<NodeRef>::new(),
     )]));
-    assert_eq!(
-        code_of(builder),
-        Some(ErrorCode::WorkflowInvalidSuccessPolicy)
+    let refused = refusal(builder);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidSuccessPolicy));
+    assert!(
+        refused
+            .message
+            .contains("SuccessCase[0] has no required node"),
+        "{refused}"
     );
 }
 
@@ -346,22 +377,72 @@ fn a_member_that_a_lenient_input_type_does_not_read_is_refused() {
 }
 
 /// #571: a key inside a nested object that binds to no field, named by its
-/// key path.
+/// key path. Python's strict encode of the member's value refuses it with
+/// `HRS-031`.
 #[test]
 fn a_nested_member_that_binds_to_no_field_is_refused_with_its_key_path() {
     let refused = ship_refusal(r#"{"label": "a", "options": {"retriess": 3}, "parcels": []}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
     assert!(refused.message.contains("options.retriess"), "{refused}");
 }
 
 /// #571: a key inside an element of a list that binds to no field, named by
-/// its key path.
+/// its key path, with `HRS-031`.
 #[test]
 fn a_list_element_member_that_binds_to_no_field_is_refused_with_its_key_path() {
     let refused =
         ship_refusal(r#"{"label": "a", "options": {}, "parcels": [{"weight": 1, "wieght": 2}]}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
     assert!(refused.message.contains("parcels[0].wieght"), "{refused}");
+}
+
+/// The input of a task whose nested type refuses an unknown key on read
+/// (`deny_unknown_fields`), so serde refuses the key before the compare.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictShipInput {
+    label: String,
+    options: StrictShipOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictShipOptions {
+    retries: u32,
+}
+
+/// #571: a key that serde refuses inside a nested object is `HRS-031` with
+/// its key path; at the top level it is `HRS-019`.
+#[test]
+fn a_key_that_a_strict_type_refuses_has_the_code_of_its_depth() {
+    let strict_refusal = |input: &str| {
+        let mut builder = WorkflowSpecBuilder::new("ship");
+        builder.task(
+            task_node::<u32, StrictShipInput>("ship")
+                .input_json(input)
+                .unwrap(),
+        );
+        refusal(builder)
+    };
+    let nested = strict_refusal(r#"{"label": "a", "options": {"retries": 1, "retriess": 3}}"#);
+    assert_eq!(nested.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert!(nested.message.contains("options.retriess"), "{nested}");
+    let top = strict_refusal(r#"{"label": "a", "options": {"retries": 1}, "lable": "b"}"#);
+    assert_eq!(top.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert!(top.message.contains("lable"), "{top}");
+}
+
+/// A member of the input of a task with no parameters binds to no
+/// parameter: `HRS-019`, as Python's check of the parameter names.
+#[test]
+fn a_member_of_the_input_of_a_task_with_no_parameters_is_refused() {
+    let mut builder = WorkflowSpecBuilder::new("unit");
+    builder.task(
+        task_node::<u32, ()>("tick")
+            .input_json(r#"{"count": 1}"#)
+            .unwrap(),
+    );
+    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidKwargKey));
 }
 
 /// #572: a node whose static input misses a field of its input type.
@@ -379,6 +460,54 @@ fn a_missing_field_is_refused() {
     assert_eq!(
         code_of(builder),
         Some(ErrorCode::WorkflowMissingRequiredParams)
+    );
+}
+
+/// The refusal of a spec with one node of `I` whose input text is `input`.
+fn input_refusal<I>(input: &str) -> HorsiesError
+where
+    I: Serialize + serde::de::DeserializeOwned + 'static,
+{
+    let mut builder = WorkflowSpecBuilder::new("ship");
+    builder.task(task_node::<u32, I>("ship").input_json(input).unwrap());
+    refusal(builder)
+}
+
+/// #1734: a field of the input itself that has no value (depth 0) is
+/// `HRS-020`, as Python's check of the parameters.
+#[test]
+fn a_missing_field_of_the_input_is_refused_with_hrs_020() {
+    let refused = input_refusal::<StrictShipInput>(r#"{"options": {"retries": 1}}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowMissingRequiredParams));
+    assert!(
+        refused.message.contains(".: missing field `label`"),
+        "{refused}"
+    );
+}
+
+/// #1734: a field missing inside a member's value (depth 1, the path of
+/// the member) is `HRS-031`, as Python's strict encode of the value.
+#[test]
+fn a_missing_field_of_a_member_s_value_is_refused_with_hrs_031() {
+    let refused = input_refusal::<StrictShipInput>(r#"{"label": "a", "options": {}}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert!(
+        refused.message.contains("options: missing field `retries`"),
+        "{refused}"
+    );
+}
+
+/// #1734: a field missing inside an element of a member's list (depth 2,
+/// the path of the element) is `HRS-031`.
+#[test]
+fn a_missing_field_of_a_list_element_is_refused_with_hrs_031() {
+    let refused = input_refusal::<ShipInput>(r#"{"label": "a", "options": {}, "parcels": [{}]}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert!(
+        refused
+            .message
+            .contains("parcels[0]: missing field `weight`"),
+        "{refused}"
     );
 }
 
@@ -440,6 +569,8 @@ fn the_output_type_is_checked() {
     let mut builder = WorkflowSpecBuilder::new("no output");
     builder.task(charge());
     let spec = builder.build().unwrap();
+    assert!(matches!(spec.output, SpecOutput::NoOutput));
+    assert_eq!(spec.success_policy, None);
     spec.check_output_type::<OutputlessResults>().unwrap();
     assert_eq!(
         spec.check_output_type::<f64>().unwrap_err().code,
@@ -457,10 +588,34 @@ fn a_key_of_another_builder_is_none() {
     assert!(spec.key(foreign).is_none());
 }
 
+/// Python `test_workflow_models.py::TestSlugify` (spaces, valid
+/// characters, invalid characters, mixed input, empty result, the node id
+/// pattern), and a letter outside ASCII, which Python's
+/// `[^A-Za-z0-9_\-:.]` removes.
 #[test]
 fn slugify_keeps_the_node_id_characters() {
-    assert_eq!(slugify("daily report"), "daily_report");
-    assert_eq!(slugify("a/b*c"), "abc");
-    assert_eq!(slugify("***"), "_");
-    assert_eq!(slugify("v1.2:x-y"), "v1.2:x-y");
+    let cases = [
+        ("daily report", "daily_report"),
+        ("a/b*c", "abc"),
+        ("***", "_"),
+        ("v1.2:x-y", "v1.2:x-y"),
+        ("Hello World", "Hello_World"),
+        ("My Workflow Name", "My_Workflow_Name"),
+        ("task:v2.0", "task:v2.0"),
+        ("my-task-name", "my-task-name"),
+        ("prefix.suffix", "prefix.suffix"),
+        ("Hello!World", "HelloWorld"),
+        ("test@#$%chars", "testchars"),
+        ("parentheses(removed)", "parenthesesremoved"),
+        ("My App: v2.0!", "My_App:_v2.0"),
+        ("Company Name (Inc.)", "Company_Name_Inc."),
+        ("my flow/v2.0", "my_flowv2.0"),
+        ("!@#$%", "_"),
+        ("", "_"),
+        ("caf\u{e9}", "caf"),
+    ];
+    for (name, slug) in cases {
+        assert_eq!(slugify(name), slug, "{name:?}");
+        assert!(is_valid_node_id(&slugify(name)), "{name:?}");
+    }
 }

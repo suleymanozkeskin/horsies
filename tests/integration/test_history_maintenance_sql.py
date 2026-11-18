@@ -1,17 +1,15 @@
-"""The history maintenance functions of the baseline, through their SQL cases.
+"""The miss classes of the history maintenance functions of the baseline.
 
-``history_maintenance_cases.sql`` holds the one-session cases and runs in one
-transaction that is rolled back. ``history_maintenance_concurrency.sql`` holds
-the two-session cases (dblink peers) and commits its fixtures. Each file runs
-as one message on its own isolated database, so no case touches the shared
-test database. Neither file uses stand-in readers: both publish the readers
-with ``horsies_publish_history_readers`` and read through them.
+The case files of these functions are Rust database tests of the core crate
+(``crates/horsies-core/src/sql_tests/history_maintenance_sql.rs``). This test
+stays in Python: it compares the database classes with the classes of the
+Python lifecycle (``equivalence_class_of``). It runs on an isolated database,
+so it does not touch the shared test database.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from pathlib import Path
 from typing import Final
 
 import psycopg
@@ -25,17 +23,6 @@ from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 
 pytestmark = [pytest.mark.integration]
-
-_CASES_SQL: Final = Path(__file__).with_name('history_maintenance_cases.sql')
-_CONCURRENCY_SQL: Final = Path(__file__).with_name('history_maintenance_concurrency.sql')
-
-PASSED_CASES: Final = 119
-"""The checks of ``history_maintenance_cases.sql``. A check added to the file changes it."""
-
-PASSED_CONCURRENCY_CASES: Final = 36
-"""The checks of ``history_maintenance_concurrency.sql``. A check added to the file changes it."""
-
-_PASSED_PREFIX: Final = 'ok: '
 
 
 def _migration() -> BaselineMigration:
@@ -62,43 +49,6 @@ async def installed() -> AsyncGenerator[psycopg.AsyncConnection[tuple[object, ..
             yield connection
         finally:
             await connection.close()
-
-
-def _collect_passed(
-    connection: psycopg.AsyncConnection[tuple[object, ...]],
-) -> list[str]:
-    passed: list[str] = []
-
-    def _collect(diagnostic: psycopg.errors.Diagnostic) -> None:
-        message = diagnostic.message_primary or ''
-        if message.startswith(_PASSED_PREFIX):
-            passed.append(message.removeprefix(_PASSED_PREFIX))
-
-    connection.add_notice_handler(_collect)
-    return passed
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_history_maintenance_cases_pass(
-    installed: psycopg.AsyncConnection[tuple[object, ...]],
-) -> None:
-    passed = _collect_passed(installed)
-    # A failed case raises 'case failed: <name>', which fails this test with
-    # the case name in the error.
-    async with installed.transaction(force_rollback=True):
-        await installed.execute(_CASES_SQL.read_text(encoding='utf-8').encode('utf-8'))
-    assert len(passed) == PASSED_CASES, passed
-    assert len(set(passed)) == PASSED_CASES, 'two cases share a name'
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_history_maintenance_two_session_cases_pass(
-    installed: psycopg.AsyncConnection[tuple[object, ...]],
-) -> None:
-    passed = _collect_passed(installed)
-    await installed.execute(_CONCURRENCY_SQL.read_text(encoding='utf-8').encode('utf-8'))
-    assert len(passed) == PASSED_CONCURRENCY_CASES, passed
-    assert len(set(passed)) == PASSED_CONCURRENCY_CASES, 'two cases share a name'
 
 
 _FAMILY_SQL: Final = 'SELECT horsies_terminalization_family(%s)'

@@ -143,6 +143,28 @@ fn a_child_without_a_frame_is_read_by_its_exit() {
     );
 }
 
+/// Python `BootFailure.describe` with `describe_failure_cause`
+/// (`python/horsies/core/worker/slots.py:777-808`): a child that ended before
+/// its ready frame names the cause without its loss, and the detail names
+/// the loss and the exit once. The line of a failed attempt and the error
+/// of a pool whose attempts ran out carry this text.
+#[test]
+fn a_child_lost_before_ready_names_its_loss_once() {
+    let failure = match boot_end_of(BootReply::Lost(lost(LossCause::ChildDied, exited(1)))) {
+        BootEnd::Failed(failure) => failure,
+        BootEnd::ChildHookFailed => panic!("expected a boot failure, got a hook failure"),
+    };
+
+    assert_eq!(
+        failure.cause.to_string(),
+        "the child ended before it was ready"
+    );
+    assert_eq!(
+        failure.to_string(),
+        "the child ended before it was ready: child died: exit code 1"
+    );
+}
+
 #[test]
 fn a_ready_frame_of_another_version_is_a_protocol_mismatch() {
     let reply = BootReply::Lost(lost(
@@ -163,6 +185,9 @@ fn a_ready_frame_of_another_version_is_a_protocol_mismatch() {
 // Restart rules
 // ---------------------------------------------------------------------------
 
+/// Python `_boot_child`: a cause that repeats counts every attempt; the
+/// last counted attempt is recorded as a failed attempt before the pool
+/// fails.
 #[test]
 fn a_cause_that_repeats_counts_up_to_the_bound() {
     let mut counts = BootCounts::default();
@@ -184,7 +209,8 @@ fn a_cause_that_repeats_counts_up_to_the_bound() {
     assert_eq!(
         counts.after_failure(cause, POOL_ALONE_AT_START, 0),
         BootDecision::Exhausted {
-            attempts: CHILD_BOOT_ATTEMPTS
+            attempts: CHILD_BOOT_ATTEMPTS,
+            last: LastRecord::AttemptFailed,
         }
     );
 }
@@ -206,6 +232,10 @@ fn a_cause_that_can_clear_is_spared_while_another_slot_serves() {
     }
 }
 
+/// Python `TestBoot::test_a_task_loop_failure_on_the_only_slot_uses_every_attempt`:
+/// a cause that can clear counts while every other slot is down. The last
+/// counted attempt is recorded as a slot down, with its failed boots and its
+/// wait, before the pool fails.
 #[test]
 fn a_cause_that_can_clear_counts_when_every_other_slot_is_down() {
     let mut counts = BootCounts::default();
@@ -218,9 +248,16 @@ fn a_cause_that_can_clear_counts_when_every_other_slot_is_down() {
         counts.after_failure(cause, POOL_ALONE_AT_START, 1),
         BootDecision::SlotDown { counted: 2, .. }
     ));
+    let third = NonZeroU32::new(3).unwrap();
     assert_eq!(
         counts.after_failure(cause, POOL_ALONE_AT_START, 2),
-        BootDecision::Exhausted { attempts: 3 }
+        BootDecision::Exhausted {
+            attempts: 3,
+            last: LastRecord::SlotDown {
+                failed_boots: third,
+                wait: Duration::from_secs(4),
+            },
+        }
     );
 }
 

@@ -25,7 +25,7 @@ mod tests;
 
 pub use boot::{
     boot_end_of, outside_kill_delay, slot_down_delay, BootCounts, BootDecision, BootEnd,
-    BootFailure, BootFailureCause, BootReply, CauseKind, MismatchSeen, PoolAtFailure,
+    BootFailure, BootFailureCause, BootReply, CauseKind, LastRecord, MismatchSeen, PoolAtFailure,
     CHILD_BOOT_ATTEMPTS, CHILD_READY_TIMEOUT,
 };
 pub use channel::{

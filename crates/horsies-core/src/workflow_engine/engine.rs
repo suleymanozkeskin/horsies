@@ -6,9 +6,8 @@
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::WorkflowSpecRegistry;
 use crate::db::CheckoutClass;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::steps::SourceFailure;
 use crate::workflow_engine::steps::{
@@ -77,18 +76,25 @@ pub enum WorkflowTaskCompletionError {
 /// `on_workflow_task_complete`, `core/workflows/engine.py:1746-1843`). The step sends no capacity wake
 /// (Python's default `NoQueueWake`). Does not retry.
 ///
+/// The children of the sub-workflow nodes that the step promotes come from the client's `source`.
+///
 /// Returns: [`WorkflowTaskCompletion`]. Errors: [`WorkflowTaskCompletionError`], with the state that
 /// stays after each.
 pub async fn on_workflow_task_complete(
     broker: &PostgresBroker,
     task_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    retention: &RetentionConfig,
+    source: &dyn ChildSpecSource,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
-    let build = ChildBuild::Registry {
-        registry,
-        retention,
-    };
+    on_workflow_task_complete_with(broker, task_id, ChildBuild::Client(source)).await
+}
+
+/// [`on_workflow_task_complete`] with the children of the owed child starts
+/// built by `build`. Outcomes and errors as [`on_workflow_task_complete`].
+pub(crate) async fn on_workflow_task_complete_with(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    build: ChildBuild<'_>,
+) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
     let committed = node_finish_in_transaction(broker, task_id, false, build)
         .await
         .map_err(|error| WorkflowTaskCompletionError::NodeFinish { task_id, error })?;

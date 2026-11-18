@@ -796,7 +796,6 @@ Each entry: Title -- summary -> URL
 - Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
 
 ### Monitoring
-- Syce Overview -- TUI monitoring dashboard -> /horsies/monitoring/syce-overview/
 - Worker & Database Health -- what the database ping, the worker ping, worker states, class coverage and the class report answer; snapshot fields; embedded health payloads -> /horsies/monitoring/worker-health/
 - Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
@@ -814,7 +813,7 @@ Each entry: Title -- summary -> URL
 - Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
 
 ### Troubleshooting
-- PgBouncer Troubleshooting -- transaction pooling issues with horsies and Syce, and the PgBouncer pool size for workers -> /horsies/troubleshooting/pgbouncer/
+- PgBouncer Troubleshooting -- transaction pooling issues with horsies, and the PgBouncer pool size for workers -> /horsies/troubleshooting/pgbouncer/
 
 ### Scheduling
 - Scheduler Overview -- how the scheduler enqueues: state rows, one fire per statement, database clock, slot task ids, configuration changes, catch-up, validation, task options -> /horsies/scheduling/scheduler-overview/
@@ -884,7 +883,6 @@ schedule, delay, TaskFunction.schedule, resend_on_transient_err, idempotency_res
 worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
-syce, dashboard, TUI, monitor -> /horsies/monitoring/syce-overview/
 list_worker_states, get_worker_state, broker methods -> /horsies/monitoring/broker-methods/
 TaskInfo, retry_count, next_retry_at, task metadata -> /horsies/monitoring/broker-methods/
 BrokerResult, BrokerOperationError, BrokerErrorCode, retryable, Ok, Err, Result -> /horsies/monitoring/broker-methods/

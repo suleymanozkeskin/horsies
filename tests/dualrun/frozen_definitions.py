@@ -2,9 +2,9 @@
 
 Some switches change the bodies of baseline functions and not the calls that
 a client sends. Such a switch is checked with the function-call script
-(``tests/integration/baseline_function_calls.sql``), which calls every
-function of the baseline. The script runs twice, each time on a fresh
-database with the baseline:
+(``crates/horsies-core/src/sql_tests/cases/baseline_function_calls.sql``),
+which calls every function of the baseline. The script runs twice, each time
+on a fresh database with the baseline:
 
 - reference side: the definitions before the switch, from SQL files in
   ``tests/dualrun/reference/``, installed over the baseline in order;

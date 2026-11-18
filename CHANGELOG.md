@@ -111,6 +111,26 @@ written in Rust, on a new baseline schema.
   `loads_json_bytes` refuse it at any depth; at enqueue it is
   `INVALID_INPUT` and nothing is written. 0.7 kept the last value.
 
+- **Breaking: `loads_json` refuses an empty text and takes no `None`.** An
+  empty text is not JSON: `loads_json('')` and `loads_json_bytes(b'')` are
+  `Err(EmptyJsonTextError)`, a `SerializationError` with the text
+  `JSON parse failed: the text is empty`. 0.7 read `''` and `None` as the
+  JSON value `null`. A caller with a nullable value checks `None` before the
+  call. A send whose kwargs text or task options text is empty gets
+  `VALIDATION_FAILED` (`INVALID_INPUT` and `INVALID_TASK_OPTIONS` from
+  `PostgresBroker.enqueue`). The handle reads of an empty stored result,
+  error or summary keep their outcome, and the message now holds the text
+  of `EmptyJsonTextError`.
+
+- **A send refuses task options that hold an integer outside
+  -9223372036854775808 to 18446744073709551615.** The send returns
+  `VALIDATION_FAILED` (`PostgresBroker.enqueue` returns
+  `INVALID_TASK_OPTIONS`) with the text `task_options JSON holds an integer
+  outside -9223372036854775808 to 18446744073709551615`, and nothing is
+  written. `RetryPolicy` still takes a `max_delay_seconds` of any size, so a
+  task whose policy has `max_delay_seconds` of `2**64` or more is refused at
+  each send; 0.7 sent it. A stored policy with such a cap still reads.
+
 - **The web task routes answer a task id that is not a UUID with 400
   `INVALID_INPUT`.** `GET /api/tasks/{task_id}` and `POST
   /api/tasks/{task_id}/cancel` answer `{"code": "INVALID_INPUT", "detail":
@@ -292,6 +312,15 @@ written in Rust, on a new baseline schema.
   log format writes the message only; a handler with its own formatter can
   read the attributes.
 
+- **`echo=True` logs the statements of the core on `horsies.sql`.** Each
+  statement that the core runs is one INFO record on the logger
+  `horsies.sql`: the SQL text is the message, the statement name is the
+  attribute `statement`, and bound values are not shown. A broker built with
+  `echo=True` sets `horsies.sql` to INFO and, when that logger has no
+  handler, adds one stdout handler per process, as SQLAlchemy's `echo` does
+  for `sqlalchemy.engine.Engine`. The Rust client logs the same events on the
+  `tracing` target `horsies.sql`.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
@@ -336,6 +365,9 @@ written in Rust, on a new baseline schema.
   `horsies.web.auth.view_guard`, `horsies.web.auth.act_guard` and
   `horsies.web.schema.schema_guard` are removed: the core's handler serves
   every route. The exports of `horsies.web` are unchanged.
+
+- **Syce, the terminal monitoring tool, is removed; the web UI is the
+  monitoring tool.**
 
 ### Rust client (crate `horsies`)
 
@@ -417,7 +449,10 @@ unless it starts with "Added".
   only the engine writes, data deeper than the error bound) is replaced with
   `{"data_refused": "<cause>"}`, the cause that Python stores, and the code
   and the message are kept. The replacement is logged at ERROR with the
-  code. Before, a non-finite float became `null` with no notice.
+  code. Before, a non-finite float became `null` with no notice. `data()`
+  returns `Option<&JsonText>`, the data as its stored text (`get`,
+  `decode::<T>`): an integer outside the `i64` and `u64` range is stored
+  with every digit and reads as `u128` or `i128`, as in Python.
 - **Added: `#[derive(horsies::UserErrorCode)]`.** On an enum of unit
   variants, each variant's code is its name in UPPER_SNAKE_CASE
   (`RateLimited` is `RATE_LIMITED`). A code with the name of a built-in code
@@ -536,7 +571,13 @@ unless it starts with "Added".
   `Failed` with `TASK_CANCELLED`. `WaitLimit::parse` refuses a limit above
   about 49.7 days before any read. The handle keeps an outcome and the
   failures of the stored data, as Python; a timeout, an absent task and a
-  database failure are read again.
+  database failure are read again. The value decodes from its stored text,
+  here and in `WorkflowHandle::get` and `result_for`, so an integer outside
+  the `i64` and `u64` range reads as `u128` or `i128`, as in Python. A
+  dependency result (a `TaskOutcome<S, E>` input field) and
+  `WorkflowContext::result_for` decode the value from its stored text too.
+  The worker's child and the sub-workflow child build pass each input member
+  and each dependency result to the task or the builder as stored.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
   sends no statement, as in Python.
 - **Reads by task id are on the app:** `get_result::<T, E>`,
@@ -618,17 +659,24 @@ unless it starts with "Added".
   Both return `SchedulerStopped` or a closed `SchedulerRunError`. A schedule
   section that is missing or switched off is refused.
 - **Added: the blocking API, `horsies::blocking`.** `TaskFunction::blocking()`,
-  `TaskHandle::blocking()` and `Horsies::blocking()` give views whose
-  methods have the names, arguments and result types of the async
-  methods: the sends, the schedules and their retries, `get` and `info`,
-  the app's reads by task id, the health reads that Python's app offers in
-  sync form, and `check_live`. Each call runs on the core's process
-  runtime and blocks its thread. On a thread that runs a tokio runtime it
-  runs nothing and answers `ASYNC_CONTEXT`: `TaskSendError::AsyncContext`
-  with the prepared task id and payload (an async retry sends them),
-  `ReadError::AsyncContext` (added; not kept by the handle),
-  `BrokerErrorCode::AsyncContext`, or `HRS-217` in the check report. The
-  body of a `fn` task in a worker child may call them.
+  `TaskHandle::blocking()`, `Horsies::blocking()`,
+  `WorkflowFunction::blocking()`, `WorkflowTemplate::blocking()` and
+  `WorkflowHandle::blocking()` give views whose methods have the names,
+  arguments and result types of the async methods: the sends, the
+  schedules and their retries, `get` and `info`, the app's reads by task
+  id, the health reads that Python's app offers in sync form,
+  `check_live`, the workflow starts and `retry_start`, and the methods of
+  the workflow handle. `blocking::start_workflow` and
+  `blocking::start_workflow_with` are the process-wide starts. Each call
+  runs on the core's process runtime and blocks its thread. On a thread
+  that runs a tokio runtime it runs nothing and answers `ASYNC_CONTEXT`:
+  `TaskSendError::AsyncContext` with the prepared task id and payload (an
+  async retry sends them), `ReadError::AsyncContext` (added; not kept by
+  the handle), `BrokerErrorCode::AsyncContext`, `HRS-217` in the check
+  report, `WorkflowStartErrorCode::AsyncContext` with the workflow id of
+  the start, `HandleErrorCode::AsyncContext`, or
+  `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
+  worker child may call them.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a
@@ -679,9 +727,11 @@ unless it starts with "Added".
   included, is refused with `HRS-031`; before, `set` stored NaN as `null`.
 - **`WorkflowSpecBuilder::build` decodes each node's input with the input
   type of its task or child workflow**, with each `args_from` member as a
-  result and the workflow context when the task takes it: a member that
-  binds to no field is `HRS-019`, a missing field `HRS-020`, a value of
-  another type `HRS-031`. A member of the node's own input binds to no
+  result and the workflow context when the task takes it: a top-level
+  member that binds to no field is `HRS-019`, a top-level missing field
+  `HRS-020`, a value of another type `HRS-031`, and a key that binds to no
+  field or a missing field inside a member's value `HRS-031`, as in Python.
+  A member of the node's own input binds to no
   field when the decoded value does not write it back, at any depth, so
   an input type without `deny_unknown_fields` refuses it too; the error
   names its key path (`options.retries`, `parcels[0].weight`). A member
@@ -703,7 +753,11 @@ unless it starts with "Added".
 - **`WorkflowContext::result_for::<T, E>` returns `Result<TaskOutcome<T,
   E>, WorkflowContextError>`** (`NotInContext`, `Unreadable`,
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
-  `output_for` the child's output read as `T`.
+  `output_for` the child's output read as `T`. `SubWorkflowSummary.output`
+  is `Option<JsonText>`, the child's output as its stored text (`get`,
+  `decode::<T>`); `output_for` and the summary of `WorkflowHandle::tasks`
+  read it from that text, so an integer outside the `i64` and `u64` range
+  reads as `u128` or `i128`, as in Python.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
   `UserErrorCode`, with every user code as checked text. `UserCode` and
   `UserCodeRefused` are exported at the crate root, so the outcome type of

@@ -117,9 +117,10 @@ impl fmt::Display for BootFailureCause {
                 f.write_str("the child could not create the event loop for async tasks")
             }
             Self::SpawnFailed => f.write_str("the OS refused to start the child process"),
-            Self::LostBeforeReady { loss, exit } => {
-                write!(f, "the child ended before it was ready ({loss}: {exit})")
-            }
+            // Python `describe_failure_cause`
+            // (`python/horsies/core/worker/slots.py:781`) names no loss: the
+            // detail of the boot failure carries the loss and the exit.
+            Self::LostBeforeReady { .. } => f.write_str("the child ended before it was ready"),
             Self::NotReadyInTime => f.write_str("the child was not ready in time"),
             Self::ProtocolMismatch(MismatchSeen::ReadyNamed(received)) => write!(
                 f,
@@ -279,9 +280,27 @@ pub enum BootDecision {
         failed_boots: NonZeroU32,
         wait: Duration,
     },
-    /// The last counted attempt failed: the pool fails with
+    /// The last counted attempt failed. The slot records it as it records
+    /// every counted attempt (`last`), then the pool fails with
     /// `BootAttemptsExhausted`.
-    Exhausted { attempts: u32 },
+    Exhausted { attempts: u32, last: LastRecord },
+}
+
+/// How a slot records its last counted attempt, before the pool fails
+/// (Python `_boot_child`: `_record_failed_boot` runs before the check of the
+/// bound).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastRecord {
+    /// A cause that repeats: the attempt failed, as at a
+    /// [`BootDecision::Retry`].
+    AttemptFailed,
+    /// A cause that can clear: the slot is down, as at a
+    /// [`BootDecision::SlotDown`]. `wait` is the wait that the log line
+    /// names; no boot follows.
+    SlotDown {
+        failed_boots: NonZeroU32,
+        wait: Duration,
+    },
 }
 
 /// The boot counts of one slot, kept across its failed boots until a child
@@ -319,22 +338,28 @@ impl BootCounts {
             false => 0,
         };
         let exhausted = self.counted >= CHILD_BOOT_ATTEMPTS;
+        let failed_boots = NonZeroU32::MIN.saturating_add(failed_boots_while_down);
         match (exhausted, cause.kind()) {
-            (true, _) => BootDecision::Exhausted {
+            (true, CauseKind::Repeats) => BootDecision::Exhausted {
                 attempts: self.counted,
+                last: LastRecord::AttemptFailed,
+            },
+            (true, CauseKind::CanClear) => BootDecision::Exhausted {
+                attempts: self.counted,
+                last: LastRecord::SlotDown {
+                    failed_boots,
+                    wait: slot_down_delay(failed_boots),
+                },
             },
             (false, CauseKind::Repeats) => BootDecision::Retry {
                 counted: self.counted,
                 wait: CHILD_BOOT_RETRY_DELAY.saturating_mul(self.counted),
             },
-            (false, CauseKind::CanClear) => {
-                let failed_boots = NonZeroU32::MIN.saturating_add(failed_boots_while_down);
-                BootDecision::SlotDown {
-                    counted: self.counted,
-                    failed_boots,
-                    wait: slot_down_delay(failed_boots),
-                }
-            }
+            (false, CauseKind::CanClear) => BootDecision::SlotDown {
+                counted: self.counted,
+                failed_boots,
+                wait: slot_down_delay(failed_boots),
+            },
         }
     }
 }
