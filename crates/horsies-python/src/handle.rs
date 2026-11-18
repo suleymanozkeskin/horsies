@@ -15,7 +15,9 @@ use std::sync::{Arc, OnceLock};
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::worker_manifest::parse_worker_profiles;
-use horsies_core::{BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker};
+use horsies_core::{
+    BrokerError, BrokerErrorCode, ClientFamily, CoverageRequest, PoolProfile, PostgresBroker,
+};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -30,7 +32,9 @@ use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
 use crate::operations::claim_settle::{settle_claimed_workflow_tasks_operation, SettleRequest};
 use crate::operations::connectivity::check_connectivity_operation;
-use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
+use crate::operations::coverage::{
+    ensure_partition_coverage_operation, CoverageRequestArgument, InstallCoverageArgument,
+};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
     audit_orphaned_workflow_tasks_operation, expire_pending_tasks_operation,
@@ -96,6 +100,23 @@ impl BrokerConnection {
     pub fn new(manifest: ProducerManifest, profile: PoolProfile) -> Self {
         Self {
             handle: Arc::new(LazyHandle::new(manifest, profile, ClientFamily::Python)),
+        }
+    }
+
+    /// A new connection of the same manifest and pool profile whose schema
+    /// install ends with the coverage pass of `request`
+    /// ([`LazyHandle::with_install_coverage`]). It shares no broker with this
+    /// one. Starts nothing.
+    pub fn with_install_coverage(&self, request: CoverageRequest) -> Self {
+        Self {
+            handle: Arc::new(
+                LazyHandle::new(
+                    self.handle.manifest().clone(),
+                    self.handle.profile(),
+                    ClientFamily::Python,
+                )
+                .with_install_coverage(request),
+            ),
         }
     }
 
@@ -233,6 +254,20 @@ impl CoreHandle {
             })
     }
 
+    /// A new handle of the same manifest and pool profile whose schema
+    /// install ends with the coverage pass of `install_coverage`: the request
+    /// of the client's retention config, so the install covers every class
+    /// that its sends can stamp. The new handle shares no pool and no child
+    /// spec source with this one. Starts nothing.
+    fn with_install_coverage(&self, install_coverage: &Bound<'_, InstallCoverageArgument>) -> Self {
+        Self {
+            connection: self
+                .connection
+                .with_install_coverage(install_coverage.get().request()),
+            child_spec_source: OnceLock::new(),
+        }
+    }
+
     /// The version of the manifest this handle was built from.
     #[getter]
     fn manifest_version(&self) -> u32 {
@@ -343,9 +378,10 @@ impl CoreHandle {
         )
     }
 
-    /// Apply the embedded migrations and check the schema version, once per
-    /// handle: `SchemaInstalled`, `SchemaInstallNotRun` (an `OBSERVE_ONLY` or
-    /// `ASSUME_INITIALIZED` handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
+    /// Apply the embedded migrations, check the schema version, then run the
+    /// startup coverage pass, once per handle: `SchemaInstalled`,
+    /// `SchemaInstallNotRun` (an `OBSERVE_ONLY` or `ASSUME_INITIALIZED`
+    /// handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
     fn install_schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
@@ -1631,6 +1667,34 @@ mod tests {
         assert_eq!(handle.connection.handle.family(), ClientFamily::Python);
         assert!(matches!(
             handle.connection.connect_state(),
+            HandleConnection::NeverConnected
+        ));
+    }
+
+    /// A handle with an install request keeps the manifest, the profile and
+    /// the family, takes the request, and starts nothing.
+    #[test]
+    fn a_handle_with_an_install_request_keeps_its_inputs_and_starts_nothing() {
+        let handle = CoreHandle::new(MANIFEST, "WORKER").expect("the manifest is complete");
+        let seven_days = horsies_core::RetentionDays::parse_period(chrono::Duration::days(7))
+            .expect("seven days");
+        let request = CoverageRequest::new(3, 6, &[seven_days]).expect("a request in bounds");
+
+        let covered = handle.connection.with_install_coverage(request.clone());
+
+        assert_eq!(covered.handle.install_coverage(), &request);
+        assert_ne!(
+            covered.handle.install_coverage(),
+            handle.connection.handle.install_coverage()
+        );
+        assert_eq!(covered.handle.profile(), PoolProfile::Worker);
+        assert_eq!(covered.handle.family(), ClientFamily::Python);
+        assert_eq!(
+            covered.handle.manifest(),
+            handle.connection.handle.manifest()
+        );
+        assert!(matches!(
+            covered.connect_state(),
             HandleConnection::NeverConnected
         ));
     }

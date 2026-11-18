@@ -4,7 +4,9 @@ The move functions are the only writers of `horsies_task_history`. The CHECK
 constraints that stay on the table refuse the combinations that no move
 writes: rerun input on a COMPLETED row or a workflow row, and a result on an
 administrative cancel. The history tree has no DEFAULT partition, so a row
-whose class or terminal time has no leaf cannot be stored. The pending table
+whose class or terminal time has no leaf cannot be stored: the move refuses it
+before its insert with SQLSTATE 55H01, which names the class and the missing
+UTC day. The pending table
 takes only the closed value sets that its CHECK constraints name.
 """
 
@@ -41,6 +43,7 @@ FAILURE_RESULT: Final = '{"error":{"code":"BOOM"}}'
 
 CHECK_VIOLATION: Final = '23514'
 STRING_TOO_LONG: Final = '22001'
+HISTORY_LEAF_MISSING: Final = '55H01'
 
 terminalization_schema = terminalization_schema_fixture('task_history_it_rules')
 
@@ -319,9 +322,20 @@ async def test_a_move_with_no_leaf_for_its_row_keeps_the_task_and_its_reservatio
         ).scalar_one()
         assert claimed == 'APPLIED'
 
-        with pytest.raises(DBAPIError, match='no partition of relation'):
+        with pytest.raises(DBAPIError) as refused:
             async with connection.begin_nested():
                 await fail_running(connection, task_id)
+        cause = refused.value.orig
+        assert isinstance(cause, psycopg.Error), cause
+        assert cause.sqlstate == HISTORY_LEAF_MISSING, cause
+        message = cause.diag.message_primary
+        assert message is not None
+        assert message.startswith(
+            f'no task-history leaf of class {uncovered_class} covers ['
+        ), message
+        detail = cause.diag.message_detail
+        assert detail is not None
+        assert detail.startswith(f'the leaf horsies_task_history_{uncovered_class}_'), detail
 
         state = (
             await connection.execute(

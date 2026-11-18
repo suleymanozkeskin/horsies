@@ -147,9 +147,17 @@ class CoreHandle:
         limit. No profile, or PgBouncer transaction mode, connects nothing. Reads only.
         """
     def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerFailure:
-        """Apply the embedded migrations and check the schema version, once per handle. Writes."""
+        """Apply the embedded migrations, check the schema version, then run the startup coverage
+        pass that creates the history leaves of the current UTC day and the lookahead, once per
+        handle. Writes.
+        """
     def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerFailure]:
         """The awaitable form of the method above."""
+    def with_install_coverage(self, install_coverage: InstallCoverage) -> CoreHandle:
+        """A new handle of the same manifest and pool profile whose schema install ends with the
+        coverage pass of install_coverage. It shares no pool and no child spec source with this
+        one. Starts nothing.
+        """
     def schema_status(self) -> SchemaStatusRecord:
         """The schema state of the database. Reads only."""
     def schema_status_async(self) -> asyncio.Future[SchemaStatusRecord]:
@@ -2519,6 +2527,15 @@ class CoverageRequest:
     leaves, or another serialization raises ValueError.
     """
     def __init__(self, *, history_horizon_days: int, heartbeat_horizon_hours: int, declared_period_days: list[int], serialization: Literal['GATED', 'PER_LEAF_LOCKS']) -> None: ...
+
+
+@final
+class InstallCoverage:
+    """The coverage request of a handle's schema install: the two horizons and the declared
+    retention periods in whole days. The install runs it gated, as the worker start. A period
+    outside 1 to 1825 days or a horizon below two leaves raises ValueError.
+    """
+    def __init__(self, *, history_horizon_days: int, heartbeat_horizon_hours: int, declared_period_days: list[int]) -> None: ...
 
 
 @final

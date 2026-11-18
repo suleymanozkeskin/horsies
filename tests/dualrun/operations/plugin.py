@@ -28,20 +28,33 @@ subject and the cause; it never counts as an equal snapshot. A capture reads
 at most ``TABLE_ROW_LIMIT`` rows per table, and the pair of a test in
 ``LARGE_SEED_TESTS`` at most ``LARGE_SEED_ROW_LIMIT``. The pair of a test in
 ``PAIR_RULES`` compares the fact of its rule in the place of the stored
-values that hold it (``tests/dualrun/pair_rules.py``); every other pair
-compares the whole snapshot. The first run of the session installs
-the baseline, runs the seed sequence of the integration tests
-(``ensure_history_seedable``) and saves that state. ``--dual-run`` needs the
+values that hold it (``tests/dualrun/pair_rules.py``). The pair of a test
+in a module's ``DECIDED_DIFFERENCES`` compares the whole snapshot; a
+difference whose every entry its decided fact explains makes the core case an
+expected failure (``xfail``) that names the fact, its decision and the
+difference. Every other pair compares the whole snapshot. The first run of
+the session installs the baseline, runs the seed sequence of the integration
+tests (``ensure_history_seedable``) and saves that state. ``--dual-run`` needs the
 session database: the PgBouncer lane (``HORSIES_PGBOUNCER_TEST=1``) has none
 and is refused.
 
 The two cases of a pair share the key ``_pair_key``: the case's node id
 without the id of ``implementation``. In each case of a pair, the ``uuid4``
-that test code holds draws from a generator seeded by that key
-(``_install_paired_draws``), so a name that a test makes with a random part
-is the same in both cases and compares exactly. Test code is every module of
-the ``tests`` package outside ``tests.dualrun``; the harness, the Python
-reference and the library keep the system ``uuid4``.
+that test code holds draws from a generator seeded by that key and by
+``PROCESS_DRAW_SALT`` (``_install_paired_draws``), so a name that a test makes
+with a random part is the same in both cases and compares exactly. Test code
+is every module of the ``tests`` package outside ``tests.dualrun``; the
+harness, the Python reference and the library keep the system ``uuid4``.
+
+Rule for dual-runs at once on one server: each process draws its own salt
+from the system once, and both cases of a pair run in one process (the
+record of the Python case lives in the process). So two processes that run
+the same test at once draw other names, for example of the isolated
+databases that a test creates (``tests/integration/isolated_database.py``),
+also with one database prefix. Runs that share a server still set
+different prefixes (``HORSIES_TEST_DATABASE_PREFIX``,
+``tests/session_database.py``), so that no run sweeps or drops a database of
+another run.
 
 This plugin imports no ``horsies`` module at import: the tables name their
 functions by path, and the fixture loads them.
@@ -69,6 +82,7 @@ from tests.dualrun.operations.broker import BROKER_OPERATIONS, BROKER_REFERENCE_
 from tests.dualrun.operations.history import HISTORY_OPERATIONS
 from tests.dualrun.operations.lifecycle import (
     LIFECYCLE_CORE_ONLY_TESTS,
+    LIFECYCLE_DECIDED_DIFFERENCES,
     LIFECYCLE_OPERATIONS,
 )
 from tests.dualrun.operations.monitoring_and_web import (
@@ -88,6 +102,7 @@ from tests.dualrun.operations.rebinding import (
 )
 from tests.dualrun.operations.table import (
     CoreOnlyTest,
+    DecidedDifference,
     DualRunOperation,
     Implementation,
     LargeSeedTest,
@@ -141,6 +156,18 @@ REFERENCE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[ReferenceOnlyTest, ...]]
     SwitchModule.SCHEDULER: (),
 }
 """The tests that run once, on the Python reference, in the dual-run of each module."""
+
+DECIDED_DIFFERENCES: Final[Mapping[SwitchModule, tuple[DecidedDifference, ...]]] = {
+    SwitchModule.LIFECYCLE: LIFECYCLE_DECIDED_DIFFERENCES,
+    SwitchModule.HISTORY: (),
+    SwitchModule.BROKER: (),
+    SwitchModule.MONITORING_AND_WEB: (),
+    SwitchModule.WORKFLOW_ENGINE: (),
+    SwitchModule.SCHEDULER: (),
+}
+"""The tests whose pairs can differ by a decided behaviour difference in the
+dual-run of each module: the difference is in the module's switched
+operations, so the other modules run the core on both sides."""
 
 LARGE_SEED_ROW_LIMIT: Final = 25_000
 """Most rows per table that a capture of a ``LARGE_SEED_TESTS`` pair reads.
@@ -223,6 +250,28 @@ PAIR_RULES: Final[tuple[PairRule, ...]] = (
             'and the number of beats follow the run time'
         ),
     ),
+    PairRule(
+        node_id=(
+            'tests/integration/test_enqueue_idempotency_key.py::'
+            'test_concurrent_sends_with_two_commands_classify_against_the_winner'
+        ),
+        fact=PairFact.ONE_KEYED_SEND_WINNER,
+        reason=(
+            'the sends of one key, with two commands, run at once; the send that '
+            'commits first wins, in any order in any run'
+        ),
+    ),
+    PairRule(
+        node_id=(
+            'tests/integration/test_task_lock_order.py::'
+            'test_a_free_race_of_finalize_and_stale_recovery_never_deadlocks'
+        ),
+        fact=PairFact.ONE_MOVER_PER_ROUND,
+        reason=(
+            'each round runs the finalize and the stale recovery at once on one '
+            'task; either can take the row first in any run'
+        ),
+    ),
 )
 """The tests whose pairs compare the fact of their rule (``PairRule``)."""
 
@@ -259,6 +308,14 @@ PGBOUNCER_LANE_VARIABLE: Final = 'HORSIES_PGBOUNCER_TEST'
 
 TEST_CODE_PACKAGE: Final = 'tests'
 """The package whose modules are test code for the paired draws."""
+
+DRAW_SALT_BYTES: Final = 16
+"""The length of the salt of the paired draws."""
+
+PROCESS_DRAW_SALT: Final = os.urandom(DRAW_SALT_BYTES)
+"""The salt of the paired draws of this process, drawn once from the system.
+Both cases of a pair run in one process and draw the same values; two
+processes draw other values for one pair."""
 
 HARNESS_PACKAGE: Final = 'tests.dualrun'
 """The harness and the Python reference of each operation: they keep the
@@ -549,11 +606,12 @@ def _pair_key(item: pytest.Item) -> PairKey:
             )
 
 
-def _paired_uuid4(key: PairKey) -> Callable[[], uuid.UUID]:
-    """A ``uuid4`` whose draws come from a generator seeded by ``key``: the
-    n-th draw of a pair's Python case equals the n-th draw of its core case.
-    Each draw is a version 4 UUID."""
-    digest = hashlib.sha256(key.case_name.encode('utf-8')).digest()
+def _paired_uuid4(key: PairKey, salt: bytes) -> Callable[[], uuid.UUID]:
+    """A ``uuid4`` whose draws come from a generator seeded by ``salt`` and
+    ``key``: with one salt, the n-th draw of a pair's Python case equals the
+    n-th draw of its core case; another salt draws other values. Each draw is
+    a version 4 UUID."""
+    digest = hashlib.sha256(salt + key.case_name.encode('utf-8')).digest()
     generator = random.Random(int.from_bytes(digest, 'big'))
 
     def draw() -> uuid.UUID:
@@ -573,8 +631,11 @@ def _is_test_code(module_name: str) -> bool:
     return in_tests and not in_harness
 
 
-def _install_paired_draws(key: PairKey, monkeypatch: pytest.MonkeyPatch) -> None:
-    """For this case, give test code a ``uuid4`` that draws from ``_paired_uuid4(key)``.
+def _install_paired_draws(
+    key: PairKey, salt: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For this case, give test code a ``uuid4`` that draws from
+    ``_paired_uuid4(key, salt)``.
 
     In each loaded module of test code (``_is_test_code``), a global that
     holds the ``uuid`` module gets a copy of it whose ``uuid4`` is the paired
@@ -585,7 +646,7 @@ def _install_paired_draws(key: PairKey, monkeypatch: pytest.MonkeyPatch) -> None
     after this call, keeps the system draw.
     """
     system_uuid4 = uuid.uuid4
-    draw = _paired_uuid4(key)
+    draw = _paired_uuid4(key, salt)
     paired_uuid = types.ModuleType(uuid.__name__, uuid.__doc__)
     vars(paired_uuid).update(vars(uuid))
     vars(paired_uuid)['uuid4'] = draw
@@ -637,7 +698,7 @@ def _open_pair_case(
         start=start,
         listener=listener,
         row_limit=_row_limit(_base_node_id(item.nodeid)),
-        compare=_pair_compare(_base_node_id(item.nodeid)),
+        compare=_pair_compare(module, _base_node_id(item.nodeid)),
     )
 
 
@@ -652,26 +713,53 @@ def _row_limit(node_id: str) -> int:
             return TABLE_ROW_LIMIT
 
 
-def _pair_compare(node_id: str) -> PairCompare:
-    """How the pair of the test ``node_id`` compares: its rule in
-    ``PAIR_RULES``, else the whole snapshot. Two rules for one test are a
-    defect of the table."""
-    match [rule for rule in PAIR_RULES if rule.node_id == node_id]:
+def _pair_compare(module: SwitchModule, node_id: str) -> PairCompare:
+    """How the pair of the test ``node_id`` compares in the dual-run of
+    ``module``: its rule in ``PAIR_RULES``, or its entry in the module's
+    ``DECIDED_DIFFERENCES``, else the whole snapshot. Two entries for one test
+    are a defect of the tables."""
+    entries: list[PairCompare] = [
+        *(rule for rule in PAIR_RULES if rule.node_id == node_id),
+        *(decided for decided in DECIDED_DIFFERENCES[module] if decided.node_id == node_id),
+    ]
+    match entries:
         case []:
             return WholeSnapshot()
-        case [rule]:
-            return rule
-        case rules:
-            raise AssertionError(f'{node_id} has {len(rules)} pair rules')
+        case [entry]:
+            return entry
+        case _:
+            raise AssertionError(
+                f'{node_id} has {len(entries)} pair rules and decided differences '
+                f'for {module.value}'
+            )
 
 
 def _compare_note(compare: PairCompare) -> str:
-    """The pair rule of a failure text, or nothing for the whole snapshot."""
+    """The pair rule or decided difference of a failure text, or nothing for
+    the whole snapshot."""
     match compare:
         case WholeSnapshot():
             return ''
         case PairRule(fact=fact):
             return f' under the pair rule {fact.name} ({fact.value})'
+        case DecidedDifference(fact=fact):
+            return (
+                f' under the decided difference {fact.name}, with entries that it '
+                'does not explain'
+            )
+
+
+def _decided_text(decided: DecidedDifference, rendered_diff: str) -> str:
+    """The expected-failure text of a pair whose difference a decided fact
+    explains: the fact, its decision and the difference.
+
+    The core case raises ``pytest.xfail.Exception`` with it, not
+    ``pytest.xfail``: under ``--runxfail`` that function does nothing, and
+    the exception still reports the case, as a failure."""
+    return (
+        f'DecidedDifference {decided.fact.name} ({decided.fact.value}). '
+        f'Decision: {decided.decision}.\n{rendered_diff}'
+    )
 
 
 def _capture(
@@ -760,6 +848,7 @@ def _after_core_body(config: pytest.Config, case: PairCase) -> None:
     from tests.dualrun.pair_outcomes import (
         ClockBoundaryStraddle,
         CompareSnapshots,
+        DecidedDifferenceSeen,
         DualRunMismatch,
         NoCompare,
         NoReference,
@@ -790,6 +879,8 @@ def _after_core_body(config: pytest.Config, case: PairCase) -> None:
     match judge_pair(reference, snapshot, window, case.compare):
         case PairEqual():
             return
+        case DecidedDifferenceSeen(diff=diff, decided=decided):
+            raise pytest.xfail.Exception(_decided_text(decided, render_diff(diff)))
         case DualRunMismatch(diff=diff):
             pytest.fail(f'DualRunMismatch{note}:\n{render_diff(diff)}')
         case ClockBoundaryStraddle(diff=diff, reference_window=left, candidate_window=right):
@@ -858,7 +949,7 @@ def implementation(
     pair = len(_implementations(switched, _base_node_id(item.nodeid))) == 2
     if pair:
         key = _pair_key(item)
-        _install_paired_draws(key, monkeypatch)
+        _install_paired_draws(key, PROCESS_DRAW_SALT, monkeypatch)
         item.stash[_PAIR_CASE_KEY] = _open_pair_case(
             item, key, switched, implementation_run, counts, url
         )

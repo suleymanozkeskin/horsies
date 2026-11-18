@@ -16,13 +16,18 @@ Order of work:
    inside a JSON document.
 5. Rows that still tie (same ``order_by`` values, same references) and
    bring in new labels are checked: their order decides nothing when every
-   order gives the same normalized snapshot. That holds when each new value
-   occurs in one row of the group or in every row of it, the rows are equal
-   apart from their new labels, and the rows elsewhere that hold the new
-   values of one row equal those of each other row, with those values
-   marked, and hold no id without a label and no new value of another row
-   of the group. Otherwise the group is reported as an ``AmbiguousGroup``.
-   A label is never guessed.
+   order gives the same normalized snapshot. A new value that every row of
+   the group holds is shared: it gets the same label in every order. The
+   other new values of a row are its own values, and rows with the same own
+   values are one block: for example the two status events of one workflow
+   that no table holds. Another order of the rows only gives the own values
+   of one block the labels of another block. That holds when no own value
+   is in two blocks, the rows of a block hold the new values in one order,
+   every block is equal to each other block apart from its new labels, and
+   the rows elsewhere that hold the own values of one block equal those of
+   each other block, with those values marked, and hold no id without a
+   label and no own value of another block. Otherwise the group is reported
+   as an ``AmbiguousGroup``. A label is never guessed.
 """
 
 from __future__ import annotations
@@ -375,27 +380,34 @@ def _assign_labels(
     return introduced
 
 
-_Footprint = tuple[tuple[_Token, ...], tuple[_Context, ...]]
+_Block = tuple[int, ...]
+"""Rows of a tie, by row index in their table, that hold the same own values."""
+
+_Footprint = tuple[tuple[tuple[_Token, ...], ...], tuple[_Context, ...]]
+"""A block of a tie as the rest of the snapshot sees it: its rows, masked
+and sorted, and the rows elsewhere that hold its own values, masked and
+sorted."""
 
 
 @dataclass(frozen=True, slots=True)
 class _OrderDependent:
-    """A row elsewhere that holds a private value of a tied row and also the
-    private value of another row of the tie, or an id without a label: its
-    labels or its own order could follow the order of the tie."""
+    """The labels of a tie, or the order of rows elsewhere, could follow the
+    order of the tie: the rows of one block hold the new values of the tie
+    in other orders, or a row outside a block holds an own value of the
+    block and also an own value of another block, or an id without a label."""
 
 
 def _holds_only_known_ids(
-    cells: StableRow, marks: dict[str, str], private: dict[str, int], book: _LabelBook
+    cells: StableRow, marks: dict[str, str], owned: set[str], book: _LabelBook
 ) -> bool:
-    """Whether every id of ``cells`` is marked, or is not a private value of
-    the tie and has a label."""
+    """Whether every id of ``cells`` is marked, or is not an own value of the
+    tie (``owned``) and has a label."""
     for cell in cells:
         for pending in cell_ids(cell):
             match pending.raw:
                 case raw if raw in marks:
                     pass
-                case raw if raw in private:
+                case raw if raw in owned:
                     return False
                 case raw if isinstance(book.lookup(raw), UnlabelledId):
                     return False
@@ -404,41 +416,78 @@ def _holds_only_known_ids(
     return True
 
 
+def _blocks(
+    members: list[int], in_row: dict[int, Counter[str]], group_new: set[str]
+) -> dict[frozenset[str], _Block]:
+    """The rows of a tie, grouped by their own values.
+
+    A shared value is a new value that every row of the tie holds. The own
+    values of a row are the other new values that it holds. Rows with the
+    same own values are one block. When two blocks hold one own value, a
+    row of each block holds an own value of the other block that the
+    footprint of the other block does not mark, so ``_footprint`` finds the
+    tie order-dependent.
+    """
+    shared = {
+        raw for raw in group_new if all(in_row[row][raw] > 0 for row in members)
+    }
+    grouped: dict[frozenset[str], list[int]] = {}
+    for row in members:
+        own = frozenset(raw for raw in group_new - shared if in_row[row][raw] > 0)
+        grouped.setdefault(own, []).append(row)
+    return {own: tuple(rows) for own, rows in grouped.items()}
+
+
+def _new_value_order(cells: StableRow, group_new: set[str]) -> tuple[str, ...]:
+    """The new values of the tie that ``cells`` holds, in first-appearance order."""
+    return tuple(
+        dict.fromkeys(
+            pending.raw
+            for cell in cells
+            for pending in cell_ids(cell)
+            if pending.raw in group_new
+        )
+    )
+
+
 def _footprint(
     table_index: int,
-    row: int,
-    stable: list[list[StableRow]],
+    block: _Block,
+    own: frozenset[str],
     group_new: set[str],
-    private: dict[str, int],
+    owned: set[str],
+    stable: list[list[StableRow]],
     book: _LabelBook,
 ) -> _Footprint | _OrderDependent:
-    """A tied row as the rest of the snapshot sees it.
+    """A block of a tie as the rest of the snapshot sees it.
 
-    The row with each new value of the tie replaced by its first position in
-    the row, and the rows elsewhere that hold a private value of the row
-    (``private``: new value to its only row), marked the same way and sorted.
+    Every row of the block must hold the new values of the tie in one order;
+    each new value is marked by its position in that order. The footprint is
+    the rows of the block with the new values marked, and the rows elsewhere
+    that hold an own value of the block (``own``), marked the same way, each
+    list sorted. Order-dependent when the rows of the block hold the new
+    values in other orders, or a row elsewhere holds an id that is neither
+    marked nor labelled, or an own value of another block (``owned``).
     """
-    cells = stable[table_index][row]
-    local = [
-        pending.raw
-        for cell in cells
-        for pending in cell_ids(cell)
-        if pending.raw in group_new
-    ]
-    marks = {raw: f'new-{position}' for position, raw in enumerate(dict.fromkeys(local))}
+    rows = stable[table_index]
+    match list(dict.fromkeys(_new_value_order(rows[row], group_new) for row in block)):
+        case [order]:
+            marks = {raw: f'new-{position}' for position, raw in enumerate(order)}
+        case _:
+            return _OrderDependent()
+    in_block = {(table_index, row) for row in block}
     holders = dict.fromkeys(
         holder
-        for raw in marks
-        if private.get(raw) == row
+        for raw in sorted(own)
         for holder in book.holders(raw)
-        if holder != (table_index, row)
+        if holder not in in_block
     )
     if len(holders) > REFERENCE_CONTEXT_LIMIT:
         return _OrderDependent()
     contexts: list[_Context] = []
     for holder_table, holder_row in holders:
         holder_cells = stable[holder_table][holder_row]
-        if not _holds_only_known_ids(holder_cells, marks, private, book):
+        if not _holds_only_known_ids(holder_cells, marks, owned, book):
             return _OrderDependent()
         contexts.append(
             (
@@ -446,8 +495,10 @@ def _footprint(
                 *(_masked_token(cell, marks, book) for cell in holder_cells),
             )
         )
-    masked = tuple(_masked_token(cell, marks, book) for cell in cells)
-    return (masked, tuple(sorted(contexts)))
+    masked = sorted(
+        tuple(_masked_token(cell, marks, book) for cell in rows[row]) for row in block
+    )
+    return (tuple(masked), tuple(sorted(contexts)))
 
 
 def _interchangeable(
@@ -459,13 +510,16 @@ def _interchangeable(
 ) -> bool:
     """Whether every order of the tied rows gives the same normalized snapshot.
 
-    True when the rows bring in no new label. Otherwise each new value must
-    occur in one row of the group (a private value) or in every row of it (a
-    shared value: it gets the same label in every order), and every row must
-    have the same footprint (``_footprint``): the same cells apart from its
-    new labels, and the same rows elsewhere that hold its private values.
-    A row elsewhere that holds the private values of two rows, or an id
-    without a label, makes the group order-dependent.
+    True when the rows bring in no new label. Otherwise the rows split into
+    blocks by their own values (``_blocks``): a shared value gets the same
+    label in every order, and another order of the rows gives the own values
+    of each block the labels of another block. That changes nothing when
+    every block has the same footprint (``_footprint``): the same rows apart
+    from their new labels, and the same rows elsewhere that hold its own
+    values. A block of one row is a row whose own values are private to it.
+    A row outside a block that holds the own values of two blocks (also a
+    row of another block, when two blocks hold one own value) or an id
+    without a label makes the group order-dependent.
     """
     rows = stable[table_index]
     group_new = {raw for row in members for raw in introduced[row]}
@@ -475,19 +529,11 @@ def _interchangeable(
         row: Counter(pending.raw for cell in rows[row] for pending in cell_ids(cell))
         for row in members
     }
-    private: dict[str, int] = {}
-    for raw in group_new:
-        holders = [row for row in members if in_row[row][raw] > 0]
-        match len(holders):
-            case 1:
-                private[raw] = holders[0]
-            case count if count == len(members):
-                pass
-            case _:
-                return False
+    blocks = _blocks(members, in_row, group_new)
+    owned = {raw for own in blocks for raw in own}
     footprints = [
-        _footprint(table_index, row, stable, group_new, private, book)
-        for row in members
+        _footprint(table_index, block, own, group_new, owned, stable, book)
+        for own, block in blocks.items()
     ]
     match footprints[0]:
         case _OrderDependent():

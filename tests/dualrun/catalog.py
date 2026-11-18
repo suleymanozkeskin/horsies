@@ -34,12 +34,14 @@ from enum import Enum
 from typing import Final
 
 from tests.dualrun.rules import (
+    CANONICAL_UUID,
     AnchorNull,
     AnchorReference,
     ColumnRule,
     ColumnSpec,
     DigestOf,
     EachItem,
+    EachMarkedMember,
     EachMember,
     Exact,
     FormatVersion,
@@ -148,6 +150,21 @@ result envelope)."""
 
 _CONTEXT: Final = Key(name='__h_workflow_ctx__')
 
+ARGS_FROM_MARKER: Final = '__h_taskresult_envelope__'
+"""The marker of an ``args_from`` entry: a member of a task input that the
+engine writes in place of the keyword argument that a node takes from a
+dependency (``crates/horsies-core/src/workflow_engine/args_merge.rs``,
+``ARGS_FROM_ENVELOPE_KEY``)."""
+
+_ARGS_FROM_ERROR: Final = (
+    EachMarkedMember(marker=ARGS_FROM_MARKER),
+    Key(name='inner'),
+    Key(name='err'),
+)
+"""The error of the dependency's result in each ``args_from`` entry
+(``{"__h_taskresult_envelope__": true, "source_task_name": ...,
+"source_definition_key": ..., "inner": <result envelope>}``)."""
+
 TASK_INPUT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
@@ -158,6 +175,7 @@ TASK_INPUT: Final = StoredJson(
         ),
         JsonPath(steps=(_CONTEXT, Key(name='workflow_id')), rule=WORKFLOW_ID),
         *stored_error_paths((_CONTEXT, *_RESULTS_BY_ID_ERROR)),
+        *stored_error_paths(_ARGS_FROM_ERROR),
         JsonPath(
             steps=(
                 _CONTEXT,
@@ -175,7 +193,12 @@ workflow context names its workflow in ``__h_workflow_ctx__.workflow_id``,
 holds the result of each dependency in ``__h_workflow_ctx__.results_by_id``
 (each error by ``stored_error_paths``) and the summary of each sub-workflow
 dependency in ``__h_workflow_ctx__.summaries_by_id`` (``error_summary`` can
-name a workflow)."""
+name a workflow). The input of a node that takes keyword arguments from its
+dependencies (``args_from``) holds one entry per argument, marked by
+``ARGS_FROM_MARKER``; the error of the dependency's result in it
+(``inner.err``) follows ``stored_error_paths``: the output-skipped error of
+a child and the error of a child result that does not parse name the child
+in ``data.workflow_id`` and in ``message``."""
 
 WORKFLOW_ERROR: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -836,7 +859,7 @@ class NotificationPayload(Enum):
 
     TASK_ID = 'a task id'
     WORKFLOW_ID = 'a workflow id'
-    TEXT = 'a fixed text'
+    QUEUE_WAKE = 'a fixed text, or the retry prefix and the id of the retried task'
 
 
 TASK_CHANNELS: Final = ('task_new', 'task_done', 'horsies_task_status')
@@ -847,7 +870,12 @@ WORKFLOW_CHANNELS: Final = ('workflow_done', 'horsies_workflow_status')
 
 QUEUE_CHANNEL_PREFIX: Final = 'task_queue_'
 """The wake channel of a queue, ``task_queue_<queue>``; its payload is
-``new``, ``capacity`` or ``class``."""
+``new``, ``capacity``, ``class`` or ``retry:<task id>``."""
+
+RETRY_WAKE_PREFIX: Final = 'retry:'
+"""The prefix of the wake that a retry sends on the queue of its task:
+``retry:<task id>`` (the worker's retry, ``python/horsies/core/worker/retrying.py``;
+the stale recovery's retry, ``crates/horsies-core/src/broker/stale_recovery.rs``)."""
 
 
 def notification_payload(channel: str) -> NotificationPayload:
@@ -859,7 +887,7 @@ def notification_payload(channel: str) -> NotificationPayload:
         case _ if channel in WORKFLOW_CHANNELS:
             return NotificationPayload.WORKFLOW_ID
         case _ if channel.startswith(QUEUE_CHANNEL_PREFIX):
-            return NotificationPayload.TEXT
+            return NotificationPayload.QUEUE_WAKE
         case _:
             raise AssertionError(
                 f'no payload rule for the notification channel {channel!r}'
@@ -878,14 +906,36 @@ NOTIFICATIONS: Final = TableRules(
     identity=('channel', 'task_id', 'workflow_id', 'payload'),
 )
 """The notifications of a run, one row each: the channel, and the payload in
-the column of its kind (``notification_row``). Rows with one identity
-compare as a multiset, so the section compares as a multiset per channel."""
+the column of its kind (``notification_row``). A retry wake puts the id of
+its task into ``task_id`` and keeps ``RETRY_WAKE_PREFIX`` as its payload.
+Rows with one identity compare as a multiset, so the section compares as a
+multiset per channel.
+
+The order key is the channel, the payload and the two ids. The rows of one
+channel whose id has no label yet (no table holds it, for example the
+status events of workflows that a test deleted) tie on it. ``normalize``
+orders them by the rows that hold their ids, and frees a tie whose rows
+split into equal blocks, one per id (``normalize._interchangeable``): the
+two status events of each workflow of a chain. No column of a notification
+can order such rows, because they differ only in their ids."""
 
 NOTIFIED_CATALOG: Final = SnapshotCatalog(
     tables=(*BASELINE_CATALOG.tables, NOTIFICATIONS),
 )
 """The baseline tables, then the notifications: a payload id takes the label
 that its row in a table gave it."""
+
+
+def _queue_wake_row(channel: str, payload: str) -> tuple[str | None, ...]:
+    """A queue wake. ``retry:<task id>``, with the id in its canonical form
+    (``CANONICAL_UUID``), puts the id into ``task_id`` and keeps the prefix
+    as the payload. Any other payload stays as its text and compares exactly."""
+    task_id = payload.removeprefix(RETRY_WAKE_PREFIX)
+    match task_id != payload and CANONICAL_UUID.fullmatch(task_id) is not None:
+        case True:
+            return (channel, task_id, None, RETRY_WAKE_PREFIX)
+        case False:
+            return (channel, None, None, payload)
 
 
 def notification_row(channel: str, payload: str) -> tuple[str | None, ...]:
@@ -895,5 +945,5 @@ def notification_row(channel: str, payload: str) -> tuple[str | None, ...]:
             return (channel, payload, None, None)
         case NotificationPayload.WORKFLOW_ID:
             return (channel, None, payload, None)
-        case NotificationPayload.TEXT:
-            return (channel, None, None, payload)
+        case NotificationPayload.QUEUE_WAKE:
+            return _queue_wake_row(channel, payload)

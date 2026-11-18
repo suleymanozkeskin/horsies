@@ -6,8 +6,10 @@
 //! The first operation connects the broker; a failed connect is not kept,
 //! so the next operation connects again. The schema is installed once per
 //! handle, before its first operation that needs it, unless the manifest's
-//! schema mode is `ObserveOnly` or `AssumeInitialized`. The broker checks
-//! the client family of the database before its first write.
+//! schema mode is `ObserveOnly` or `AssumeInitialized`. The install ends with
+//! the startup coverage pass of the handle's coverage request
+//! ([`CoreHandle::with_install_coverage`]). The broker checks the client
+//! family of the database before its first write.
 //!
 //! The Python bridge (`CoreHandle`, `CoreChildHandle`) and the Rust client
 //! (`Horsies`) each hold one.
@@ -17,7 +19,9 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::broker::client_family::ClientFamily;
+use crate::broker::partition_maintenance::default_install_coverage;
 use crate::broker::{BrokerError, PoolProfile, PostgresBroker, SchemaInitializationMode};
+use crate::core::history::maintenance::coverage::CoverageRequest;
 use crate::manifest::{ProducerManifest, SchemaMode};
 
 /// Whether a handle holds a connected broker.
@@ -66,19 +70,37 @@ pub struct CoreHandle {
     manifest: ProducerManifest,
     profile: PoolProfile,
     family: ClientFamily,
+    /// The coverage pass of the schema install of the handle's broker.
+    install_coverage: CoverageRequest,
     broker: OnceCell<Arc<PostgresBroker>>,
 }
 
 impl CoreHandle {
     /// A handle of `manifest` with the pools of `profile`, writing as
-    /// `family`. Starts nothing: no runtime, no connection.
+    /// `family`, whose install covers the classes of the default retention
+    /// config. Starts nothing: no runtime, no connection.
     pub fn new(manifest: ProducerManifest, profile: PoolProfile, family: ClientFamily) -> Self {
         Self {
             manifest,
             profile,
             family,
+            install_coverage: default_install_coverage(),
             broker: OnceCell::new(),
         }
+    }
+
+    /// The same handle, whose schema install ends with the coverage pass of
+    /// `request` ([`PostgresBroker::with_install_coverage`]): the request of
+    /// the client's retention config, so the install covers every class
+    /// that the client's sends can stamp. Starts nothing.
+    pub fn with_install_coverage(mut self, request: CoverageRequest) -> Self {
+        self.install_coverage = request;
+        self
+    }
+
+    /// The coverage request of the schema install of the handle.
+    pub fn install_coverage(&self) -> &CoverageRequest {
+        &self.install_coverage
     }
 
     /// The manifest the handle was built from.
@@ -112,13 +134,21 @@ impl CoreHandle {
     /// Errors: the [`BrokerError`] of the connect.
     pub async fn broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
         self.broker
-            .get_or_try_init(|| connect(&self.manifest, self.profile, self.family))
+            .get_or_try_init(|| {
+                connect(
+                    &self.manifest,
+                    self.profile,
+                    self.family,
+                    &self.install_coverage,
+                )
+            })
             .await
             .map(Arc::clone)
     }
 
     /// The connected broker, with the schema installed once per handle
-    /// first ([`PostgresBroker::ensure_schema_initialized`]: nothing in an
+    /// first ([`PostgresBroker::ensure_schema_initialized`]: the migrations
+    /// and the coverage pass of the handle's request; nothing in an
     /// `ObserveOnly` or `AssumeInitialized` handle), as Python's broker
     /// installs at its first enqueue or read. A failure of the connect or of
     /// the install is returned and not kept, so the next call runs it again.
@@ -155,15 +185,17 @@ impl CoreHandle {
     }
 }
 
-/// Connect the broker of a manifest. `AssumeInitialized` runs no schema
-/// step, as `ObserveOnly`, and has no listener (Python's
-/// `assume_initialized=True`): a result wait polls.
+/// Connect the broker of a manifest, whose install ends with the coverage
+/// pass of `install_coverage`. `AssumeInitialized` runs no schema step, as
+/// `ObserveOnly`, and has no listener (Python's `assume_initialized=True`):
+/// a result wait polls.
 ///
 /// Errors: the [`BrokerError`] of the connect.
 async fn connect(
     manifest: &ProducerManifest,
     profile: PoolProfile,
     family: ClientFamily,
+    install_coverage: &CoverageRequest,
 ) -> Result<Arc<PostgresBroker>, BrokerError> {
     let config = manifest
         .database
@@ -177,7 +209,8 @@ async fn connect(
     let window = manifest.send.idempotency_reservation_window.as_duration();
     let broker = PostgresBroker::connect_with_policies(&config, mode, window, profile)
         .await?
-        .with_client_family(family);
+        .with_client_family(family)
+        .with_install_coverage(install_coverage.clone());
     Ok(Arc::new(match HandleListener::of(manifest.schema) {
         HandleListener::Disabled => broker.without_listener(),
         HandleListener::Process => broker,
@@ -234,6 +267,23 @@ mod tests {
             HandleConnection::NeverConnected
         ));
         assert_eq!(handle(ClientFamily::Python).family(), ClientFamily::Python);
+    }
+
+    /// A new handle's install covers the classes of the default retention
+    /// config; the client's request replaces it. Neither starts anything.
+    #[test]
+    fn the_install_coverage_is_the_default_until_the_client_sets_one() {
+        let default = handle(ClientFamily::Rust);
+        assert_eq!(default.install_coverage(), &default_install_coverage());
+
+        let seven_days =
+            crate::core::history::periods::RetentionDays::parse_period(chrono::Duration::days(7))
+                .expect("seven days");
+        let request = CoverageRequest::new(2, 2, &[seven_days]).expect("a request in bounds");
+        let set = handle(ClientFamily::Python).with_install_coverage(request.clone());
+        assert_eq!(set.install_coverage(), &request);
+        assert_ne!(set.install_coverage(), default.install_coverage());
+        assert!(matches!(set.connection(), HandleConnection::NeverConnected));
     }
 
     /// Only an `AssumeInitialized` handle has no listener; the rule needs no

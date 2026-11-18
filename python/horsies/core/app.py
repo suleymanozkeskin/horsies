@@ -1478,7 +1478,9 @@ class Horsies:
         the child (``set_task_send_pool``). In every other process, the
         worker process included, it opens the pool that ``PostgresConfig``
         sets. The worker process opens its own pool, ``WorkerProfile.pool``,
-        on a broker of its own.
+        on a broker of its own. The broker's schema install ends with the
+        startup coverage pass of ``config.retention``: the history leaves of
+        every class that the app's sends can stamp.
 
         Raises:
             HorsiesError: broker construction failed (BROKER_INIT_FAILED;
@@ -1496,6 +1498,7 @@ class Horsies:
                         broker = PostgresBroker(
                             broker_config,
                             run_schema_migrations=self.run_schema_migrations,
+                            retention=self.config.retention,
                         )
                         broker.app = self  # app ref for subworkflow support
                         self._broker = broker

@@ -1,13 +1,18 @@
-"""The pair rules of the integration dual-run (``PAIR_RULES``), over raw
-snapshots normalized by ``NOTIFIED_CATALOG``. For each rule, the difference
-that the run timing makes passes, and a difference in the fact of the rule
-still fails. No database."""
+"""The pair rules of the integration dual-run (``PAIR_RULES``) and the
+decided differences (``DECIDED_DIFFERENCES``), over raw snapshots normalized
+by ``NOTIFIED_CATALOG``. For each rule, the difference that the run timing
+makes passes, and a difference in the fact of the rule still fails. For each
+decided difference, the difference that the decision explains is reported as
+decided, and any other difference still fails. No database."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Final
 
 import pytest
@@ -22,6 +27,7 @@ from tests.dualrun.catalog import (
 from tests.dualrun.cells import RawRow, RawSnapshot, RawTable
 from tests.dualrun.compare import render_diff
 from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
+from tests.dualrun.operations.lifecycle import LIFECYCLE_DECIDED_DIFFERENCES
 from tests.dualrun.operations.plugin import PAIR_RULES
 from tests.dualrun.operations.table import (
     PairCompare,
@@ -30,12 +36,19 @@ from tests.dualrun.operations.table import (
     WholeSnapshot,
 )
 from tests.dualrun.pair_outcomes import (
+    DecidedDifferenceSeen,
     DualRunMismatch,
     PairEqual,
+    PairJudgement,
     ReferenceCaptured,
     judge_pair,
 )
-from tests.dualrun.pair_rules import HEARTBEATS_TABLE, HISTORY_TABLE
+from tests.dualrun.pair_rules import (
+    HEARTBEATS_TABLE,
+    HISTORY_TABLE,
+    PHASE2_PENDING_TABLE,
+    TASKS_TABLE,
+)
 from tests.dualrun.rules import TableRules
 from tests.dualrun.values import RunWindow
 
@@ -435,3 +448,652 @@ def test_the_heartbeat_rule_fails_a_difference_in_the_senders(
     reference = _seat_run(RUN_A, 'a', ONE_BEAT_EACH)
 
     assert _judge(reference, _seat_run(RUN_B, 'b', beats), SENDERS) == [expected]
+
+
+# ---- One keyed send winner ----
+
+KEYED: Final = _rule(PairFact.ONE_KEYED_SEND_WINNER)
+COMMANDS: Final = ('{"order":"order-1"}', '{"order":"order-2"}')
+"""The two commands of the sends of one key."""
+KEY_DIGEST: Final = 'key-digest'
+
+
+def _keyed_task(task: str, run: datetime, task_input: str, digest: str | None) -> Row:
+    """A PENDING task that a send committed; ``digest`` is its key digest, or NULL."""
+    at = _text(run)
+    return {
+        'id': task,
+        'task_name': 'keyed_task',
+        'queue_name': 'default',
+        'priority': '100',
+        'input': task_input,
+        'execution': 'ISOLATED',
+        'retention_class_key': 'standard_30d',
+        'sent_at': at,
+        'created_at': at,
+        'command_fingerprint_version': '1',
+        'command_fingerprint': f'{task}-fingerprint',
+        'idempotency_key_digest': digest,
+        'status': 'PENDING',
+        'enqueued_at': at,
+        'retry_count': '0',
+        'max_retries': '0',
+        'is_workflow_task': 'false',
+        'updated_at': at,
+        'retain_rerun_input': 'false',
+    }
+
+
+def _sends(
+    run: datetime,
+    prefix: str,
+    inputs: Sequence[str],
+    *,
+    digest: str | None = KEY_DIGEST,
+    changes: Row | None = None,
+) -> NormalizedSnapshot:
+    """The tasks that the sends of one key committed, one per input, and their events."""
+    tasks = [f'{prefix}-task-{position}' for position in range(len(inputs))]
+    rows = [
+        {**_keyed_task(task, run, task_input, digest), **(changes or {})}
+        for task, task_input in zip(tasks, inputs, strict=True)
+    ]
+    return _snapshot(
+        run,
+        {TASKS_TABLE: rows},
+        [event for task in tasks for event in (('task_new', task), ('task_queue_default', 'new'))],
+    )
+
+
+def test_without_a_rule_the_command_of_the_winner_differs() -> None:
+    assert _judge(
+        _sends(RUN_A, 'a', [COMMANDS[1]]), _sends(RUN_B, 'b', [COMMANDS[0]]), WholeSnapshot()
+    ) == [
+        'horsies_tasks [id=task#1]: input: reference {"order":"order-2"}, '
+        'candidate {"order":"order-1"}',
+    ]
+
+
+@pytest.mark.parametrize(
+    ('reference', 'candidate'),
+    [(0, 1), (1, 0), (0, 0), (1, 1)],
+    ids=['one-two', 'two-one', 'one-one', 'two-two'],
+)
+def test_the_keyed_send_rule_passes_either_command_against_either(
+    reference: int, candidate: int
+) -> None:
+    assert (
+        _judge(
+            _sends(RUN_A, 'a', [COMMANDS[reference]]),
+            _sends(RUN_B, 'b', [COMMANDS[candidate]]),
+            KEYED,
+        )
+        == []
+    )
+
+
+def test_the_keyed_send_rule_fails_a_second_committed_task() -> None:
+    lines = _judge(
+        _sends(RUN_A, 'a', [COMMANDS[0]]),
+        _sends(RUN_B, 'b', [COMMANDS[0], COMMANDS[1]]),
+        KEYED,
+    )
+
+    assert lines
+    assert all('row only in the candidate' in line for line in lines), lines
+    assert lines[0].startswith('horsies_tasks [id=task#2]: row only in the candidate')
+
+
+def test_the_keyed_send_rule_fails_an_input_that_is_not_a_document() -> None:
+    assert _judge(
+        _sends(RUN_A, 'a', [COMMANDS[0]]), _sends(RUN_B, 'b', ['order-1']), KEYED
+    ) == [
+        "horsies_tasks [id=task#1]: input: reference 'the command of the send that won', "
+        "candidate <not json 'order-1'>",
+    ]
+
+
+def test_the_keyed_send_rule_compares_the_input_of_a_task_without_a_key() -> None:
+    assert _judge(
+        _sends(RUN_A, 'a', [COMMANDS[0]], digest=None),
+        _sends(RUN_B, 'b', [COMMANDS[1]], digest=None),
+        KEYED,
+    ) == [
+        'horsies_tasks [id=task#1]: input: reference {"order":"order-1"}, '
+        'candidate {"order":"order-2"}',
+    ]
+
+
+def test_the_keyed_send_rule_compares_every_other_column_as_captured() -> None:
+    assert _judge(
+        _sends(RUN_A, 'a', [COMMANDS[0]]),
+        _sends(RUN_B, 'b', [COMMANDS[1]], changes={'priority': '1'}),
+        KEYED,
+    ) == ["horsies_tasks [id=task#1]: priority: reference '100', candidate '1'"]
+
+
+# ---- One mover per round ----
+
+ROUNDS: Final = _rule(PairFact.ONE_MOVER_PER_ROUND)
+RACE_WORKER: Final = 'lock-order-worker'
+STALE_REASON: Final = 'Worker process crashed (no runner heartbeat for 1000ms = 1.0s)'
+
+
+class Mover(Enum):
+    """Who moved the task of one round, and what the round's task is."""
+
+    FAILURE_BY_FINALIZE = 'the finalize of a plain task that failed'
+    FAILURE_BY_STALE_RECOVERY = 'the stale recovery of a plain task'
+    SUCCESS_BY_FINALIZE = 'the finalize of a workflow task that succeeded'
+    SUCCESS_BY_STALE_RECOVERY = 'the stale recovery of a workflow task'
+    WORKFLOW_FAILURE_BY_FINALIZE = 'the finalize of a workflow task that failed'
+
+
+def _hex(payload: bytes) -> str:
+    return '\\x' + payload.hex()
+
+
+def _digest(payload: bytes) -> str:
+    return _hex(hashlib.sha256(payload).digest())
+
+
+def _micros(at: datetime) -> int:
+    return (at - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1)
+
+
+def _move(task: str, run: datetime, mover: Mover) -> tuple[Row, bytes, list[object]]:
+    """The columns that ``mover`` writes, its result envelope and its attempt."""
+    started, finished = run - timedelta(hours=1), run + timedelta(milliseconds=5)
+    match mover:
+        case Mover.FAILURE_BY_FINALIZE | Mover.WORKFLOW_FAILURE_BY_FINALIZE:
+            code, reason, status, kind, outcome = (
+                'BROKER_ERROR', 'worker lost the child', 'FAILED', 'FAIL_RUNNING', 'WORKER_FAILURE'
+            )
+            data: object = {'task_id': task}
+        case Mover.SUCCESS_BY_FINALIZE:
+            code, reason, status, kind, outcome = (None, None, 'COMPLETED', 'COMPLETE_LOCKED', 'COMPLETED')
+            data = None
+        case Mover.FAILURE_BY_STALE_RECOVERY | Mover.SUCCESS_BY_STALE_RECOVERY:
+            code, reason, status, kind, outcome = (
+                'WORKER_CRASHED', STALE_REASON, 'FAILED', 'FAIL_STALE', 'FAILED'
+            )
+            data = {
+                'started_at': started.isoformat(),
+                'detected_at': finished.isoformat(),
+                'worker_id': RACE_WORKER,
+                'worker_pid': 4242,
+            }
+    error = None if code is None else {
+        'data': data,
+        'error_code': {'__builtin_task_code__': code},
+        'exception': None,
+        'message': reason,
+    }
+    envelope = json.dumps({'__h_task_result__': True, 'err': error, 'ok': None}).encode()
+    attempt: list[object] = [
+        1, outcome, False, _micros(started), _micros(finished),
+        code, reason, reason, RACE_WORKER, 'host-1', 4242, 'child-1',
+    ]
+    columns: Row = {
+        'status': status,
+        'terminalization_kind': kind,
+        'error_code': code,
+        'final_failed_reason': reason,
+    }
+    return columns, envelope, attempt
+
+
+def _is_workflow_task(mover: Mover) -> bool:
+    match mover:
+        case Mover.FAILURE_BY_FINALIZE | Mover.FAILURE_BY_STALE_RECOVERY:
+            return False
+        case (
+            Mover.SUCCESS_BY_FINALIZE
+            | Mover.SUCCESS_BY_STALE_RECOVERY
+            | Mover.WORKFLOW_FAILURE_BY_FINALIZE
+        ):
+            return True
+
+
+def _round_row(task: str, run: datetime, position: int, mover: Mover, changes: Row) -> Row:
+    """The history row of the task of one round; the round's position sets its send time."""
+    columns, envelope, attempt = _move(task, run, mover)
+    archive = json.dumps([attempt]).encode()
+    sent = _text(run - timedelta(seconds=10) + timedelta(milliseconds=position))
+    workflow_task = _is_workflow_task(mover)
+    return {
+        'tableoid': f'horsies_task_history_standard_30d_{run:%Y_%m_%d}',
+        'task_id': task,
+        'task_name': 'lock_order_task',
+        'queue_name': 'default',
+        'priority': '100',
+        'retention_class_key': 'standard_30d',
+        'is_workflow_task': 'true' if workflow_task else 'false',
+        'workflow_id': f'{task}-workflow' if workflow_task else None,
+        'sent_at': sent,
+        'created_at': _text(run),
+        'enqueued_at': _text(run),
+        'claimed_at': _text(run - timedelta(hours=1)),
+        'started_at': _text(run - timedelta(hours=1)),
+        'terminal_at': _text(run + timedelta(milliseconds=5)),
+        'retry_count': '0',
+        'max_retries': '0',
+        'last_claimed_worker_id': RACE_WORKER,
+        'last_worker_hostname': 'host-1',
+        'last_worker_pid': '4242',
+        'last_worker_process_name': 'child-1',
+        'result_envelope_version': '1',
+        'result_payload': _hex(envelope),
+        'result_digest': _digest(envelope),
+        'history_schema_version': '1',
+        'attempt_archive_version': '1',
+        'attempt_snapshot': _hex(archive),
+        'attempt_snapshot_digest': _digest(archive),
+        'rerun_input_disposition': 'DECLINED_BY_POLICY',
+        **columns,
+        **changes,
+    }
+
+
+def _phase2_row(task: str, run: datetime, kind: str | None) -> Row:
+    """The pending phase 2 of a workflow task's move."""
+    return {
+        'task_id': task,
+        'workflow_id': f'{task}-workflow',
+        'workflow_node_row_id': f'{task}-node',
+        'terminalization_kind': kind,
+        'history_class': 'standard_30d',
+        'history_anchor': _text(run),
+        'history_schema_version': '1',
+        'created_at': _text(run),
+        'attempt_count': '0',
+    }
+
+
+def _rounds(
+    run: datetime,
+    prefix: str,
+    movers: Sequence[Mover],
+    *,
+    changes: Mapping[int, Row] | None = None,
+    wakes: int | None = None,
+) -> NormalizedSnapshot:
+    """The history rows of the rounds and their events. ``wakes`` is the count
+    of capacity wakes; by default one per failure that the finalize moved."""
+    tasks = [f'{prefix}-task-{position}' for position in range(len(movers))]
+    history = [
+        _round_row(task, run, position, mover, (changes or {}).get(position, {}))
+        for position, (task, mover) in enumerate(zip(tasks, movers, strict=True))
+    ]
+    phase2 = [
+        _phase2_row(task, run, row['terminalization_kind'])
+        for task, mover, row in zip(tasks, movers, history, strict=True)
+        if _is_workflow_task(mover)
+    ]
+    owed = sum(1 for mover in movers if mover is Mover.FAILURE_BY_FINALIZE)
+    events = [
+        *(event for task in tasks for event in (('task_done', task), (STATUS, task))),
+        *(('task_queue_default', 'capacity') for _ in range(owed if wakes is None else wakes)),
+    ]
+    return _snapshot(run, {HISTORY_TABLE: history, PHASE2_PENDING_TABLE: phase2}, events)
+
+
+FAILURES_A: Final = (Mover.FAILURE_BY_STALE_RECOVERY, Mover.FAILURE_BY_FINALIZE, Mover.FAILURE_BY_FINALIZE)
+FAILURES_B: Final = (Mover.FAILURE_BY_FINALIZE, Mover.FAILURE_BY_FINALIZE, Mover.FAILURE_BY_FINALIZE)
+SUCCESSES_A: Final = (Mover.SUCCESS_BY_FINALIZE, Mover.SUCCESS_BY_FINALIZE)
+SUCCESSES_B: Final = (Mover.SUCCESS_BY_STALE_RECOVERY, Mover.SUCCESS_BY_FINALIZE)
+
+
+def test_without_a_rule_a_round_that_another_side_moved_differs() -> None:
+    lines = _judge(
+        _rounds(RUN_A, 'a', FAILURES_B), _rounds(RUN_B, 'b', FAILURES_A), WholeSnapshot()
+    )
+
+    assert [line.split(': reference')[0] for line in lines] == [
+        'horsies_task_history [task_id=task#1]: terminalization_kind',
+        'horsies_task_history [task_id=task#1]: error_code',
+        'horsies_task_history [task_id=task#1]: final_failed_reason',
+        'horsies_task_history [task_id=task#1]: result_payload',
+        'horsies_task_history [task_id=task#1]: attempt_snapshot',
+        "notifications [channel='task_queue_default', task_id=NULL, workflow_id=NULL, "
+        "payload='capacity']: row only in the reference: channel='task_queue_default', "
+        "task_id=NULL, workflow_id=NULL, payload='capacity'",
+    ]
+
+
+@pytest.mark.parametrize(
+    ('reference', 'candidate'),
+    [
+        (FAILURES_B, FAILURES_A),
+        (FAILURES_A, FAILURES_B),
+        (FAILURES_A, FAILURES_A),
+        (SUCCESSES_A, SUCCESSES_B),
+        (SUCCESSES_B, SUCCESSES_A),
+    ],
+    ids=[
+        'failure-finalize-stale',
+        'failure-stale-finalize',
+        'failure-same',
+        'success-finalize-stale',
+        'success-stale-finalize',
+    ],
+)
+def test_the_round_rule_passes_either_mover_of_each_round(
+    reference: tuple[Mover, ...], candidate: tuple[Mover, ...]
+) -> None:
+    assert _judge(_rounds(RUN_A, 'a', reference), _rounds(RUN_B, 'b', candidate), ROUNDS) == []
+
+
+def test_a_failure_of_a_workflow_task_by_the_finalize_owes_no_capacity_wake() -> None:
+    """Its phase 2 sends the wake, not the move."""
+    reference = _rounds(RUN_A, 'a', (Mover.WORKFLOW_FAILURE_BY_FINALIZE,))
+    candidate = _rounds(RUN_B, 'b', (Mover.SUCCESS_BY_STALE_RECOVERY,))
+
+    assert _judge(reference, candidate, ROUNDS) == []
+
+
+def test_the_round_rule_fails_a_move_that_neither_side_writes() -> None:
+    """The second round's kind is one of neither side, and that row owes no
+    capacity wake, so the candidate sends two."""
+    candidate = _rounds(
+        RUN_B,
+        'b',
+        FAILURES_B,
+        changes={1: {'terminalization_kind': 'CANCEL_ADMIN'}},
+        wakes=2,
+    )
+
+    assert _judge(_rounds(RUN_A, 'a', FAILURES_A), candidate, ROUNDS) == [
+        "horsies_task_history [task_id=task#2]: status: reference 'written by the mover "
+        "of the round', candidate 'FAILED'",
+        "horsies_task_history [task_id=task#2]: terminalization_kind: reference 'written "
+        "by the mover of the round', candidate 'CANCEL_ADMIN'",
+        "horsies_task_history [task_id=task#2]: error_code: reference 'written by the "
+        "mover of the round', candidate 'BROKER_ERROR'",
+        "horsies_task_history [task_id=task#2]: final_failed_reason: reference 'written "
+        "by the mover of the round', candidate 'worker lost the child'",
+        'horsies_task_history [task_id=task#2]: result_payload: reference \'written by '
+        'the mover of the round\', candidate {"__h_task_result__":true,"err":{"data":'
+        '{"task_id":task#2},"error_code":{"__builtin_task_code__":"BROKER_ERROR"},'
+        '"exception":null,"message":"worker lost the child"},"ok":null}',
+        'horsies_task_history [task_id=task#2]: attempt_snapshot: reference \'written by '
+        'the mover of the round\', candidate [[1,"WORKER_FAILURE",false,<during run>,'
+        '<during run>,"BROKER_ERROR","worker lost the child","worker lost the child",'
+        'worker#1,"host-1",4242,"child-1"]]',
+    ]
+
+
+@pytest.mark.parametrize(
+    ('wakes', 'expected'),
+    [
+        (
+            1,
+            "notifications [channel='task_queue_default', task_id=NULL, workflow_id=NULL, "
+            "payload='the capacity wake of a finalize of a failure, missing']: row only in "
+            "the candidate: channel='task_queue_default', task_id=NULL, workflow_id=NULL, "
+            "payload='the capacity wake of a finalize of a failure, missing'",
+        ),
+        (
+            3,
+            "notifications [channel='task_queue_default', task_id=NULL, workflow_id=NULL, "
+            "payload='capacity']: row only in the candidate: channel='task_queue_default', "
+            "task_id=NULL, workflow_id=NULL, payload='capacity'",
+        ),
+    ],
+    ids=['finalize-without-its-wake', 'one-wake-more'],
+)
+def test_the_round_rule_fails_a_capacity_wake_that_disagrees_with_the_movers(
+    wakes: int, expected: str
+) -> None:
+    candidate = _rounds(RUN_B, 'b', FAILURES_A, wakes=wakes)
+
+    assert _judge(_rounds(RUN_A, 'a', FAILURES_B), candidate, ROUNDS) == [expected]
+
+
+def test_the_round_rule_fails_a_round_without_its_history_row() -> None:
+    lines = _judge(
+        _rounds(RUN_A, 'a', FAILURES_A), _rounds(RUN_B, 'b', FAILURES_A[:2]), ROUNDS
+    )
+
+    assert lines
+    assert lines[0].startswith('horsies_task_history [task_id=task#3]: row only in the reference')
+
+
+def test_the_round_rule_compares_every_other_column_as_captured() -> None:
+    candidate = _rounds(RUN_B, 'b', FAILURES_B, changes={2: {'retry_count': '1'}})
+
+    assert _judge(_rounds(RUN_A, 'a', FAILURES_A), candidate, ROUNDS) == [
+        "horsies_task_history [task_id=task#3]: retry_count: reference '0', candidate '1'",
+    ]
+
+
+def test_the_round_rule_fails_a_phase2_row_whose_move_neither_side_writes() -> None:
+    candidate = _rounds(
+        RUN_B, 'b', SUCCESSES_B, changes={0: {'terminalization_kind': 'COMPLETE_FUSED'}}
+    )
+
+    lines = _judge(_rounds(RUN_A, 'a', SUCCESSES_A), candidate, ROUNDS)
+
+    assert "horsies_workflow_phase2_pending [task_id=task#1]: terminalization_kind: " \
+        "reference 'written by the mover of the round', candidate 'COMPLETE_FUSED'" in lines
+
+
+# ---- The decided difference of the finalize batcher close ----
+
+(CLOSE,) = LIFECYCLE_DECIDED_DIFFERENCES
+BATCH_WORKER: Final = 'batch-worker'
+RECEIVED: Final = 4
+"""Two batches of two rows that the writes had received at the close."""
+UNSENT: Final = 2
+"""Rows that no write received."""
+
+
+def _batch_task(task: str, run: datetime, position: int, changes: Row) -> Row:
+    """A RUNNING task of the batch test; its position sets its send time."""
+    sent = _text(run - timedelta(seconds=10) + timedelta(milliseconds=position))
+    at = _text(run)
+    return {
+        'id': task,
+        'task_name': 'round_trip_task',
+        'queue_name': 'round_trip_queue',
+        'priority': '100',
+        'input': '{}',
+        'execution': 'ISOLATED',
+        'retention_class_key': 'standard_30d',
+        'sent_at': sent,
+        'created_at': at,
+        'command_fingerprint_version': '1',
+        'command_fingerprint': 'one-fingerprint',
+        'status': 'RUNNING',
+        'enqueued_at': sent,
+        'claimed_at': at,
+        'claimed_by_worker_id': BATCH_WORKER,
+        'started_at': at,
+        'retry_count': '0',
+        'max_retries': '0',
+        'is_workflow_task': 'false',
+        'updated_at': at,
+        'retain_rerun_input': 'false',
+        **changes,
+    }
+
+
+def _committed_row(task: str, run: datetime, position: int, status: str) -> Row:
+    """The history row of a received row that its write committed after the close."""
+    sent = _text(run - timedelta(seconds=10) + timedelta(milliseconds=position))
+    at = _text(run)
+    return {
+        'tableoid': f'horsies_task_history_standard_30d_{run:%Y_%m_%d}',
+        'task_id': task,
+        'task_name': 'round_trip_task',
+        'queue_name': 'round_trip_queue',
+        'priority': '100',
+        'command_fingerprint_version': '1',
+        'command_fingerprint': 'one-fingerprint',
+        'retention_class_key': 'standard_30d',
+        'is_workflow_task': 'false',
+        'sent_at': sent,
+        'created_at': at,
+        'enqueued_at': sent,
+        'claimed_at': at,
+        'started_at': at,
+        'terminal_at': _text(run + timedelta(seconds=1)),
+        'status': status,
+        'terminalization_kind': 'COMPLETE_FUSED',
+        'retry_count': '0',
+        'max_retries': '0',
+        'last_claimed_worker_id': BATCH_WORKER,
+        'history_schema_version': '1',
+        'attempt_archive_version': '1',
+        'rerun_input_disposition': 'DECLINED_BY_POLICY',
+    }
+
+
+def _closed_batcher(
+    run: datetime,
+    prefix: str,
+    committed: int,
+    *,
+    history_status: str = 'COMPLETED',
+    events_of_a_commit: Sequence[str] = MOVE_EVENTS,
+    live_changes: Mapping[int, Row] | None = None,
+    extra: Mapping[str, Sequence[Row]] | None = None,
+) -> NormalizedSnapshot:
+    """The batch test after the close: the first ``committed`` received rows
+    are in history with the events of their move; every other row is RUNNING."""
+    tasks = [f'{prefix}-task-{position}' for position in range(RECEIVED + UNSENT)]
+    live = [
+        _batch_task(task, run, position, (live_changes or {}).get(position, {}))
+        for position, task in enumerate(tasks)
+        if position >= committed
+    ]
+    history = [
+        _committed_row(task, run, position, history_status)
+        for position, task in enumerate(tasks[:committed])
+    ]
+    events = [(channel, task) for task in tasks[:committed] for channel in events_of_a_commit]
+    return _snapshot(
+        run, {'horsies_tasks': live, HISTORY_TABLE: history, **(extra or {})}, events
+    )
+
+
+def _judgement(
+    reference: NormalizedSnapshot, candidate: NormalizedSnapshot, compare: PairCompare
+) -> PairJudgement:
+    return judge_pair(
+        ReferenceCaptured(snapshot=reference, window=_window(RUN_A)),
+        candidate,
+        _window(RUN_B),
+        compare,
+    )
+
+
+def test_without_the_decision_the_commit_of_the_received_rows_differs() -> None:
+    lines = _judge(
+        _closed_batcher(RUN_A, 'a', 0), _closed_batcher(RUN_B, 'b', RECEIVED), WholeSnapshot()
+    )
+
+    assert len(lines) == 4 * RECEIVED, lines
+    assert lines[0].startswith('horsies_tasks [id=task#3]: row only in the reference: ')
+
+
+@pytest.mark.parametrize('committed', [1, RECEIVED])
+def test_the_decided_difference_reports_the_commit_of_received_rows_as_decided(
+    committed: int,
+) -> None:
+    reference = _closed_batcher(RUN_A, 'a', 0)
+    candidate = _closed_batcher(RUN_B, 'b', committed)
+
+    match _judgement(reference, candidate, CLOSE):
+        case DecidedDifferenceSeen(diff=diff, decided=decided):
+            assert decided == CLOSE
+            assert len(diff.entries) == 4 * committed
+        case other:
+            raise AssertionError(f'expected the decided difference, got {other}')
+
+
+def test_the_decided_difference_is_equal_when_no_received_row_committed() -> None:
+    assert (
+        _judgement(_closed_batcher(RUN_A, 'a', 0), _closed_batcher(RUN_B, 'b', 0), CLOSE)
+        == PairEqual()
+    )
+
+
+@pytest.mark.parametrize(
+    'candidate',
+    [
+        pytest.param(
+            lambda: _closed_batcher(RUN_B, 'b', RECEIVED, history_status='FAILED'),
+            id='committed-as-failed',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(RUN_B, 'b', RECEIVED, events_of_a_commit=('task_done',)),
+            id='commit-without-its-status-event',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B, 'b', RECEIVED, events_of_a_commit=(*MOVE_EVENTS, 'task_new')
+            ),
+            id='commit-with-another-event',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B, 'b', RECEIVED, events_of_a_commit=(*MOVE_EVENTS, 'task_done')
+            ),
+            id='commit-with-two-done-events',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B,
+                'b',
+                RECEIVED,
+                live_changes={RECEIVED: {'claimed_by_worker_id': 'other-worker'}},
+            ),
+            id='unsent-row-of-another-worker',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B,
+                'b',
+                RECEIVED,
+                extra={'horsies_task_attempts': [{'task_id': 'b-task-0', 'attempt': '1'}]},
+            ),
+            id='row-in-another-table',
+        ),
+    ],
+)
+def test_the_decided_difference_fails_a_difference_that_it_does_not_explain(
+    candidate: Callable[[], NormalizedSnapshot],
+) -> None:
+    match _judgement(_closed_batcher(RUN_A, 'a', 0), candidate(), CLOSE):
+        case DualRunMismatch(diff=diff):
+            assert diff.entries
+        case other:
+            raise AssertionError(f'expected a mismatch, got {other}')
+
+
+def test_the_decided_difference_fails_a_received_row_that_left_without_a_commit() -> None:
+    """Four rows left the live table, and only three committed."""
+    reference = _closed_batcher(RUN_A, 'a', 0)
+    tasks = [f'b-task-{position}' for position in range(RECEIVED + UNSENT)]
+    candidate = _snapshot(
+        RUN_B,
+        {
+            'horsies_tasks': [
+                _batch_task(task, RUN_B, position, {})
+                for position, task in enumerate(tasks)
+                if position >= RECEIVED
+            ],
+            HISTORY_TABLE: [
+                _committed_row(task, RUN_B, position, 'COMPLETED')
+                for position, task in enumerate(tasks[: RECEIVED - 1])
+            ],
+        },
+        [(channel, task) for task in tasks[: RECEIVED - 1] for channel in MOVE_EVENTS],
+    )
+
+    match _judgement(reference, candidate, CLOSE):
+        case DualRunMismatch():
+            pass
+        case other:
+            raise AssertionError(f'expected a mismatch, got {other}')

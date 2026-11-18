@@ -11,6 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
+from typing import Final
 
 
 class IdFamily(Enum):
@@ -144,7 +145,22 @@ class EachMember:
     whose keys are data (node ids), not names of the format."""
 
 
-PathStep = Key | Index | EachItem | EachMember
+@dataclass(frozen=True, slots=True)
+class EachMarkedMember:
+    """A path step into every member of an object whose value is an object
+    that holds ``marker`` with the value ``true``, whatever its key.
+
+    The keys are names that the user gives, and the marker names the members
+    that the library writes among them: an ``args_from`` entry of a task
+    input (``__h_taskresult_envelope__``). A member without the marker, or
+    with another value at the marker, does not match: it is user data and
+    compares exactly.
+    """
+
+    marker: str
+
+
+PathStep = Key | Index | EachItem | EachMember | EachMarkedMember
 
 
 class TimeEncoding(Enum):
@@ -165,6 +181,16 @@ class JsonTime:
 
     encoding: TimeEncoding
     rule: TimeOrderOnly | TimeWithin
+
+
+CANONICAL_UUID: Final = re.compile(
+    r'(?<![0-9A-Za-z-])'
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    r'(?![0-9A-Za-z-])',
+)
+"""An id inside a text: the text form of a uuid column. ``IdsInText`` finds
+the ids of a text with it, and ``catalog.notification_row`` the task id of a
+retry wake."""
 
 
 @dataclass(frozen=True, slots=True)

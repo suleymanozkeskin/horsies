@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Duration, Timelike, Utc};
 
 use crate::broker::core_rows::{column, one_row, query_in, query_on, RowDecodeError, StatementLog};
+use crate::core::config::retention::RetentionConfig;
 use crate::core::history::commands::EnsureLeafCoverage;
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::leaf_id_index_name;
@@ -109,6 +110,21 @@ impl CoverageRequest {
             history_horizon_days,
             heartbeat_horizon_hours,
         })
+    }
+
+    /// The request of the startup pass of a process whose retention config
+    /// is `config`: its two horizons and every period that its sends can
+    /// stamp ([`RetentionConfig::registrable_periods`]), the request that the
+    /// worker start builds.
+    ///
+    /// Errors: as [`CoverageRequest::new`]. A config that
+    /// `RetentionConfig::validate` accepted has its horizons in the bounds.
+    pub fn of_retention(config: &RetentionConfig) -> Result<Self, HistoryError> {
+        Self::new(
+            config.history_leaf_horizon_days,
+            config.heartbeat_leaf_horizon_hours,
+            &config.registrable_periods(),
+        )
     }
 }
 
