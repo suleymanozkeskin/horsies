@@ -67,6 +67,58 @@ class PanicException(BaseException):
     """Rust code called from Python panicked."""
 
 
+class CoreFailure(Exception):
+    """Base of the causes of a failed core operation. subject is the operation, for example
+    'release_claims'; message says what failed and why. No constructor.
+    """
+    @property
+    def subject(self) -> str: ...
+    @property
+    def message(self) -> str: ...
+
+
+class CoreDatabaseError(CoreFailure):
+    """Base of the database failures: the server answered with an error, or did not answer.
+    retryable: the cause may clear, so a repeat of the operation can succeed. No constructor.
+    """
+    @property
+    def retryable(self) -> bool: ...
+
+
+class CoreServerError(CoreDatabaseError):
+    """The server answered with an error: sqlstate is its five-character SQLSTATE, message
+    the server's primary message.
+    """
+    def __init__(self, subject: str, sqlstate: str, message: str, retryable: bool) -> None: ...
+    @property
+    def sqlstate(self) -> str: ...
+
+
+class CoreConnectionError(CoreDatabaseError):
+    """The operation got no answer from the server: a connect or a checkout that failed or
+    timed out, a lost connection, or a reply that did not come within its bound.
+    """
+    def __init__(self, subject: str, message: str, retryable: bool) -> None: ...
+
+
+class CoreContractViolation(CoreFailure):
+    """A row, a stored value or a result broke the contract that the core reads it with. Not
+    retryable: the same call meets it again.
+    """
+    def __init__(self, subject: str, message: str) -> None: ...
+
+
+class CorePreconditionFailed(CoreFailure):
+    """A precondition of the operation does not hold: the settings, the database's client
+    family or schema, an argument, a row that the call names, a key or a lock that another
+    command holds, a usable transaction, or a client that can build a child spec now.
+    retryable: the precondition may come to hold without a change by the caller.
+    """
+    def __init__(self, subject: str, message: str, retryable: bool) -> None: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
 @final
 class CoreHandle:
     """The core handle of one producer manifest and the pool profile of its process: PRODUCER,
@@ -490,6 +542,8 @@ class BrokerFailure:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -613,6 +667,8 @@ class SendEnqueueFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -784,6 +840,8 @@ class StaleClaimsRequeueFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -815,6 +873,8 @@ class StaleRunningScanFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -846,6 +906,8 @@ class PendingExpiryFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -870,6 +932,8 @@ class OrphanAuditLockBusy:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -881,6 +945,8 @@ class OrphanAuditFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -967,6 +1033,8 @@ class AttemptWriteFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1085,6 +1153,8 @@ class BatchNotSent:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1094,6 +1164,8 @@ class BatchRefused:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1101,6 +1173,8 @@ class BatchCommitUnknown:
     """The reply of the batch statement was lost: each row may have committed or not."""
     @property
     def message(self) -> str: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1165,6 +1239,8 @@ class ClaimPassFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1183,6 +1259,8 @@ class QueueStartsFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1321,6 +1399,8 @@ class ReleaseFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1370,6 +1450,8 @@ class CancelFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1503,6 +1585,8 @@ class MonitoringFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1925,6 +2009,8 @@ class HandleFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1947,6 +2033,8 @@ class WorkflowDeleteFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -1965,6 +2053,8 @@ class PausedExpiryFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2211,6 +2301,8 @@ class NodeFinishFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2233,6 +2325,8 @@ class ParentAdvanceStopped:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2275,6 +2369,8 @@ class Phase2RecoveryFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2334,6 +2430,8 @@ class RecoveryPassFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2362,6 +2460,8 @@ class SettleFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2387,6 +2487,8 @@ class WorkflowResumeRecoveryFailed:
     def workflow_id(self) -> uuid.UUID: ...
     @property
     def message(self) -> str: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2401,6 +2503,8 @@ class WorkflowStartFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2473,6 +2577,8 @@ class CoverageFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2504,6 +2610,8 @@ class PruneFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
@@ -2620,6 +2728,8 @@ class RerunClientFamilyMismatch:
     def stored(self) -> Literal['PYTHON', 'RUST'] | None: ...
     @property
     def message(self) -> str: ...
+    @property
+    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final
