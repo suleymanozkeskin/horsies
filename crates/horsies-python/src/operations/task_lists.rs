@@ -244,4 +244,116 @@ mod tests {
         );
         assert!(!failed.retryable);
     }
+
+    /// The task id of the list rows of these tests.
+    const TASK_ID: &str = "0198c0de-0000-7000-8000-000000000001";
+
+    /// 2026-01-01T00:00:00Z, the time columns of the list rows.
+    fn started() -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("a valid instant")
+    }
+
+    /// Run the Python `checks` with `entry` bound to the dict of `row`, and
+    /// the modules `uuid` and `datetime`.
+    fn check_entry(row: &impl TaskListEntry, checks: &std::ffi::CStr) {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let globals = PyDict::new(py);
+            globals.set_item("entry", row.entry(py)?)?;
+            globals.set_item("uuid", py.import("uuid")?)?;
+            globals.set_item("datetime", py.import("datetime")?)?;
+            py.run(checks, Some(&globals), None)
+        })
+        .expect("the checks pass");
+    }
+
+    /// Python `tests/unit/test_broker_task_lists.py::TestStaleList::test_rows_become_the_dicts_of_the_client_statement`:
+    /// a stale row is the dict of Python's public API, with its keys in
+    /// Python's order and the task id as `uuid.UUID`.
+    #[test]
+    fn a_stale_row_is_the_dict_of_the_python_api() {
+        let row = StaleTaskRow {
+            id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
+            task_name: "slow_task".to_owned(),
+            worker_hostname: Some("host-1".to_owned()),
+            worker_pid: Some(1234),
+            worker_process_name: Some("child-1".to_owned()),
+            started_at: started(),
+            last_heartbeat: None,
+        };
+
+        check_entry(
+            &row,
+            c"started = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+assert entry == {
+    'id': uuid.UUID('0198c0de-0000-7000-8000-000000000001'),
+    'worker_hostname': 'host-1',
+    'worker_pid': 1234,
+    'worker_process_name': 'child-1',
+    'last_heartbeat': None,
+    'started_at': started,
+    'task_name': 'slow_task',
+}, entry
+assert list(entry) == [
+    'id',
+    'worker_hostname',
+    'worker_pid',
+    'worker_process_name',
+    'last_heartbeat',
+    'started_at',
+    'task_name',
+], list(entry)
+assert type(entry['id']) is uuid.UUID, type(entry['id'])
+",
+        );
+    }
+
+    /// Python `tests/unit/test_broker_task_lists.py::TestExpiredList::test_rows_become_the_dicts_of_the_client_statement`:
+    /// an expired row is the dict of Python's public API, with its keys in
+    /// Python's order, the task id as `uuid.UUID` and `expired_for` as a
+    /// `timedelta`.
+    #[test]
+    fn an_expired_row_is_the_dict_of_the_python_api() {
+        let row = ExpiredTaskRow {
+            id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
+            task_name: "slow_task".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 100,
+            sent_at: started(),
+            enqueued_at: started(),
+            good_until: started(),
+            expired_for_us: 300_000_000,
+        };
+
+        check_entry(
+            &row,
+            c"started = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+assert list(entry) == [
+    'id',
+    'task_name',
+    'queue_name',
+    'priority',
+    'sent_at',
+    'enqueued_at',
+    'good_until',
+    'expired_for',
+], list(entry)
+assert entry == {
+    'id': uuid.UUID('0198c0de-0000-7000-8000-000000000001'),
+    'task_name': 'slow_task',
+    'queue_name': 'default',
+    'priority': 100,
+    'sent_at': started,
+    'enqueued_at': started,
+    'good_until': started,
+    'expired_for': datetime.timedelta(minutes=5),
+}, entry
+assert type(entry['id']) is uuid.UUID, type(entry['id'])
+",
+        );
+    }
 }
