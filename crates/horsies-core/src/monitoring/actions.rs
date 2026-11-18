@@ -1,7 +1,5 @@
 //! Transport-free decisions for monitoring actions.
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -12,7 +10,6 @@ use crate::core::workflow::status::WorkflowStatus;
 use crate::workflow_engine::child_spec::{ChildSpecSource, ChildSpecUnavailable};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::ResumeFailure;
-use crate::workflow_engine::steps::ChildBuild;
 
 use super::models::ActionResponse;
 use super::task_actions::{
@@ -41,25 +38,6 @@ impl ActionConflictCode {
         match self {
             Self::TaskNotCancellable => "TASK_NOT_CANCELLABLE",
             Self::StateConflict => STATE_CONFLICT,
-        }
-    }
-}
-
-/// Where a resume through the monitoring actions gets the spec of each
-/// sub-workflow child that the resume owes.
-#[derive(Clone)]
-pub enum ResumeChildren {
-    /// A client that builds each child in its own language and sends its
-    /// spec as data, with the retention class of each task queue (the
-    /// `build_with` of the Python client, the registry of the Rust client).
-    Client(Arc<dyn ChildSpecSource>),
-}
-
-impl ResumeChildren {
-    /// The child build of one resume. Pure.
-    fn build(&self) -> ChildBuild<'_> {
-        match self {
-            Self::Client(source) => ChildBuild::Client(source.as_ref()),
         }
     }
 }
@@ -299,18 +277,19 @@ fn child_build_raised(workflow_id: Uuid, subject: &str, cause: &str) -> ActionOu
 }
 
 /// Resume a workflow tree; each owed sub-workflow child start builds its
-/// child through `children`. A resume that committed and whose recovery
+/// child through `children`, the client's child spec source (the
+/// `build_with` of the Python client, the registry of the Rust client). A resume that committed and whose recovery
 /// pass failed answers success with a warning ([`resume_failure`]). A child
 /// build of the client that raised answers 500 ([`child_build_raised`]).
 pub async fn resume_workflow_action(
     broker: &PostgresBroker,
     workflow_id: Uuid,
-    children: &ResumeChildren,
+    children: &dyn ChildSpecSource,
 ) -> ActionOutcome {
     match Box::pin(crate::workflow_engine::lifecycle::resume_with(
         broker,
         workflow_id,
-        children.build(),
+        children,
     ))
     .await
     {

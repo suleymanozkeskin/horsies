@@ -40,7 +40,6 @@ use crate::workflow_engine::recovery_limit::{
     record_candidate_failure, CandidateFailure, CountFailures, FailureClass, FailureRecord,
     RecoveryCase, RecoveryFailurePolicy,
 };
-use crate::workflow_engine::steps::ChildBuild;
 
 /// `workflow_recovery_failure_limit` of every pass here (Python's `LIMIT`).
 const LIMIT: u32 = 3;
@@ -61,7 +60,7 @@ const BAD_GOOD_UNTIL: &str = r#"{"good_until":"not-a-date"}"#;
 async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        ChildBuild::Client(child_specs),
+        child_specs,
         LIMIT,
     )
     .await
@@ -79,7 +78,7 @@ async fn passes(pool: &PgPool, child_specs: &TestChildSpecs, count: u32) -> Vec<
 async fn phase2_pass(pool: &PgPool) -> Phase2RecoverySummary {
     drive_phase2_recovery_with(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         0,
         GLOBAL_SCAN_ROW_CAP,
         LIMIT,
@@ -516,7 +515,7 @@ async fn the_resume_pass_logs_and_does_not_count() {
 
     let report = recover_workflow_tree(
         &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         workflow_id,
     )
     .await

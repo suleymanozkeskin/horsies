@@ -11,7 +11,7 @@ use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::steps::SourceFailure;
 use crate::workflow_engine::steps::{
-    advance_parents, node_finish_in_transaction, ChildBuild, NodeFinishDisposition,
+    advance_parents, node_finish_in_transaction, NodeFinishDisposition,
 };
 
 /// What [`on_workflow_task_complete`] did with the phase-2 record of a finished workflow task.
@@ -85,7 +85,7 @@ pub async fn on_workflow_task_complete(
     task_id: Uuid,
     source: &dyn ChildSpecSource,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
-    on_workflow_task_complete_with(broker, task_id, ChildBuild::Client(source)).await
+    on_workflow_task_complete_with(broker, task_id, source).await
 }
 
 /// [`on_workflow_task_complete`] with the children of the owed child starts
@@ -93,7 +93,7 @@ pub async fn on_workflow_task_complete(
 pub(crate) async fn on_workflow_task_complete_with(
     broker: &PostgresBroker,
     task_id: Uuid,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
     let committed = node_finish_in_transaction(broker, task_id, false, build)
         .await

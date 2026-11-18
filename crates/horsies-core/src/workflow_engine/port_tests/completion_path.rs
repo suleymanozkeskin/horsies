@@ -18,7 +18,6 @@ use crate::broker::PostgresBroker;
 use crate::core::OnError;
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::engine::on_workflow_task_complete_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// A -> B with `on_error` (Python's `_chain_spec`).
 async fn start_chain(pool: &PgPool, name: &str, on_error: OnError) -> Uuid {
@@ -50,7 +49,7 @@ async fn a_second_completion_of_a_node_keeps_the_first_result() {
     on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await
     .expect("a second phase 2 of the task");
@@ -161,7 +160,7 @@ async fn phase_two_of_a_task_with_no_node_changes_nothing() {
     on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await
     .expect("phase 2 of a task with no node returns");

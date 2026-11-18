@@ -32,7 +32,7 @@ use crate::workflow_engine::recovery_limit::{
     CountFailures, FailureRecord, RecoveryCase, RecoveryFailurePolicy,
 };
 use crate::workflow_engine::steps::{
-    advance_parents, checkout, run_alone, run_in_transaction, step_row_select, ChildBuild,
+    advance_parents, checkout, run_alone, run_in_transaction, step_row_select,
     ChildFinishDisposition, OwedParentAdvances, ParentAdvance, StepContractError, StepDisposition,
     CHILD_FINISH,
 };
@@ -631,7 +631,7 @@ pub async fn recover_stuck_workflows(
 ) -> Result<RecoveryReport, WorkflowError> {
     Box::pin(recover_stuck_workflows_observed_with(
         broker,
-        ChildBuild::Client(source),
+        source,
         failure_limit,
     ))
     .await
@@ -642,7 +642,7 @@ pub async fn recover_stuck_workflows(
 /// [`recover_stuck_workflows`]; a failed pass keeps its partial report ([`RecoveryPassFailure`]).
 pub(crate) async fn recover_stuck_workflows_observed_with(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     failure_limit: u32,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
     Box::pin(recover_stuck_workflows_in_scope(
@@ -663,7 +663,7 @@ pub(crate) async fn recover_stuck_workflows_observed_with(
 /// Errors: the tree read or a discovery statement failed.
 pub(crate) async fn recover_workflow_tree(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     root_workflow_id: Uuid,
 ) -> Result<RecoveryReport, WorkflowError> {
     let rows = run_alone(
@@ -691,7 +691,7 @@ pub(crate) async fn recover_workflow_tree(
 /// debug build needs more than a 2 MiB thread stack for one pass (see the module docs of `steps`).
 async fn recover_stuck_workflows_in_scope(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     scope: RecoveryScope<'_>,
     failure_policy: RecoveryFailurePolicy,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
@@ -775,7 +775,7 @@ async fn recover_stuck_workflows_in_scope(
 #[derive(Clone, Copy)]
 struct PassContext<'a> {
     broker: &'a PostgresBroker,
-    build: ChildBuild<'a>,
+    build: &'a dyn ChildSpecSource,
     scope: RecoveryScope<'a>,
     failure_policy: RecoveryFailurePolicy,
 }
@@ -1793,7 +1793,7 @@ async fn audit_end_states(
 ) -> Result<(), WorkflowError> {
     let pass = PassContext {
         broker,
-        build: ChildBuild::Client(child_specs),
+        build: child_specs,
         scope: RecoveryScope::Global { max_rows },
         failure_policy,
     };
@@ -1843,7 +1843,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_indexes)
                 .finish(),
-            ChildBuild::Client(&child_specs),
+            &child_specs,
         )
         .await
     }
@@ -1864,7 +1864,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_index)
                 .finish(),
-            ChildBuild::Client(&child_specs),
+            &child_specs,
         )
         .await
     }
@@ -2055,13 +2055,10 @@ mod cap_tests {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         insert_orphaned_workflow(&pool, workflow_id).await;
-        let report = recover_workflow_tree(
-            &broker_of(&pool),
-            ChildBuild::Client(&TestChildSpecs::empty()),
-            workflow_id,
-        )
-        .await
-        .unwrap();
+        let report =
+            recover_workflow_tree(&broker_of(&pool), &TestChildSpecs::empty(), workflow_id)
+                .await
+                .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
         let (status, error): (String, String) =
             sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
@@ -2086,7 +2083,7 @@ mod cap_tests {
     async fn discovery_query_failure_keeps_case_metrics_in_the_health_snapshot() {
         let failure = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             25,
         )
         .await
@@ -2211,13 +2208,10 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let report = recover_workflow_tree(
-            &broker_of(&pool),
-            ChildBuild::Client(&TestChildSpecs::empty()),
-            workflow_id,
-        )
-        .await
-        .unwrap();
+        let report =
+            recover_workflow_tree(&broker_of(&pool), &TestChildSpecs::empty(), workflow_id)
+                .await
+                .unwrap();
         assert_eq!(report.case0_pending_reevaluated, 1);
         let statuses: Vec<(i32, String)> = sqlx::query_as(
             "SELECT task_index, status FROM horsies_workflow_tasks
@@ -2275,7 +2269,7 @@ mod cap_tests {
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
         let report = recover_stuck_workflows_in_scope(
             &broker,
-            ChildBuild::Client(&child_specs),
+            &child_specs,
             RecoveryScope::Global { max_rows: 2 },
             RecoveryFailurePolicy::LogOnly,
         )
@@ -2288,7 +2282,7 @@ mod cap_tests {
         // Uncapped: the remaining orphan is failed.
         let report = recover_stuck_workflows_in_scope(
             &broker,
-            ChildBuild::Client(&child_specs),
+            &child_specs,
             RecoveryScope::Global {
                 max_rows: GLOBAL_SCAN_ROW_CAP,
             },
@@ -3320,13 +3314,9 @@ mod cap_tests {
         insert_orphaned_workflow(&pool, selected).await;
         insert_orphaned_workflow(&pool, unrelated).await;
 
-        let report = recover_workflow_tree(
-            &broker_of(&pool),
-            ChildBuild::Client(&TestChildSpecs::empty()),
-            selected,
-        )
-        .await
-        .unwrap();
+        let report = recover_workflow_tree(&broker_of(&pool), &TestChildSpecs::empty(), selected)
+            .await
+            .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
         let statuses: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT id, status FROM horsies_workflows

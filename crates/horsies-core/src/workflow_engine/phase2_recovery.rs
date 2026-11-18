@@ -17,12 +17,13 @@ use crate::broker::PostgresBroker;
 use crate::core::lifecycle::TerminalizationKind;
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::recovery_limit::{
     recovery_limit_error, recovery_limit_payloads, run_catching_panic, CandidateFailure,
     FailureClass, RecoveryCase,
 };
 use crate::workflow_engine::steps::{
-    advance_parents, phase2_recover, run_alone, ChildBuild, CommittedStep, NodeFinishDisposition,
+    advance_parents, phase2_recover, run_alone, CommittedStep, NodeFinishDisposition,
     StepContractError,
 };
 
@@ -234,7 +235,7 @@ pub enum Phase2Wake {
 /// - [`WorkflowError::StepContract`] for a row that does not decode.
 pub(crate) async fn drive_phase2_recovery_with(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     grace_ms: u64,
     max_rows: i64,
     quarantine_after_attempts: u32,
@@ -386,7 +387,7 @@ async fn advance_after_recovery(
     broker: &PostgresBroker,
     task_id: Uuid,
     committed: CommittedStep<NodeFinishDisposition>,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) {
     if committed.parent_advances.is_empty() {
         return;
@@ -576,7 +577,7 @@ mod tests {
     ) -> Result<Phase2RecoverySummary, WorkflowError> {
         drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             grace_ms,
             max_rows,
             attempt_bound,
@@ -1179,7 +1180,7 @@ mod tests {
 
         let summary = drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             0,
             1,
             25,
@@ -1298,7 +1299,7 @@ mod tests {
 
         let summary = drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             0,
             1,
             3,
@@ -1913,7 +1914,7 @@ mod tests {
 
             let summary = drive_phase2_recovery_with(
                 &PostgresBroker::from_pool(pool.clone()),
-                ChildBuild::Client(&TestChildSpecs::empty()),
+                &TestChildSpecs::empty(),
                 0,
                 1,
                 25,

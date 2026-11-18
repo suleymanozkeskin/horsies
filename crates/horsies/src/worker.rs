@@ -14,8 +14,8 @@ use horsies_core::core::config::worker_profile::ProfileRequest;
 use horsies_core::process_runtime::{spawn_on_process_runtime, ProcessRuntimeRefusal};
 use horsies_core::worker_manifest::WorkerManifest;
 use horsies_core::{
-    child_command, run_end_of, ChildSpecs, ClientFamily, RunPhase, Worker, WorkerPlan,
-    WorkerPlanRefused, WorkerRunEnd, WorkerStop,
+    child_command, run_end_of, ClientFamily, RunPhase, Worker, WorkerPlan, WorkerPlanRefused,
+    WorkerRunEnd, WorkerStop,
 };
 
 pub use horsies_core::worker_manifest::WorkerLogLevel;
@@ -189,7 +189,7 @@ async fn run_plan(
     workflows: Arc<WorkflowRegistry>,
     stop: WorkerStop,
 ) -> WorkerRunEnd {
-    match Worker::from_plan(plan, ChildSpecs::Client(workflows), ClientFamily::Rust).await {
+    match Worker::from_plan(plan, workflows, ClientFamily::Rust).await {
         Ok(worker) => worker.with_stop(&stop).run_to_end().await,
         Err(error) => {
             tracing::error!("the worker did not build: {error}");

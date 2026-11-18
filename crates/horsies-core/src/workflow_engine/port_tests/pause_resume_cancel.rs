@@ -28,7 +28,6 @@ use crate::core::{OnError, TaskResult, WorkflowSpec, WorkflowStatus};
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_client_workflow};
 use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// How long a test waits to see that a call is blocked on a lock.
 const BLOCKED_WAIT: Duration = Duration::from_millis(500);
@@ -877,7 +876,7 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     assert_eq!(failed, 2);
     let _summary = drive_phase2_recovery_with(
         &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&child_specs),
+        &child_specs,
         0,
         100,
         3,

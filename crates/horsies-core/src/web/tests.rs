@@ -183,7 +183,7 @@ fn test_state(
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
-        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        children: Arc::new(TestChildSpecs::empty()),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -1204,7 +1204,7 @@ async fn migrated_state() -> WebState {
         actions_enabled: true,
         ui_config: MonitoringUiConfig::default(),
         assets: MemoryAssets::standard(),
-        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        children: Arc::new(TestChildSpecs::empty()),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -2089,7 +2089,7 @@ async fn a_resume_whose_child_build_raised_is_python_s_internal_server_error() {
     let mut state = migrated_state().await;
     let build = Arc::new(RaisingChildBuild::default());
     let source: Arc<dyn crate::ChildSpecSource> = build.clone();
-    state.children = crate::monitoring::ResumeChildren::Client(source);
+    state.children = source;
     let pool = state.broker.pool().clone();
     let prefix = format!("web_resume_raised_{}__", Uuid::new_v4().simple());
     clean_w4(&pool, &prefix).await;
@@ -2174,7 +2174,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     );
     let handler = MonitoringHandler::new(
         Arc::clone(&broker),
-        crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        Arc::new(TestChildSpecs::empty()),
         MonitoringHandlerConfig {
             actions_enabled: true,
             ui: MonitoringUiConfig::default(),

@@ -25,8 +25,7 @@ use std::time::Duration;
 use horsies_core::web::{
     route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
     Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig, MonitoringUiConfig,
-    RequestParts, ResponseForm, ResponseParts, ResumeChildren, Verdict, DEGRADED_FRAME,
-    MAX_REQUEST_BODY_BYTES,
+    RequestParts, ResponseForm, ResponseParts, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -379,11 +378,7 @@ impl HandlerState {
                     RaisedExceptions::InRecord,
                 ));
                 let source = Arc::clone(&child_source) as Arc<dyn ChildSpecSource>;
-                let handler = CoreHandler::new(
-                    broker,
-                    ResumeChildren::Client(source),
-                    self.plan.config.clone(),
-                );
+                let handler = CoreHandler::new(broker, source, self.plan.config.clone());
                 Ok::<_, BrokerError>(Arc::new(BuiltHandler {
                     handler,
                     child_source,

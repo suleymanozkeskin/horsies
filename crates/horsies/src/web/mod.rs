@@ -36,8 +36,8 @@ use futures_util::StreamExt;
 use horsies_core::handle::CoreHandle;
 use horsies_core::web::{
     route_access, AccessGrant, AccessNeed, EventFrames, EventStreamItem, MonitoringHandler,
-    MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, ResumeChildren, Verdict,
-    HEARTBEAT, MAX_REQUEST_BODY_BYTES,
+    MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict, HEARTBEAT,
+    MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use tokio::sync::OnceCell;
@@ -133,10 +133,9 @@ impl<P> Mount<P> {
         let broker = self.handle.broker().await?;
         let registry = Arc::clone(&self.workflows);
         let source: Arc<dyn ChildSpecSource> = registry;
-        let children = ResumeChildren::Client(source);
         Ok(MonitoringHandler::new(
             broker,
-            children,
+            source,
             self.settings.clone(),
         ))
     }
