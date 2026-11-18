@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies._catalog.child_bounds import CANCELLED_WRITE_END_SECONDS
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.run_return import StoppedBeforeRunning
@@ -151,7 +152,7 @@ async def test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound(
     start does not commit once the lock is gone: the row stays CLAIMED with
     no beat."""
     statements_s = shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
-    cancel_end_s = shared_lifecycle.CANCELLED_WRITE_END_S
+    cancel_end_s = CANCELLED_WRITE_END_SECONDS
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     await session.execute(

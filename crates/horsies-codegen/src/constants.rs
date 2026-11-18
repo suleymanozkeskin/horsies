@@ -1,6 +1,6 @@
 //! Render integer constants of horsies-core as modules of `_catalog`
 //! (`release_bounds.py`, `monitoring_bounds.py`, `broker_bounds.py`,
-//! `exit_codes.py`). Each
+//! `exit_codes.py`, `child_bounds.py`). Each
 //! constant is a `Final` integer whose value is the core's constant, so a
 //! Python bound cannot differ from the bound that the core enforces: `check`
 //! fails when a core value changes and the module is not written again.
@@ -16,8 +16,8 @@ use horsies_core::monitoring::{
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 use horsies_core::{
-    LIVENESS_LOCK_LOST_EXIT_CODE, MAX_RELEASED_CLAIMS, RUNNER_HEARTBEAT_LOST_EXIT_CODE,
-    TASK_LIST_BOUND,
+    CANCELLED_WRITE_END, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_RELEASED_CLAIMS,
+    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -193,9 +193,29 @@ pub const EXIT_CODES: ConstantModule = ConstantModule {
     constants: &EXIT_CODE_CONSTANTS,
 };
 
+const CHILD_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
+    name: "CANCELLED_WRITE_END_SECONDS",
+    doc: "The longest end of a write of a child after its bound: the cancel request\n\
+          of the statement and the wait for its reply.",
+    value: CANCELLED_WRITE_END.as_secs() as i64,
+}];
+
+/// The bounds of the writes of a worker child. The spans are whole seconds.
+pub const CHILD_BOUNDS: ConstantModule = ConstantModule {
+    file: "child_bounds.py",
+    doc: "The bounds of the writes of a worker child in horsies-core, generated from its\n\
+          Rust constants. The spans are in whole seconds.",
+    constants: &CHILD_CONSTANTS,
+};
+
 /// Every generated module of core constants, in file order.
-pub const CONSTANT_MODULES: [ConstantModule; 4] =
-    [RELEASE_BOUNDS, MONITORING_BOUNDS, BROKER_BOUNDS, EXIT_CODES];
+pub const CONSTANT_MODULES: [ConstantModule; 5] = [
+    RELEASE_BOUNDS,
+    MONITORING_BOUNDS,
+    BROKER_BOUNDS,
+    EXIT_CODES,
+    CHILD_BOUNDS,
+];
 
 /// The text of one module of core constants.
 pub fn render_constant_module(module: &ConstantModule) -> String {
@@ -338,6 +358,16 @@ mod tests {
     fn the_window_spans_are_whole_seconds() {
         assert_eq!(MONITORING_WINDOW_DEFAULT.subsec_nanos(), 0);
         assert_eq!(MONITORING_WINDOW_MAX.subsec_nanos(), 0);
+        assert_eq!(CANCELLED_WRITE_END.subsec_nanos(), 0);
+    }
+
+    #[test]
+    fn the_child_bounds_hold_the_core_spans() {
+        let rendered = render_constant_module(&CHILD_BOUNDS);
+        assert!(rendered.contains(&format!(
+            "\nCANCELLED_WRITE_END_SECONDS: Final = {}\n",
+            CANCELLED_WRITE_END.as_secs()
+        )));
     }
 
     #[test]
