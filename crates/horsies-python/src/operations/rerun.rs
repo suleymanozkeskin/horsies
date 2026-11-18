@@ -343,6 +343,18 @@ pub struct RerunClientFamilyMismatch {
     pub exception: FailureException,
 }
 
+/// The family row of the database holds a value that is not a client family
+/// (`stored`): corrupt stored data. Nothing written. `message` names the
+/// table, the column and the value. `exception` is the refusal, a
+/// `CoreContractViolation` with the subject `rerun_task`.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct RerunUnknownStoredFamily {
+    pub stored: String,
+    pub message: String,
+    pub exception: FailureException,
+}
+
 /// The subject of the exception of a refused rerun.
 const RERUN_SUBJECT: &str = "rerun_task";
 
@@ -390,6 +402,7 @@ pub enum PreparationRecord {
     InputCorrupt(RerunInputCorruptRecord),
     ClassNotRegistered(RerunClassNotRegistered),
     ClientFamilyMismatch(RerunClientFamilyMismatch),
+    UnknownStoredFamily(RerunUnknownStoredFamily),
     CallerKeyRefused(RerunCallerKeyRefused),
     IdMintRefused(IdMintRefused),
 }
@@ -410,6 +423,7 @@ impl<'py> IntoPyObject<'py> for PreparationRecord {
             Self::InputCorrupt(record) => record.into_bound_py_any(py),
             Self::ClassNotRegistered(record) => record.into_bound_py_any(py),
             Self::ClientFamilyMismatch(record) => record.into_bound_py_any(py),
+            Self::UnknownStoredFamily(record) => record.into_bound_py_any(py),
             Self::CallerKeyRefused(record) => record.into_bound_py_any(py),
             Self::IdMintRefused(record) => record.into_bound_py_any(py),
         }
@@ -506,6 +520,19 @@ fn preparation_record(preparation: RerunPreparation) -> PreparationRecord {
                 message,
             })
         }
+        RerunPreparation::UnknownStoredFamily(unknown) => {
+            let message = format!("rerun refused: {unknown}");
+            PreparationRecord::UnknownStoredFamily(RerunUnknownStoredFamily {
+                exception: FailureException::new(
+                    RERUN_SUBJECT,
+                    message.clone(),
+                    false,
+                    FailureCause::ContractViolation,
+                ),
+                message,
+                stored: unknown.stored,
+            })
+        }
         RerunPreparation::CallerKeyRefused(refused) => {
             PreparationRecord::CallerKeyRefused(RerunCallerKeyRefused {
                 cause: refused.to_string(),
@@ -567,7 +594,8 @@ pub fn rerun_read_function(
 
 /// Decide the rerun from the row of `read` (a tuple in column order):
 /// `RerunWriteRecord`, a refusal record, `RerunClassNotRegistered`,
-/// `RerunClientFamilyMismatch`, `RerunCallerKeyRefused` or `IdMintRefused`.
+/// `RerunClientFamilyMismatch`, `RerunUnknownStoredFamily`,
+/// `RerunCallerKeyRefused` or `IdMintRefused`.
 /// `sent_at` is the send instant of the new task (aware). Pure apart from
 /// the id mint. A row that does not fit the read's columns raises
 /// `CoreDefect`.
@@ -615,7 +643,7 @@ pub fn decode_rerun_write_function(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{IdempotencyKeyError, TaskAbsenceReason, Uuid7Error};
+    use horsies_core::{IdempotencyKeyError, TaskAbsenceReason, UnknownStoredFamily, Uuid7Error};
 
     use super::*;
 
@@ -715,6 +743,30 @@ mod tests {
             }),
             PreparationRecord::ClientFamilyMismatch(RerunClientFamilyMismatch { stored: None, .. })
         ));
+        match preparation_record(RerunPreparation::UnknownStoredFamily(UnknownStoredFamily {
+            stored: "GO".to_owned(),
+        })) {
+            PreparationRecord::UnknownStoredFamily(record) => {
+                assert_eq!(record.stored, "GO");
+                assert!(
+                    record
+                        .message
+                        .contains("horsies_client_family.family holds \"GO\""),
+                    "{}",
+                    record.message
+                );
+                assert_eq!(
+                    record.exception,
+                    FailureException::new(
+                        RERUN_SUBJECT,
+                        record.message.clone(),
+                        false,
+                        FailureCause::ContractViolation,
+                    )
+                );
+            }
+            _ => panic!("an unknown stored family has its own record"),
+        }
         assert!(matches!(
             preparation_record(RerunPreparation::CallerKeyRefused(
                 IdempotencyKeyError::Empty {

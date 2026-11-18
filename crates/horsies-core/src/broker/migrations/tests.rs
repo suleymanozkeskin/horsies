@@ -647,6 +647,17 @@ fn each_install_error_keeps_its_meaning_as_a_broker_error() {
     ));
     assert!(!other_family.is_retryable());
 
+    let unknown = UnknownStoredFamily {
+        stored: "GO".to_owned(),
+    };
+    let unknown_family =
+        BrokerError::from(SchemaInstallError::UnknownStoredFamily(unknown.clone()));
+    assert!(
+        matches!(&unknown_family, BrokerError::UnknownStoredFamily(inner) if *inner == unknown),
+        "{unknown_family:?}"
+    );
+    assert!(!unknown_family.is_retryable());
+
     let busy = BrokerError::from(SchemaInstallError::Lock(
         InstallLockFailure::WaitBoundReached {
             waited: INSTALL_LOCK_WAIT,
@@ -1065,6 +1076,43 @@ async fn a_database_with_no_family_row_gets_this_client_s_row() {
         .expect("record the family");
 
     assert_eq!(family_row(&database).await.as_deref(), Some("PYTHON"));
+    assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
+/// A family row that holds no client family is corrupt stored data: the
+/// install of either family is refused with the stored value at its state
+/// read, and changes nothing. The test writes the row past its CHECK
+/// (`horsies_client_family_family_known`), which it drops first.
+#[tokio::test]
+#[serial]
+async fn a_family_row_that_holds_no_client_family_is_refused_and_unchanged() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute(
+            "ALTER TABLE horsies_client_family \
+             DROP CONSTRAINT horsies_client_family_family_known; \
+             UPDATE horsies_client_family SET family = 'GO'",
+        )
+        .await;
+    let before = installed_on(&database).await;
+
+    for own in [ClientFamily::Python, ClientFamily::Rust] {
+        let refused = database.install(own, InstallLockPlan::fleet()).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(SchemaInstallError::UnknownStoredFamily(UnknownStoredFamily { stored }))
+                    if stored == "GO"
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(family_row(&database).await.as_deref(), Some("GO"));
     assert_eq!(installed_on(&database).await, before);
     database.drop().await;
 }

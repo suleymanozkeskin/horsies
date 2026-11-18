@@ -97,6 +97,7 @@ async fn rerun_with_audit(
 | `Driver(E)` | A statement failed in the caller's driver. Its retry rule is the driver's |
 | `ClassNotRegistered { key }` | The retention class of the new task has no class row. Nothing is written |
 | `ClientFamilyMismatch { stored }` | Another client installed the database, or it records none. Nothing is written. Not retryable |
+| `UnknownStoredFamily(UnknownStoredFamily)` | The family row of the database holds a value that is not a client family (`stored`): corrupt stored data. Nothing is written. Not retryable |
 | `CallerKeyRefused(IdempotencyKeyError)` | The caller key is not a valid idempotency key. Nothing is written |
 | `IdMintRefused(Uuid7Error)` | The id of the new task could not be minted. Nothing is written |
 | `Row(RerunRowError)` | A row did not fit its statement. Not retryable |

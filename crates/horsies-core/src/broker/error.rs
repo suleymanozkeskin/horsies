@@ -175,6 +175,13 @@ pub enum BrokerError {
         own: crate::broker::client_family::ClientFamily,
     },
 
+    /// The family row of the database holds a value that is not a client
+    /// family: corrupt stored data. The install changed nothing, and no
+    /// write ran. Not retryable: the same row is refused again until it is
+    /// repaired.
+    #[error("{0}")]
+    UnknownStoredFamily(crate::broker::client_family::UnknownStoredFamily),
+
     /// The schema install refused the database: it holds something this
     /// build does not install into (a 0.x schema, unknown horsies tables, a
     /// newer, foreign, failed or changed migration). Nothing was changed. Not
@@ -275,6 +282,7 @@ impl BrokerError {
             | Self::IncompleteTaskHistoryCutover
             | Self::InvalidConnectionSettings(_)
             | Self::ClientFamilyMismatch { .. }
+            | Self::UnknownStoredFamily(_)
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
             | Self::InvalidExecutionClass(_)

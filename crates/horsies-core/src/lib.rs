@@ -187,7 +187,9 @@ pub use crate::broker::task_lists::{
     TASK_LIST_BOUND,
 };
 
-pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure, RecordedFamily};
+pub use crate::broker::client_family::{
+    ClientFamily, FamilyCheckFailure, RecordedFamily, UnknownStoredFamily,
+};
 pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;

@@ -283,6 +283,7 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::ClaimContract(_)
+            | Self::UnknownStoredFamily(_)
             | Self::RowDecode(_) => FailureCause::ContractViolation,
             Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover

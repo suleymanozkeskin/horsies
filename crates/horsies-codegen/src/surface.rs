@@ -3335,6 +3335,13 @@ const HISTORY_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "RerunUnknownStoredFamily",
+        doc: "The family row of the database holds a value that is not a client family (stored):\ncorrupt stored data. Nothing written. message names the table, the column and the\nvalue; exception is a CoreContractViolation with the subject rerun_task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("stored", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        methods: &[],
+    },
+    StubClass {
         name: "RerunCallerKeyRefused",
         doc: "The caller key is not a valid idempotency key; cause names why. Nothing written.",
         constructor: Constructor::NoConstructor,
@@ -3852,7 +3859,7 @@ const FUNCTIONS: &[StubFunction] = &[
     StubFunction {
         name: "prepare_rerun_write",
         parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
-        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunCallerKeyRefused | IdMintRefused"),
+        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused"),
         doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect.",
     },
     StubFunction {
