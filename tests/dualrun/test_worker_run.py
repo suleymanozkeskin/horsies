@@ -2,7 +2,11 @@
 
 Each test runs one scenario on the reference worker and on the candidate
 worker, each with a fresh database, and requires an empty snapshot diff, an
-equal report and a clean exit on both sides. The scenarios cover, on the
+equal report and a clean exit on both sides. A pair whose snapshots differ
+while its run spans do not lie in one UTC hour (``ClockBoundaryStraddle``)
+runs again with a new scenario and new databases, at most
+``STRADDLE_REPEATS`` times; the last pair must have an empty diff. The
+scenarios cover, on the
 profiles where each applies:
 - plain successes on each child kind;
 - task errors with and without a retry;
@@ -37,9 +41,13 @@ import pytest
 from horsies.core.types.result import Err, Ok
 from tests.dualrun.apps import whole_run_app as whole
 from tests.dualrun.compare import render_diff
-from tests.dualrun.databases import DualRunDatabase, install_baseline_schema
+from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.worker_run import (
+    ClockBoundaryStraddle,
     DropOptionKey,
+    DualRunMismatch,
+    PairEqual,
+    PairJudgement,
     PauseWhenRunning,
     ReportEntry,
     ReportKey,
@@ -61,6 +69,11 @@ MakeDatabase = Callable[[], DualRunDatabase]
 
 BATCH: int = 64
 """The plain successes of one scenario: more than one claim batch."""
+
+STRADDLE_REPEATS: int = 1
+"""How many times a pair judged ``ClockBoundaryStraddle`` runs again. The
+judgement of the last pair stands as it is: a straddle fails the test
+too."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,23 +263,30 @@ CASES: dict[str, _Case] = {
 }
 
 
-def _installed(make_database: MakeDatabase) -> DualRunDatabase:
-    database = make_database()
-    match install_baseline_schema(database):
-        case Ok():
-            return database
-        case Err(failed):
-            pytest.fail(f'{failed.step.value} {failed.database}: {failed.cause}')
-
-
 @pytest.mark.parametrize('name', sorted(CASES))
 def test_the_core_worker_leaves_what_the_python_worker_leaves(
     empty_database: MakeDatabase,
     name: str,
 ) -> None:
     case = CASES[name]
+    straddles: list[ClockBoundaryStraddle] = []
+    for _ in range(STRADDLE_REPEATS + 1):
+        match _checked_pair(name, case, empty_database):
+            case PairEqual():
+                return
+            case DualRunMismatch(diff=diff):
+                pytest.fail(f'{name}: DualRunMismatch:\n{render_diff(diff)}')
+            case ClockBoundaryStraddle() as straddle:
+                straddles.append(straddle)
+    pytest.fail(_straddles_text(name, straddles))
+
+
+def _checked_pair(name: str, case: _Case, make_database: MakeDatabase) -> PairJudgement:
+    """Run a new scenario of ``case`` on two new databases and assert the
+    clean exits, the equal reports and the statuses. The judgement of the
+    two snapshots."""
     scenario = case.build()
-    match run_pair(scenario, _installed(empty_database), _installed(empty_database)):
+    match run_pair(scenario, make_database(), make_database()):
         case Ok(pair):
             pass
         case Err(failed):
@@ -274,10 +294,22 @@ def test_the_core_worker_leaves_what_the_python_worker_leaves(
     for side in (pair.reference, pair.candidate):
         assert side.worker.end is StopEnd.EXITED, side.worker.log_tail
         assert side.worker.exit_code == 0, side.worker.log_tail
-    assert not pair.snapshot_diff.entries, render_diff(pair.snapshot_diff)
     assert not pair.report_differences, pair.report_differences
     assert _send_statuses(pair.reference.report, scenario) == case.statuses
     assert _workflow_statuses(pair.reference.report, scenario) == case.workflow_statuses
+    return pair.snapshots
+
+
+def _straddles_text(name: str, straddles: list[ClockBoundaryStraddle]) -> str:
+    spans = '; '.join(
+        f'reference {straddle.reference_span}, core {straddle.candidate_span}'
+        for straddle in straddles
+    )
+    return (
+        f'{name}: ClockBoundaryStraddle in each of {len(straddles)} pairs: the run spans '
+        f'did not lie in one UTC hour ({spans}); the snapshots of the last pair differ:\n'
+        f'{render_diff(straddles[-1].diff)}'
+    )
 
 
 def _send_statuses(

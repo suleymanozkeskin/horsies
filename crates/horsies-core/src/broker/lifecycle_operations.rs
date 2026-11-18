@@ -664,7 +664,7 @@ mod tests {
             .acquire_timeout(std::time::Duration::from_secs(1))
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
-        let broker = PostgresBroker::from_pool(pool);
+        let broker = PostgresBroker::from_pool(pool, crate::ClientFamily::Rust);
         let check = QueueStartCheck {
             worker_id: "worker-1".to_owned(),
             queues: Vec::new(),

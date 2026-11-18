@@ -524,7 +524,10 @@ fn claimed(task_id: Uuid, queue: &str, generation: DateTime<Utc>, kind: TaskKind
 
 /// The outcome writer of [`WORKER`] on `pool`.
 fn writer(pool: &PgPool) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool(
+        pool.clone(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
@@ -717,7 +720,7 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
     let (task_id, generation) =
         seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE).await;
     let workflow_id = seed_workflow(&pool, task_id, &queue, "ENQUEUED").await;
-    let expired = PostgresBroker::from_pool(pool.clone())
+    let expired = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
         .expire_claimed_task_before_start(
             task_id,
             WORKER,
@@ -777,7 +780,7 @@ async fn an_expired_workflow_task_fails_its_node_skips_its_dependent_and_fails_t
     .execute(&pool)
     .await
     .expect("seed the dependent node");
-    let expired = PostgresBroker::from_pool(pool.clone())
+    let expired = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
         .expire_claimed_task_before_start(
             task_id,
             WORKER,

@@ -203,7 +203,11 @@ mod p7_maintenance_tests {
         let mut config = RetentionConfig::default();
         config.worker_state_retention_hours = Some(1);
         config.terminal_record_retention_hours = Some(1);
-        run_retention_cleanup(&PostgresBroker::from_pool(pool.clone()), &config).await;
+        run_retention_cleanup(
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+            &config,
+        )
+        .await;
 
         let state: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
@@ -259,7 +263,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -357,7 +361,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -418,7 +422,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -610,7 +614,7 @@ mod p7_maintenance_tests {
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
-            &PostgresBroker::from_pool(pool.clone()),
+            &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
             crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
@@ -2307,7 +2311,7 @@ mod tests {
         config.pool_size = 3;
         config.max_overflow = 0;
         config.pool_timeout = 1;
-        let broker = PostgresBroker::connect_worker_with(&config)
+        let broker = PostgresBroker::connect_worker_with(&config, crate::ClientFamily::Rust)
             .await
             .expect("connect the broker of a worker");
         let open = broker.core_pools_for_read().expect("open the core pools");
@@ -2793,7 +2797,7 @@ mod tests {
         // The empty-batch drain loop removes the rest in one call (2 + 0-row
         // statements); short-batch semantics would have returned after the
         // first 2-row batch above. The seeded workflows are two hours old.
-        let total = PostgresBroker::from_pool(pool.clone())
+        let total = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust)
             .delete_expired_workflows(WorkflowRetentionPass {
                 retention_hours: NonZeroU32::new(1).expect("one hour is above zero"),
                 batch_size: NonZeroU32::new(6).expect("six nodes is above zero"),

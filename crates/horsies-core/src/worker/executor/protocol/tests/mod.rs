@@ -1,6 +1,7 @@
 //! Tests of the frame codec: byte examples of the Python codec, pinned
 //! version-2 metadata, every refusal, and the read buffer.
 
+mod field_checks;
 mod python_vectors;
 
 use std::num::NonZeroU64;
