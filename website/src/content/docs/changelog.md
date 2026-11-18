@@ -237,9 +237,7 @@ before you upgrade a 0.7 deployment.
   `enqueue_async` take `input_json` in their place and require `sent_at` and
   `send_kind`. The row stores the text as sent, `{}` for none; an input that
   is not a JSON object or null is `INVALID_INPUT`.
-  `PostgresBroker.prepare_send_command` takes `input_json` in place of
-  `kwargs_json`. `horsies.core.utils.fingerprint.enqueue_fingerprint` is
-  removed.
+  `horsies.core.utils.fingerprint.enqueue_fingerprint` is removed.
 
 - **A database URL takes the scheme `postgresql://` or `postgres://`.**
   `postgresql+psycopg://`, the one scheme 0.7 accepted, and every other
@@ -667,6 +665,17 @@ before you upgrade a 0.7 deployment.
   `unsubscribe_payload`, `listen_many`, `unlisten` and `unsubscribe`;
   `PostgresBroker.validate_worker_database_paths` and `send_route`;
   `PartitionMaintenanceDatabase.coverage_gate_enabled`.
+
+- **`PostgresBroker.mark_stale_tasks_as_failed` and
+  `terminate_orphaned_workflow_tasks`.** The reaper of each worker runs both
+  passes in the core: the stale RUNNING pass every
+  `RecoveryConfig.check_interval_ms` (default 30 s) when
+  `auto_fail_stale_running` is on, and one orphan audit page every
+  `orphan_task_audit_interval_ms` (default 60 s) when
+  `auto_terminate_orphaned_workflow_tasks` is on. Both settings are on by
+  default. `PostgresBroker.audit_orphaned_workflow_tasks` stays. Also
+  removed: `PostgresBroker.create_single_connection_engine` and
+  `BrokerResources.session_async_engine`.
 
 ### Rust client (crate `horsies`)
 

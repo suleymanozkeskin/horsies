@@ -14,7 +14,7 @@ from typing import (
     assert_never,
 )
 from uuid import UUID
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import psycopg
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
@@ -61,9 +61,6 @@ from horsies._core import (
     PendingExpiryBoundReached,
     PendingExpiryDrained,
     PendingExpiryFailed,
-    StaleRunningRecovered,
-    StaleRunningScanFailed,
-    StaleRunningScanFull,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -91,16 +88,7 @@ from horsies.core.brokers.resources import (
     split_closed_loops,
 )
 from horsies.core.brokers.enqueue_task import (
-    EnqueueKey,
-    EnqueueRow,
-    EnqueueStart,
-    FirstRun,
-    Keyed,
     SendKind,
-    StartAfterDelay,
-    StartAt,
-    StartNow,
-    Unkeyed,
 )
 from horsies.core.brokers.worker_state_records import (
     class_coverage_of,
@@ -150,12 +138,6 @@ from horsies.core.types.status import (
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, SerializationError, loads_json
-from horsies.core.codec.task_options import (
-    OPTIONS_INTEGER_OUT_OF_RANGE,
-    options_integer_out_of_range,
-    stored_execution,
-    stored_max_retries,
-)
 from horsies.core.codec.validation_errors import without_validation_input
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.models.class_coverage import ClassCoverage, ClassReport
@@ -163,10 +145,6 @@ from horsies.core.models.health import (
     DatabasePing,
     WorkerPong,
     WorkerStateSnapshot,
-)
-from horsies.core.history.identity.fingerprint import (
-    COMMAND_FINGERPRINT_VERSION,
-    EnqueueCommandV1,
 )
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
@@ -240,234 +218,6 @@ _DRIVER_ERRORS: Final = (SQLAlchemyError, psycopg.Error, OSError)
 """What a statement can raise when the database or the network fails."""
 
 
-@dataclass(frozen=True, slots=True)
-class SendCommand:
-    """The stored values of one send command, checked. Only the database can refuse it now.
-
-    The version-1 fingerprint leaves the task id and ``sent_at`` out, so one
-    value serves every row of the command: each slot of a schedule fire.
-    ``stored_input`` is the ``input`` text the row stores; ``execution`` and
-    ``max_retries`` are read from ``task_options``.
-    """
-
-    task_name: str
-    queue_name: str
-    priority: int
-    stored_input: str
-    task_options: str | None
-    execution: Execution
-    max_retries: int
-    retention_class_key: str
-    retain_rerun_input: bool
-    fingerprint_version: int
-    fingerprint: bytes
-
-
-def _send_command(
-    *,
-    task_name: str,
-    queue_name: str,
-    priority: int,
-    input_json: str | None,
-    good_until: datetime | None,
-    enqueue_delay_seconds: int | None,
-    task_options: str | None,
-    retention_class_key: str,
-    retain_rerun_input: bool,
-) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
-    """Check the input and the options of one send and build its command. Pure.
-
-    Refusals, in this order: the input text (``INVALID_INPUT``), the
-    options text (``INVALID_TASK_OPTIONS``), a value the fingerprint
-    refuses (``INVALID_INPUT``).
-    """
-    input_r = _parse_enqueue_input(task_name, input_json)
-    if is_err(input_r):
-        return input_r
-    stored_input = input_r.ok_value
-    options_r = _parse_enqueue_task_options(task_name, task_options)
-    if is_err(options_r):
-        return options_r
-    parsed_options = options_r.ok_value
-    fingerprint_r = _command_fingerprint(
-        task_name=task_name,
-        queue_name=queue_name,
-        priority=priority,
-        stored_input=stored_input,
-        good_until=good_until,
-        enqueue_delay_seconds=enqueue_delay_seconds,
-        task_options=task_options,
-        retention_class_key=retention_class_key,
-        retain_rerun_input=retain_rerun_input,
-    )
-    if is_err(fingerprint_r):
-        return fingerprint_r
-    return Ok(SendCommand(
-        task_name=task_name,
-        queue_name=queue_name,
-        priority=priority,
-        stored_input=stored_input,
-        task_options=task_options,
-        execution=parsed_options.execution,
-        max_retries=parsed_options.max_retries,
-        retention_class_key=retention_class_key,
-        retain_rerun_input=retain_rerun_input,
-        fingerprint_version=COMMAND_FINGERPRINT_VERSION,
-        fingerprint=fingerprint_r.ok_value,
-    ))
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedEnqueue:
-    """The checked input of one enqueue. Only the database can refuse it now.
-
-    ``row.sent_at`` is the caller's call-site instant, which the row stores.
-    """
-
-    row: EnqueueRow
-
-
-def _command_fingerprint(
-    *,
-    task_name: str,
-    queue_name: str,
-    priority: int,
-    stored_input: str,
-    good_until: datetime | None,
-    enqueue_delay_seconds: int | None,
-    task_options: str | None,
-    retention_class_key: str,
-    retain_rerun_input: bool,
-) -> Result[bytes, BrokerInvalidInput]:
-    """The version-1 command fingerprint of a send. Pure.
-
-    The input travels in the fingerprint's ``input_json`` element as the
-    stored ``input`` text, and the args element is always null: a Python send has
-    no positional arguments. The fingerprint is therefore a function of the
-    stored row. A value that the fingerprint refuses is ``INVALID_INPUT``.
-    """
-    try:
-        command = EnqueueCommandV1(
-            task_name=task_name,
-            queue_name=queue_name,
-            priority=priority,
-            positional_args_json=None,
-            input_json=stored_input,
-            good_until=good_until,
-            enqueue_delay_seconds=enqueue_delay_seconds,
-            task_options_json=task_options,
-            retention_class_key=retention_class_key,
-            retain_rerun_input=retain_rerun_input,
-            rerun_of_task_id=None,
-            rerun_root_task_id=None,
-        )
-    except ValueError as exc:
-        return Err(BrokerInvalidInput(
-            message=f'enqueue input refused for {task_name}: {exc}',
-            exception=exc,
-        ))
-    return Ok(command.fingerprint)
-
-
-_SENT_AT_FUTURE_TOLERANCE: Final = timedelta(seconds=5)
-"""Absorbs trivial clock drift in the future ``sent_at`` guard."""
-
-
-def _check_enqueue_timing(
-    *,
-    sent_at: datetime,
-    enqueued_at: datetime | None,
-    enqueue_delay_seconds: int | None,
-) -> Result[None, BrokerInvalidInput]:
-    """Refuse a call whose instants cannot mean what they say.
-
-    A naive instant cannot be compared with now, and a naive ``enqueued_at``
-    would be stored under the session time zone: a wrong instant. ``sent_at``
-    is an immutable call-site timestamp, not a scheduling mechanism: a future
-    one with no explicit schedule is almost certainly legacy ETA usage that
-    would silently run immediately, because ``enqueued_at`` defaults to NOW().
-    """
-    if enqueued_at is not None and enqueue_delay_seconds is not None:
-        return Err(BrokerInvalidInput(
-            message='Cannot specify both enqueued_at and enqueue_delay_seconds',
-            exception=NoCause(),
-        ))
-    for label, instant in (('sent_at', sent_at), ('enqueued_at', enqueued_at)):
-        if instant is not None and instant.tzinfo is None:
-            return Err(BrokerInvalidInput(
-                message=f'{label} must be timezone-aware',
-                exception=NoCause(),
-            ))
-    if (
-        sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
-        and enqueued_at is None
-        and enqueue_delay_seconds is None
-    ):
-        return Err(BrokerInvalidInput(
-            message=(
-                'sent_at is in the future without enqueued_at or enqueue_delay_seconds; '
-                'sent_at is a call-site timestamp, use enqueued_at or '
-                'enqueue_delay_seconds to schedule deferred execution'
-            ),
-            exception=NoCause(),
-        ))
-    return Ok(None)
-
-
-@dataclass(frozen=True, slots=True)
-class _EnqueueOptions:
-    """The columns read from the task options of one enqueue."""
-
-    max_retries: int
-    execution: Execution
-
-
-def _parse_enqueue_task_options(
-    task_name: str, task_options: str | None,
-) -> Result[_EnqueueOptions, BrokerInvalidTaskOptions]:
-    """Parse task options to their retry limit and execution class.
-
-    ``serialize_task_options()`` always produces this text, so malformed JSON
-    is a bug, not a runtime condition, and it must not be silently swallowed.
-    No options (None) store no retries and ``ISOLATED``. An empty text is
-    not JSON and is refused, as the core refuses it. Options that hold an int
-    outside ``MIN_OPTIONS_INTEGER`` to ``MAX_OPTIONS_INTEGER`` (for example a
-    ``max_delay_seconds`` of ``2**64``) are refused before the retry limit is
-    read, as the core refuses them.
-    """
-    if task_options is None:
-        return Ok(_EnqueueOptions(max_retries=0, execution=Execution.ISOLATED))
-    opts_r = loads_json(task_options)
-    if is_err(opts_r):
-        return Err(BrokerInvalidTaskOptions(
-            message=f'task_options JSON corrupt: {opts_r.err_value}',
-            exception=opts_r.err_value,
-        ))
-    if options_integer_out_of_range(opts_r.ok_value):
-        return Err(BrokerInvalidTaskOptions(
-            message=OPTIONS_INTEGER_OUT_OF_RANGE,
-            exception=NoCause(),
-        ))
-    retry_limit_r = stored_max_retries(opts_r.ok_value)
-    if is_err(retry_limit_r):
-        detail = retry_limit_r.err_value.detail
-        return Err(BrokerInvalidTaskOptions(
-            message=f'task_options refused for {task_name}: {detail}',
-            exception=NoCause(),
-        ))
-    execution_r = stored_execution(opts_r.ok_value)
-    if is_err(execution_r):
-        detail = execution_r.err_value.detail
-        return Err(BrokerInvalidTaskOptions(
-            message=f'task_options refused for {task_name}: {detail}',
-            exception=NoCause(),
-        ))
-    return Ok(_EnqueueOptions(
-        max_retries=retry_limit_r.ok_value,
-        execution=execution_r.ok_value,
-    ))
-
-
 def _parse_enqueue_json(
     label: str, task_name: str, text: str,
 ) -> Result[Json, BrokerInvalidInput]:
@@ -518,57 +268,6 @@ def _parse_enqueue_input(
                 ),
                 exception=NoCause(),
             ))
-
-
-def _enqueue_start(
-    enqueued_at: datetime | None,
-    enqueue_delay_seconds: int | None,
-) -> EnqueueStart:
-    """When the row is due: at ``enqueued_at``, after the delay, or now.
-
-    ``_check_enqueue_timing`` refuses both together first; both here is a
-    caller defect (``AssertionError``). Pure.
-    """
-    match (enqueued_at, enqueue_delay_seconds):
-        case (None, None):
-            return StartNow()
-        case (datetime() as at, None):
-            return StartAt(at=at)
-        case (None, int() as delay_s):
-            return StartAfterDelay(delay_s=delay_s)
-        case _:
-            raise AssertionError(
-                'the timing check refuses enqueued_at with enqueue_delay_seconds',
-            )
-
-
-def _enqueue_key(
-    task_name: str,
-    idempotency_key: str | None,
-    key_window: timedelta,
-) -> Result[EnqueueKey, BrokerInvalidInput]:
-    """The key of a send: none, or the digest of the key scoped to the task
-    name with its reservation window, exact to the microsecond. A key that the
-    scope refuses is ``INVALID_INPUT``. Pure."""
-    if idempotency_key is None:
-        return Ok(Unkeyed())
-    from horsies.core.history.identity.keys import (
-        IDEMPOTENCY_SCOPE_VERSION,
-        ScopedIdempotencyKey,
-    )
-
-    try:
-        digest = ScopedIdempotencyKey(task_name=task_name, key=idempotency_key).digest
-    except ValueError as exc:
-        return Err(BrokerInvalidInput(
-            message=f'idempotency key refused for {task_name}: {exc}',
-            exception=exc,
-        ))
-    return Ok(Keyed(
-        digest=digest,
-        scope_version=IDEMPOTENCY_SCOPE_VERSION,
-        window=key_window,
-    ))
 
 
 def _monitoring_call_failed(
@@ -1753,25 +1452,6 @@ class PostgresBroker:
         engine_cfg['connect_args'] = self.config.tcp_connect_args()
         return engine_cfg
 
-    def create_single_connection_engine(self) -> AsyncEngine:
-        """Create a private engine of at most one connection.
-
-        It has the runtime engine's URL, options, and read hooks, and does
-        not share the runtime pool. It opens its connection on first use.
-        The caller owns the engine and disposes it.
-        """
-        engine_cfg = self._runtime_engine_config()
-        engine_cfg['pool_size'] = 1
-        engine_cfg['max_overflow'] = 0
-        engine = create_async_engine(
-            sqlalchemy_url(self.config.database_url.get_secret_value()),
-            **engine_cfg,
-        )
-        register_identity_text_reads(engine)
-        register_session_settings(engine, self._runtime_session_settings())
-        self._register_pre_ping(engine)
-        return engine
-
     def _register_pre_ping(self, engine: AsyncEngine | Engine) -> None:
         """With ``pool_pre_ping`` on, ping a pooled connection of ``engine``
         at checkout when it waited in the pool for longer than
@@ -1931,109 +1611,6 @@ class PostgresBroker:
 
     # ----------------- Async API -----------------
 
-    @staticmethod
-    def _prepare_enqueue(
-        *,
-        task_id: UUID,
-        task_name: str,
-        queue_name: str,
-        priority: int,
-        input_json: str | None,
-        sent_at: datetime,
-        enqueued_at: Optional[datetime],
-        enqueue_delay_seconds: Optional[int],
-        good_until: Optional[datetime],
-        task_options: Optional[str],
-        retention_class_key: str,
-        retain_rerun_input: bool,
-        idempotency_key: Optional[str],
-        key_window: timedelta,
-    ) -> Result[_PreparedEnqueue, BrokerInvalidInput | BrokerInvalidTaskOptions]:
-        """Check one enqueue's input and build its row. Touches no database.
-
-        Every refusal means nothing was written, so a refused input never
-        looks like a write that may have happened. A lone surrogate in
-        ``task_name`` or ``queue_name`` raises ``UnicodeEncodeError`` from the
-        fingerprint: those are programmer constants, so it crashes loud.
-        ``key_window`` is how long a key stays reserved after its task
-        finishes; only a keyed send uses it.
-        """
-        timing_r = _check_enqueue_timing(
-            sent_at=sent_at,
-            enqueued_at=enqueued_at,
-            enqueue_delay_seconds=enqueue_delay_seconds,
-        )
-        if is_err(timing_r):
-            return timing_r
-        command_r = _send_command(
-            task_name=task_name,
-            queue_name=queue_name,
-            priority=priority,
-            input_json=input_json,
-            good_until=good_until,
-            enqueue_delay_seconds=enqueue_delay_seconds,
-            task_options=task_options,
-            retention_class_key=retention_class_key,
-            retain_rerun_input=retain_rerun_input,
-        )
-        if is_err(command_r):
-            return command_r
-        command = command_r.ok_value
-
-        key_r = _enqueue_key(task_name, idempotency_key, key_window)
-        if is_err(key_r):
-            return key_r
-        return Ok(_PreparedEnqueue(
-            row=EnqueueRow(
-                task_id=task_id,
-                task_name=task_name,
-                queue_name=queue_name,
-                priority=priority,
-                stored_input=command.stored_input,
-                task_options=task_options,
-                execution=command.execution,
-                retention_class_key=retention_class_key,
-                retain_rerun_input=retain_rerun_input,
-                max_retries=command.max_retries,
-                good_until=good_until,
-                sent_at=sent_at,
-                start=_enqueue_start(enqueued_at, enqueue_delay_seconds),
-                command_fingerprint=command.fingerprint,
-                key=key_r.ok_value,
-                lineage=FirstRun(),
-            ),
-        ))
-
-    def prepare_send_command(
-        self,
-        *,
-        task_name: str,
-        queue_name: str,
-        priority: int,
-        input_json: str | None,
-        task_options: str | None,
-        retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
-    ) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
-        """The stored values of an unkeyed send with no deadline and no delay, without a write.
-
-        The values are those ``enqueue_async`` writes for the same arguments:
-        the retention class resolves as there (an explicit None is
-        ``forever``), and the rerun-input posture is the broker's default.
-        Touches no database; the refusals are those of ``enqueue_async``
-        before its write.
-        """
-        return _send_command(
-            task_name=task_name,
-            queue_name=queue_name,
-            priority=priority,
-            input_json=input_json,
-            good_until=None,
-            enqueue_delay_seconds=None,
-            task_options=task_options,
-            retention_class_key=resolve_retention_class_key(retention_class_key),
-            retain_rerun_input=self.config.retain_rerun_input_default,
-        )
-
     async def enqueue_async(
         self,
         task_name: str,
@@ -2114,54 +1691,6 @@ class PostgresBroker:
         except CoreError as exc:
             return _enqueue_core_error(task_name, call_refusal_or_raise(exc))
         return _enqueue_result(outcome)
-
-    def _build_raw_result_record(
-        self,
-        task_id: UUID,
-        task_name: str,
-        status: TaskStatus,
-        result_json: 'str | None',
-    ) -> BrokerResult[RawResultRecord | None]:
-        """Decode the result column into a ``RawResultRecord``.
-
-        ``result_json`` None (no stored result) gives a record without a
-        result. Returns ``Err(INVALID_JSON_PAYLOAD)`` when the stored JSON is
-        malformed (parser failure, an empty text, NaN / Infinity rejected by
-        the parse-constant guard) or when the top-level payload is neither
-        ``None`` nor a JSON object (the envelope grammar requires a
-        ``dict``). Otherwise wraps the loaded value into the record.
-        """
-        if result_json is None:
-            return Ok(RawResultRecord(
-                task_id=task_id,
-                task_name=task_name,
-                status=status,
-                raw_result=None,
-            ))
-        _lr = loads_json(result_json)
-        if is_err(_lr):
-            return Err(BrokerInvalidJsonPayload(
-                message=(
-                    f'Result JSON parse failed for task {task_id}: '
-                    f'{_lr.err_value}'
-                ),
-                exception=_lr.err_value,
-            ))
-        raw_value = _lr.ok_value
-        if raw_value is not None and not isinstance(raw_value, dict):
-            return Err(BrokerInvalidJsonPayload(
-                message=(
-                    f'Result for task {task_id} is not a JSON object; '
-                    f'got {type(raw_value).__name__}'
-                ),
-                exception=NoCause(),
-            ))
-        return Ok(RawResultRecord(
-            task_id=task_id,
-            task_name=task_name,
-            status=status,
-            raw_result=raw_value,
-        ))
 
     async def get_raw_result_record_async(
         self,
@@ -2815,85 +2344,6 @@ class PostgresBroker:
             return _monitoring_call_failed('get_expired_tasks', call_refusal_or_raise(exc))
         return self._task_list_answer('get_expired_tasks', outcome)
 
-    async def mark_stale_tasks_as_failed(
-        self,
-        stale_threshold_ms: int = 300_000,
-        finalizing_stale_threshold_ms: int = 300_000,
-    ) -> BrokerResult[int]:
-        """Recover RUNNING tasks whose runner stopped beating: a crash retry
-        when the task's policy allows it, else the failure. One core pass.
-
-        The core reads at most one scan batch of candidates with
-        ``horsies_stale_running_scan``, without a lock; a full batch leaves
-        the rest to the next pass and a warning is logged. Each candidate is
-        then one ``horsies_finish_stale_attempt`` statement that commits
-        alone: it judges staleness again under the task advisory lock and the
-        row lock and writes the attempt with the retry or the move, with the
-        crash result that the core builds. A scheduled retry also wakes its
-        queue (best effort). Returns the number of tasks retried or failed; a
-        refused candidate is not counted, and a candidate whose statement
-        failed is logged on ``horsies.broker`` and skipped.
-
-        Failures, each ``CLEANUP_FAILED``; nothing was written:
-        - the scan, the connect or the client family check failed;
-          ``retryable`` is the core's classification of the cause;
-        - a threshold below 0 or above 2,147,483,647 ms; not retryable;
-        - the core of this process cannot run the pass (``CoreCallRefusal``);
-          ``retryable`` follows ``core_error_retryable``.
-
-        A cancel of the caller does not stop the pass: the core runs it to
-        its end.
-        """
-        thresholds = (stale_threshold_ms, finalizing_stale_threshold_ms)
-        for threshold_ms in thresholds:
-            if not SIGNED_64_BIT_MIN <= threshold_ms <= SIGNED_64_BIT_MAX:
-                refusal = f'the stale threshold {threshold_ms} ms is not a 64-bit integer'
-                return Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.CLEANUP_FAILED,
-                        message=f'mark_stale_tasks_as_failed failed: {refusal}',
-                        retryable=False,
-                        exception=OverflowError(refusal),
-                    ),
-                )
-        try:
-            outcome = await self._core_handle.mark_stale_running_async(
-                stale_threshold_ms, finalizing_stale_threshold_ms,
-            )
-        except CoreError as exc:
-            refusal = call_refusal_or_raise(exc)
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.CLEANUP_FAILED,
-                    message=f'mark_stale_tasks_as_failed failed: {refusal}',
-                    retryable=core_error_retryable(refusal),
-                    exception=refusal,
-                ),
-            )
-        match outcome:
-            case StaleRunningRecovered(recovered=recovered):
-                return Ok(recovered)
-            case StaleRunningScanFull(recovered=recovered, scan_batch=scan_batch):
-                self.logger.warning(
-                    'mark_stale_tasks_as_failed read a full scan batch of %s '
-                    'candidates; the rest is recovered next pass',
-                    scan_batch,
-                )
-                return Ok(recovered)
-            case StaleRunningScanFailed(
-                message=message, retryable=retryable, exception=exception,
-            ):
-                return Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.CLEANUP_FAILED,
-                        message=f'mark_stale_tasks_as_failed failed: {message}',
-                        retryable=retryable,
-                        exception=exception,
-                    ),
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
-
     async def expire_pending_tasks(self) -> BrokerResult[int]:
         """Expire PENDING tasks whose ``good_until`` deadline passed: one core
         pass.
@@ -3109,14 +2559,6 @@ class PostgresBroker:
                 )
             case _ as unreachable:
                 assert_never(unreachable)
-
-    async def terminate_orphaned_workflow_tasks(self) -> BrokerResult[int]:
-        """Cancel one bounded page and return its applied outcome count."""
-        match await self.audit_orphaned_workflow_tasks():
-            case Ok(report):
-                return Ok(report.cancelled)
-            case Err(error):
-                return Err(error)
 
     # ----------------- Sync API Facades -----------------
 

@@ -16,13 +16,11 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
 
 RUNTIME_URL = SecretStr('postgresql://u:p@pooler:6432/db')
-SESSION_URL = SecretStr('postgresql://u:p@direct:5432/db')
 
 
 @pytest.mark.unit
@@ -32,33 +30,6 @@ class TestEngineKwargsHideParameters:
 
         assert config.sqlalchemy_engine_kwargs()['hide_parameters'] is True
 
-    @pytest.mark.asyncio
-    async def test_runtime_and_session_engines_hide_parameters(self) -> None:
-        broker = PostgresBroker(
-            PostgresConfig(
-                database_url=RUNTIME_URL,
-                session_database_url=SESSION_URL,
-                pgbouncer_transaction_mode=True,
-            )
-        )
-        resources = broker._build_resources()
-        session_engine = resources.session_async_engine()
-        try:
-            assert session_engine is not resources.engine
-            assert resources.engine.sync_engine.hide_parameters is True
-            assert session_engine.sync_engine.hide_parameters is True
-        finally:
-            await resources.engine.dispose()
-            await session_engine.dispose()
-
-    @pytest.mark.asyncio
-    async def test_single_connection_engine_hides_parameters(self) -> None:
-        broker = PostgresBroker(PostgresConfig(database_url=RUNTIME_URL))
-        engine = broker.create_single_connection_engine()
-        try:
-            assert engine.sync_engine.hide_parameters is True
-        finally:
-            await engine.dispose()
 
     def test_live_check_opens_no_engine(self) -> None:
         """Both live phases run in the core on one core handle: the

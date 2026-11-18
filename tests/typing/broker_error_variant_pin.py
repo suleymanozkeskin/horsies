@@ -46,9 +46,7 @@ from horsies import (
 from horsies.core.brokers.enqueue_task import Inserted, SendKind, enqueue_result
 from horsies.core.brokers.postgres import (
     PostgresBroker,
-    SendCommand,
     _async_context_err,  # pyright: ignore[reportPrivateUsage]
-    _command_fingerprint,  # pyright: ignore[reportPrivateUsage]
     _parse_enqueue_input,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.task_decorator import (
@@ -183,20 +181,9 @@ def every_enqueue_variant_is_matched(
             assert_never(unreachable)
 
 
-def enqueue_helpers_return_their_subsets(good_until: datetime) -> None:
+def enqueue_helpers_return_their_subsets() -> None:
     stored_input: Result[str, BrokerInvalidInput] = _parse_enqueue_input(
         'report', None,
-    )
-    fingerprint: Result[bytes, BrokerInvalidInput] = _command_fingerprint(
-        task_name='report',
-        queue_name='default',
-        priority=100,
-        stored_input='{}',
-        good_until=good_until,
-        enqueue_delay_seconds=None,
-        task_options=None,
-        retention_class_key='default',
-        retain_rerun_input=True,
     )
     answered: Result[
         UUID, BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict
@@ -204,20 +191,7 @@ def enqueue_helpers_return_their_subsets(good_until: datetime) -> None:
     async_context: Err[BrokerAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
     )
-    _ = (stored_input, fingerprint, answered, async_context)
-
-
-def send_command_returns_only_the_input_refusals(broker: PostgresBroker) -> None:
-    built: Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions] = (
-        broker.prepare_send_command(
-            task_name='report',
-            queue_name='default',
-            priority=100,
-            input_json=None,
-            task_options=None,
-        )
-    )
-    _ = built
+    _ = (stored_input, answered, async_context)
 
 
 def send_mapping_refuses_the_operation_error(

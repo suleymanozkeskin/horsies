@@ -237,7 +237,6 @@ To fix it, restart the process. The core does not start again in the same proces
 | `OperationalErrorCode` | One more member: `WORKFLOW_START_INCOMPLETE`. Recovery fails a RUNNING workflow that has no node rows with this code. `TaskError` refuses `'WORKFLOW_START_INCOMPLETE'` as a user code | Add the case to an exhaustive `match`. Rename a user code with this name |
 | `TaskSendPayload.args_json`, `kwargs_json` and `enqueue_sha` | Removed. `TaskSendPayload.input_json` holds the keyword arguments as one JSON object, or `None` for none | Read `input_json` |
 | `PostgresBroker.enqueue()` and `enqueue_async()` with `args_json`, `kwargs_json` and `enqueue_sha` | `input_json` replaces the three. `sent_at` and `send_kind` are required. An `input_json` that is not a JSON object or null, or that repeats a key, gets `INVALID_INPUT` | Give `input_json`, `sent_at` and `send_kind`. Import `SendKind` from `horsies`: `SendKind.FIRST` for the first send of a task id, `SendKind.REPEAT` for a resend |
-| `PostgresBroker.prepare_send_command()` with `kwargs_json` | Takes `input_json` | Give `input_json` |
 | `RerunInputUnavailable.reference_locator` | Removed. `task_id` and `disposition` stay | Remove the read |
 | `horsies.core.utils.fingerprint.enqueue_fingerprint` | Removed | Remove the call |
 | `get_stale_tasks(stale_threshold_minutes)` with any value | An `int` from 0 to 525,600, else `INVALID_INPUT`. `get_stale_tasks` and `get_expired_tasks` return at most 10,000 rows | Give a value in the range |
@@ -245,6 +244,8 @@ To fix it, restart the process. The core does not start again in the same proces
 | `horsies.web.routes`, `horsies.web.events`, `horsies.web.read_cache`, `horsies.web.auth.view_guard`, `horsies.web.auth.act_guard`, `horsies.web.schema.schema_guard` | Removed. The core serves each route. The exports of `horsies.web` do not change | Mount `create_monitoring_app` |
 | `horsies/web/static/` in the wheel | Removed. `horsies._core` contains the web UI | Nothing to serve |
 | Syce, the terminal monitoring tool | Removed | Use the web UI |
+| `PostgresBroker.mark_stale_tasks_as_failed()` and `terminate_orphaned_workflow_tasks()` | Removed. The reaper of each worker runs both passes: the stale RUNNING pass every `check_interval_ms` (default 30 s) when `auto_fail_stale_running` is on, and one orphan audit page every `orphan_task_audit_interval_ms` (default 60 s) when `auto_terminate_orphaned_workflow_tasks` is on. Both settings are on by default | Remove the calls. To run one orphan audit page by hand, call `audit_orphaned_workflow_tasks()` |
+| `PostgresBroker.create_single_connection_engine()` and `BrokerResources.session_async_engine()` | Removed | Remove the calls |
 
 The error types keep their `EVENT_LOOP_LIMIT` and `LOOP_RUNNER_FAILED` variants, so an exhaustive `match` on them stays valid. The calls that run on the core do not return them.
 
