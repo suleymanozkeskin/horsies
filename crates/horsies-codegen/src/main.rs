@@ -11,8 +11,9 @@
 //!   (`horsies_core::manifest_schema::SCHEDULER_MANIFEST`) in the same form.
 //! - `_catalog/workflow_spec.py`: the workflow spec data
 //!   (`horsies_core::manifest_schema::WORKFLOW_SPEC_DATA`) in the same form.
-//! - `_catalog/release_bounds.py`, `_catalog/monitoring_bounds.py` and
-//!   `_catalog/broker_bounds.py`: integer constants of horsies-core
+//! - `_catalog/monitoring_bounds.py`, `_catalog/broker_bounds.py`,
+//!   `_catalog/exit_codes.py` and `_catalog/child_bounds.py`: integer
+//!   constants of horsies-core
 //!   (`constants::CONSTANT_MODULES`).
 //! - `_catalog/broker_errors.py`, `_catalog/workflow_handle_errors.py`,
 //!   `_catalog/monitoring_errors.py` and `_catalog/task_send_errors.py`: the

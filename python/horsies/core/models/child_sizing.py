@@ -78,10 +78,6 @@ not cut a thread pool below one connection per 10 seats. 256 seats, Postgres
 18 on the host itself, one run each: 26 connections give 1,750 tasks/s, 10
 give 1,660, 40 give 1,520."""
 
-FINALIZE_BATCH_FLUSHERS: Final = 2
-"""The steady flushers of the batched success write (``FinalizeBatcher``):
-they write whenever rows wait. Each one runs one statement at a time through
-the worker's core handle, whose pool has the size of the parent pool."""
 
 PARENT_POOL_CLAIM_CONNECTIONS: Final = 1
 """The connection of the engine pool of the worker process that the claim
@@ -219,20 +215,3 @@ def parent_pool_connections(seats: int) -> int:
     )
 
 
-def parent_pool_flusher_bound(connections: int) -> int:
-    """The most flushers of the batched success write, steady and surge
-    together, on a parent pool of ``connections`` connections: the core pool
-    of the worker, which has that size, less ``PARENT_POOL_RESERVE``. The
-    claim loop holds a connection of the engine pool, not of the core pool.
-    The core pool keeps the same count free from its batch checkouts, so the
-    flushers fill its batch checkouts and no more.
-
-    ``connections`` is at least ``PARENT_POOL_MIN_CONNECTIONS``: AppConfig
-    validation refuses a smaller explicit size, and a derived size is at
-    least the floor. A smaller value is a defect: ``AssertionError``.
-    """
-    assert connections >= PARENT_POOL_MIN_CONNECTIONS, (
-        f'a parent pool of {connections} connections is below the minimum '
-        f'of {PARENT_POOL_MIN_CONNECTIONS}'
-    )
-    return connections - PARENT_POOL_RESERVE

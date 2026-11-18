@@ -174,7 +174,7 @@ class TestCascadeResumeMissingCompletionCheck:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='PARENT_FAIL', message='A failed')),
         )

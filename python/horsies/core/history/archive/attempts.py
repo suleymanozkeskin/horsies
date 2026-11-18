@@ -95,27 +95,6 @@ def decode_attempt_snapshot(
     return _decode_records(payload)
 
 
-def decode_attempt_encoding(
-    *,
-    version: int,
-    payload: bytes,
-) -> ArchiveDecodeResult[tuple[AttemptRecord, ...]]:
-    """Decode the attempts of a live task, encoded on read in the snapshot form.
-
-    ``horsies_encode_task_attempts`` writes the bytes that the move to
-    history stores, but a live read stores no digest, so only the version
-    and the body are checked. Fails closed on every malformation, as
-    ``decode_attempt_snapshot`` does.
-    """
-    version_failure = validate_archive_version(
-        domain=ArchiveDomain.ATTEMPTS,
-        version=version,
-    )
-    if version_failure is not None:
-        return version_failure
-    return _decode_records(payload)
-
-
 def _decode_records(payload: bytes) -> ArchiveDecodeResult[tuple[AttemptRecord, ...]]:
     """The attempt records of a version-1 body, numbered from 1 without a gap."""
     loaded = loads_json_bytes(payload)

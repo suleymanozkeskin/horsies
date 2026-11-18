@@ -6,6 +6,8 @@ enum values. Both lists are read from code and must stay equal.
 
 from __future__ import annotations
 
+import uuid
+
 import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -92,7 +94,7 @@ def _handle_with_rows(rows: list[MagicMock]) -> WorkflowHandle[Any]:
     broker._core_handle.workflow_nodes_async = AsyncMock(
         return_value=_record(core.WorkflowNodesRead, nodes=rows),
     )
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
 class TestTasksAsync:

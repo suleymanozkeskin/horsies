@@ -68,10 +68,10 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # Complete just task A
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
         # Aggregator should be ENQUEUED (join='any' satisfied by A)
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'
 
     async def test_any_join_skips_when_all_deps_fail(
@@ -105,20 +105,20 @@ class TestOrJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
         )
 
         # Aggregator should be SKIPPED (no dep succeeded)
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'SKIPPED'
 
     async def test_any_join_stays_pending_while_possible(
@@ -152,20 +152,20 @@ class TestOrJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
 
         # Aggregator should still be PENDING (B might succeed)
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'PENDING'
 
         # Now complete B with success
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=10))
 
         # Aggregator should now be ENQUEUED
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'ENQUEUED'
 
     async def test_any_join_waits_for_ctx_deps(
@@ -199,17 +199,17 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A only (join condition satisfied)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
         # Aggregator should remain PENDING until ctx deps are terminal
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'PENDING'
 
         # Complete B (ctx dep)
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=4))
 
         # Now aggregator can be ENQUEUED
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'ENQUEUED'
 
     # -- New boundary / edge-case tests --
@@ -238,9 +238,9 @@ class TestOrJoin:
         )
 
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
-        status_agg = await get_task_status(session, handle.workflow_id, 1)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 1)
         assert status_agg == 'ENQUEUED'
 
     async def test_any_join_single_dep_fails(
@@ -271,12 +271,12 @@ class TestOrJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
 
-        status_agg = await get_task_status(session, handle.workflow_id, 1)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 1)
         assert status_agg == 'SKIPPED'
 
     async def test_any_join_cascade_skips_downstream(
@@ -317,15 +317,15 @@ class TestOrJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
 
-        status_b = await get_task_status(session, handle.workflow_id, 1)
+        status_b = await get_task_status(session, str(handle.workflow_id), 1)
         assert status_b == 'SKIPPED'
 
-        status_c = await get_task_status(session, handle.workflow_id, 2)
+        status_c = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_c == 'SKIPPED'
 
     async def test_any_join_idempotent_after_enqueue(
@@ -355,13 +355,13 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds → aggregator ENQUEUED
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'ENQUEUED'
 
         # B succeeds → aggregator should still be ENQUEUED (guard at line 1457)
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=4))
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'ENQUEUED'
 
     async def test_any_join_out_of_order_completion(
@@ -392,9 +392,9 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # Complete last dep (index 2) first
-        await finish_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
+        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=6))
 
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'
 
     async def test_any_join_ctx_dep_fails(
@@ -427,17 +427,17 @@ class TestOrJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds (join met) and B fails (ctx dep terminal)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
         )
 
         # Aggregator should be ENQUEUED: join='any' satisfied + ctx dep is terminal (failed)
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'ENQUEUED'
 
     async def test_any_join_ctx_dep_skipped(
@@ -480,18 +480,18 @@ class TestOrJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
         # B should be SKIPPED now (cascade from A failing, join='all' default)
-        status_b = await get_task_status(session, handle.workflow_id, 1)
+        status_b = await get_task_status(session, str(handle.workflow_id), 1)
         assert status_b == 'SKIPPED'
 
         # C succeeds → join='any' met + ctx dep B is terminal (SKIPPED)
-        await finish_task(session, broker, handle.workflow_id, 2, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=4))
 
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'
 
 
@@ -542,11 +542,11 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A and B
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=4))
 
         # Aggregator should be ENQUEUED (2 >= min_success)
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'
 
     async def test_quorum_skips_when_impossible(
@@ -583,20 +583,20 @@ class TestQuorumJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
         )
 
         # Aggregator should be SKIPPED (max possible = 1, need 2)
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'SKIPPED'
 
     async def test_quorum_stays_pending_while_possible(
@@ -633,27 +633,27 @@ class TestQuorumJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
 
         # Aggregator should still be PENDING (B and C can still succeed)
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'PENDING'
 
         # Complete B with success
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=4))
 
         # Still PENDING (need one more)
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'PENDING'
 
         # Complete C with success
-        await finish_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
+        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=6))
 
         # Now ENQUEUED (2 >= min_success)
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'
 
     async def test_quorum_join_waits_for_ctx_deps(
@@ -688,17 +688,17 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A only (quorum satisfied)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
         # Aggregator should remain PENDING until ctx deps are terminal
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'PENDING'
 
         # Complete B (ctx dep)
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=4))
 
         # Now aggregator can be ENQUEUED
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'ENQUEUED'
 
     # -- New boundary / edge-case tests --
@@ -732,16 +732,16 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # Complete A and B → still PENDING (need 3)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=4))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=4))
 
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'PENDING'
 
         # Complete C → now ENQUEUED (3 >= 3)
-        await finish_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
+        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=6))
 
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'
 
     async def test_quorum_min_success_one(
@@ -773,9 +773,9 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # First success → ENQUEUED immediately
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
 
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'
 
     async def test_quorum_cascade_skips_downstream(
@@ -819,22 +819,22 @@ class TestQuorumJoin:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
         )
 
-        status_d = await get_task_status(session, handle.workflow_id, 3)
+        status_d = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_d == 'SKIPPED'
 
-        status_e = await get_task_status(session, handle.workflow_id, 4)
+        status_e = await get_task_status(session, str(handle.workflow_id), 4)
         assert status_e == 'SKIPPED'
 
     async def test_quorum_ctx_dep_fails(
@@ -868,17 +868,17 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds (quorum met) and B fails (ctx dep terminal)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
         )
 
         # Aggregator should be ENQUEUED: quorum satisfied + ctx dep terminal
-        status_agg = await get_task_status(session, handle.workflow_id, 2)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 2)
         assert status_agg == 'ENQUEUED'
 
     async def test_quorum_exact_threshold_boundary(
@@ -912,22 +912,22 @@ class TestQuorumJoin:
         handle = await start_ok(spec, broker)
 
         # A succeeds → completed=1, still PENDING (need 2)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=2))
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'PENDING'
 
         # B fails → completed=1, failed=1, remaining=1, max_possible=2 → still PENDING
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             1,
             TaskResult(err=TaskError(error_code='FAIL', message='B failed')),
         )
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'PENDING'
 
         # C succeeds → completed=2 >= min_success=2 → ENQUEUED
-        await finish_task(session, broker, handle.workflow_id, 2, TaskResult(ok=6))
-        status_agg = await get_task_status(session, handle.workflow_id, 3)
+        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=6))
+        status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'ENQUEUED'

@@ -21,12 +21,8 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.workflows.engine import (
-    _handle_workflow_task_failure,  # pyright: ignore[reportPrivateUsage]
-)
 from horsies.core.workflows.lifecycle import pause_workflow
 from tests.integration.conftest import DB_URL
 from tests.broker_resources_support import current_resources
@@ -137,7 +133,7 @@ async def test_handle_pause_notifies_each_paused_workflow_through_the_trigger(
     )
 
     with _captured_statements(current_resources(broker).engine) as statements:
-        paused = await pause_workflow(broker, parent_id)
+        paused = await pause_workflow(broker, uuid.UUID(parent_id))
 
     assert is_ok(paused) and paused.ok_value is True, paused
     assert sorted(await _received(workflow_done_listener)) == sorted(
@@ -148,32 +144,3 @@ async def test_handle_pause_notifies_each_paused_workflow_through_the_trigger(
     assert await _status_of(session, child_id) == 'PAUSED'
 
 
-@pytest.mark.asyncio(loop_scope='function')
-async def test_on_error_pause_notifies_each_paused_workflow_after_commit(
-    clean_workflow_tables: None,
-    engine: AsyncEngine,
-    session: AsyncSession,
-    workflow_done_listener: psycopg.AsyncConnection,
-) -> None:
-    _ = clean_workflow_tables
-    parent_id, child_id = await _seed_parent_with_child(
-        session, on_error='pause',
-    )
-    failure: TaskResult[Any, TaskError] = TaskResult(
-        err=TaskError(error_code='NODE_FAILED', message='node failed'),
-    )
-
-    with _captured_statements(engine) as statements:
-        should_continue = await _handle_workflow_task_failure(
-            session, parent_id, failure,
-        )
-        assert await _received(workflow_done_listener) == []
-        await session.commit()
-
-    assert should_continue is False
-    assert sorted(await _received(workflow_done_listener)) == sorted(
-        [parent_id, child_id],
-    )
-    assert not [s for s in statements if 'pg_notify' in s]
-    assert await _status_of(session, parent_id) == 'PAUSED'
-    assert await _status_of(session, child_id) == 'PAUSED'

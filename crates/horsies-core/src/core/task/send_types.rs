@@ -399,6 +399,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::ClaimContract(_)
         | BrokerError::Statement(_)
         | BrokerError::PoolSettings(_)
+        | BrokerError::ProcessRuntime(_)
         | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
@@ -496,12 +497,25 @@ mod tests {
 
     /// A refused input is never replayed: the same input meets the same
     /// refusal (Python `test_send_idempotency_conflict.py`, refusal rows).
+    /// A rule of the version-1 command (an empty retention class key) and a
+    /// rule of the scoped key (an empty key) are refusals of the same kind:
+    /// Python passes their `ValueError`, the Rust client its precondition
+    /// cause.
     #[test]
     fn a_refusal_is_validation_failed_and_refused_for_a_resend() {
+        use crate::core::history::enqueue::EnqueuePreparationError;
+        use crate::core::history::identity::keys::IdempotencyKeyError;
+
         for refusal in [
             BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::by_rule(
                 crate::core::history::enqueue::SendPart::TaskOptions,
                 "bad options".to_owned(),
+            )),
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::empty_retention_class_key()),
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::from(
+                EnqueuePreparationError::Idempotency(IdempotencyKeyError::Empty {
+                    label: "idempotency key",
+                }),
             )),
             BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
         ] {

@@ -258,7 +258,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
                 message: "database".to_owned(),
                 retryable: true,
                 task_id,
-                cause: crate::FailureCause::Connection,
+                cause: crate::broker::BrokerError::ConnectionFailed("refused".to_owned()),
             },
             503,
             r#"{"detail":"database"}"#,
@@ -267,6 +267,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
             TaskActionError::StoredDataInvalid {
                 message: "stored".to_owned(),
                 task_id,
+                cause: crate::core::lifecycle::OutcomeDecodeError("NOT_KNOWN".to_owned()),
             },
             500,
             r#"{"detail":"stored"}"#,
@@ -631,6 +632,7 @@ fn stored_data_invalid_is_a_server_error() {
     let outcome = task_action_outcome(Err(TaskActionError::StoredDataInvalid {
         message: "stored data does not parse".to_owned(),
         task_id: Uuid::nil(),
+        cause: crate::core::lifecycle::OutcomeDecodeError("NOT_KNOWN".to_owned()),
     }));
 
     assert_eq!(outcome.status_code(), 500);

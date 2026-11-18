@@ -4,10 +4,10 @@ The live table's status domain admits only live rows, so a fixture with
 a terminal status is seeded as a `horsies_task_history` row — exactly
 where production writes it. A fresh install performs no class
 registration, leaf creation, or staged-reader publication at startup,
-so `ensure_history_seedable` owns that publication sequence; every step
-is idempotent (registration reports the class as already registered,
-coverage reports leaves as already conformant, republication rewrites
-the same manifest).
+so `ensure_history_seedable` runs that sequence through the baseline
+functions of the core's coverage pass; every step is idempotent
+(registration answers VERIFIED, leaf creation ALREADY_CONFORMANT, and
+republication rewrites the same manifest).
 
 `route_rows` is the choke point suites call from their own persist
 helpers: terminal-status `TaskModel` fixtures become history rows, any
@@ -21,9 +21,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
@@ -33,31 +33,18 @@ from horsies.core.history.archive.attempts import (
     decode_attempt_snapshot,
 )
 from horsies.core.history.archive.versions import DecodedArchiveValue
-from horsies.core.history.commands import EnsureLeafCoverage
-from horsies.core.history.names import WORKFLOW_PHASE2_PENDING
 from horsies.core.history.ddl.classes import (
-    ClassAlreadyRegistered,
-    ClassRegistered,
     DEFAULT_RETENTION_CLASS_KEY,
-    DEFAULT_RETENTION_DURATION,
-    register_finite_retention_class,
+    DEFAULT_RETENTION_DAYS,
 )
-from horsies.core.history.heartbeats.partitioning import (
-    EnsureHeartbeatCoverage,
-    ensure_heartbeat_coverage,
-    register_heartbeat_class,
-)
-from horsies.core.history.outcomes import (
-    LeafAlreadyConformant,
-    LeafCreated,
-    LeafIndexRepaired,
-)
-from horsies.core.history.partitions.manager import ensure_leaf_coverage
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
 from horsies.core.models.workflow_pg import WorkflowTaskModel
 from horsies.core.types.status import TaskStatus
 from tests.attempt_snapshot_support import encode_attempt_snapshot
+
+WORKFLOW_PHASE2_PENDING: Final = 'horsies_workflow_phase2_pending'
+"""The phase-2 record table of the baseline."""
 
 HISTORY_SEED_CLASS_KEY = DEFAULT_RETENTION_CLASS_KEY
 """Seeding uses the ratified default class, so fixture rows, stamped
@@ -87,51 +74,83 @@ def seed_terminalization_kind(status: str) -> str:
             raise AssertionError(f'{status!r} is not a terminal status')
 
 
+SEED_HISTORY_HORIZON_DAYS: Final = 2
+"""Daily history leaves from today through this many days ahead."""
+
+SEED_HEARTBEAT_HORIZON_HOURS: Final = 2
+"""Hourly heartbeat leaves from this hour through this many hours ahead."""
+
+SEED_HEARTBEAT_CLASS_HORIZON_HOURS: Final = 3
+"""The horizon that the heartbeat class row stores."""
+
+_REGISTER_CLASSES_SQL = text(
+    'SELECT class_key, outcome FROM horsies_register_retention_classes('
+    'CAST(:days AS smallint[]), CAST(:hours AS smallint))'
+)
+_CREATE_HISTORY_LEAF_SQL = text(
+    'SELECT outcome, leaf_name, conflict_kind FROM horsies_create_history_leaf('
+    'CAST(:class_key AS text), CAST(:lower_anchor AS timestamptz))'
+)
+_CREATE_HEARTBEAT_LEAF_SQL = text(
+    'SELECT outcome, leaf_name, conflict_kind FROM horsies_create_heartbeat_leaf('
+    'CAST(:lower_anchor AS timestamptz))'
+)
+_REGISTERED_OUTCOMES: Final = frozenset({'REGISTERED', 'VERIFIED', 'HORIZON_UPDATED'})
+_COVERED_OUTCOMES: Final = frozenset({'CREATED', 'ALREADY_CONFORMANT', 'INDEX_REPAIRED'})
+
+
 async def ensure_history_seedable(connection: AsyncConnection) -> None:
     """Register the default class, cover leaves + heartbeats, publish.
 
-    The test-side stand-in for the production maintenance owner (its
-    groundwork proposal is pending): the same idempotent sequence a
-    fleet needs before any terminalization or heartbeat write can land.
+    The steps of the core's coverage pass, through its baseline functions,
+    in the caller's transaction: the class rows
+    (``horsies_register_retention_classes``), the daily leaves of the
+    default class (``horsies_create_history_leaf``), the hourly heartbeat
+    leaves (``horsies_create_heartbeat_leaf``), then the readers
+    (``horsies_publish_history_readers``). Any other outcome fails the
+    caller with an ``AssertionError``.
     """
-    registration = await register_finite_retention_class(
-        connection,
-        class_key=DEFAULT_RETENTION_CLASS_KEY,
-        duration=DEFAULT_RETENTION_DURATION,
-    )
-    match registration:
-        case ClassRegistered() | ClassAlreadyRegistered():
-            pass
-        case _:
-            raise AssertionError(f'retention class unusable: {registration!r}')
-    publisher = StagedLoaderPublisher()
-    creations = await ensure_leaf_coverage(
-        connection,
-        EnsureLeafCoverage(
-            class_key=DEFAULT_RETENTION_CLASS_KEY, horizon_days=2
-        ),
-        publisher,
-    )
-    for creation in creations:
-        match creation:
-            case LeafCreated() | LeafAlreadyConformant() | LeafIndexRepaired():
-                continue
-            case _:
-                raise AssertionError(f'leaf coverage refused: {creation!r}')
-    await register_heartbeat_class(connection, horizon=timedelta(hours=3))
-    heartbeat_creations = await ensure_heartbeat_coverage(
-        connection,
-        EnsureHeartbeatCoverage(horizon_hours=2),
-    )
-    for creation in heartbeat_creations:
-        match creation:
-            case LeafCreated() | LeafAlreadyConformant() | LeafIndexRepaired():
-                continue
-            case _:
-                raise AssertionError(
-                    f'heartbeat coverage refused: {creation!r}'
-                )
-    await publisher.republish(connection)
+    registered = (
+        await connection.execute(
+            _REGISTER_CLASSES_SQL,
+            {'days': [DEFAULT_RETENTION_DAYS], 'hours': SEED_HEARTBEAT_CLASS_HORIZON_HOURS},
+        )
+    ).all()
+    for row in registered:
+        if row.outcome not in _REGISTERED_OUTCOMES:
+            raise AssertionError(f'retention class {row.class_key} unusable: {row.outcome}')
+    database_now = (await connection.execute(text('SELECT now()'))).scalar_one()
+    assert isinstance(database_now, datetime), database_now
+    now = database_now.astimezone(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for day_offset in range(SEED_HISTORY_HORIZON_DAYS + 1):
+        leaf = (
+            await connection.execute(
+                _CREATE_HISTORY_LEAF_SQL,
+                {
+                    'class_key': DEFAULT_RETENTION_CLASS_KEY,
+                    'lower_anchor': today + timedelta(days=day_offset),
+                },
+            )
+        ).one()
+        if leaf.outcome not in _COVERED_OUTCOMES:
+            raise AssertionError(
+                f'leaf coverage refused: {leaf.outcome} {leaf.leaf_name} {leaf.conflict_kind}'
+            )
+    this_hour = now.replace(minute=0, second=0, microsecond=0)
+    for hour_offset in range(SEED_HEARTBEAT_HORIZON_HOURS + 1):
+        leaf = (
+            await connection.execute(
+                _CREATE_HEARTBEAT_LEAF_SQL,
+                {'lower_anchor': this_hour + timedelta(hours=hour_offset)},
+            )
+        ).one()
+        if leaf.outcome not in _COVERED_OUTCOMES:
+            raise AssertionError(
+                f'heartbeat coverage refused: {leaf.outcome} {leaf.leaf_name} '
+                f'{leaf.conflict_kind}'
+            )
+    _ = await StagedLoaderPublisher().republish(connection)
     await connection.execute(ITEST_TASK_ROWS_VIEW_DDL)
 
 

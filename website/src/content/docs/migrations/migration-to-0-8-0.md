@@ -110,7 +110,7 @@ Nothing moves from the 0.7 database. Tasks in flight, workflows, task history, s
 
 ## Task ids are UUIDs
 
-Each task id of the public API is a `uuid.UUID`, not a `str`. Workflow ids stay `str`.
+Each task id of the public API is a `uuid.UUID`, not a `str`. Workflow ids stay `str`, except the id of a `WorkflowHandle` ([below](#workflow-handle-ids-are-uuids)).
 
 | Where | What to do |
 | ----- | ---------- |
@@ -123,6 +123,28 @@ from uuid import UUID
 
 stored_task_id = '0193a1f2-4c5d-7e6f-8a9b-0c1d2e3f4a5b'
 result = app.get_result(UUID(stored_task_id))
+```
+
+## Workflow handle ids are UUIDs
+
+`WorkflowHandle.workflow_id` is a `uuid.UUID`, not a `str`, and pyright refuses a `str` id. A handle that a start returns needs no change.
+
+| Where | What to do |
+| ----- | ---------- |
+| `WorkflowHandle(workflow_id=text, broker=broker)` | Parse the text once with `WorkflowHandle.for_id(text, broker)`: `Ok(handle)`, or `Err(HandleInvalidWorkflowId)` for text that is not a UUID. In 0.7 each call of such a handle returned `DB_OPERATION_FAILED` |
+| `handle.workflow_id` | Read a `uuid.UUID`. Write `str(handle.workflow_id)` where you keep, send or compare the id as text, for example against the `workflow_id` of a handle error |
+| The `workflow_id` of `pause_workflow`, `resume_workflow`, `pause_workflow_sync` and `resume_workflow_sync` | Give a `uuid.UUID` |
+| The `workflow_id` of the handle error classes | Still a `str`: the canonical text of the UUID (lower case, with hyphens). In 0.7 it was the text that the handle was made from |
+
+```python
+from horsies import Err, Ok, WorkflowHandle
+
+stored_workflow_id = '0193a1f2-4c5d-7e6f-8a9b-0c1d2e3f4a5c'
+match WorkflowHandle.for_id(stored_workflow_id, app.get_broker()):
+    case Ok(ok_value=handle):
+        status = handle.status()
+    case Err(err_value=invalid):
+        print(invalid.message)  # the text is not a UUID; no handle was built
 ```
 
 ## The class of a database failure

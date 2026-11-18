@@ -26,10 +26,14 @@ from typing import Any, Final, NoReturn
 
 import pytest
 
+import horsies._core as core
 from horsies.core.worker import child_main
 from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.child_frames import MAX_BODY_BYTES
 from horsies.core.worker.run_return import (
+    MarkerDone,
+    MarkerEnd,
+    MarkerMetStoppedCore,
     ResultEnvelope,
     SetRunning,
     StoppedBeforeRunning,
@@ -107,14 +111,21 @@ def _leave(task_loop: TaskLoop, work: Coroutine[Any, Any, None]) -> asyncio.Task
 def _report(
     task_loop: TaskLoop,
     returned: SetRunning | StoppedBeforeRunning,
+    marker_end: MarkerEnd = MarkerDone(),
+    events: list[str] | None = None,
+    metas: list[dict[str, Any]] | None = None,
 ) -> tuple[child_main._AfterRun, list[str], list[dict[str, Any]]]:
-    events: list[str] = []
-    metas: list[dict[str, Any]] = []
+    """Report one run. The marker records itself in ``events`` and ends
+    with ``marker_end``; pass ``events`` and ``metas`` to read them when the
+    report ends the child."""
+    events = [] if events is None else events
+    metas = [] if metas is None else metas
     frame = run_frame(task_id=TASK_ID)
 
-    def mark_finalizing(marked: object) -> None:
+    def mark_finalizing(marked: object) -> MarkerEnd:
         assert marked is frame
         events.append(MARKER)
+        return marker_end
 
     after = child_main._report_run(
         _RecordingSocket(events, metas),  # pyright: ignore[reportArgumentType]
@@ -124,6 +135,14 @@ def _report(
         mark_finalizing,
     )
     return after, events, metas
+
+
+@pytest.fixture
+def exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``os._exit`` raises ``_Exited``; ``logging.shutdown`` does nothing, so
+    the handlers of the test stay open."""
+    monkeypatch.setattr(child_main.os, '_exit', _raise_exit)
+    monkeypatch.setattr(child_main.logging, 'shutdown', lambda: None)
 
 
 class TestTheMarkerOfARun:
@@ -211,6 +230,56 @@ class TestTheMarkerOfARun:
         assert after is child_main._AfterRun.TO_RETIRE
         # The task never ends. Drop it quietly: it is pending on the loop.
         left._log_destroy_pending = False  # pyright: ignore[reportAttributeAccessIssue]
+
+    def test_a_marker_that_met_the_stopped_core_reports_the_result_then_ends_the_child(
+        self,
+        exits: None,
+    ) -> None:
+        """The body finished: the parent gets its result and writes it, and
+        the child ends after the frame."""
+        events: list[str] = []
+        metas: list[dict[str, Any]] = []
+        stopped = core.CoreStopped('log forwarder', 'planned panic')
+
+        with pytest.raises(_Exited) as exited:
+            _report(
+                TaskLoop(),
+                SetRunning(ResultEnvelope(ENVELOPE)),
+                MarkerMetStoppedCore(stopped),
+                events,
+                metas,
+            )
+
+        assert exited.value.code == child_main.CORE_STOPPED_EXIT_CODE
+        assert events == [MARKER, 'result']
+        assert metas[0]['end'] == {'kind': 'result'}
+
+    def test_a_marker_after_left_work_that_met_the_stopped_core_ends_the_child_after_the_frame(
+        self,
+        exits: None,
+        short_grace: None,
+        task_loop: TaskLoop,
+    ) -> None:
+        events: list[str] = []
+        metas: list[dict[str, Any]] = []
+        stopped = core.CoreStopped('log forwarder', 'planned panic')
+
+        async def flush() -> None:
+            await asyncio.sleep(SHORT_GRACE_S / 4)
+
+        _ = _leave(task_loop, flush())
+        with pytest.raises(_Exited) as exited:
+            _report(
+                task_loop,
+                SetRunning(ResultEnvelope(ENVELOPE)),
+                MarkerMetStoppedCore(stopped),
+                events,
+                metas,
+            )
+
+        assert exited.value.code == child_main.CORE_STOPPED_EXIT_CODE
+        assert events == ['body_returned', MARKER, 'left_work_ended']
+        assert metas[-1]['end'] == 'in_grace'
 
     def test_a_run_that_stopped_before_running_writes_no_marker(self) -> None:
         after, events, metas = _report(TaskLoop(), StoppedBeforeRunning('CLAIM_LOST'))

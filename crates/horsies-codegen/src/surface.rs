@@ -8,8 +8,7 @@
 //! the type comes from the core catalog itself.
 
 use horsies_core::catalog::{CodeCatalog, CodeEnum};
-use horsies_core::monitoring::MonitoringQueryErrorCode;
-use horsies_core::{BrokerErrorCode, TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
+use horsies_core::{TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
 
 /// The type text of an annotation.
 #[derive(Clone, Copy, Debug)]
@@ -103,9 +102,19 @@ pub struct StubStaticMethod {
     pub function: StubFunction,
 }
 
+/// A `from <module> import <names>` line of the stub: classes of the
+/// package that the annotations name, for example the generated error
+/// classes that an operation returns.
+#[derive(Clone, Copy, Debug)]
+pub struct StubImport {
+    pub module: &'static str,
+    pub names: &'static [&'static str],
+}
+
 /// The whole module.
 #[derive(Clone, Copy, Debug)]
 pub struct ModuleSurface {
+    pub imports: &'static [StubImport],
     pub exceptions: &'static [StubException],
     pub classes: &'static [StubClass],
     pub static_methods: &'static [StubStaticMethod],
@@ -405,13 +414,14 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
 ];
 
-const PING_OUTCOME: &str = "DatabasePingRecord | BrokerFailure";
-const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFailure";
+const PING_OUTCOME: &str = "DatabasePingRecord | BrokerOperationFailed";
+const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed";
 const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendAsyncContext | \
      SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | \
      SendKeyConflict";
-const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailure";
-const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerFailure";
+const TASK_INFO_OUTCOME: &str =
+    "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -433,8 +443,9 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const ENSURE_PARTITION_COVERAGE_OUTCOME: &str =
     "CoverageEnsuredRecord | CoverageEnsureFailedRecord | CoverageFailed";
 const PRUNE_EXPIRED_PARTITIONS_OUTCOME: &str = "PrunePassRecord | PruneFailed";
-const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
-     CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
+/// A refused or failed cancel is a generated class of
+/// `horsies._catalog.monitoring_errors`, built in Rust.
+const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | TaskActionCoreError";
 const EXPIRE_PENDING_TASKS_OUTCOME: &str =
     "PendingExpiryDrained | PendingExpiryBoundReached | PendingExpiryFailed";
 const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
@@ -459,8 +470,10 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
 const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
     &[keyword("message", "str"), keyword("failure_result", "str")];
-const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | \
-     WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed";
+/// A failed handle operation is a generated class of
+/// `horsies._catalog.workflow_handle_errors`, built in Rust.
+const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed";
 const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
     &[positional("request", "NodeFinishRequest")];
 const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
@@ -482,18 +495,21 @@ const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
     keyword("max_rows", "int"),
     keyword("quarantine_after_attempts", "int"),
 ];
-const PAUSE_WORKFLOW_OUTCOME: &str =
-    "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
-const CANCEL_WORKFLOW_OUTCOME: &str =
-    "WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed";
-const WORKFLOW_STATUS_OUTCOME: &str = "WorkflowStatusRead | WorkflowAbsent | HandleFailed";
+const PAUSE_WORKFLOW_OUTCOME: &str = "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const CANCEL_WORKFLOW_OUTCOME: &str = "WorkflowCancelled | WorkflowNotCancellable | \
+     WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_STATUS_OUTCOME: &str =
+    "WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
 const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEndedRead | \
-     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed";
-const WORKFLOW_NODE_RESULTS_OUTCOME: &str =
-    "WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed";
-const WORKFLOW_NODE_RESULT_OUTCOME: &str =
-    "StoredNodeResultRecord | NodeResultNotStored | HandleFailed";
-const WORKFLOW_NODES_OUTCOME: &str = "WorkflowNodesRead | WorkflowAbsent | HandleFailed";
+     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | \
+     HandleStoredDataInvalid";
+const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_NODES_OUTCOME: &str =
+    "WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -930,14 +946,20 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
     },
 ];
 
-const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
-const PING_WORKERS_OUTCOME: &str = "WorkerPongsRecord | BrokerFailure";
-const WORKER_STATES_OUTCOME: &str = "WorkerStatesRecord | BrokerFailure";
-const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerFailure";
-const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerFailure";
-const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerFailure";
-const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFailure";
-const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
+/// A failed monitoring read is a generated class of
+/// `horsies._catalog.monitoring_errors`, built in Rust.
+const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringQueryCoreError";
+const PING_WORKERS_OUTCOME: &str =
+    "WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled";
+const WORKER_STATES_OUTCOME: &str =
+    "WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput";
+const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
+const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerOperationFailed";
+const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerOperationFailed";
+const TASK_LIST_OUTCOME: &str =
+    "TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+const MONITORING_DETAIL_OUTCOME: &str =
+    "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
 /// The monitoring methods of `CoreHandle`.
 const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
@@ -1336,21 +1358,6 @@ const ARGUMENT_CLASSES: &[StubClass] = &[
 
 const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
-        name: "BrokerFailure",
-        doc: "An expected failure of a broker operation.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            StubProperty {
-                name: "code",
-                annotation: TypeText::WireValuesOf(<BrokerErrorCode as CodeEnum>::CATALOG),
-            },
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "DatabasePingRecord",
         doc: "The round trip of one database ping.",
         constructor: Constructor::NoConstructor,
@@ -1454,13 +1461,37 @@ const RECORD_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "SendValidationFailed",
-        doc: "The core refused the send before any statement. Nothing was written. cause_text is the\nJSON reader's error when the refused text does not read.",
+        doc: "The core refused the send before any statement. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("code", "Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']"),
             property("message", "str"),
-            property("cause_text", "str | None"),
+            property(
+                "cause",
+                "SendRefusalUnreadableJson | SendRefusalByRule | SendRefusalByValueRule",
+            ),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalUnreadableJson",
+        doc: "The refused text does not read as JSON. reader_error is the JSON reader's error.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("reader_error", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalByRule",
+        doc: "A rule refused a value that reads. The message is the only fact.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendRefusalByValueRule",
+        doc: "A rule of the version-1 command or of the scoped idempotency key refused a value. rule is\nthe rule's text.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rule", "str")],
         methods: &[],
     },
     StubClass {
@@ -2101,58 +2132,6 @@ const RECORD_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "CancelRefusedWorkflowTask",
-        doc: "The task belongs to a workflow, live or finished. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            StubProperty {
-                name: "current_status",
-                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
-            },
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelRefusedStatus",
-        doc: "The task's status does not admit the cancel: a terminal status (an earlier cancel\nincluded), or RUNNING without the opt-in. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            StubProperty {
-                name: "current_status",
-                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
-            },
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelTaskAbsent",
-        doc: "Neither the live table nor history holds the task. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelFailed",
-        doc: "The connect, the client family check or the statement failed. The statement wrote\nnothing, or it committed and its reply was lost.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelStoredDataInvalid",
-        doc: "Stored task data does not parse. The cancel refused the task; nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
         name: "SchedulerStarted",
         doc: "The start of the scheduler completed.",
         constructor: Constructor::NoConstructor,
@@ -2303,21 +2282,6 @@ const MONITORING_CLASSES: &[StubClass] = &[
         doc: "The JSON text of the core model of one monitoring read.",
         constructor: Constructor::NoConstructor,
         properties: &[property("json", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "MonitoringFailed",
-        doc: "An expected failure of a monitoring read. Nothing changed: a read writes nothing.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            StubProperty {
-                name: "code",
-                annotation: TypeText::WireValuesOf(<MonitoringQueryErrorCode as CodeEnum>::CATALOG),
-            },
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
         methods: &[],
     },
     StubClass {
@@ -2738,19 +2702,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "HandleFailed",
-        doc: "The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a\nstored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After\nDB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "WorkflowsDeleted",
         doc: "The workflow retention pass ended: a batch deleted no workflow, or the budget passed\nafter a batch.",
         constructor: Constructor::NoConstructor,
@@ -3136,17 +3087,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "WorkflowResumeRecoveryFailed",
-        doc: "The resume committed; the parent advance or the recovery pass of the tree after it\nfailed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("message", "str"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "WorkflowStartFailed",
         doc: "The connect, the schema install, the client family check, the statement or an owed\nchild start failed, or a child build did not run. Nothing committed, or the commit\noutcome is unknown: a resend with the same id then finds the workflow.",
         constructor: Constructor::NoConstructor,
@@ -3490,7 +3430,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "ProtocolNumbers",
         doc: "The protocol version, the exit codes of a child, the spawn request byte, and the bounds\nthat a child applies before it builds a frame: the names of a report of left work, and the\nbytes of a body.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
+        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("core_stopped_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
         methods: &[],
     },
     StubClass {
@@ -3573,7 +3513,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "ResultFrame",
         doc: "An isolated task ended and left no work on a task loop.",
-        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']")]),
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },
@@ -3601,7 +3541,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "SharedResultFrame",
         doc: "A run of a shared child ended; its seat is free.",
-        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },
@@ -3911,7 +3851,33 @@ const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
     },
 }];
 
+/// The generated classes of `horsies._catalog` that the annotations name.
+const IMPORTS: &[StubImport] = &[
+    StubImport {
+        module: "horsies._catalog.broker_errors",
+        names: &[
+            "BrokerInvalidInput",
+            "BrokerInvalidJsonPayload",
+            "BrokerListenerDisabled",
+            "BrokerOperationFailed",
+        ],
+    },
+    StubImport {
+        module: "horsies._catalog.monitoring_errors",
+        names: &["MonitoringQueryCoreError", "TaskActionCoreError"],
+    },
+    StubImport {
+        module: "horsies._catalog.workflow_handle_errors",
+        names: &[
+            "HandleDbOperationFailed",
+            "HandleResumeRecoveryFailed",
+            "HandleStoredDataInvalid",
+        ],
+    },
+];
+
 pub const CORE_MODULE: ModuleSurface = ModuleSurface {
+    imports: IMPORTS,
     exceptions: EXCEPTIONS,
     classes: &CLASSES,
     static_methods: STATIC_METHODS,

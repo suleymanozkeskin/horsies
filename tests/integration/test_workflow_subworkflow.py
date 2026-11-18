@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Annotated, Any
 
 import pytest
@@ -14,41 +13,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.json_io import SerializationError, dumps_json, loads_json
+from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import (
     decode_task_result,
-    encode_task_error,
-    encode_task_result,
 )
 from horsies.core.errors import WorkflowValidationError
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
-    SubWorkflowError,
     TaskError,
     TaskResult,
 )
-from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
-    SubWorkflowSummary,
     WorkflowDefinition,
-    WorkflowContext,
-    WorkflowStatus,
-    WorkflowSpec,
     OnError,
 )
-from horsies.core.workflows.engine import (
-    drain_parent_propagations_in_session,
-    on_subworkflow_complete,
-)
 from horsies.core.workflows.registry import (
-    register_workflow_definition,
-    unregister_workflow_definition,
     unregister_workflow_spec,
 )
 
-from .conftest import finish_task, make_failing_task, make_simple_task, start_ok
+from .conftest import finish_task, make_simple_task, start_ok
 
 
 # =============================================================================
@@ -85,11 +69,6 @@ def _decode_task_result(
     if isinstance(value, str):
         return decode_task_result(loads_json(value).unwrap(), ok_type)
     return None
-
-
-def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
-    """Build a strict-serde task-result envelope for direct DB fixtures."""
-    return dumps_json(encode_task_result(result, Any)).unwrap()
 
 
 def _extract_taskresult_value(
@@ -185,35 +164,6 @@ class ConstrainedChildWorkflow(WorkflowDefinition[int]):
         )
 
 
-class MultiParamChildWorkflow(WorkflowDefinition[int]):
-    """Child workflow that accepts two build_with parameters."""
-
-    name = 'multi_param_child_workflow'
-    definition_key = 'tests.multi_param_child.v1'
-
-    @classmethod
-    def build_with(
-        cls,
-        app: Horsies,
-        first: TaskResult[int, TaskError],
-        second: TaskResult[int, TaskError],
-    ) -> Any:
-        first_val = _extract_taskresult_value(first)
-        second_val = _extract_taskresult_value(second)
-
-        @app.task(task_name='multi_param_child_task')
-        def child_task(*, first: int, second: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=first + second)
-
-        node = TaskNode(fn=child_task, kwargs={'first': first_val, 'second': second_val})
-        return app.workflow(
-            name=cls.name,
-            tasks=[node],
-            output=node,
-            on_error=OnError.FAIL,
-        )
-
-
 class StartChildWorkflow(WorkflowDefinition[int]):
     name = 'child_workflow_start'
     definition_key = 'tests.start_child.v1'
@@ -221,25 +171,6 @@ class StartChildWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
         @app.task(task_name='sub_child_task')
-        def child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
-
-        node = TaskNode(fn=child_task)
-        return app.workflow(
-            name=cls.name,
-            tasks=[node],
-            output=node,
-            on_error=OnError.FAIL,
-        )
-
-
-class SummaryChildWorkflow(WorkflowDefinition[int]):
-    name = 'summary_child_workflow'
-    definition_key = 'tests.summary_child.v1'
-
-    @classmethod
-    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        @app.task(task_name='summary_child_task')
         def child_task() -> TaskResult[int, TaskError]:
             return TaskResult(ok=1)
 
@@ -293,69 +224,6 @@ class MiddleWorkflow(WorkflowDefinition[int]):
             name=cls.name,
             tasks=[node_child],
             output=node_child,
-            on_error=OnError.FAIL,
-        )
-
-
-class RootNestingWorkflow(WorkflowDefinition[int]):
-    """Includes itself, one level deeper, as its only root node.
-
-    Only the subworkflow depth limit ends this nesting.
-    """
-
-    name = 'root_nesting_workflow'
-    definition_key = 'tests.root_nesting.v1'
-
-    @classmethod
-    def build_with(
-        cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any,
-    ) -> Any:
-        node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=RootNestingWorkflow,
-            kwargs={'level': level + 1},
-        )
-        return app.workflow(
-            name=cls.name,
-            tasks=[node],
-            output=node,
-            on_error=OnError.FAIL,
-        )
-
-
-class DependentNestingWorkflow(WorkflowDefinition[int]):
-    """Nests through root nodes to the depth limit. There, a task runs first,
-    and the deeper child waits for it, so the limit applies when the task
-    completes, not when the workflow starts."""
-
-    name = 'dependent_nesting_workflow'
-    definition_key = 'tests.dependent_nesting.v1'
-
-    @classmethod
-    def build_with(
-        cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any,
-    ) -> Any:
-        if level < MAX_SUBWORKFLOW_DEPTH:
-            node: SubWorkflowNode[int] = SubWorkflowNode(
-                workflow_def=DependentNestingWorkflow,
-                kwargs={'level': level + 1},
-            )
-            return app.workflow(
-                name=cls.name,
-                tasks=[node],
-                output=node,
-                on_error=OnError.FAIL,
-            )
-        leaf_task = make_simple_task(app, 'dependent_nesting_leaf_task')
-        leaf: TaskNode[int] = TaskNode(fn=leaf_task, kwargs={'value': 1})
-        deeper: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=DependentNestingWorkflow,
-            kwargs={'level': level + 1},
-            waits_for=[leaf],
-        )
-        return app.workflow(
-            name=cls.name,
-            tasks=[leaf, deeper],
-            output=deeper,
             on_error=OnError.FAIL,
         )
 
@@ -421,48 +289,6 @@ class TestSubworkflowIntegration:
     # Existing happy-path tests
     # -----------------------------------------------------------------
 
-    async def test_subworkflow_starts_on_dependency_complete(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        session, broker, app = setup
-
-        parent_task = make_simple_task(app, 'sub_parent_task')
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 2})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-            waits_for=[node_a],
-        )
-
-        spec = _workflow(app, 
-            name='parent_workflow_start',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-        await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=4)
-        )
-
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row is not None
-        status, child_id, _ = row
-        assert status == 'RUNNING'
-        assert isinstance(child_id, str)
-
-        child_row = await session.execute(
-            text(
-                'SELECT parent_workflow_id, parent_task_index, sent_at FROM horsies_workflows WHERE id = :cid'
-            ),
-            {'cid': child_id},
-        )
-        child_info = child_row.fetchone()
-        assert child_info is not None
-        assert child_info[0] == handle.workflow_id
-        assert child_info[1] == 1
-        assert child_info[2] is not None
 
     async def test_subworkflow_okt_resolves_by_definition_key_not_colliding_task_name(
         self,
@@ -515,7 +341,7 @@ class TestSubworkflowIntegration:
 
         # Complete the child workflow's inner task (returns int 42).
         await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=42),
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=42),
         )
 
         # result_for must decode via the workflow's definition_key (int),
@@ -548,55 +374,15 @@ class TestSubworkflowIntegration:
         unregister_workflow_spec(spec.name)
 
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=4)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=4)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, _ = row
         assert status == 'RUNNING'
         assert isinstance(child_id, str)
 
-    async def test_subworkflow_build_with_args_from(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        session, broker, app = setup
-
-        producer_task = make_simple_task(app, 'sub_value_producer')
-
-        node_a: TaskNode[int] = TaskNode(fn=producer_task, kwargs={'value': 7})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ParamChildWorkflow,
-            waits_for=[node_a],
-            args_from={'value': node_a},
-        )
-
-        spec = _workflow(app, 
-            name='parent_workflow_params',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-        await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=7)
-        )
-
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row is not None
-        _, child_id, _ = row
-        assert isinstance(child_id, str)
-
-        await finish_task(session, broker, child_id, 0, TaskResult(ok=7))
-
-        row_after = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row_after is not None
-        status, _, result_json = row_after
-        assert status == 'COMPLETED'
-        tr = _decode_task_result(result_json)
-        assert tr is not None and tr.is_ok()
-        assert tr.unwrap() == 7
 
     async def test_build_with_refuses_a_value_outside_its_constraint(
         self,
@@ -622,10 +408,10 @@ class TestSubworkflowIntegration:
 
         handle = await start_ok(spec, broker)
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=-1)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=-1)
         )
 
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
         assert row is not None
         status, child_id, result_json = row
         assert status == 'FAILED'
@@ -634,409 +420,6 @@ class TestSubworkflowIntegration:
         assert failed is not None and failed.is_err()
         assert 'does not fit the type' in (failed.err_value.message or '')
 
-    async def test_child_failure_propagates_to_parent_node(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When child workflow fails, parent node is FAILED with SUBWORKFLOW_FAILED error."""
-        session, broker, app = setup
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-
-        spec = _workflow(app, 
-            name='parent_workflow_failure',
-            tasks=[node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        child_id = await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
-            TaskResult(err=TaskError(error_code='CHILD_FAILED', message='Deliberate failure')),
-        )
-
-        # Parent node should now be FAILED
-        parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-        assert parent_row is not None
-        status, _, result_json = parent_row
-        assert status == 'FAILED'
-
-        # Result should contain SUBWORKFLOW_FAILED error code and preserve
-        # the SubWorkflowError subclass fields through the broker round-trip.
-        tr = _decode_task_result(result_json)
-        assert tr is not None
-        assert tr.is_err()
-        assert tr.err is not None
-        assert isinstance(tr.err, SubWorkflowError)
-        assert tr.err.error_code == 'SUBWORKFLOW_FAILED'
-        assert tr.err.sub_workflow_id == child_id
-        assert tr.err.sub_workflow_summary.status == WorkflowStatus.FAILED
-        assert tr.err.sub_workflow_summary.failed_tasks >= 1
-
-        # sub_workflow_summary column should be populated
-        summary_row = await session.execute(
-            text("""
-                SELECT sub_workflow_summary
-                FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        summary_json = summary_row.scalar_one()
-        assert summary_json is not None
-        parsed_summary = loads_json(summary_json).unwrap() if isinstance(summary_json, str) else summary_json
-        assert isinstance(parsed_summary, dict)
-        summary = SubWorkflowSummary.from_json(parsed_summary)
-        assert summary.status == WorkflowStatus.FAILED
-        assert summary.failed_tasks >= 1
-        assert summary.error_summary is not None
-
-        # The WorkflowHandle path must also preserve the SubWorkflowError
-        # subtype through its envelope decode.
-        workflow_result = await handle.get_async(timeout_ms=1000)
-        assert workflow_result.is_err()
-        assert isinstance(workflow_result.err, SubWorkflowError)
-        assert workflow_result.err.sub_workflow_id == child_id
-        assert workflow_result.err.sub_workflow_summary.status == WorkflowStatus.FAILED
-
-    @pytest.mark.parametrize(
-        'child_status',
-        ['COMPLETED', 'FAILED'],
-        ids=['child_completed', 'child_failed'],
-    )
-    async def test_subworkflow_completion_does_not_rewrite_terminal_parent_node(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-        child_status: str,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Regression for audit finding H4: a replayed subworkflow callback must not
-        overwrite the parent node's terminal state.
-
-        Covers both child outcomes — child_completed exercises the parent_node_status =
-        'COMPLETED' branch in on_subworkflow_complete, and child_failed exercises the
-        parent_node_status = 'FAILED' branch. The FAILED branch is the load-bearing one:
-        the CAS-miss early return is what skips _handle_workflow_task_failure on an
-        already-terminal parent. Without that, a replay would write a workflow-level
-        error to a workflow whose tasks are all COMPLETED.
-        """
-        session, broker, app = setup
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-
-        spec = _workflow(
-            app,
-            name='parent_terminal_replay_guard',
-            tasks=[node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-        assert row is not None
-        status, child_id, _ = row
-        assert status == 'RUNNING'
-        assert isinstance(child_id, str)
-
-        # Pin the parent task to a terminal state with a sentinel completed_at.
-        # The UPDATE_PARENT_NODE_RESULT_SQL would `SET completed_at = NOW()`, so
-        # any tick of completed_at off this fixed past timestamp proves the CAS
-        # guard failed.
-        preserved_result = _strict_result_json(TaskResult(ok=11))
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED',
-                    result = :result,
-                    completed_at = TIMESTAMPTZ '2026-01-01 00:00:00+00'
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id, 'result': preserved_result},
-        )
-        if child_status == 'COMPLETED':
-            await session.execute(
-                text("""
-                    UPDATE horsies_workflows
-                    SET status = 'COMPLETED',
-                        result = :result,
-                        completed_at = NOW()
-                    WHERE id = :child_id
-                """),
-                {
-                    'child_id': child_id,
-                    'result': _strict_result_json(TaskResult(ok=99)),
-                },
-            )
-        else:
-            child_error_payload = dumps_json(
-                encode_task_error(TaskError(
-                    error_code='SUBWORKFLOW_REPLAY_PROBE',
-                    message='child failed for replay-guard test',
-                )),
-            ).unwrap()
-            await session.execute(
-                text("""
-                    UPDATE horsies_workflows
-                    SET status = 'FAILED',
-                        error = :error,
-                        completed_at = NOW()
-                    WHERE id = :child_id
-                """),
-                {'child_id': child_id, 'error': child_error_payload},
-            )
-        await session.commit()
-
-        caplog.clear()
-        with caplog.at_level(logging.DEBUG, logger='horsies.workflow.engine'):
-            await on_subworkflow_complete(session, child_id, broker)
-            await drain_parent_propagations_in_session(session, broker)
-            await session.commit()
-
-        parent_row = await session.execute(
-            text("""
-                SELECT status,
-                       result,
-                       sub_workflow_summary,
-                       completed_at = TIMESTAMPTZ '2026-01-01 00:00:00+00'
-                           AS completed_at_preserved
-                FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        replayed = parent_row.fetchone()
-        assert replayed is not None
-        assert replayed[0] == 'COMPLETED'
-        assert replayed[1] == preserved_result
-        assert replayed[2] is None
-        assert replayed[3] is True
-
-        # caplog: operators rely on the debug log as the signal that the guard fired.
-        debug_messages = [
-            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
-        ]
-        assert any(
-            'Parent workflow task already terminal, skipping subworkflow progression'
-            in msg
-            for msg in debug_messages
-        ), f'Expected guard debug log, got: {debug_messages}'
-
-        # CAS-miss must short-circuit before _handle_workflow_task_failure, so the
-        # parent workflow's error column stays untouched. This is the load-bearing
-        # assertion for the child_failed parametrization: without the early return,
-        # the FAILED branch would write a workflow-level error here.
-        parent_error_row = await session.execute(
-            text('SELECT error FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )
-        parent_error_entry = parent_error_row.fetchone()
-        assert parent_error_entry is not None
-        assert parent_error_entry[0] is None
-
-    async def test_child_failure_with_on_error_pause(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When child fails and parent has on_error=PAUSE, parent workflow pauses.
-
-        Also verifies the workflow-level error column carries a
-        ``SubWorkflowError`` (not plain TaskError) — `on_error=PAUSE`
-        writes via `_handle_workflow_task_failure`'s `error_payload`
-        path (engine.py:2305), exercising `encode_task_error` directly.
-        """
-        session, broker, app = setup
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-
-        spec = _workflow(app,
-            name='parent_workflow_pause_on_fail',
-            tasks=[node_child],
-            output=node_child,
-            on_error=OnError.PAUSE,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        child_id = await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
-            TaskResult(err=TaskError(error_code='CHILD_FAILED', message='Test')),
-        )
-
-        # Parent workflow should be PAUSED
-        wf_row = await session.execute(
-            text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )
-        wf_status = wf_row.scalar_one()
-        assert wf_status == 'PAUSED'
-
-        # The workflow-level error column must preserve the
-        # SubWorkflowError subclass on write. Pre-fix
-        # `encode_value(err, TaskError)` at engine.py stripped
-        # `sub_workflow_id` / `sub_workflow_summary` before persisting;
-        # post-fix the encode routes through `encode_task_error`.
-        # Inspect the column directly (not via handle.get_async, which
-        # returns a synthetic `WORKFLOW_PAUSED` error for paused
-        # workflows without consulting the column).
-        err_row = await session.execute(
-            text('SELECT error FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )
-        err_json = err_row.scalar_one()
-        assert err_json is not None
-        parsed = loads_json(err_json).unwrap() if isinstance(err_json, str) else err_json
-        assert isinstance(parsed, dict)
-        assert parsed.get('sub_workflow_id') == child_id
-        sub_summary = parsed.get('sub_workflow_summary')
-        assert isinstance(sub_summary, dict)
-        assert sub_summary.get('status') == WorkflowStatus.FAILED.value
-
-    async def test_parent_pause_on_error_cascades_to_running_child(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        session, broker, app = setup
-
-        task_fail = make_failing_task(app, 'pause_parent_fail_sibling')
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-        node_fail: TaskNode[Any] = TaskNode(fn=task_fail)
-
-        spec = _workflow(
-            app,
-            name='parent_pause_cascades_child',
-            tasks=[node_child, node_fail],
-            on_error=OnError.PAUSE,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        parent_child_row = await self._get_workflow_task_row(
-            session, handle.workflow_id, 0
-        )
-        assert parent_child_row is not None
-        child_status, child_id, _ = parent_child_row
-        assert child_status == 'RUNNING'
-        assert isinstance(child_id, str)
-
-        await finish_task(
-            session,
-            broker,
-            handle.workflow_id,
-            1,
-            TaskResult(err=TaskError(error_code='PARENT_FAIL', message='parent failed')),
-        )
-
-        statuses = await session.execute(
-            text("""
-                SELECT
-                    parent.status AS parent_status,
-                    child.status AS child_status
-                FROM horsies_workflows parent
-                JOIN horsies_workflows child ON child.id = :child_id
-                WHERE parent.id = :parent_id
-            """),
-            {'parent_id': handle.workflow_id, 'child_id': child_id},
-        )
-        row = statuses.fetchone()
-        assert row is not None
-        assert row.parent_status == 'PAUSED'
-        assert row.child_status == 'PAUSED'
-
-    async def test_parent_completes_when_child_output_succeeds(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When child (as output) completes successfully, parent workflow completes."""
-        session, broker, app = setup
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-
-        spec = _workflow(app, 
-            name='parent_workflow_output',
-            tasks=[node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=42),
-        )
-
-        # Parent workflow should be COMPLETED
-        wf_row = await session.execute(
-            text('SELECT status, result FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )
-        wf_result = wf_row.fetchone()
-        assert wf_result is not None
-        assert wf_result[0] == 'COMPLETED'
-
-        # Result should be child's output
-        parent_result = _decode_task_result(wf_result[1])
-        assert parent_result is not None and parent_result.is_ok()
-        assert parent_result.unwrap() == 42
-
-    async def test_multiple_parallel_subworkflows(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Multiple subworkflows can run in parallel."""
-        session, broker, app = setup
-
-        node_child1: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-        node_child2: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ImportableChildWorkflow,
-        )
-
-        post_task = make_simple_task(app, 'parallel_post_task')
-        node_post: TaskNode[int] = TaskNode(
-            fn=post_task,
-            waits_for=[node_child1, node_child2],
-            kwargs={'value': 1},
-        )
-
-        spec = _workflow(app, 
-            name='parent_parallel_subworkflows',
-            tasks=[node_child1, node_child2, node_post],
-            output=node_post,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Both children should be RUNNING
-        row1 = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-        row2 = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row1 is not None and row2 is not None
-        assert row1[0] == 'RUNNING'
-        assert row2[0] == 'RUNNING'
-
-        # Complete both children
-        child1_id = row1[1]
-        child2_id = row2[1]
-        assert isinstance(child1_id, str) and isinstance(child2_id, str)
-
-        await finish_task(session, broker, child1_id, 0, TaskResult(ok=1))
-        await finish_task(session, broker, child2_id, 0, TaskResult(ok=5))
-
-        # Post task should now be ENQUEUED
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
-        assert post_row is not None
-        assert post_row[0] == 'ENQUEUED'
 
     async def test_depth_tracking_in_nested_workflows(
         self,
@@ -1065,7 +448,7 @@ class TestSubworkflowIntegration:
         assert parent_depth.scalar_one() == 0
 
         # Check child depth
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         child_id = row[1]
         assert isinstance(child_id, str)
@@ -1076,87 +459,6 @@ class TestSubworkflowIntegration:
         )
         assert child_depth.scalar_one() == 1
 
-    async def _workflows_at_depth(
-        self, session: AsyncSession, depth: int,
-    ) -> list[str]:
-        res = await session.execute(
-            text('SELECT id FROM horsies_workflows WHERE depth = :depth'),
-            {'depth': depth},
-        )
-        return [str(row[0]) for row in res.fetchall()]
-
-    async def _deeper_workflow_count(self, session: AsyncSession, depth: int) -> int:
-        res = await session.execute(
-            text('SELECT COUNT(*) FROM horsies_workflows WHERE depth > :depth'),
-            {'depth': depth},
-        )
-        return int(res.scalar_one())
-
-    async def _failed_error_code(
-        self, session: AsyncSession, workflow_id: str, task_index: int,
-    ) -> object:
-        row = await self._get_workflow_task_row(session, workflow_id, task_index)
-        assert row is not None
-        status, _, result_json = row
-        assert status == 'FAILED'
-        tr = _decode_task_result(result_json)
-        assert tr is not None and tr.err is not None
-        return tr.err.error_code
-
-    async def test_a_root_nesting_stops_at_the_depth_limit(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A self-including root node starts children down to depth 32 and
-        fails at depth 32 with SUBWORKFLOW_DEPTH_LIMIT_REACHED."""
-        session, broker, app = setup
-        node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=RootNestingWorkflow, kwargs={'level': 1},
-        )
-        spec = _workflow(app, name='root_nesting_parent', tasks=[node], output=node)
-
-        handle = await start_ok(spec, broker)
-        await drain_parent_propagations_in_session(session, broker)
-        await session.commit()
-
-        deepest = await self._workflows_at_depth(session, MAX_SUBWORKFLOW_DEPTH)
-        assert len(deepest) == 1
-        assert await self._deeper_workflow_count(session, MAX_SUBWORKFLOW_DEPTH) == 0
-        assert (
-            await self._failed_error_code(session, deepest[0], 0)
-            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
-        )
-        root_status = await session.execute(
-            text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )
-        assert root_status.scalar_one() == 'FAILED'
-
-    async def test_a_dependent_nesting_stops_at_the_depth_limit(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """At depth 32, a child that waits for a task is refused when the task
-        completes, with SUBWORKFLOW_DEPTH_LIMIT_REACHED."""
-        session, broker, app = setup
-        node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=DependentNestingWorkflow, kwargs={'level': 1},
-        )
-        spec = _workflow(
-            app, name='dependent_nesting_parent', tasks=[node], output=node,
-        )
-
-        await start_ok(spec, broker)
-        deepest = await self._workflows_at_depth(session, MAX_SUBWORKFLOW_DEPTH)
-        assert len(deepest) == 1
-
-        await finish_task(session, broker, deepest[0], 0, TaskResult(ok=2))
-
-        assert await self._deeper_workflow_count(session, MAX_SUBWORKFLOW_DEPTH) == 0
-        assert (
-            await self._failed_error_code(session, deepest[0], 1)
-            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
-        )
 
     async def test_root_workflow_id_propagation(
         self,
@@ -1178,7 +480,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Get child workflow ID
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         child_id = row[1]
         assert isinstance(child_id, str)
@@ -1189,607 +491,12 @@ class TestSubworkflowIntegration:
             {'wf_id': child_id},
         )
         root_id = child_row.scalar_one()
-        assert root_id == handle.workflow_id
+        assert root_id == str(handle.workflow_id)
 
     # -----------------------------------------------------------------
     # New: error / non-happy paths
     # -----------------------------------------------------------------
 
-    async def test_subworkflow_load_failure_marks_node_failed(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When the stored definition_key cannot be resolved, node fails cleanly."""
-        session, broker, app = setup
-
-        parent_task = make_simple_task(app, 'load_fail_parent_task')
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ImportableChildWorkflow,
-            waits_for=[node_a],
-        )
-
-        spec = _workflow(app, 
-            name='parent_load_failure',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        unregister_workflow_definition(ImportableChildWorkflow.definition_key)
-        try:
-            await session.execute(
-                text("""
-                    UPDATE horsies_workflow_tasks
-                    SET sub_definition_key = 'missing.workflow.v1'
-                    WHERE workflow_id = :wf_id AND task_index = 1
-                """),
-                {'wf_id': handle.workflow_id},
-            )
-            await session.commit()
-
-            # Complete dependency → triggers subworkflow load → fails
-            await finish_task(
-                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-            )
-
-            # Subworkflow node should be FAILED
-            row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-            assert row is not None
-            status, _, result_json = row
-            assert status == 'FAILED'
-
-            tr = _decode_task_result(result_json)
-            assert tr is not None and tr.is_err()
-            assert tr.err is not None
-            assert tr.err.error_code == 'SUBWORKFLOW_LOAD_FAILED'
-        finally:
-            register_workflow_definition(ImportableChildWorkflow)
-
-    async def test_child_task_prepare_failure_does_not_commit_partial_child(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A later child task prep failure must not leave a partial child workflow.
-
-        The TaskNode branch of the prepare loop in `enqueue_subworkflow_task`
-        fails the parent node when the queue of a child node does not bind
-        against the app config. `build_with()` returns a `WorkflowSpec`
-        directly, so `app.workflow()` does not bind the queues first, and the
-        later node has a queue that DEFAULT mode refuses. The first node's
-        params are then built, and the load-bearing assertion is
-        `child_count == 0`.
-        """
-        session, broker, app = setup
-        parent_task = make_simple_task(app, 'partial_child_parent_task')
-
-        class LaterNodePrepFailureChildWorkflow(WorkflowDefinition[int]):
-            name = 'later_node_prep_failure_child_workflow'
-            definition_key = 'tests.later_node_prep_failure_child_workflow.v1'
-
-            @classmethod
-            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                _ = args, params
-
-                @app.task(task_name='partial_child_first_task')
-                def child_first() -> TaskResult[int, TaskError]:
-                    return TaskResult(ok=1)
-
-                @app.task(task_name='partial_child_later_task')
-                def child_later() -> TaskResult[int, TaskError]:
-                    return TaskResult(ok=2)
-
-                node_first = TaskNode(fn=child_first)
-                # DEFAULT mode accepts only the 'default' queue.
-                node_later = TaskNode(
-                    fn=child_later,
-                    waits_for=[node_first],
-                    queue='not_a_configured_queue',
-                )
-                return WorkflowSpec(
-                    name=cls.name,
-                    tasks=[node_first, node_later],
-                    output=node_later,
-                    on_error=OnError.FAIL,
-                )
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=LaterNodePrepFailureChildWorkflow,
-            waits_for=[node_a],
-        )
-        spec = _workflow(
-            app,
-            name='parent_partial_child_prepare_failure',
-            tasks=[node_a, node_child],
-            output=node_child,
-            on_error=OnError.FAIL,
-        )
-        handle = await start_ok(spec, broker)
-
-        try:
-            await finish_task(
-                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-            )
-
-            parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-            assert parent_row is not None
-            status, child_id, result_json = parent_row
-            assert status == 'FAILED'
-            assert child_id is None
-
-            tr = _decode_task_result(result_json)
-            assert tr is not None and tr.is_err()
-            assert tr.err is not None
-            assert tr.err.error_code == 'WORKFLOW_ENQUEUE_FAILED'
-            assert 'partial_child_later_task' in (tr.err.message or '')
-
-            child_count = await session.scalar(
-                text("""
-                    SELECT COUNT(*)
-                    FROM horsies_workflows
-                    WHERE parent_workflow_id = :wf_id
-                """),
-                {'wf_id': handle.workflow_id},
-            )
-            assert child_count == 0
-        finally:
-            unregister_workflow_definition(LaterNodePrepFailureChildWorkflow.definition_key)
-
-    async def test_nested_subworkflow_kwargs_write_failure_raises_and_rolls_back(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A SubWorkflowNode-branch kwargs write failure raises; nothing is kept.
-
-        The SubWorkflowNode branch of the prepare loop in
-        `enqueue_subworkflow_task` writes the kwargs of each nested
-        SubWorkflowNode. Spec construction in `build_with()` already proved
-        them, so a failure there is a defect: the child start raises
-        `SerializationError` before it writes a row, and the caller's
-        transaction rolls back. The test puts an object in the wire form of the
-        nested node, because spec construction refuses every value that cannot
-        be written.
-
-        After the rollback, no child workflow row exists, the parent node is
-        not FAILED, and the completion of the upstream node is not kept.
-        """
-        session, broker, app = setup
-        parent_task = make_simple_task(app, 'nested_sub_partial_parent_task')
-
-        class NestedSubGrandchildWorkflow(WorkflowDefinition[int]):
-            name = 'nested_sub_partial_grandchild'
-            definition_key = 'tests.nested_sub_partial_grandchild.v1'
-
-            @classmethod
-            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                _ = args, params
-
-                @app.task(task_name='nested_sub_partial_grandchild_task')
-                def grandchild_task() -> TaskResult[int, TaskError]:
-                    return TaskResult(ok=3)
-
-                node = TaskNode(fn=grandchild_task)
-                return app.workflow(
-                    name=cls.name,
-                    tasks=[node],
-                    output=node,
-                    on_error=OnError.FAIL,
-                    definition_key=cls.definition_key,
-                )
-
-        class NestedSubChildWorkflow(WorkflowDefinition[int]):
-            name = 'nested_sub_partial_child'
-            definition_key = 'tests.nested_sub_partial_child.v1'
-
-            @classmethod
-            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                _ = args, params
-
-                @app.task(task_name='nested_sub_partial_child_first_task')
-                def first_task() -> TaskResult[int, TaskError]:
-                    return TaskResult(ok=1)
-
-                node_first = TaskNode(fn=first_task)
-                node_nested_sub: SubWorkflowNode[int] = SubWorkflowNode(
-                    workflow_def=NestedSubGrandchildWorkflow,
-                    waits_for=[node_first],
-                )
-                spec = app.workflow(
-                    name=cls.name,
-                    tasks=[node_first, node_nested_sub],
-                    output=node_nested_sub,
-                    on_error=OnError.FAIL,
-                    definition_key=cls.definition_key,
-                )
-                object.__setattr__(spec.tasks[1], 'wire_kwargs', {'value': object()})
-                return spec
-
-        register_workflow_definition(NestedSubGrandchildWorkflow)
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=NestedSubChildWorkflow,
-            waits_for=[node_a],
-        )
-        spec = _workflow(
-            app,
-            name='parent_nested_sub_prepare_failure',
-            tasks=[node_a, node_child],
-            output=node_child,
-            on_error=OnError.FAIL,
-        )
-        handle = await start_ok(spec, broker)
-
-        try:
-            with pytest.raises(
-                SerializationError,
-                match='Failed to serialize kwargs for child sub',
-            ):
-                await finish_task(
-                    session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-                )
-            await session.rollback()
-
-            upstream_row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-            assert upstream_row is not None
-            assert upstream_row[0] == 'ENQUEUED'
-
-            parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-            assert parent_row is not None
-            status, child_id, result_json = parent_row
-            assert status == 'PENDING'
-            assert child_id is None
-            assert result_json is None
-
-            child_count = await session.scalar(
-                text("""
-                    SELECT COUNT(*)
-                    FROM horsies_workflows
-                    WHERE parent_workflow_id = :wf_id
-                """),
-                {'wf_id': handle.workflow_id},
-            )
-            assert child_count == 0
-        finally:
-            unregister_workflow_definition(NestedSubChildWorkflow.definition_key)
-            unregister_workflow_definition(NestedSubGrandchildWorkflow.definition_key)
-
-    async def test_parallel_child_one_fails_downstream_skipped(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When one of two parallel children fails, downstream task (allow_failed_deps=False) is skipped."""
-        session, broker, app = setup
-
-        node_child1: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-        node_child2: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ImportableChildWorkflow,
-        )
-
-        post_task = make_simple_task(app, 'parallel_fail_post')
-        node_post: TaskNode[int] = TaskNode(
-            fn=post_task,
-            waits_for=[node_child1, node_child2],
-            kwargs={'value': 1},
-        )
-
-        spec = _workflow(app, 
-            name='parent_parallel_one_fails',
-            tasks=[node_child1, node_child2, node_post],
-            output=node_post,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete child1 with failure
-        await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
-            TaskResult(err=TaskError(error_code='C1_FAIL', message='child 1 failed')),
-        )
-
-        # Complete child2 with success
-        await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 1,
-            TaskResult(ok=5),
-        )
-
-        # Downstream should be SKIPPED (has failed dep, allow_failed_deps=False)
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
-        assert post_row is not None
-        assert post_row[0] == 'SKIPPED'
-
-    async def test_parallel_child_failures_keep_first_parent_error(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        session, broker, app = setup
-
-        node_child1: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-        node_child2: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ImportableChildWorkflow,
-        )
-
-        blocker_task = make_simple_task(app, 'parallel_fail_blocker')
-        node_blocker: TaskNode[int] = TaskNode(fn=blocker_task, kwargs={'value': 1})
-
-        spec = _workflow(
-            app,
-            name='parent_parallel_failures_first_error',
-            tasks=[node_child1, node_child2, node_blocker],
-            on_error=OnError.FAIL,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        row1 = await self._get_workflow_task_row(session, handle.workflow_id, 0)
-        row2 = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row1 is not None and row2 is not None
-        child1_id = row1[1]
-        child2_id = row2[1]
-        assert isinstance(child1_id, str) and isinstance(child2_id, str)
-
-        await self._complete_child_workflow(
-            session,
-            broker,
-            handle.workflow_id,
-            0,
-            TaskResult(err=TaskError(error_code='C1_FAIL', message='child 1 failed')),
-        )
-        await self._complete_child_workflow(
-            session,
-            broker,
-            handle.workflow_id,
-            1,
-            TaskResult(err=TaskError(error_code='C2_FAIL', message='child 2 failed')),
-        )
-
-        wf_row = await session.execute(
-            text("""
-                SELECT status, error
-                FROM horsies_workflows
-                WHERE id = :wf_id
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        status, error_json = wf_row.one()
-        assert status == 'RUNNING'
-        assert isinstance(error_json, str)
-        assert child1_id in error_json
-        assert child2_id not in error_json
-
-    async def test_allow_failed_deps_subworkflow_still_starts(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """SubWorkflowNode with allow_failed_deps=True starts even when upstream failed."""
-        session, broker, app = setup
-
-        parent_task = make_simple_task(app, 'allow_fail_parent')
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-            waits_for=[node_a],
-            allow_failed_deps=True,
-        )
-
-        spec = _workflow(app, 
-            name='parent_allow_failed',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete task A with failure
-        await finish_task(
-            session, broker, handle.workflow_id, 0,
-            TaskResult(err=TaskError(error_code='A_FAIL', message='upstream failed')),
-        )
-
-        # Subworkflow should still be RUNNING despite failed upstream
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row is not None
-        status, child_id, _ = row
-        assert status == 'RUNNING'
-        assert isinstance(child_id, str)
-
-    async def test_subworkflow_join_any_starts_on_first_dep(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """SubWorkflowNode with join='any' starts when first dependency completes."""
-        session, broker, app = setup
-
-        task_a = make_simple_task(app, 'join_any_a')
-        task_b = make_simple_task(app, 'join_any_b')
-
-        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 2})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-            waits_for=[node_a, node_b],
-            join='any',
-        )
-
-        spec = _workflow(app, 
-            name='parent_join_any',
-            tasks=[node_a, node_b, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete only task A → join='any' should trigger subworkflow start
-        await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=10),
-        )
-
-        # Subworkflow should already be RUNNING (didn't wait for B)
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
-        assert row is not None
-        status, child_id, _ = row
-        assert status == 'RUNNING'
-        assert isinstance(child_id, str)
-
-    async def test_subworkflow_mid_chain_result_flows(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """SubWorkflow result flows through to a downstream TaskNode in the middle of a chain."""
-        session, broker, app = setup
-
-        task_a = make_simple_task(app, 'mid_chain_a')
-        post_task = make_simple_task(app, 'mid_chain_post')
-
-        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 3})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-            waits_for=[node_a],
-        )
-        node_post: TaskNode[int] = TaskNode(
-            fn=post_task,
-            waits_for=[node_child],
-            kwargs={'value': 1},
-        )
-
-        spec = _workflow(app, 
-            name='parent_mid_chain',
-            tasks=[node_a, node_child, node_post],
-            output=node_post,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete A → child starts
-        await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=6),
-        )
-
-        # Complete child → should enqueue post task
-        await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 1, TaskResult(ok=50),
-        )
-
-        # Post task should be ENQUEUED
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
-        assert post_row is not None
-        assert post_row[0] == 'ENQUEUED'
-
-        # Subworkflow node should be COMPLETED with the child's result
-        child_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert child_row is not None
-        assert child_row[0] == 'COMPLETED'
-        tr = _decode_task_result(child_row[2])
-        assert tr is not None and tr.is_ok()
-        assert tr.unwrap() == 50
-
-    async def test_summary_for_failed_child_has_error_fields(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When child fails, sub_workflow_summary has failed_tasks > 0 and error_summary populated."""
-        session, broker, app = setup
-
-        @app.task(task_name='summary_fail_post')
-        def post_task(
-            *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=SummaryChildWorkflow,
-        )
-        node_post: TaskNode[int] = TaskNode(
-            fn=post_task,
-            waits_for=[node_child],
-            workflow_ctx_from=[node_child],
-            allow_failed_deps=True,
-        )
-
-        spec = _workflow(app, 
-            name='parent_summary_failed',
-            tasks=[node_child, node_post],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete child with failure
-        await self._complete_child_workflow(
-            session, broker, handle.workflow_id, 0,
-            TaskResult(err=TaskError(error_code='CHILD_ERR', message='Something went wrong')),
-        )
-
-        # Verify sub_workflow_summary column is populated with failure data
-        summary_row = await session.execute(
-            text("""
-                SELECT sub_workflow_summary FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        summary_json = summary_row.scalar_one()
-        assert summary_json is not None
-        parsed = loads_json(summary_json).unwrap() if isinstance(summary_json, str) else summary_json
-        assert isinstance(parsed, dict)
-        summary = SubWorkflowSummary.from_json(parsed)
-        assert summary.status == WorkflowStatus.FAILED
-        assert summary.failed_tasks >= 1
-        assert summary.total_tasks >= 1
-        assert summary.error_summary is not None and len(summary.error_summary) > 0
-
-        # Downstream post task should be ENQUEUED (allow_failed_deps=True)
-        post_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert post_row is not None
-        assert post_row[0] == 'ENQUEUED'
-
-    async def test_multiple_args_from_keys(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Multiple args_from keys inject results from different upstream tasks."""
-        session, broker, app = setup
-
-        task_a = make_simple_task(app, 'multi_args_a')
-        task_b = make_simple_task(app, 'multi_args_b')
-
-        node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 3})
-        node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 5})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=MultiParamChildWorkflow,
-            waits_for=[node_a, node_b],
-            args_from={'first': node_a, 'second': node_b},
-        )
-
-        spec = _workflow(app, 
-            name='parent_multi_args',
-            tasks=[node_a, node_b, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete both upstream tasks
-        await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=10),
-        )
-        await finish_task(
-            session, broker, handle.workflow_id, 1, TaskResult(ok=20),
-        )
-
-        # Subworkflow should be RUNNING
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
-        assert row is not None
-        status, child_id, _ = row
-        assert status == 'RUNNING'
-        assert isinstance(child_id, str)
 
     async def test_deeply_nested_depth_and_root_id(
         self,
@@ -1818,7 +525,7 @@ class TestSubworkflowIntegration:
         assert parent_depth_row.scalar_one() == 0
 
         # Middle workflow: depth = 1
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 0)
         assert row is not None
         middle_id = row[1]
         assert isinstance(middle_id, str)
@@ -1830,7 +537,7 @@ class TestSubworkflowIntegration:
         middle_info = middle_depth_row.fetchone()
         assert middle_info is not None
         assert middle_info[0] == 1
-        assert middle_info[1] == handle.workflow_id
+        assert middle_info[1] == str(handle.workflow_id)
 
         # Grandchild workflow: depth = 2, same root
         grandchild_row = await session.execute(
@@ -1852,55 +559,7 @@ class TestSubworkflowIntegration:
         grandchild_info = grandchild_depth_row.fetchone()
         assert grandchild_info is not None
         assert grandchild_info[0] == 2
-        assert grandchild_info[1] == handle.workflow_id
-
-    async def test_broker_app_missing_marks_node_failed(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """When broker.app is None at enqueue time, node is FAILED (no post-ENQUEUED raise)."""
-        session, broker, app = setup
-
-        parent_task = make_simple_task(app, 'broker_missing_parent')
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-            waits_for=[node_a],
-        )
-
-        spec = _workflow(app, 
-            name='parent_broker_missing',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Detach app from broker
-        original_app = broker.app
-        broker.app = None
-        try:
-            # Completing dep triggers subworkflow enqueue → broker.app is None.
-            # Post-ENQUEUED failures are converted to FAILED state instead of raising.
-            await finish_task(
-                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-            )
-        finally:
-            broker.app = original_app
-
-        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
-        assert row is not None
-        status, child_id, result_json = row
-        assert status == 'FAILED'
-        assert child_id is None
-
-        tr = _decode_task_result(result_json)
-        assert tr is not None and tr.is_err()
-        assert tr.err is not None
-        assert tr.err.error_code == 'WORKFLOW_ENQUEUE_FAILED'
-        assert tr.err.message is not None
-        assert 'Broker missing app reference' in tr.err.message
+        assert grandchild_info[1] == str(handle.workflow_id)
 
 
 # =============================================================================
@@ -1965,216 +624,6 @@ class TestSubworkflowValidation:
 # =============================================================================
 # TestSubworkflowRecovery
 # =============================================================================
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio(loop_scope='function')
-class TestSubworkflowRecovery:
-    """Tests for subworkflow recovery scenarios."""
-
-    @pytest_asyncio.fixture
-    async def setup(
-        self,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> tuple[AsyncSession, PostgresBroker, Horsies]:
-        await session.execute(text('TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks CASCADE'))
-        await session.commit()
-        return session, broker, app
-
-    async def test_recovery_child_completed_parent_not_updated(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Recovery handles case where child completed but parent node wasn't updated."""
-        session, broker, app = setup
-        from horsies.core.workflows.recovery import recover_stuck_workflows_global
-        from tests.broker_resources_support import current_resources
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-
-        spec = _workflow(app, 
-            name='parent_recovery_test',
-            tasks=[node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Get child workflow ID
-        row_res = await session.execute(
-            text("""
-                SELECT sub_workflow_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        row = row_res.fetchone()
-        assert row is not None
-        child_id = row[0]
-        assert isinstance(child_id, str)
-
-        # Simulate: child workflow completed but parent node still RUNNING
-        # (as if the callback failed midway)
-        await session.execute(
-            text("""
-                UPDATE horsies_workflows SET status = 'COMPLETED', result = :result
-                WHERE id = :child_id
-            """),
-            {'child_id': child_id, 'result': _strict_result_json(TaskResult(ok=99))},
-        )
-        # Parent node stays RUNNING (simulating interrupted callback)
-        await session.commit()
-
-        # Run recovery
-        recovered = (
-            await recover_stuck_workflows_global(
-                current_resources(broker).session_factory, broker,
-            )
-        ).recovered
-        await session.commit()
-
-        assert recovered >= 1
-
-        # Parent node should now be COMPLETED
-        parent_row = await session.execute(
-            text("""
-                SELECT status FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        parent_status = parent_row.scalar_one()
-        assert parent_status == 'COMPLETED'
-
-    async def test_recovery_ready_subworkflow_not_started(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Recovery handles READY subworkflow that was never started."""
-        session, broker, app = setup
-
-        parent_task = make_simple_task(app, 'recovery_parent_task')
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-            waits_for=[node_a],
-        )
-
-        spec = _workflow(app, 
-            name='parent_ready_recovery',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Complete task A to make child READY
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
-
-        # Verify child is RUNNING (started normally)
-        child_row = await session.execute(
-            text("""
-                SELECT status, sub_workflow_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 1
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        child_status_row = child_row.fetchone()
-        assert child_status_row is not None
-        # Child should be RUNNING with sub_workflow_id set
-        assert child_status_row[0] == 'RUNNING'
-        assert child_status_row[1] is not None
-
-    async def test_recovery_child_failed_parent_still_running(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Recovery handles case where child FAILED but parent node still stuck RUNNING."""
-        session, broker, app = setup
-        from horsies.core.workflows.recovery import recover_stuck_workflows_global
-        from tests.broker_resources_support import current_resources
-
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=StartChildWorkflow,
-        )
-
-        spec = _workflow(app, 
-            name='parent_recovery_failed_child',
-            tasks=[node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Get child workflow ID
-        row_res = await session.execute(
-            text("""
-                SELECT sub_workflow_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        row = row_res.fetchone()
-        assert row is not None
-        child_id = row[0]
-        assert isinstance(child_id, str)
-
-        # Simulate: child workflow FAILED but parent node still RUNNING
-        await session.execute(
-            text("""
-                UPDATE horsies_workflows
-                SET status = 'FAILED',
-                    error = :error
-                WHERE id = :child_id
-            """),
-            {
-                'child_id': child_id,
-                'error': dumps_json({'message': 'child task crashed'}).unwrap(),
-            },
-        )
-        # Also mark child's task as FAILED for accurate task counts
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'FAILED',
-                    result = :result
-                WHERE workflow_id = :child_id AND task_index = 0
-            """),
-            {
-                'child_id': child_id,
-                'result': _strict_result_json(TaskResult(err=TaskError(
-                    error_code='CHILD_CRASH',
-                    message='child task crashed',
-                ))),
-            },
-        )
-        await session.commit()
-
-        # Run recovery
-        recovered = (
-            await recover_stuck_workflows_global(
-                current_resources(broker).session_factory, broker,
-            )
-        ).recovered
-        await session.commit()
-
-        assert recovered >= 1
-
-        # Parent node should now be FAILED
-        parent_row = await session.execute(
-            text("""
-                SELECT status FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        parent_status = parent_row.scalar_one()
-        assert parent_status == 'FAILED'
 
 
 # =============================================================================

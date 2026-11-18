@@ -16,6 +16,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies._core import (
@@ -29,7 +30,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.periods import RetentionDays, period_class_key
 from horsies.core.history.reads.publisher import (
     PUBLISHED_READER_SIGNATURES,
-    StagedLoaderPublisher,
 )
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
@@ -125,13 +125,18 @@ async def _missing_readers(connection: Connection) -> object:
 
 
 async def _publication_is_current(url: str) -> bool:
-    """The publisher's own check: the manifest equals the catalog and every reader is stamped."""
+    """The baseline's freshness check (``horsies_history_readers_current``):
+    the manifest equals the catalog and every reader is stamped."""
     engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
-            return await StagedLoaderPublisher().is_current(connection)
+            current = (
+                await connection.execute(text('SELECT horsies_history_readers_current()'))
+            ).scalar_one()
     finally:
         await engine.dispose()
+    assert isinstance(current, bool), current
+    return current
 
 
 @pytest.mark.asyncio(loop_scope='function')

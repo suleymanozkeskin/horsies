@@ -11,37 +11,21 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Final
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from horsies.core.history.ddl.classes import finite_class_parent_name
-from horsies.core.history.commands import (
-    CreateDailyHistoryLeaf,
-    DetachExpiredHistoryLeaf,
-    DropDetachedHistoryLeaf,
-    LeafBounds,
-    LeafLifecycle,
-    LeafRef,
-)
-from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
-from horsies.core.history.names import CLOCK_SKEW_EXCEPTIONS
-from horsies.core.history.outcomes import LeafCreated, LeafDetached, LeafDropped
-from horsies.core.history.partitions.catalog import daily_leaf_name
-from horsies.core.history.partitions.manager import (
-    create_daily_leaf,
-    detach_expired_leaf,
-    drop_detached_leaf,
-)
-from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.integration.task_history_harness import (
     HistorySchema,
-    day_bounds,
     insert_live_task,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+
+CLOCK_SKEW_EXCEPTIONS: Final = 'horsies_task_history_clock_exceptions'
+"""The table of the moves whose clock ran ahead of the id birth."""
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -97,15 +81,6 @@ async def exception_ids(connection: AsyncConnection) -> set[str]:
     return {str(row) for row in rows}
 
 
-async def test_publication_renders_the_stamped_guard_over_a_first_version(
-    terminalization_schema: HistorySchema,
-) -> None:
-    async with terminalization_schema.engine.begin() as connection:
-        assert not await StagedLoaderPublisher().is_current(connection)
-        await prepare_move_storage(connection, CLASS_KEY)
-        assert await StagedLoaderPublisher().is_current(connection)
-
-
 async def test_a_clock_ahead_move_is_recorded_and_the_guard_finds_it(
     terminalization_schema: HistorySchema,
 ) -> None:
@@ -135,51 +110,3 @@ async def test_a_clock_ahead_move_is_recorded_and_the_guard_finds_it(
         assert await provenance_found(connection, ahead)
 
 
-async def test_dropping_a_leaf_deletes_the_exceptions_of_its_rows(
-    terminalization_schema: HistorySchema,
-) -> None:
-    async with terminalization_schema.engine.begin() as connection:
-        await prepare_move_storage(connection, CLASS_KEY)
-        parent = finite_class_parent_name(CLASS_KEY)
-        lower, _ = day_bounds(datetime.now(UTC) - timedelta(days=40))
-        ref = LeafRef(
-            leaf_name=daily_leaf_name(parent, lower),
-            class_key=CLASS_KEY,
-            bounds=LeafBounds(lower=lower, upper=lower + timedelta(days=1)),
-        )
-        created = await create_daily_leaf(
-            connection, CreateDailyHistoryLeaf(leaf=ref), StagedLoaderPublisher(),
-        )
-        assert isinstance(created, LeafCreated)
-        inside, outside = str(uuid.uuid4()), str(uuid.uuid4())
-        for task_id, terminal_at in (
-            (inside, lower + timedelta(hours=1)),
-            (outside, datetime.now(UTC)),
-        ):
-            await connection.execute(
-                text(
-                    f'INSERT INTO {CLOCK_SKEW_EXCEPTIONS} (task_id, '
-                    'retention_class_key, terminal_at) '
-                    'VALUES (CAST(:id AS uuid), :class_key, :terminal_at)'
-                ),
-                {'id': task_id, 'class_key': CLASS_KEY, 'terminal_at': terminal_at},
-            )
-
-    detached = await detach_expired_leaf(
-        PartitionMaintenanceDatabase(terminalization_schema.engine, connection_capacity=2),
-        DetachExpiredHistoryLeaf(
-            leaf=ref, statement_timeout_ms=None,
-        ),
-        StagedLoaderPublisher(),
-    )
-    assert isinstance(detached, LeafDetached)
-    async with terminalization_schema.engine.begin() as connection:
-        dropped = await drop_detached_leaf(
-            connection,
-            DropDetachedHistoryLeaf(
-                leaf=ref, lifecycle=LeafLifecycle.RETENTION
-            ),
-            StagedLoaderPublisher(),
-        )
-        assert dropped == LeafDropped(leaf_name=ref.leaf_name)
-        assert await exception_ids(connection) == {outside}

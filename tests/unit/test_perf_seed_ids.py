@@ -26,7 +26,7 @@ pytestmark = [pytest.mark.unit]
 
 
 def _ids() -> SeedIds:
-    return seed_ids('fused-completion-small-result', Role.BASELINE, RowKind.TASK)
+    return seed_ids('seed-ids-first', Role.BASELINE, RowKind.TASK)
 
 
 class TestSeededId:
@@ -67,7 +67,7 @@ class TestIdRange:
         """One run's delete never removes another role's or scenario's rows."""
         ranges = [
             seed_ids(scenario, role, kind)
-            for scenario in ('fused-completion-small-result', 'owned-claim-expiry')
+            for scenario in ('seed-ids-first', 'seed-ids-second')
             for role in Role
             for kind in RowKind
         ]
@@ -79,16 +79,16 @@ class TestIdRange:
 
 class TestSeedRows:
     def test_seed_rows_names_one_range_per_kind_of_its_role(self) -> None:
-        rows = seed_rows('workflow-success-phase2', Role.BALLAST)
+        rows = seed_rows('seed-ids-workflow', Role.BALLAST)
         assert rows.tasks == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.TASK
+            'seed-ids-workflow', Role.BALLAST, RowKind.TASK
         )
         assert rows.workflows == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.WORKFLOW
+            'seed-ids-workflow', Role.BALLAST, RowKind.WORKFLOW
         )
         assert rows.nodes == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.WORKFLOW_NODE
+            'seed-ids-workflow', Role.BALLAST, RowKind.WORKFLOW_NODE
         )
         assert rows.dependent_nodes == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.DEPENDENT_NODE
+            'seed-ids-workflow', Role.BALLAST, RowKind.DEPENDENT_NODE
         )

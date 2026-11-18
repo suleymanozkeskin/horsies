@@ -21,9 +21,9 @@ from uuid import UUID
 import pytest
 from pydantic import SecretStr
 
+from horsies._catalog.error_detail import NoCause
 from horsies._core import (
     AllSlotsServingRecord,
-    BrokerFailure,
     BudgetLoadRecord,
     ClassCoverageRecord,
     ClassReportRecord,
@@ -50,7 +50,10 @@ from horsies.core.brokers.postgres import (
 )
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
+    BrokerInvalidInput,
+    BrokerListenerDisabled,
     BrokerOperationFailed,
+    BrokerOperationFailedCode,
     BrokerResult,
     RawResultRecord,
 )
@@ -304,9 +307,9 @@ def test_get_task_info_gives_the_outcome_of_get_task_info_async(
 # =============================================================================
 
 
-def _failure(code: str) -> MagicMock:
-    return MagicMock(
-        spec=BrokerFailure,
+def _failure(code: BrokerOperationFailedCode) -> BrokerOperationFailed:
+    """The core's class of a failed operation of ``code``."""
+    return BrokerOperationFailed(
         code=code,
         message=f'{code}: connection refused',
         retryable=True,
@@ -316,7 +319,7 @@ def _failure(code: str) -> MagicMock:
 
 PING_ANSWERS: Final[dict[str, object]] = {
     'pinged': MagicMock(spec=DatabasePingRecord, latency_ms=1.5),
-    'ping_failed': _failure('DB_PING_FAILED'),
+    'ping_failed': _failure(BrokerErrorCode.DB_PING_FAILED),
     'core_cannot_run_the_call': CORE_REFUSAL,
 }
 
@@ -360,7 +363,7 @@ def test_ping_database_gives_the_outcome_of_ping_database_async(answer: str) -> 
 
 def test_ping_database_refuses_another_code_as_its_async_form_does() -> None:
     """A failure code outside the ping's catalog is a defect in both forms."""
-    handle = _answering('ping_database', _failure('CLEANUP_FAILED'))
+    handle = _answering('ping_database', _failure(BrokerErrorCode.CLEANUP_FAILED))
     app, _ = _app_with_core_handle(handle)
 
     with pytest.raises(AssertionError, match='CLEANUP_FAILED') as blocking:
@@ -462,14 +465,14 @@ def test_close_with_nothing_open_runs_no_event_loop(monkeypatch: pytest.MonkeyPa
 # =============================================================================
 
 
-def _failure_of(code: str) -> MagicMock:
-    return _core_record(
-        BrokerFailure,
-        code=code,
-        message=f'{code}: connection refused',
-        retryable=code != 'INVALID_INPUT',
-        exception=CONNECTION_LOST,
-    )
+def _refused_input() -> BrokerInvalidInput:
+    """The core's class of an argument that a check refused."""
+    return BrokerInvalidInput(message='INVALID_INPUT: refused', exception=NoCause())
+
+
+def _listener_disabled() -> BrokerListenerDisabled:
+    """The core's class of a ping on a broker with no listener."""
+    return BrokerListenerDisabled(message='LISTENER_DISABLED: no listener')
 
 
 _STATES: Final = _core_record(
@@ -561,9 +564,9 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
                     ),
                 ],
             ),
-            'invalid_input': _failure_of('INVALID_INPUT'),
-            'listener_disabled': _failure_of('LISTENER_DISABLED'),
-            'ping_failed': _failure_of('WORKER_PING_FAILED'),
+            'invalid_input': _refused_input(),
+            'listener_disabled': _listener_disabled(),
+            'ping_failed': _failure(BrokerErrorCode.WORKER_PING_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -575,7 +578,7 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         keywords={},
         answers={
             'states': _STATES,
-            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -588,7 +591,7 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         answers={
             'state': _state_record('w1', _SLOTS_DOWN_RECORD),
             'absent': _core_record(WorkerStateAbsent),
-            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -600,8 +603,8 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         keywords={'limit': 5},
         answers={
             'states': _STATES,
-            'invalid_input': _failure_of('INVALID_INPUT'),
-            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'invalid_input': _refused_input(),
+            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -613,7 +616,7 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         keywords={},
         answers={
             'coverage': _COVERAGE,
-            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -625,7 +628,7 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
         keywords={},
         answers={
             'report': _REPORT,
-            'read_failed': _failure_of('MONITORING_QUERY_FAILED'),
+            'read_failed': _failure(BrokerErrorCode.MONITORING_QUERY_FAILED),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -662,7 +665,7 @@ def test_a_monitoring_facade_gives_the_outcome_of_its_async_form(
 def test_a_monitoring_facade_refuses_another_code_as_its_async_form_does(facade: str) -> None:
     """A failure code outside the facade's catalog is a defect in both forms."""
     entry = MONITORING_FACADES[facade]
-    handle = _answering(entry.blocking_form, _failure_of('CLEANUP_FAILED'))
+    handle = _answering(entry.blocking_form, _failure(BrokerErrorCode.CLEANUP_FAILED))
     app, _ = _app_with_core_handle(handle)
 
     with pytest.raises(AssertionError, match='CLEANUP_FAILED') as blocking:

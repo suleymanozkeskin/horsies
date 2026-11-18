@@ -35,15 +35,15 @@ pub use horsies_core::monitoring::{
     categorize_error_code, elapsed_s, span_s, task_action_outcome, ActionBody, ActionConflictCode,
     ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoadInfo,
     CancelTaskBody, ClassReportInfo, DownSlotInfo, ErrorCategory, ErrorFacet, FacetValue, Facets,
-    GroupRow, HistoryWindow, LeafTaskInfo, LivenessReport, MonitoringQueryError,
-    MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult, PaginationRefused,
-    PendingStreamInfo, ScheduleStateInfo, SlotHealthKind, SortDirection, StatusCount,
-    StreamCoverageInfo, StreamWaitInfo, TaskAbsenceReason, TaskActionError, TaskActionErrorCode,
-    TaskActionResult, TaskAttemptInfo, TaskBreakdownQuery, TaskCancelled, TaskDetail,
-    TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListPage,
-    TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused, WorkerClassLoadInfo,
-    WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge, WorkflowNodeInfo,
-    WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
+    GroupRow, HistoryContractSource, HistoryWindow, LeafTaskInfo, LivenessReport,
+    MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
+    PaginationRefused, PendingStreamInfo, ScheduleStateInfo, SlotHealthKind, SortDirection,
+    StatusCount, StreamCoverageInfo, StreamWaitInfo, TaskAbsenceReason, TaskActionError,
+    TaskActionErrorCode, TaskActionResult, TaskAttemptInfo, TaskBreakdownQuery, TaskCancelled,
+    TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskGroupBy,
+    TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused,
+    WorkerClassLoadInfo, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge,
+    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
     INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
     MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
     RESUME_RECOVERY_WARNING, STATE_CONFLICT,
@@ -168,12 +168,7 @@ pub async fn cancel_task(
     refuse_in_a_fork(format_args!("Task cancel of task {task_id}"));
     match app.reads_handle().broker().await {
         Ok(broker) => core_monitoring::cancel_task(&broker, task_id, include_running).await,
-        Err(error) => Err(TaskActionError::DbOperationFailed {
-            message: format!("Task cancel failed: {error}"),
-            retryable: error.is_retryable(),
-            task_id,
-            cause: error.failure_cause(),
-        }),
+        Err(error) => Err(TaskActionError::cancel_failed(task_id, error)),
     }
 }
 
@@ -247,11 +242,7 @@ async fn monitoring_broker(
 
 /// The error of a failed connect before the read `operation`. Pure.
 fn connect_failed(operation: &str, error: BrokerError) -> MonitoringQueryError {
-    MonitoringQueryError::DbOperationFailed {
-        message: format!("{operation} failed: {error}"),
-        retryable: error.is_retryable(),
-        source: MonitoringQueryErrorSource::Broker(error),
-    }
+    MonitoringQueryError::connect_failed(operation, error)
 }
 
 /// Run the workflow action `run` on `app`'s broker; a failed connect is

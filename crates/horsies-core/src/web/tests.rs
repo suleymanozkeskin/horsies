@@ -1848,8 +1848,10 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
         "Task detail",
         crate::monitoring::MonitoringQueryError::HistoryContractViolation {
             message: "task detail history read failed: bad row".to_owned(),
-            source: crate::monitoring::MonitoringQueryErrorSource::History(
-                crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
+            source: crate::monitoring::HistoryContractSource(
+                crate::monitoring::MonitoringQueryErrorSource::History(
+                    crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
+                ),
             ),
         },
     );

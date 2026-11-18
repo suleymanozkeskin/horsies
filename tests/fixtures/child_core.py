@@ -7,9 +7,7 @@ init frame (``CoreChildHandle.from_init``). A test builds that frame with
 ``child_init_frame``. A test that runs the writes against a database of its
 own puts a handle for that database in place of the handle of the process
 for the time of a block. ``child_database_url`` names the database of the
-handle in place: the reference of the start of a child
-(``tests.dualrun.reference.stop_before_start_caller``) runs its statements
-on a psycopg pool of its own on that database.
+handle in place.
 A test of the bound of a start waits for the start statements of the
 handle to end before it reads the row (``wait_for_start_statements_to_end``).
 """

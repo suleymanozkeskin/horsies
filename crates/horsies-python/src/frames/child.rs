@@ -11,11 +11,11 @@ use std::num::NonZeroU64;
 
 use horsies_core::frame_protocol::{
     BlockedWhere, BodyEnd, BodyReturnedFrame, BootDetail, BootErrorName, BootFailedFrame,
-    ChildFrame, DispatchNumber, FailureDetail, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
-    LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
-    LoopHoldsTasks, NoLeftWork, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText,
-    ResultFrame, RssMb, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    ShortageErrno, StopReason, StuckWork,
+    ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail, LeftWorkEnd, LeftWorkEndedFrame,
+    LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame,
+    LoopCulprit, LoopHoldsTasks, NoLeftWork, ProcessId, ReadyFrame, ReportedBootCause,
+    ResultEnvelopeText, ResultFrame, RssMb, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd,
+    SharedResultFrame, ShortageErrno, StopReason, StuckWork,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -71,6 +71,18 @@ fn leftover_names(names: Vec<String>) -> Vec<LeftoverName> {
         .into_iter()
         .map(|name| LeftoverName::cut(&name))
         .collect()
+}
+
+/// What the child does once its result frame is written: `'SERVES_ON'`,
+/// or `'ENDS_ITSELF'` when its core stopped and it ends itself.
+fn child_after_frame(child: &str) -> PyResult<ChildAfterFrame> {
+    match child {
+        "SERVES_ON" => Ok(ChildAfterFrame::ServesOn),
+        "ENDS_ITSELF" => Ok(ChildAfterFrame::EndsItself),
+        other => Err(PyValueError::new_err(format!(
+            "child must be 'SERVES_ON' or 'ENDS_ITSELF', not {other:?}"
+        ))),
+    }
 }
 
 /// The task produced a result envelope: a value or a task error.
@@ -443,14 +455,17 @@ impl BootFailedFrameRecord {
 
 #[pymethods]
 impl ResultFrameRecord {
-    /// `task_loop`: `'NO_TASK_LOOP'` or `'LOOP_HOLDS_NO_TASK'`.
+    /// `task_loop`: `'NO_TASK_LOOP'` or `'LOOP_HOLDS_NO_TASK'`. `child`:
+    /// `'SERVES_ON'`, or `'ENDS_ITSELF'` when the child ends itself once the
+    /// frame is written.
     #[new]
-    #[pyo3(signature = (*, task_id, end, rss_mb, task_loop))]
+    #[pyo3(signature = (*, task_id, end, rss_mb, task_loop, child))]
     fn new(
         task_id: Uuid,
         end: RunEndArgument<'_>,
         rss_mb: RssArgument,
         task_loop: &str,
+        child: &str,
     ) -> PyResult<Self> {
         let task_loop = match task_loop {
             "NO_TASK_LOOP" => NoLeftWork::NoTaskLoop,
@@ -467,6 +482,7 @@ impl ResultFrameRecord {
                 end: end.run_end()?,
                 rss: rss_mb.reading()?,
                 task_loop,
+                child: child_after_frame(child)?,
             }),
         })
     }
@@ -532,19 +548,23 @@ impl LeftWorkStuckFrameRecord {
 
 #[pymethods]
 impl SharedResultFrameRecord {
+    /// `child`: `'SERVES_ON'`, or `'ENDS_ITSELF'` when the child ends itself
+    /// once the frame is written.
     #[new]
-    #[pyo3(signature = (*, dispatch, task_id, end, rss_mb))]
+    #[pyo3(signature = (*, dispatch, task_id, end, rss_mb, child))]
     fn new(
         dispatch: u64,
         task_id: Uuid,
         end: SeatEndArgument<'_>,
         rss_mb: RssArgument,
+        child: &str,
     ) -> PyResult<Self> {
         Ok(Self {
             frame: ChildFrame::SharedResult(SharedResultFrame {
                 run: run_ref(dispatch, task_id)?,
                 end: end.seat_end()?,
                 rss: rss_mb.reading()?,
+                child: child_after_frame(child)?,
             }),
         })
     }

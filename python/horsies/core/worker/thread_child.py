@@ -76,7 +76,12 @@ from horsies.core.worker.child_frames import (
     ThreadSeatWork,
     boot_failed_frame,
 )
-from horsies.core.worker.run_return import ResultEnvelope
+from horsies.core.worker.run_return import (
+    CoreStoppedBeforeStart,
+    MarkerEnd,
+    ResultEnvelope,
+    end_after_marker,
+)
 from horsies.core.worker.shared_child import (
     CHILD_DEFECT_EXIT_CODE,
     FRAMES_PER_SEAT,
@@ -114,10 +119,14 @@ class FrameSink(Protocol):
     def send_result(self, task_name: str, frame: SharedResultFrame) -> None: ...
 
 
-type ThreadSeatReturn = SetRunning | StoppedBeforeRunning | DeadlineBeforeStart
+type ThreadSeatReturn = (
+    SetRunning | StoppedBeforeRunning | DeadlineBeforeStart | CoreStoppedBeforeStart
+)
 """What the run of one task on a seat thread returns. ``DeadlineBeforeStart``:
 the deadline of the run fired while it waited for a pooled connection, and
-the run did not start."""
+the run did not start. ``CoreStoppedBeforeStart``: the core of the child
+stopped before the start; the run reports ``OWNERSHIP_UNCONFIRMED``, and the
+child ends itself once that frame is written (``FrameWriter``)."""
 
 
 class ThreadSeatProgram(Protocol):
@@ -136,9 +145,11 @@ class ThreadSeatProgram(Protocol):
         ``CHILD_DEFECT_EXIT_CODE``."""
         ...
 
-    def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+    def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``, whose task
-        returned. A failed or skipped write is logged only; an exception
+        returned. A failed or skipped write is logged only.
+        ``MarkerMetStoppedCore``: the core of the child stopped; the run
+        reports its result, and the child then ends itself. An exception
         that escapes is a defect, as for ``run``."""
         ...
 
@@ -206,7 +217,14 @@ def _milliseconds_left(seconds: float) -> int:
     return max(1, math.ceil(seconds * 1000.0))
 
 
-def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
+type _EndAtReturn = (
+    ResultEnvelope | StoppedBeforeRunning | CoreStoppedBeforeStart | SeatTimedOut
+)
+"""The end of a run at the return of its task, before its finalizing
+marker."""
+
+
+def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> _EndAtReturn:
     """The end of a run whose task returned ``returned``: the timeout after
     a deadline that fired, also when the task returned a value, else what
     the task returned. A second return is a defect, and so is a run that did
@@ -221,7 +239,7 @@ def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
             )
         case _Deadline.PENDING, SetRunning(result=result):
             return result
-        case _Deadline.PENDING, StoppedBeforeRunning() as stopped:
+        case _Deadline.PENDING, StoppedBeforeRunning() | CoreStoppedBeforeStart() as stopped:
             return stopped
         case _Returned(), _:
             raise AssertionError(f'run {run.frame.dispatch} returned twice')
@@ -232,7 +250,7 @@ def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
 def _marker_at_return(
     run: _ThreadRun,
     returned: ThreadSeatReturn,
-    end: SeatEnd,
+    end: _EndAtReturn,
     now: float,
 ) -> MarkerDue | NoMarker:
     """Whether the seat writes the finalizing marker of a run whose task
@@ -248,20 +266,28 @@ def _marker_at_return(
         case SeatTimedOut(), _, _:
             return NoMarker()
         case (
-            ResultEnvelope() | StoppedBeforeRunning(),
-            StoppedBeforeRunning() | DeadlineBeforeStart(),
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
+            StoppedBeforeRunning() | DeadlineBeforeStart() | CoreStoppedBeforeStart(),
             _,
         ):
             return NoMarker()
-        case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _NoDeadline():
+        case (
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
+            SetRunning(),
+            _NoDeadline(),
+        ):
             return MarkerDue()
         case (
-            ResultEnvelope() | StoppedBeforeRunning(),
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
             SetRunning(),
             _DeadlineAt(seconds=at),
         ) if at > now:
             return MarkerDue()
-        case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _DeadlineAt():
+        case (
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
+            SetRunning(),
+            _DeadlineAt(),
+        ):
             return NoMarker()
         case _ as unreachable:
             assert_never(unreachable)
@@ -367,7 +393,7 @@ class ThreadRunTable:
             match returned:
                 case DeadlineBeforeStart():
                     _ = self._fire_due()
-                case SetRunning() | StoppedBeforeRunning():
+                case SetRunning() | StoppedBeforeRunning() | CoreStoppedBeforeStart():
                     pass
                 case _ as unreachable:
                     assert_never(unreachable)
@@ -377,10 +403,29 @@ class ThreadRunTable:
             self._changed.notify_all()
             return _marker_at_return(run, returned, end, self._clock())
 
+    def marked(self, dispatch: int, marker: MarkerEnd) -> None:
+        """Fold the end of the finalizing marker of run ``dispatch`` into the
+        end of the run (``end_after_marker``). A marker that met the stopped
+        core of the child gives ``CoreStoppedAfterBody``: the writer ends
+        the child once the frame of the run is written. Called once per run
+        whose marker was due, by its seat thread, between ``returned`` and
+        ``finish``."""
+        with self._lock:
+            run = self._runs[dispatch]
+            match run.state:
+                case _Returned(end=ResultEnvelope() as result):
+                    run.state = _Returned(end_after_marker(result, marker))
+                case _Returned() | _Deadline.PENDING | _Deadline.FIRED:
+                    raise AssertionError(
+                        f'run {dispatch} wrote a marker with no finished body',
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+
     def finish(self, dispatch: int, rss: RssReading) -> None:
         """End run ``dispatch``, whose task returned, and queue its result
-        frame with the end fixed at the return. Called once per run, by its
-        seat thread, after ``returned``."""
+        frame with the end fixed at the return and the marker. Called once
+        per run, by its seat thread, after ``returned``."""
         with self._lock:
             run = self._runs.pop(dispatch)
             match run.state:
@@ -544,13 +589,14 @@ class ThreadSeats:
 
     def _run(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
         """Run one task, fix its end at its return, write its finalizing
-        marker when one is due, then end the run."""
+        marker when one is due and fold its end into the end of the run,
+        then end the run."""
         returned = self._run_or_exit(frame, work)
         match self._table.returned(frame.dispatch, returned):
             case NoMarker():
                 pass
             case MarkerDue():
-                self._mark_or_exit(frame)
+                self._table.marked(frame.dispatch, self._mark_or_exit(frame))
             case _ as unreachable:
                 assert_never(unreachable)
         self._table.finish(frame.dispatch, self._read_rss())
@@ -573,9 +619,9 @@ class ThreadSeats:
                 CHILD_DEFECT_EXIT_CODE,
             )
 
-    def _mark_or_exit(self, frame: core.SharedRunFrame) -> None:
+    def _mark_or_exit(self, frame: core.SharedRunFrame) -> MarkerEnd:
         try:
-            self._program.mark_finalizing(frame)
+            return self._program.mark_finalizing(frame)
         except BaseException as exc:
             _exit_for_defect(
                 f'the finalizing marker of task {frame.task_id} escaped the '

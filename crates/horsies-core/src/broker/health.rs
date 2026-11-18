@@ -13,9 +13,8 @@ use serde_json::{Map, Value};
 use sqlx::FromRow;
 
 use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
-use crate::broker::result_types::{BrokerOperationError, BrokerOperationFailedCode, BrokerResult};
+use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
 use crate::broker::slot_health::{parse_slot_health, SlotHealth};
-use crate::failure_cause::FailureCause;
 
 /// Shared inbound channel every worker subscribes to. A ping NOTIFY carries a
 /// [`WorkerPingRequest`]; each worker replies on the request's `reply_channel`.
@@ -182,7 +181,7 @@ impl WorkerStateColumn {
     "worker {worker_id} snapshot at {snapshot_at}: {} is unreadable: {reason}",
     column.as_str()
 )]
-pub(crate) struct WorkerStateUnreadable {
+pub struct WorkerStateUnreadable {
     pub(crate) worker_id: String,
     pub(crate) snapshot_at: DateTime<Utc>,
     pub(crate) column: WorkerStateColumn,
@@ -283,20 +282,18 @@ pub fn ping_listener_disabled() -> BrokerOperationError {
 /// (`ping_workers_async`). `timeout_seconds` is the given value as the
 /// caller wrote it. Nothing ran.
 pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError::InvalidInput {
-        message: format!("timeout_seconds must be positive, got {timeout_seconds}"),
-        cause: FailureCause::PreconditionFailed,
-    }
+    BrokerOperationError::invalid_input(format!(
+        "timeout_seconds must be positive, got {timeout_seconds}"
+    ))
 }
 
 /// The refusal of a worker ping `min_responses` below 1: `INVALID_INPUT`,
 /// not retryable, with Python's text (`ping_workers_async`).
 /// `min_responses` is the given value as the caller wrote it. Nothing ran.
 pub fn ping_min_responses_refused(min_responses: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError::InvalidInput {
-        message: format!("min_responses must be >= 1 when set, got {min_responses}"),
-        cause: FailureCause::PreconditionFailed,
-    }
+    BrokerOperationError::invalid_input(format!(
+        "min_responses must be >= 1 when set, got {min_responses}"
+    ))
 }
 
 /// The worker state history limit, by Python's rule
@@ -315,10 +312,7 @@ pub fn checked_history_limit(limit: Option<i64>) -> BrokerResult<Option<i64>> {
 /// (`get_worker_state_history_async`). `limit` is the given value as the
 /// caller wrote it. Nothing ran.
 pub fn worker_history_limit_refused(limit: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError::InvalidInput {
-        message: format!("limit must be positive when set, got {limit}"),
-        cause: FailureCause::PreconditionFailed,
-    }
+    BrokerOperationError::invalid_input(format!("limit must be positive when set, got {limit}"))
 }
 
 /// The snapshots of stored rows, for the read `operation`. The first row that
@@ -341,13 +335,12 @@ pub(crate) fn read_worker_snapshot(
     operation: &str,
     row: StoredWorkerState,
 ) -> BrokerResult<WorkerStateSnapshot> {
-    row.into_snapshot()
-        .map_err(|unreadable| BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::MonitoringQueryFailed,
-            message: format!("{operation} failed: {unreadable}"),
-            retryable: false,
-            cause: FailureCause::ContractViolation,
-        })
+    row.into_snapshot().map_err(|unreadable| {
+        BrokerOperationError::monitoring_query_failed(
+            operation,
+            BrokerOperationSource::Snapshot(unreadable),
+        )
+    })
 }
 
 /// The listed states of the worker list rows, for the read `operation`.
@@ -450,6 +443,72 @@ mod tests {
             r#"{"correlation_id":"c","worker_id":"w","hostname":"h","pid":1,"extra":true}"#,
         );
         assert!(result.is_err(), "unknown fields must be rejected");
+    }
+
+    /// Python `test_health_models.py::TestWorkerPingRequest::test_roundtrip_through_json_io`:
+    /// a request with a target keeps each field through its wire text.
+    #[test]
+    fn ping_request_round_trip_keeps_each_field() {
+        let req = WorkerPingRequest {
+            correlation_id: "abc123".to_owned(),
+            reply_channel: "horsies_worker_pong_abc123".to_owned(),
+            target_worker_id: Some("worker-7".to_owned()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: WorkerPingRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.correlation_id, "abc123");
+        assert_eq!(back.reply_channel, "horsies_worker_pong_abc123");
+        assert_eq!(back.target_worker_id.as_deref(), Some("worker-7"));
+    }
+
+    /// Python `test_health_models.py::TestWorkerPingRequest::test_rejects_extra_fields`.
+    #[test]
+    fn ping_request_rejects_unknown_fields() {
+        let result: Result<WorkerPingRequest, _> = serde_json::from_str(
+            r#"{"correlation_id":"c","reply_channel":"r","target_worker_id":null,"rogue":1}"#,
+        );
+        assert!(result.is_err(), "unknown fields must be rejected");
+    }
+
+    /// Python `test_health_models.py::TestWorkerPingRequest::test_rejects_missing_required`.
+    #[test]
+    fn ping_request_rejects_a_missing_reply_channel() {
+        let result: Result<WorkerPingRequest, _> =
+            serde_json::from_str(r#"{"correlation_id":"c"}"#);
+        assert!(result.is_err(), "a request needs its reply channel");
+    }
+
+    /// Python `test_health_models.py::TestWorkerPongPayload::test_roundtrip_through_json_io`.
+    #[test]
+    fn pong_payload_round_trip_keeps_each_field() {
+        let pong = WorkerPongPayload {
+            correlation_id: "abc".to_owned(),
+            worker_id: "w1".to_owned(),
+            hostname: "host".to_owned(),
+            pid: 999,
+        };
+        let json = serde_json::to_string(&pong).unwrap();
+        let back: WorkerPongPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.correlation_id, "abc");
+        assert_eq!(back.worker_id, "w1");
+        assert_eq!(back.hostname, "host");
+        assert_eq!(back.pid, 999);
+    }
+
+    /// Python `test_health_models.py::TestWorkerPongPayload::test_rejects_non_integer_pid`.
+    #[test]
+    fn pong_payload_rejects_a_pid_that_is_not_an_integer() {
+        let result: Result<WorkerPongPayload, _> = serde_json::from_str(
+            r#"{"correlation_id":"c","worker_id":"w","hostname":"h","pid":"not-a-pid"}"#,
+        );
+        assert!(result.is_err(), "a pid must be an integer");
+    }
+
+    /// Python `test_health_models.py::TestResultModels::test_channel_constant`:
+    /// the shared ping channel name is stable.
+    #[test]
+    fn the_ping_channel_name_is_stable() {
+        assert_eq!(WORKER_PING_CHANNEL, "horsies_worker_ping");
     }
 
     fn stored_row() -> StoredWorkerState {

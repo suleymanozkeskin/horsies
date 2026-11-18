@@ -41,6 +41,7 @@ fn answer_ok(claimed: &ClaimedTask) -> String {
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     }))
     .unwrap()
     .to_bytes();

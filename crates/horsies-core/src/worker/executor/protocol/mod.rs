@@ -35,6 +35,10 @@
 //!   (TCP keepalives, TCP user timeout, and the server sessions of the URL).
 //! - `init` and `ready` carry `protocol`. Each side compares it before any
 //!   other field, so a mismatch is named, not read as a bad frame.
+//! - The result frames (`result`, `shared_result`) carry `child`:
+//!   `serves_on`, or `ends_itself` when the core of the child stopped and
+//!   the child ends itself once the frame is written. The parent sends no
+//!   run to a child that ends itself.
 //!
 //! This module does no I/O. [`FrameReader`] holds the read buffer of one
 //! channel; everything else is pure.
@@ -63,10 +67,10 @@ pub use bounds::{
 };
 pub use child_frames::{
     decode_child_frame, encode_child_frame, BodyEnd, BodyReturnedFrame, BootFailedFrame,
-    ChildFrame, ChildFrameRefusal, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
-    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ReadyFrame,
-    ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    ShortageErrno, StopReason,
+    ChildAfterFrame, ChildFrame, ChildFrameRefusal, LeftWorkEnd, LeftWorkEndedFrame,
+    LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
+    NoLeftWork, ReadyFrame, ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd,
+    SharedResultFrame, ShortageErrno, StopReason,
 };
 pub use exit_codes::{
     ChildExitCode, BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,

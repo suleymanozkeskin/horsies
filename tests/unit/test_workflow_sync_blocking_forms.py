@@ -32,6 +32,11 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowSpec
 from horsies.core.models.workflow.handle import WorkflowHandle
+from horsies.core.models.workflow.handle_types import (
+    HandleDbOperationFailed,
+    HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid,
+)
 from horsies.core.types.result import is_ok
 from horsies.core.workflows.lifecycle import (
     pause_workflow,
@@ -78,12 +83,34 @@ def _record(record_class: type, **fields: object) -> MagicMock:
     return record
 
 
-def _handle_failed(code: str) -> MagicMock:
-    return _record(
-        core.HandleFailed,
-        code=code,
-        message=f'{code}: connection lost',
-        retryable=code == 'DB_OPERATION_FAILED',
+def _db_operation_failed() -> HandleDbOperationFailed:
+    """The core's answer of a read or write whose connection was lost."""
+    return HandleDbOperationFailed(
+        message=f'Status failed for workflow {WORKFLOW_ID}: connection lost',
+        retryable=True,
+        workflow_id=WORKFLOW_ID,
+        exception=CONNECTION_LOST,
+    )
+
+
+def _stored_data_invalid() -> HandleStoredDataInvalid:
+    """The core's answer of a stored value that does not parse."""
+    return HandleStoredDataInvalid(
+        message=f'Status failed for workflow {WORKFLOW_ID}: invalid status: BOGUS',
+        workflow_id=WORKFLOW_ID,
+        exception=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
+    )
+
+
+def _recovery_failed() -> HandleResumeRecoveryFailed:
+    """The core's answer of a resume whose recovery pass failed after the
+    commit."""
+    return HandleResumeRecoveryFailed(
+        message=(
+            f'Workflow {WORKFLOW_ID} resumed; the recovery pass for its tree failed: '
+            'connection lost'
+        ),
+        workflow_id=WORKFLOW_ID,
         exception=CONNECTION_LOST,
     )
 
@@ -118,8 +145,8 @@ def _answering(method: str, answer: object) -> CoreAnswers:
     return CoreAnswers(handle=handle, runner=runner)
 
 
-def _workflow_handle(workflow_id: str = WORKFLOW_ID) -> WorkflowHandle[int]:
-    return WorkflowHandle(workflow_id=workflow_id, broker=APP.get_broker(), out_type=int)
+def _workflow_handle() -> WorkflowHandle[int]:
+    return WorkflowHandle(workflow_id=WORKFLOW_KEY, broker=APP.get_broker(), out_type=int)
 
 
 async def _awaited(awaitable: Awaitable[object]) -> object:
@@ -141,8 +168,8 @@ class Facade:
 
 
 HANDLE_FAILURES: Final[dict[str, object]] = {
-    'db_operation_failed': _handle_failed('DB_OPERATION_FAILED'),
-    'stored_data_invalid': _handle_failed('STORED_DATA_INVALID'),
+    'db_operation_failed': _db_operation_failed(),
+    'stored_data_invalid': _stored_data_invalid(),
     'core_cannot_run_the_call': CORE_REFUSAL,
 }
 
@@ -180,7 +207,7 @@ FACADES: Final[dict[str, Facade]] = {
             'paused': _record(core.WorkflowPausedRead),
             'timed_out': _record(core.WaitTimedOut),
             'absent': _record(core.WorkflowAbsent),
-            'read_failed': _handle_failed('DB_OPERATION_FAILED'),
+            'read_failed': _db_operation_failed(),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -208,7 +235,7 @@ FACADES: Final[dict[str, Facade]] = {
                 sub_definition_key=None,
             ),
             'not_stored': _record(core.NodeResultNotStored, node_id=NODE_ID),
-            'read_failed': _handle_failed('DB_OPERATION_FAILED'),
+            'read_failed': _db_operation_failed(),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
@@ -343,11 +370,7 @@ FACADES: Final[dict[str, Facade]] = {
         answers={
             'resumed': _record(core.WorkflowResumed),
             'not_paused': _record(core.WorkflowNotPaused),
-            'recovery_failed': _record(
-                core.WorkflowResumeRecoveryFailed,
-                message='recovery pass failed',
-                exception=CONNECTION_LOST,
-            ),
+            'recovery_failed': _recovery_failed(),
             'absent': _record(core.WorkflowAbsent),
             **HANDLE_FAILURES,
         },
@@ -361,11 +384,7 @@ FACADES: Final[dict[str, Facade]] = {
         answers={
             'resumed': _record(core.WorkflowResumed),
             'not_paused': _record(core.WorkflowNotPaused),
-            'recovery_failed': _record(
-                core.WorkflowResumeRecoveryFailed,
-                message='recovery pass failed',
-                exception=CONNECTION_LOST,
-            ),
+            'recovery_failed': _recovery_failed(),
             'absent': _record(core.WorkflowAbsent),
             **HANDLE_FAILURES,
         },
@@ -388,20 +407,6 @@ def test_a_sync_facade_gives_the_outcome_of_its_async_form(facade: str, answer: 
         *entry.arguments, **entry.keywords,
     )
     answers.runner.call.assert_not_called()
-
-
-@pytest.mark.parametrize('facade', list(FACADES))
-def test_an_id_that_is_not_a_uuid_is_refused_as_the_async_form_refuses_it(facade: str) -> None:
-    """No core call in either form."""
-    entry = FACADES[facade]
-    answers = _answering(entry.blocking_form, next(iter(entry.answers.values())))
-
-    blocking = entry.blocking(_workflow_handle(NOT_A_UUID))
-    awaited = asyncio.run(_awaited(entry.awaited(_workflow_handle(NOT_A_UUID))))
-
-    assert outcome_shape(blocking) == outcome_shape(awaited)
-    getattr(answers.handle, entry.blocking_form).assert_not_called()
-    getattr(answers.handle, f'{entry.blocking_form}_async').assert_not_called()
 
 
 @pytest.mark.parametrize('facade', list(FACADES))
@@ -593,4 +598,4 @@ def test_a_minted_id_is_one_uuid_for_the_request_and_the_handle() -> None:
 
     assert is_ok(started), started
     minted = started.ok_value.workflow_id
-    assert request_class.call_args.kwargs['workflow_id'] == uuid.UUID(minted)
+    assert request_class.call_args.kwargs['workflow_id'] == minted

@@ -15,6 +15,7 @@ use super::support::{
     end_workflows, finish_phase1, node, ok, seed_node, seed_node_task, seed_workflow, shared_pool,
     workflow_status, LiveStatus, NodeSeed, Notifications, WorkflowSeed,
 };
+use crate::broker::workflow_phase2::NodeFinishForm;
 use crate::broker::PostgresBroker;
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::engine::{on_workflow_task_complete_with, WorkflowTaskCompletion};
@@ -118,6 +119,55 @@ async fn a_node_finish_that_reads_no_dependents_still_completes_its_workflow() {
     );
     assert_eq!(root.status, "COMPLETED");
     assert_eq!(status, "COMPLETED");
+}
+
+/// The form of a phase 2 decides whether the function reads the dependents
+/// (`PostgresBroker::finish_workflow_node`): `NoDependents` sends `'NONE'`,
+/// so a PENDING dependent stays PENDING with no task; `DependentsWithoutSubworkflow`
+/// sends `'READ'`, so the dependent is promoted with its task row.
+#[tokio::test]
+#[serial]
+async fn the_form_of_a_node_finish_decides_whether_the_dependents_are_read() {
+    let pool = shared_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let (unread_workflow, unread_task) = seed_owed_phase_two(&pool, "RUNNING", true).await;
+    let (read_workflow, read_task) = seed_owed_phase_two(&pool, "RUNNING", true).await;
+
+    let unread = broker
+        .finish_workflow_node(
+            unread_task,
+            NodeFinishForm::NoDependents,
+            false,
+            &TestChildSpecs::empty(),
+        )
+        .await;
+    let read = broker
+        .finish_workflow_node(
+            read_task,
+            NodeFinishForm::DependentsWithoutSubworkflow,
+            false,
+            &TestChildSpecs::empty(),
+        )
+        .await;
+
+    let unread_dependent = node(&pool, unread_workflow, 1).await;
+    let read_dependent = node(&pool, read_workflow, 1).await;
+    end_workflows(&pool, &[unread_workflow, read_workflow]).await;
+    assert_eq!(
+        unread
+            .expect("the node finish that reads no dependents")
+            .disposition,
+        "APPLIED"
+    );
+    assert_eq!(
+        read.expect("the node finish that reads the dependents")
+            .disposition,
+        "APPLIED"
+    );
+    assert_eq!(unread_dependent.status, "PENDING");
+    assert_eq!(unread_dependent.task_id, None);
+    assert_eq!(read_dependent.status, "ENQUEUED");
+    assert!(read_dependent.task_id.is_some());
 }
 
 /// `TestOnWorkflowTaskComplete::test_no_wake_is_the_default`: the phase 2 of

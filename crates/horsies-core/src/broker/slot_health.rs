@@ -425,6 +425,25 @@ mod tests {
         );
     }
 
+    /// Python `TestSlotHealth::test_every_field_is_checked`, the causes that
+    /// repeat (`cause-that-repeats`, `loop-cause-that-repeats`,
+    /// `spawn-cause-that-repeats`): none of them keeps a slot down, and the
+    /// refusal names the cause.
+    #[test]
+    fn each_cause_that_repeats_cannot_keep_a_slot_down() {
+        for kind in [
+            "app_load_failed",
+            "child_pool_setup_failed",
+            "task_loop_create_failed",
+            "spawn_failed",
+        ] {
+            assert_eq!(
+                reason(&with_field("cause", json!({"kind": kind})), 2),
+                format!("cause {kind} cannot keep a slot down")
+            );
+        }
+    }
+
     #[test]
     fn one_slot_named_twice_is_unreadable() {
         let stored = json!([entry(json!(1)), entry(json!(1))]);

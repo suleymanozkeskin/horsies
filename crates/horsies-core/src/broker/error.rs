@@ -9,6 +9,7 @@ use crate::broker::pools::PoolSettingsError;
 use crate::core::codec::JsonReadError;
 use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
 use crate::core::history::errors::HistoryError;
+use crate::core::history::identity::fingerprint::FingerprintError;
 use crate::db::{StatementFailure, Transience};
 
 /// Why the core refused a send before any statement (Python's
@@ -32,6 +33,14 @@ pub enum EnqueueRefusalCause {
     JsonUnreadable(String),
     /// A rule refused a value that reads (Python passes `NoCause()`).
     RuleRefused,
+    /// A rule of the version-1 command refused a value: the rule's text
+    /// (Python's `EnqueueCommandV1` raises it as a `ValueError`, which the
+    /// broker passes as the `exception`).
+    CommandRuleRefused(String),
+    /// A rule of the scoped idempotency key refused the key or the task
+    /// name: the rule's text (Python's `ScopedIdempotencyKey` raises it as a
+    /// `ValueError`, which the broker passes as the `exception`).
+    KeyRuleRefused(String),
 }
 
 impl EnqueueRefusal {
@@ -52,13 +61,24 @@ impl EnqueueRefusal {
             cause: EnqueueRefusalCause::JsonUnreadable(error.to_string()),
         }
     }
+
+    /// The refusal of an empty retention class key: the rule of the
+    /// version-1 command, as the command refuses it. A client that takes the
+    /// class key as text checks it with this before it reads the key as a
+    /// class ([`crate::EnqueueRetention::from_class_key`]); a key that is not
+    /// empty and that no class derives is not this refusal. Pure.
+    pub fn empty_retention_class_key() -> Self {
+        Self::from(EnqueuePreparationError::Fingerprint(
+            FingerprintError::EmptyRetentionClass,
+        ))
+    }
 }
 
 impl From<EnqueuePreparationError> for EnqueueRefusal {
     /// The part and the cause of a preparation error: a JSON text that does
     /// not read keeps the reader's error; the options' shape and execution
     /// class are the task options; the fingerprint and the idempotency key
-    /// are the input.
+    /// are the input, and each keeps the text of the rule that refused it.
     fn from(error: EnqueuePreparationError) -> Self {
         let message = error.to_string();
         let (part, cause) = match &error {
@@ -75,9 +95,14 @@ impl From<EnqueuePreparationError> for EnqueueRefusal {
             | EnqueuePreparationError::InvalidExecution(_) => {
                 (SendPart::TaskOptions, EnqueueRefusalCause::RuleRefused)
             }
-            EnqueuePreparationError::Fingerprint(_) | EnqueuePreparationError::Idempotency(_) => {
-                (SendPart::Input, EnqueueRefusalCause::RuleRefused)
-            }
+            EnqueuePreparationError::Fingerprint(rule) => (
+                SendPart::Input,
+                EnqueueRefusalCause::CommandRuleRefused(rule.to_string()),
+            ),
+            EnqueuePreparationError::Idempotency(rule) => (
+                SendPart::Input,
+                EnqueueRefusalCause::KeyRuleRefused(rule.to_string()),
+            ),
         };
         Self {
             part,
@@ -246,6 +271,14 @@ pub enum BrokerError {
     /// requires. Not retryable.
     #[error("{0}")]
     RowDecode(#[from] RowDecodeError),
+
+    /// The client did not run the operation: the core's process runtime
+    /// refused it. Nothing ran. Retryable when the OS refused the runtime's
+    /// threads (a later use starts the runtime again); a fork of the
+    /// process that started the runtime is not. A client's blocking form
+    /// produces it before it calls the core.
+    #[error("{0}")]
+    ProcessRuntime(crate::process_runtime::ProcessRuntimeRefusal),
 }
 
 impl BrokerError {
@@ -267,14 +300,18 @@ impl BrokerError {
     /// Retryable: `Database` when the driver error is retryable (see
     /// [`is_retryable_sqlx_error`]), `Statement` when its cause is transient
     /// (see [`is_retryable_statement_failure`]), `ConnectionFailed`,
-    /// `ListenerClosed`, `InstallLock` and `InstallCoverage` by their own
-    /// rules. Every other variant is a refusal or a broken contract, which
+    /// `ListenerClosed`, and `ProcessRuntime`, `InstallLock` and
+    /// `InstallCoverage` by their own rules. Every other variant is a refusal or a broken contract, which
     /// the same call meets again.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Database(e) => is_retryable_sqlx_error(e),
             Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
+            Self::ProcessRuntime(refusal) => match refusal {
+                crate::process_runtime::ProcessRuntimeRefusal::StartFailed { .. } => true,
+                crate::process_runtime::ProcessRuntimeRefusal::ForkedAfterStart { .. } => false,
+            },
             Self::InstallLock(failure) => failure.is_retryable(),
             Self::InstallCoverage(error) => error.is_retryable(),
             Self::SchemaRefused(_)

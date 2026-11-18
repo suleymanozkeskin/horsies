@@ -9,6 +9,8 @@ child leaves it when its app has an async task.
 
 from __future__ import annotations
 
+import uuid
+
 import asyncio
 import json
 import threading
@@ -484,7 +486,7 @@ class TestResultWaitsInsideAnAsyncTask:
                 case other:
                     outcomes.append(f'not refused: {other!r}')
             workflow: WorkflowHandle[Any] = WorkflowHandle(
-                workflow_id=WORKFLOW_ID,
+                workflow_id=uuid.UUID(WORKFLOW_ID),
                 broker=broker,
             )
             outcomes.append(_task_refusal(await workflow.get_async()))

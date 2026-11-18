@@ -38,6 +38,15 @@ the `family` of `horsies_client_family` (`PYTHON` against `RUST`); the
 reports must be equal. The worker health tables are not in the compare
 (`UNCOMPARED_TABLES`): the ping answers in the report are the compare of a
 health scenario.
+
+The other snapshot differences are judged by the hour rule of the whole-run
+compare (`judge_snapshots`): a `DualRunMismatch` when the run spans of both
+sides lie in one UTC hour, a `ClockBoundaryStraddle` when they do not. The
+install and the worker of each side create the hourly heartbeat leaves from
+their own hour on, and a leaf name is read relative to the hour of the run
+window, so two sides across an hour can differ by a leaf for the clock
+alone. The two sides run one after the other, so their spans can lie in two
+hours.
 """
 
 from __future__ import annotations
@@ -67,13 +76,18 @@ from tests.dualrun.capture import capture_snapshot, read_database_clock
 from tests.dualrun.compare import (
     ColumnDifference,
     DiffEntry,
+    SnapshotDiff,
     compare_snapshots,
-    render_entry,
 )
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.values import ExactValue, make_run_window
-from tests.dualrun.worker_run import WHOLE_RUN_CATALOG, compared_part
+from tests.dualrun.values import ExactValue, RunWindow, make_run_window
+from tests.dualrun.worker_run import (
+    WHOLE_RUN_CATALOG,
+    PairJudgement,
+    compared_part,
+    judge_snapshots,
+)
 from tests.parity.app import DATABASE_URL_ENV
 from tests.parity.scenarios import NoScheduler, Scenario, ScheduleSlots, WorkerStart
 
@@ -335,11 +349,13 @@ def read_report(
 
 @dataclass(frozen=True, slots=True)
 class SideRun:
-    """What one side left: the comparable snapshot and the report."""
+    """What one side left: the comparable snapshot and the report, and the
+    span of its run, from the first clock reading to the last."""
 
     client: Client
     snapshot: NormalizedSnapshot
     report: dict[ReportKey, ReportEntry]
+    span: RunWindow
 
 
 @dataclass(frozen=True, slots=True)
@@ -736,7 +752,14 @@ def run_side(
                 case Err(capture_error):
                     return Err(SideFailed(client=client, detail=f'capture: {capture_error}'))
             report = read_report(connection, sent, schedule)
-        return Ok(SideRun(client=client, snapshot=compared_part(snapshot), report=report))
+        return Ok(
+            SideRun(
+                client=client,
+                snapshot=compared_part(snapshot),
+                report=report,
+                span=window,
+            ),
+        )
     finally:
         shutil.rmtree(log_dir)
 
@@ -760,20 +783,25 @@ def _is_planned(entry: DiffEntry) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ParityResult:
-    """The unplanned snapshot differences, rendered, and the report keys
-    whose entries differ, with both entries."""
+    """The judgement of the unplanned snapshot differences, whether the
+    planned difference was seen once, and the report keys whose entries
+    differ, with both entries."""
 
-    snapshot_differences: tuple[str, ...]
+    snapshots: PairJudgement
     planned_seen: bool
     report_differences: tuple[tuple[ReportKey, ReportEntry | None, ReportEntry | None], ...]
 
 
 def compare_sides(python: SideRun, rust: SideRun) -> ParityResult:
     """Compare the Python side (reference) with the Rust side (candidate).
+    The snapshot differences other than the planned one are judged by
+    `judge_snapshots` on the run spans of both sides; no entry is left out.
     Pure."""
     diff = compare_snapshots(python.snapshot, rust.snapshot)
     planned = tuple(entry for entry in diff.entries if _is_planned(entry))
-    unplanned = tuple(render_entry(entry) for entry in diff.entries if not _is_planned(entry))
+    unplanned = SnapshotDiff(
+        entries=tuple(entry for entry in diff.entries if not _is_planned(entry)),
+    )
     keys = sorted(set(python.report) | set(rust.report), key=str)
     report_differences = tuple(
         (key, python.report.get(key), rust.report.get(key))
@@ -781,7 +809,7 @@ def compare_sides(python: SideRun, rust: SideRun) -> ParityResult:
         if python.report.get(key) != rust.report.get(key)
     )
     return ParityResult(
-        snapshot_differences=unplanned,
+        snapshots=judge_snapshots(unplanned, python.span, rust.span),
         planned_seen=len(planned) == 1,
         report_differences=report_differences,
     )

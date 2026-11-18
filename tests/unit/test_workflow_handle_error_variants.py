@@ -4,9 +4,10 @@
 ``HandleOperationError`` is a union with one frozen variant per
 ``HandleErrorCode`` member. A variant's repr hides the message and the
 cause. Every variant carries ``workflow_id``. Stored data that does not
-parse is ``HandleStoredDataInvalid`` with its parse error. ``get()`` folds a
-status read failure into a ``TaskResult``, and the web routes map each
-variant onto one response.
+parse is ``HandleStoredDataInvalid`` with its parse error. A failure that
+the core answers is its generated class with the core's message, returned
+as it is. ``get()`` folds a status read failure into a ``TaskResult``, and
+the web routes map each variant onto one response.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ CAUSE_MARKER = 'cause-marker-7d2e'
 WORKFLOW_ID = '3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f'
 UNKNOWN_STATUS = 'NOT_A_WORKFLOW_STATUS'
 _UNKNOWN_STATUS_CAUSE = core.CoreContractViolation(
-    'workflow_status', f'invalid workflow status: {UNKNOWN_STATUS}',
+    'workflow_status', f'invalid status: {UNKNOWN_STATUS}',
 )
 """The exception of a stored workflow status that does not parse."""
 
@@ -161,7 +162,7 @@ def _handle_answering(method: str, answer: object) -> WorkflowHandle[Any]:
     """A handle whose core handle answers ``method`` with ``answer``."""
     broker = MagicMock()
     setattr(broker._core_handle, method, AsyncMock(return_value=answer))
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
 class TestStoredWorkflowStatus:
@@ -179,21 +180,20 @@ class TestStoredWorkflowStatus:
 
     @pytest.mark.asyncio
     async def test_an_unknown_status_is_stored_data_invalid(self) -> None:
-        handle = _handle_answering(
-            'workflow_status_async',
-            _core_record(
-                core.HandleFailed,
-                code='STORED_DATA_INVALID',
-                message=f'invalid workflow status: {UNKNOWN_STATUS}',
-                retryable=False,
-                exception=_UNKNOWN_STATUS_CAUSE,
+        invalid = HandleStoredDataInvalid(
+            message=(
+                f'Status failed for workflow {WORKFLOW_ID}: invalid status: {UNKNOWN_STATUS}'
             ),
+            workflow_id=WORKFLOW_ID,
+            exception=_UNKNOWN_STATUS_CAUSE,
         )
+        handle = _handle_answering('workflow_status_async', invalid)
 
         result = await handle.status_async()
 
         assert is_err(result)
         err = result.err_value
+        assert err is invalid
         assert isinstance(err, HandleStoredDataInvalid)
         assert err.exception is _UNKNOWN_STATUS_CAUSE
         assert err.workflow_id == WORKFLOW_ID
@@ -229,7 +229,7 @@ def _handle_with_core_answer(
     answer: object = None, *, raises: BaseException | None = None,
 ) -> WorkflowHandle[Any]:
     """A handle on ``_core_broker``."""
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=_core_broker(answer, raises=raises))
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=_core_broker(answer, raises=raises))
 
 
 class TestCancelOutcome:
@@ -241,7 +241,7 @@ class TestCancelOutcome:
     )
     async def test_a_cancelled_or_terminal_workflow_is_ok(self, record_class: type) -> None:
         broker = _core_broker(_cancel_record(record_class))
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
         result = await handle.cancel_async()
 
@@ -261,20 +261,21 @@ class TestCancelOutcome:
         assert result.err_value.workflow_id == WORKFLOW_ID
 
     @pytest.mark.asyncio
-    async def test_a_failure_record_is_db_operation_failed(self) -> None:
+    async def test_a_failure_of_the_core_is_its_class_as_it_is(self) -> None:
         cause = core.CoreConnectionError('cancel_workflow', CAUSE_MARKER, True)
-        handle = _handle_with_core_answer(_cancel_record(
-            core.HandleFailed,
-            code='DB_OPERATION_FAILED',
-            message=CAUSE_MARKER,
+        failed = HandleDbOperationFailed(
+            message=f'Cancel failed for workflow {WORKFLOW_ID}: {CAUSE_MARKER}',
             retryable=True,
+            workflow_id=WORKFLOW_ID,
             exception=cause,
-        ))
+        )
+        handle = _handle_with_core_answer(failed)
 
         result = await handle.cancel_async()
 
         assert is_err(result)
         err = result.err_value
+        assert err is failed
         assert isinstance(err, HandleDbOperationFailed)
         assert err.exception is cause
         assert err.retryable is True
@@ -298,39 +299,46 @@ class TestCancelOutcome:
 # =============================================================================
 
 
-def _wait_failures() -> list[tuple[Any, object]]:
-    """Each failure record of the core wait, with its folded code."""
+def _wait_failures() -> list[tuple[Any, object, str]]:
+    """Each failure answer of the core wait, with its folded code and
+    message: a failure of the core keeps the core's message."""
+    failed_message = f'Get failed for workflow {WORKFLOW_ID}: {CAUSE_MARKER}'
     return [
-        (_core_record(core.WorkflowAbsent), RetrievalCode.WORKFLOW_NOT_FOUND),
         (
-            _core_record(
-                core.HandleFailed,
-                code='DB_OPERATION_FAILED',
-                message=CAUSE_MARKER,
+            _core_record(core.WorkflowAbsent),
+            RetrievalCode.WORKFLOW_NOT_FOUND,
+            f'Workflow {WORKFLOW_ID} not found',
+        ),
+        (
+            HandleDbOperationFailed(
+                message=failed_message,
                 retryable=True,
+                workflow_id=WORKFLOW_ID,
                 exception=core.CoreConnectionError('wait_workflow_result', CAUSE_MARKER, True),
             ),
             OperationalErrorCode.BROKER_ERROR,
+            failed_message,
         ),
         (
-            _core_record(
-                core.HandleFailed,
-                code='STORED_DATA_INVALID',
-                message=CAUSE_MARKER,
-                retryable=False,
+            HandleStoredDataInvalid(
+                message=failed_message,
+                workflow_id=WORKFLOW_ID,
                 exception=core.CoreContractViolation('wait_workflow_result', CAUSE_MARKER),
             ),
             OperationalErrorCode.BROKER_ERROR,
+            failed_message,
         ),
     ]
 
 
 @pytest.mark.parametrize(
-    ('answer', 'folded_code'),
+    ('answer', 'folded_code', 'folded_message'),
     _wait_failures(),
     ids=['absent', 'db_operation_failed', 'stored_data_invalid'],
 )
-def test_get_folds_each_wait_failure(answer: Any, folded_code: object) -> None:
+def test_get_folds_each_wait_failure(
+    answer: Any, folded_code: object, folded_message: str,
+) -> None:
     handle = _handle_answering('wait_workflow_result_async', answer)
 
     result = asyncio.run(handle.get_async(timeout_ms=0))
@@ -338,6 +346,7 @@ def test_get_folds_each_wait_failure(answer: Any, folded_code: object) -> None:
     assert result.is_err()
     task_error = result.unwrap_err()
     assert task_error.error_code is folded_code
+    assert task_error.message == folded_message
 
 
 # =============================================================================
@@ -526,7 +535,7 @@ class TestStoredWorkflowResult:
             + ',"err":null}'
         )
         broker = MagicMock()
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
         handle.out_type = int
 
         result = handle._completed_result(stored)

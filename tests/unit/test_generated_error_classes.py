@@ -7,7 +7,9 @@ with the payload record of a send and the retention class key. The old
 modules re-export them. This test pins, for each class, that the public
 name is the generated class, and that its fields (with their `repr` flags),
 its `code` class value and its `retryable` class value are the ones of the
-hand-written class that it replaced.
+hand-written class that it replaced. It also pins the generated exception
+classes ``OutcomeDecodeError`` and ``HistoryContractError`` to the shape of
+the classes that they replaced.
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ import pytest
 import horsies
 from horsies._catalog import (
     broker_errors,
+    history_errors,
+    lifecycle_errors,
     monitoring_errors,
     retention_class,
     task_send_errors,
@@ -27,8 +31,10 @@ from horsies._catalog import (
 )
 from horsies._catalog.error_detail import NoCause as GeneratedNoCause
 from horsies.core.brokers import result_types
+from horsies.core.history import errors as history_error_module
 from horsies.core.history import periods
 from horsies.core.history.ddl import classes
+from horsies.core.lifecycle import outcomes
 from horsies.core.models import task_send_types
 from horsies.core.models.workflow import handle_types
 from horsies.core.types import error_detail
@@ -100,6 +106,58 @@ class TestGeneratedErrorClass:
 
         assert params.frozen is True
         assert '__slots__' in vars(shape.generated)
+
+
+class TestOutcomeDecodeError:
+    """The class that the lifecycle decoders raise and that
+    ``TaskActionStoredDataInvalid.exception`` holds: a plain ``Exception``
+    subclass whose one argument is its message."""
+
+    def test_the_public_name_is_the_generated_class(self) -> None:
+        assert outcomes.OutcomeDecodeError is lifecycle_errors.OutcomeDecodeError
+
+    def test_it_is_an_exception_subclass_and_no_dataclass(self) -> None:
+        generated = lifecycle_errors.OutcomeDecodeError
+
+        assert generated.__bases__ == (Exception,)
+        assert not dataclasses.is_dataclass(generated)
+
+    def test_its_text_and_its_args_are_its_message(self) -> None:
+        error = lifecycle_errors.OutcomeDecodeError('row 3 has no kind')
+
+        assert str(error) == 'row 3 has no kind'
+        assert error.args == ('row 3 has no kind',)
+
+    def test_it_keeps_python_s_doc(self) -> None:
+        doc = lifecycle_errors.OutcomeDecodeError.__doc__
+
+        assert doc is not None
+        assert doc.startswith('The returned row does not satisfy the wire contract.')
+
+
+class TestHistoryContractError:
+    """The class of ``MonitoringQueryHistoryContractViolation.exception``:
+    a plain ``Exception`` subclass whose one argument is its message."""
+
+    def test_the_public_name_is_the_generated_class(self) -> None:
+        assert history_error_module.HistoryContractError is history_errors.HistoryContractError
+
+    def test_it_is_an_exception_subclass_and_no_dataclass(self) -> None:
+        generated = history_errors.HistoryContractError
+
+        assert generated.__bases__ == (Exception,)
+        assert not dataclasses.is_dataclass(generated)
+
+    def test_its_text_and_its_args_are_its_message(self) -> None:
+        error = history_errors.HistoryContractError('history row has status BOGUS')
+
+        assert str(error) == 'history row has status BOGUS'
+        assert error.args == ('history row has status BOGUS',)
+
+    def test_it_keeps_python_s_doc(self) -> None:
+        assert history_errors.HistoryContractError.__doc__ == (
+            'The database state violates an invariant this subsystem relies on.'
+        )
 
 
 def test_no_cause_is_the_generated_class_without_fields() -> None:

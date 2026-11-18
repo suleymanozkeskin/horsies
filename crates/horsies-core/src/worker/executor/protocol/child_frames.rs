@@ -159,6 +159,35 @@ impl LeftWorkEnd {
     }
 }
 
+/// What a child does once the frame that ends a run is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildAfterFrame {
+    /// The child takes the next run.
+    ServesOn,
+    /// The core of the child stopped: the child ends itself with
+    /// [`CORE_STOPPED_EXIT_CODE`](super::CORE_STOPPED_EXIT_CODE) once the
+    /// frame is written. The parent sends it no run, waits for its exit,
+    /// and starts a new child.
+    EndsItself,
+}
+
+impl ChildAfterFrame {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ServesOn => "serves_on",
+            Self::EndsItself => "ends_itself",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "serves_on" => Some(Self::ServesOn),
+            "ends_itself" => Some(Self::EndsItself),
+            _ => None,
+        }
+    }
+}
+
 /// One run of a shared child: its number and its task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RunRef {
@@ -198,6 +227,7 @@ pub struct ResultFrame {
     pub end: RunEnd,
     pub rss: RssReading,
     pub task_loop: NoLeftWork,
+    pub child: ChildAfterFrame,
 }
 
 /// The body of an isolated task returned, and work that it started is still
@@ -232,6 +262,7 @@ pub struct SharedResultFrame {
     pub run: RunRef,
     pub end: SeatEnd,
     pub rss: RssReading,
+    pub child: ChildAfterFrame,
 }
 
 /// A run did not stop after its second cancel and its cancel rounds.
@@ -327,6 +358,7 @@ enum ChildWire<'a> {
         end: EndWire<'a>,
         rss_mb: Option<f64>,
         task_loop: TaskLoopWire,
+        child: &'static str,
     },
     BodyReturned {
         task_id: Uuid,
@@ -347,6 +379,7 @@ enum ChildWire<'a> {
         task_id: Uuid,
         end: EndWire<'a>,
         rss_mb: Option<f64>,
+        child: &'static str,
     },
     DeadlineFired {
         dispatch: u64,
@@ -529,6 +562,7 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                     end,
                     rss_mb: result.rss.wire(),
                     task_loop: task_loop_wire(result.task_loop),
+                    child: result.child.as_str(),
                 },
                 body,
             )
@@ -567,6 +601,7 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                     task_id: result.run.task_id,
                     end,
                     rss_mb: result.rss.wire(),
+                    child: result.child.as_str(),
                 },
                 body,
             )
@@ -790,13 +825,20 @@ fn decode_held(held: &Fields<'_>) -> Result<LoopHoldsTasks, MalformedFrame> {
         .map_err(|_| held.broken_rule("names", "must name min(count, 10) tasks"))
 }
 
+/// What the child does after a frame that ends a run: its `child` field.
+fn decode_child_after(fields: &Fields<'_>) -> Result<ChildAfterFrame, MalformedFrame> {
+    ChildAfterFrame::parse(fields.text("child")?)
+        .ok_or_else(|| fields.broken_rule("child", "is not one of serves_on, ends_itself"))
+}
+
 fn decode_result(fields: &Fields<'_>, body: Vec<u8>) -> Result<ResultFrame, MalformedFrame> {
-    fields.only(&["kind", "task_id", "end", "rss_mb", "task_loop"])?;
+    fields.only(&["kind", "task_id", "end", "rss_mb", "task_loop", "child"])?;
     Ok(ResultFrame {
         task_id: fields.task_id("task_id")?,
         end: decode_run_end(&fields.object("end")?, body)?,
         rss: fields.rss("rss_mb")?,
         task_loop: decode_task_loop(&fields.object("task_loop")?)?,
+        child: decode_child_after(fields)?,
     })
 }
 
@@ -850,11 +892,12 @@ fn decode_shared_result(
     fields: &Fields<'_>,
     body: Vec<u8>,
 ) -> Result<SharedResultFrame, MalformedFrame> {
-    fields.only(&["kind", "dispatch", "task_id", "end", "rss_mb"])?;
+    fields.only(&["kind", "dispatch", "task_id", "end", "rss_mb", "child"])?;
     Ok(SharedResultFrame {
         run: decode_run_ref(fields)?,
         end: decode_seat_end(&fields.object("end")?, body)?,
         rss: fields.rss("rss_mb")?,
+        child: decode_child_after(fields)?,
     })
 }
 

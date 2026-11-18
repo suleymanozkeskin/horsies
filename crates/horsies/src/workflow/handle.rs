@@ -24,10 +24,11 @@ use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::JsonText;
 use horsies_core::{
-    process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperationError,
-    HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode, OutcomeCode, PostgresBroker,
-    ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary, TaskResult, TerminalErrorStatus,
-    UserCode, WaitLimit, WorkflowEnd, WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
+    process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperation,
+    HandleOperationError, HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode,
+    OutcomeCode, PostgresBroker, ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary,
+    TaskResult, TerminalErrorStatus, UserCode, WaitLimit, WorkflowEnd, WorkflowError,
+    WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
@@ -216,25 +217,25 @@ impl<T> WorkflowHandle<T> {
         self.workflow_id
     }
 
-    /// The connected broker of the handle for its method `method`, or
-    /// `DB_OPERATION_FAILED`.
+    /// The connected broker of the handle for its method `method`, which
+    /// runs `operation`, or `DB_OPERATION_FAILED` of `operation` with the
+    /// broker error as its cause.
     ///
     /// # Panics
     ///
     /// In a fork, without `exec`, of the process that started the core's
     /// process runtime. Nothing ran.
-    async fn broker(&self, method: &str) -> HandleResult<Arc<PostgresBroker>> {
+    async fn broker(
+        &self,
+        method: &str,
+        operation: HandleOperation,
+    ) -> HandleResult<Arc<PostgresBroker>> {
         refuse_in_a_fork(format_args!(
             "WorkflowHandle::{method} of workflow {}",
             self.workflow_id
         ));
         self.reads.initialized_broker().await.map_err(|error| {
-            HandleOperationError::DbOperationFailed {
-                message: error.to_string(),
-                retryable: error.is_retryable(),
-                workflow_id: self.workflow_id,
-                cause: error.failure_cause(),
-            }
+            HandleOperationError::connect_failed(operation, self.workflow_id, error)
         })
     }
 
@@ -243,7 +244,7 @@ impl<T> WorkflowHandle<T> {
     /// Errors: `WORKFLOW_NOT_FOUND`; `STORED_DATA_INVALID`;
     /// `DB_OPERATION_FAILED`.
     pub async fn status(&self) -> HandleResult<WorkflowStatus> {
-        self.broker("status")
+        self.broker("status", HandleOperation::Status)
             .await?
             .workflow_status(self.workflow_id)
             .await
@@ -255,7 +256,7 @@ impl<T> WorkflowHandle<T> {
     /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
     pub async fn results(&self) -> HandleResult<BTreeMap<String, NodeResult>> {
         match self
-            .broker("results")
+            .broker("results", HandleOperation::Results)
             .await?
             .workflow_node_results(self.workflow_id)
             .await?
@@ -277,7 +278,7 @@ impl<T> WorkflowHandle<T> {
     /// node status or summary that does not read; `DB_OPERATION_FAILED`.
     pub async fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
         match self
-            .broker("tasks")
+            .broker("tasks", HandleOperation::Tasks)
             .await?
             .workflow_nodes(self.workflow_id)
             .await?
@@ -295,7 +296,7 @@ impl<T> WorkflowHandle<T> {
     ///
     /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
     pub async fn cancel(&self) -> HandleResult<()> {
-        self.broker("cancel")
+        self.broker("cancel", HandleOperation::Cancel)
             .await?
             .cancel_workflow(self.workflow_id)
             .await
@@ -307,7 +308,7 @@ impl<T> WorkflowHandle<T> {
     ///
     /// Errors: `WORKFLOW_NOT_FOUND`; `DB_OPERATION_FAILED`.
     pub async fn pause(&self) -> HandleResult<bool> {
-        self.broker("pause")
+        self.broker("pause", HandleOperation::Pause)
             .await?
             .pause_workflow(self.workflow_id)
             .await
@@ -321,7 +322,7 @@ impl<T> WorkflowHandle<T> {
     /// `STORED_DATA_INVALID`; `RESUME_RECOVERY_FAILED` (the resume
     /// committed, the work after it failed).
     pub async fn resume(&self) -> HandleResult<bool> {
-        self.broker("resume")
+        self.broker("resume", HandleOperation::Resume)
             .await?
             .resume_client_workflow(self.workflow_id, &*self.workflows)
             .await
@@ -340,8 +341,11 @@ impl<T> WorkflowHandle<T> {
         V: DeserializeOwned,
         E: UserErrorCode,
     {
+        let operation = HandleOperation::ResultFor {
+            node_id: key.node_id().to_owned(),
+        };
         let broker = self
-            .broker("result_for")
+            .broker("result_for", operation)
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
         let stored = broker
@@ -358,19 +362,21 @@ impl<T> WorkflowHandle<T> {
     }
 
     fn not_found(&self) -> HandleOperationError {
-        HandleOperationError::WorkflowNotFound {
-            message: format!("workflow {} not found", self.workflow_id),
-            workflow_id: self.workflow_id,
-        }
+        HandleOperationError::not_found(self.workflow_id)
     }
 }
 
-/// `STORED_DATA_INVALID` of `workflow_id`, not retryable.
-fn stored_data_invalid(workflow_id: Uuid, message: String) -> HandleOperationError {
+/// `STORED_DATA_INVALID` of `workflow_id` with `message`, not retryable:
+/// the handle's own decode refused a stored value, `cause`.
+fn stored_data_invalid(
+    workflow_id: Uuid,
+    message: String,
+    cause: WorkflowError,
+) -> HandleOperationError {
     HandleOperationError::StoredDataInvalid {
         message,
         workflow_id,
-        cause: horsies_core::FailureCause::ContractViolation,
+        cause,
     }
 }
 
@@ -390,6 +396,7 @@ fn node_info(workflow_id: Uuid, node: StoredNode) -> HandleResult<WorkflowNodeIn
                 "node {} has the stored status {:?}, which is not a node status",
                 node.task_index, node.status
             ),
+            WorkflowError::InvalidStatus(node.status.clone()),
         )
     })?;
     let sub_workflow_summary = match node.sub_workflow_summary.as_deref() {
@@ -401,6 +408,11 @@ fn node_info(workflow_id: Uuid, node: StoredNode) -> HandleResult<WorkflowNodeIn
                     "node {} has a stored sub-workflow summary that does not read: {cause}",
                     node.task_index
                 ),
+                // The stored JSON does not read as a summary: a refused
+                // deserialize of a stored value.
+                WorkflowError::Serialization(<serde_json::Error as serde::de::Error>::custom(
+                    cause,
+                )),
             )
         })?),
     };
@@ -447,7 +459,7 @@ where
             });
         }
         let broker = self
-            .broker("get")
+            .broker("get", HandleOperation::Get)
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
         let wait = broker

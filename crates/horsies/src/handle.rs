@@ -900,7 +900,7 @@ mod tests {
             task(),
             BrokerOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
-                cause: horsies_core::FailureCause::ContractViolation,
+                cause: horsies_core::BrokerCheckCause::Check,
             },
         );
         assert!(matches!(
@@ -909,12 +909,12 @@ mod tests {
         ));
         let database = ReadError::of_operation(
             task(),
-            BrokerOperationError::OperationFailed {
-                code: horsies_core::BrokerOperationFailedCode::TaskInfoQueryFailed,
-                message: "timeout".to_owned(),
-                retryable: true,
-                cause: horsies_core::FailureCause::Connection,
-            },
+            BrokerOperationError::task_info_query_failed(
+                task(),
+                horsies_core::BrokerOperationSource::Broker(
+                    horsies_core::BrokerError::ListenerClosed,
+                ),
+            ),
         );
         assert!(matches!(
             database,

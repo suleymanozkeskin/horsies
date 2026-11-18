@@ -45,20 +45,20 @@ pub use crate::core::{
     mask_database_url, AnyNode, AppConfigError, BackoffStrategy, BuiltInTaskCode, CancelGraceMs,
     CancelGraceOutOfRange, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
     CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
-    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperationError,
-    HandleResult, HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey,
-    OnError, OperationalErrorCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
-    PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
-    RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
-    SchedulePattern, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
-    SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
-    TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode, UserCodeRefused,
-    ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
-    WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
-    WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
-    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperation,
+    HandleOperationError, HandleResult, HourlySchedule, IntervalSchedule, JoinType, Month,
+    MonthlySchedule, NodeKey, OnError, OperationalErrorCode, OutcomeCode, PausedAgeRefused,
+    PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
+    RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionChoice,
+    RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
+    RetryPolicyError, ScheduleConfig, SchedulePattern, SubWorkflowFailure, SubWorkflowParams,
+    SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
+    TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule,
+    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode,
+    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    WorkflowContext, WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
+    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 // A user value kept as its stored text: a sub-workflow summary output, the `data` of a task error.
@@ -66,13 +66,14 @@ pub use crate::core::codec::{JsonText, JsonTextRefused};
 
 // broker re-exports
 pub use crate::broker::{
-    expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerResult, CheckInterruption, CheckedSend, ConnectivityRefusal,
-    DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError,
-    PostgresBroker, RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure,
-    StaleTaskRow, StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead,
-    TaskInfoRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    expected_schema_version, BrokerCheckCause, BrokerError, BrokerErrorCode, BrokerOperationError,
+    BrokerOperationFailedCode, BrokerOperationSource, BrokerResult, CheckInterruption, CheckedSend,
+    ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError,
+    ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead, RawResultRecord,
+    SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, StoredEnvelopeRefused,
+    StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow, WorkerPingRequest,
+    WorkerPingStep, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
+    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
@@ -146,6 +147,11 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
+// The exit codes of the worker process (the codes of a child are in
+// `frame_protocol`): `horsies-codegen` renders every exit code into the
+// Python `_catalog`.
+pub use crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE;
+pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
 // The worker connection check of a client's live check (`check --live`):
 // on a connected broker (the Rust client), and on a lazy handle (the Python
 // bridge).

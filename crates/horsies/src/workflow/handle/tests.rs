@@ -303,7 +303,7 @@ fn each_read_failure_has_python_s_code() {
 #[test]
 fn a_handle_error_maps_to_its_read_failure() {
     let message = || "m".to_owned();
-    let cause = || horsies_core::FailureCause::PreconditionFailed;
+    let cause = || horsies_core::WorkflowError::InvalidStatus("BOGUS".to_owned());
     assert!(matches!(
         WorkflowReadError::of_handle_error(HandleOperationError::WorkflowNotFound {
             message: message(),
@@ -560,6 +560,17 @@ fn a_node_status_outside_the_enum_is_stored_data_invalid() {
     assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
     assert!(!refused.retryable());
     assert_eq!(refused.workflow_id(), workflow());
+    assert_eq!(
+        refused.failure_cause(),
+        horsies_core::FailureCause::ContractViolation
+    );
+    assert!(matches!(
+        refused,
+        HandleOperationError::StoredDataInvalid {
+            cause: horsies_core::WorkflowError::InvalidStatus(ref status),
+            ..
+        } if status == "BOGUS"
+    ));
     assert!(
         refused.message().contains("node 0"),
         "{}",
@@ -613,6 +624,19 @@ fn a_summary_that_does_not_read_is_stored_data_invalid() {
         let refused = node_info(workflow(), stored_node("COMPLETED", Some(summary))).unwrap_err();
         assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
         assert!(!refused.retryable());
+        // The cause is the refused deserialize of the stored value: a
+        // contract violation.
+        assert_eq!(
+            refused.failure_cause(),
+            horsies_core::FailureCause::ContractViolation
+        );
+        assert!(matches!(
+            refused,
+            HandleOperationError::StoredDataInvalid {
+                cause: horsies_core::WorkflowError::Serialization(_),
+                ..
+            }
+        ));
         assert!(
             refused.message().contains("sub-workflow summary"),
             "{}",

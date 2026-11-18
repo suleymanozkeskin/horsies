@@ -25,8 +25,7 @@ its rerun.
 ``rerun_task`` runs in the core: the core builds the read and the write
 and decides the outcome (``horsies._core.rerun_read``,
 ``prepare_rerun_write``, ``decode_rerun_write``), and the caller's
-connection runs both statements. ``read_rerun_source`` is the Python read,
-kept for the dual-run references (``tests/dualrun/reference/``).
+connection runs both statements.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from uuid import UUID
 
-from typing import Any, Final, assert_never
+from typing import assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -70,14 +69,8 @@ from ..errors import HistoryContractError
 from ..periods import parse_retention_period, period_class_key
 from horsies.core.types.result import Err, Ok
 from ..identity.keys import validate_reservation_window
-from ...utils.db import uuid_column_value
-from horsies.core.types.status import TaskStatus
-from ..archive.attempts import decode_attempt_snapshot
-from ..archive.versions import DecodedArchiveValue
 from ..reads.detail import (
     TaskAbsenceReason,
-    absence_reason_of,
-    history_status,
 )
 
 
@@ -206,138 +199,6 @@ class RerunKeyReplay:
     request is returned instead of a duplicate."""
 
     existing_task_id: UUID
-
-
-@dataclass(frozen=True, slots=True)
-class RerunClassUnregistered:
-    """The new request's retention class has no class row. ``rerun_task``
-    raises ``ValueError`` for it: a caller precondition."""
-
-    class_key: str
-
-
-@dataclass(frozen=True, slots=True)
-class RerunSource:
-    """The facts of a history source that the rerun decides on and copies.
-
-    The stored status is a ``TaskStatus`` member and the attempt snapshot
-    decoded; a source that fails either is ``RerunSourceCorrupt``.
-    """
-
-    task_id: UUID
-    task_name: str
-    queue_name: str
-    priority: int
-    max_retries: int
-    status: TaskStatus
-    is_workflow_task: bool
-    rerun_root_task_id: UUID | None
-    rerun_input_disposition: str
-    rerun_input_version: int | None
-    rerun_input_digest: bytes | None
-    rerun_input_inline: bytes | None
-
-
-type RerunSourceRead = (
-    RerunClassUnregistered
-    | RerunSourceLive
-    | RerunSourceAbsent
-    | RerunSourceCorrupt
-    | RerunSource
-)
-"""The answer of ``read_rerun_source``."""
-
-_RERUN_SOURCE_SQL: Final = text(
-    'SELECT * FROM horsies_rerun_source_read(CAST(:task_id AS uuid), :class_key)'
-)
-
-
-def _optional_bytes(value: Any) -> bytes | None:
-    return bytes(value) if value is not None else None
-
-
-def _history_source(task_id: UUID, row: Any) -> RerunSource | RerunSourceCorrupt:
-    """The history source of one rerun read row, or the corruption it carries."""
-    try:
-        status = history_status(task_id, row.status)
-    except HistoryContractError as exc:
-        return RerunSourceCorrupt(task_id=task_id, exception=exc)
-    decoded = decode_attempt_snapshot(
-        version=row.attempt_archive_version,
-        payload=bytes(row.attempt_snapshot),
-        digest=bytes(row.attempt_snapshot_digest),
-    )
-    match decoded:
-        case DecodedArchiveValue():
-            pass
-        case _:
-            return RerunSourceCorrupt(
-                task_id=task_id,
-                exception=HistoryContractError(
-                    f'attempt snapshot failed to decode: {decoded!r}'
-                ),
-            )
-    return RerunSource(
-        task_id=uuid_column_value(row.task_id, column='task_id'),
-        task_name=row.task_name,
-        queue_name=row.queue_name,
-        priority=row.priority,
-        max_retries=row.max_retries,
-        status=status,
-        is_workflow_task=row.is_workflow_task,
-        rerun_root_task_id=(
-            uuid_column_value(row.rerun_root_task_id, column='rerun_root_task_id')
-            if row.rerun_root_task_id is not None
-            else None
-        ),
-        rerun_input_disposition=row.rerun_input_disposition,
-        rerun_input_version=row.rerun_input_version,
-        rerun_input_digest=_optional_bytes(row.rerun_input_digest),
-        rerun_input_inline=_optional_bytes(row.rerun_input_inline),
-    )
-
-
-async def read_rerun_source(
-    connection: AsyncConnection,
-    source_task_id: UUID,
-    class_key: str,
-) -> RerunSourceRead:
-    """Read the source of a rerun and the class of the new request: one statement.
-
-    Calls ``horsies_rerun_source_read`` in the caller's transaction; the
-    detail reader's leaf probe keeps ACCESS SHARE on the source leaf until
-    the transaction ends. Outcomes: the class is unregistered (checked
-    first), the source is live, absent (with the reason of
-    ``horsies_task_absence_reason``), corrupt (a location, absence reason or
-    status outside its set, or an attempt snapshot that does not decode), or
-    a history source. A database error propagates. Writes nothing.
-    """
-    row = (
-        await connection.execute(
-            _RERUN_SOURCE_SQL,
-            {'task_id': source_task_id, 'class_key': class_key},
-        )
-    ).one()
-    if not row.class_registered:
-        return RerunClassUnregistered(class_key=class_key)
-    match row.location:
-        case 'LIVE':
-            return RerunSourceLive(task_id=source_task_id)
-        case 'ABSENT':
-            try:
-                reason = absence_reason_of(source_task_id, row.absence_reason)
-            except HistoryContractError as exc:
-                return RerunSourceCorrupt(task_id=source_task_id, exception=exc)
-            return RerunSourceAbsent(task_id=source_task_id, reason=reason)
-        case 'HISTORY':
-            return _history_source(source_task_id, row)
-        case other:
-            return RerunSourceCorrupt(
-                task_id=source_task_id,
-                exception=HistoryContractError(
-                    f'staged detail returned unknown location {other!r}'
-                ),
-            )
 
 
 type RerunOutcome = (

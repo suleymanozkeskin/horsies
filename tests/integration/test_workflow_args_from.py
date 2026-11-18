@@ -132,10 +132,10 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A with result
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
 
         # Check wrapper: key present with TaskResult marker
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert 'input_result' in kwargs
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
@@ -171,11 +171,11 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=200))
 
         # Check C's kwargs
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         assert 'first' in kwargs
         assert 'second' in kwargs
         assert kwargs['first']['__h_taskresult_envelope__'] is True
@@ -208,7 +208,7 @@ class TestArgsFromInjection:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test failure')),
         )
@@ -224,7 +224,7 @@ class TestArgsFromInjection:
         assert status_result.fetchone()[0] == 'ENQUEUED'
 
         # Get B's kwargs - should contain failed TaskResult
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         injected = kwargs['input_result']['inner']
         assert injected['__h_task_result__'] is True
         assert injected['err'] is not None
@@ -262,10 +262,10 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=50))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=50))
 
         # Get B's kwargs - should have both static and injected
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert kwargs.get('static_value') == 100
         assert 'input_result' in kwargs
 
@@ -302,10 +302,10 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=50))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=50))
 
         # Get B's kwargs - should have both pointing to same result
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert 'first_copy' in kwargs
         assert 'second_copy' in kwargs
 
@@ -347,7 +347,7 @@ class TestArgsFromInjection:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
         )
@@ -356,7 +356,7 @@ class TestArgsFromInjection:
         # This triggers C to become READY (allow_failed_deps=True)
 
         # Check C's kwargs contain UPSTREAM_SKIPPED sentinel for B
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         assert 'input_result' in kwargs
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
@@ -396,7 +396,7 @@ class TestArgsFromInjection:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(
                 err=TaskError(error_code='ORIGINAL_ERROR', message='Original failure')
@@ -404,7 +404,7 @@ class TestArgsFromInjection:
         )
 
         # Check B's kwargs contain A's original error (not UPSTREAM_SKIPPED)
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert 'input_result' in kwargs
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
@@ -444,7 +444,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
         # Fetch task row for B
         task_row_result = await session.execute(
@@ -532,7 +532,7 @@ class TestArgsFromInjection:
         # A completing satisfies the quorum on its own, so C is enqueued with
         # A's result injected.
         await finish_task(
-            session, broker, handle.workflow_id, 0, TaskResult(ok=10)
+            session, broker, str(handle.workflow_id), 0, TaskResult(ok=10)
         )
 
         task_row_result = await session.execute(
@@ -603,7 +603,7 @@ class TestArgsFromInjection:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='DEP_FAIL', message='Dep failed')),
         )
@@ -652,10 +652,10 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
         # B should be enqueued with only static kwargs
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert kwargs.get('static_value') == 100
         # No TaskResult markers injected
         for value in kwargs.values():
@@ -695,7 +695,7 @@ class TestArgsFromInjection:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='WORKER_ERR', message='Worker err test')),
         )
@@ -779,7 +779,7 @@ class TestArgsFromInjection:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='A_FAIL', message='A failed')),
         )
@@ -854,11 +854,11 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=200))
 
         # Check C's kwargs: only 'from_a' injected, nothing from B
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         assert 'from_a' in kwargs
         assert kwargs['from_a']['__h_taskresult_envelope__'] is True
 

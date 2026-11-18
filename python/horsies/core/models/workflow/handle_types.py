@@ -14,6 +14,9 @@ Two error strategies by return type:
    ``TaskResult(err=TaskError(...))`` with a ``RetrievalCode`` or
    ``BROKER_ERROR``.
 
+``WorkflowHandle.for_id`` returns ``HandleInvalidWorkflowId`` for a workflow
+id text that is not a UUID.
+
 ``asyncio.CancelledError`` and programmer defects propagate.
 """
 
@@ -74,5 +77,21 @@ class HandleEventLoopLimit:
 
 type HandleOperationError = HandleCoreError | HandleLoopRunnerFailed | HandleEventLoopLimit
 """Every failure of a handle operation: one variant per ``HandleErrorCode``."""
+
+
+@dataclass(slots=True, frozen=True)
+class HandleInvalidWorkflowId:
+    """The workflow id text of ``WorkflowHandle.for_id`` is not a UUID. No handle was built.
+
+    ``workflow_id_text`` is the text as given; ``exception`` is the
+    ``ValueError`` of ``uuid.UUID``. The same text gives this error again.
+    It is not a handle operation failure: no ``HandleErrorCode`` names it,
+    and ``HandleOperationError`` does not hold it.
+    """
+
+    message: str = field(repr=False)
+    workflow_id_text: str
+    exception: ValueError = field(repr=False)
+
 
 type HandleResult[T] = Result[T, HandleOperationError]

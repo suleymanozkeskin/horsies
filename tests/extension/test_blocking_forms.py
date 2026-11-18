@@ -102,9 +102,9 @@ def test_each_blocking_monitoring_form_gives_the_outcome_of_its_awaitable_form(
     outcomes = dict(_pairs(blocking))
     assert outcomes['worker_state'] == ['WorkerStateAbsent']
     assert outcomes['worker_state_history'] == ['WorkerStatesRecord', 0]
-    assert outcomes['worker_state_history_refused'] == ['BrokerFailure', 'INVALID_INPUT', False]
+    assert outcomes['worker_state_history_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
     assert outcomes['ping'] == ['WorkerPongsRecord', 0]
-    assert outcomes['ping_refused'] == ['BrokerFailure', 'INVALID_INPUT', False]
+    assert outcomes['ping_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
     assert _class_of(outcomes['worker_states']) == 'WorkerStatesRecord'
     assert _class_of(outcomes['class_coverage']) == 'ClassCoverageRecord'
     assert _class_of(outcomes['class_report']) == 'ClassReportRecord'
@@ -120,13 +120,17 @@ def test_each_blocking_form_on_an_unreachable_database_gives_the_awaitable_failu
     outcomes = dict(_pairs(blocking))
     assert _class_of(outcomes['start']) == 'WorkflowStartFailed'
     for read in ('status', 'wait', 'node_result', 'node_results', 'nodes', 'pause', 'resume', 'cancel'):
-        assert _class_and_code(outcomes[read]) == ('HandleFailed', 'DB_OPERATION_FAILED'), read
+        assert _class_and_code(outcomes[read]) == (
+            'HandleDbOperationFailed', 'DB_OPERATION_FAILED',
+        ), read
     for read in ('worker_states', 'worker_state', 'worker_state_history', 'class_coverage', 'class_report'):
-        assert _class_and_code(outcomes[read]) == ('BrokerFailure', 'MONITORING_QUERY_FAILED'), read
+        assert _class_and_code(outcomes[read]) == (
+            'BrokerOperationFailed', 'MONITORING_QUERY_FAILED',
+        ), read
     # Refused before any core call: the same answer as on a real database.
-    assert outcomes['worker_state_history_refused'] == ['BrokerFailure', 'INVALID_INPUT', False]
-    assert outcomes['ping_refused'] == ['BrokerFailure', 'INVALID_INPUT', False]
-    assert _class_of(outcomes['ping']) == 'BrokerFailure'
+    assert outcomes['worker_state_history_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
+    assert outcomes['ping_refused'] == ['BrokerInvalidInput', 'INVALID_INPUT', False]
+    assert _class_of(outcomes['ping']) == 'BrokerOperationFailed'
 
 
 def _pairs(run: JsonValue) -> list[tuple[str, JsonValue]]:

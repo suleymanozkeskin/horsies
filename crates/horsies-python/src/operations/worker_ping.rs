@@ -1,7 +1,7 @@
 //! The worker ping through the core: `PostgresBroker::ping_workers`, on the
 //! process listener of the handle's broker.
 //!
-//! The outcome is `WorkerPongsRecord` or `BrokerFailure` with
+//! The outcome is `WorkerPongsRecord` or the generated broker error class with
 //! `INVALID_INPUT` (a refused argument; nothing ran), `LISTENER_DISABLED`
 //! (the handle has no listener: an `ASSUME_INITIALIZED` handle; refused
 //! before any connect, nothing ran) or `WORKER_PING_FAILED`. The ping sends
@@ -11,15 +11,14 @@ use std::time::Duration;
 
 use horsies_core::handle::HandleListener;
 use horsies_core::{
-    ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused, BrokerErrorCode,
-    BrokerOperationError, FailureCause, WorkerPong,
+    ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused, BrokerOperationError,
+    BrokerOperationSource, WorkerPingStep, WorkerPong,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyList, PyString};
 use pyo3::IntoPyObjectExt;
 
 use crate::bridge::blocking::{BlockingBound, BLOCKING_CALL_BOUND};
-use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
@@ -115,18 +114,13 @@ fn ping_window(value: &Bound<'_, PyAny>) -> PyResult<Result<Duration, BrokerFail
     let seconds = match value.extract::<f64>() {
         Ok(seconds) => seconds,
         Err(error) => {
-            let message = format!("ping_workers failed: {error}");
-            return Ok(Err(BrokerFailure {
-                code: BrokerErrorCode::WorkerPingFailed.to_string(),
-                exception: FailureException::new(
-                    SUBJECT,
-                    message.clone(),
-                    false,
-                    FailureCause::PreconditionFailed,
+            return Ok(Err(BrokerFailure::of_operation_error(
+                SUBJECT,
+                BrokerOperationError::worker_ping_failed(
+                    WorkerPingStep::Notify,
+                    BrokerOperationSource::ArgumentUnreadable(error.to_string()),
                 ),
-                message,
-                retryable: false,
-            }));
+            )));
         }
     };
     if seconds.is_nan() {
@@ -179,13 +173,10 @@ fn ping_target(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<String>, Brok
             let type_name = value.get_type().name()?.to_string();
             Ok(Err(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerOperationError::InvalidInput {
-                    message: format!(
-                        "ping_workers request refused: target_worker_id must be a str or None, \
-                     not {type_name}"
-                    ),
-                    cause: FailureCause::PreconditionFailed,
-                },
+                BrokerOperationError::invalid_input(format!(
+                    "ping_workers request refused: target_worker_id must be a str or None, not \
+                     {type_name}"
+                )),
             )))
         }
     }
@@ -252,12 +243,13 @@ pub async fn ping_workers_operation(
     let broker = match connection.broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return PingOutcome::Failed(BrokerFailure {
-                code: BrokerErrorCode::WorkerPingFailed.to_string(),
-                message: format!("ping_workers failed: {error}"),
-                retryable: error.is_retryable(),
-                exception: FailureException::of(SUBJECT, &error),
-            })
+            return PingOutcome::Failed(BrokerFailure::of_operation_error(
+                SUBJECT,
+                BrokerOperationError::worker_ping_failed(
+                    WorkerPingStep::Notify,
+                    BrokerOperationSource::Broker(error),
+                ),
+            ))
         }
     };
     match broker
@@ -315,7 +307,7 @@ mod tests {
             .expect("the values read");
             match refused {
                 Ok(request) => panic!("a handle with no listener pinged: {request:?}"),
-                Err(failed) => (failed.code, failed.retryable),
+                Err(failed) => (failed.error.code().to_string(), failed.error.retryable()),
             }
         })
     }
@@ -323,24 +315,37 @@ mod tests {
     fn refusal(target: &str, timeout: &str, minimum: &str) -> (String, String) {
         match request_of(target, timeout, minimum) {
             Ok(request) => panic!("{timeout}, {minimum} read as {request:?}"),
-            Err(failed) => (failed.code, failed.message),
+            Err(failed) => (
+                failed.error.code().to_string(),
+                failed.error.message().to_owned(),
+            ),
+        }
+    }
+
+    /// The request that the three values read as; a refusal fails the test
+    /// with its code and message.
+    fn accepted(target: &str, timeout: &str, minimum: &str) -> PingRequest {
+        match request_of(target, timeout, minimum) {
+            Ok(request) => request,
+            Err(failed) => panic!(
+                "{target}, {timeout}, {minimum} refused: {} {}",
+                failed.error.code(),
+                failed.error.message()
+            ),
         }
     }
 
     #[test]
     fn a_valid_ping_keeps_its_window_count_and_target() {
         assert_eq!(
-            request_of("'w1'", "2.5", "None"),
-            Ok(PingRequest {
+            accepted("'w1'", "2.5", "None"),
+            PingRequest {
                 target_worker_id: Some("w1".to_owned()),
                 window: Duration::from_millis(2_500),
                 min_responses: None,
-            })
+            }
         );
-        assert_eq!(
-            request_of("None", "2", "1").map(|request| request.min_responses),
-            Ok(Some(1))
-        );
+        assert_eq!(accepted("None", "2", "1").min_responses, Some(1));
     }
 
     #[test]
@@ -364,10 +369,7 @@ mod tests {
     #[test]
     fn an_endless_window_is_the_longest_window() {
         for timeout in ["float('inf')", "1e300"] {
-            assert_eq!(
-                request_of("None", timeout, "None").map(|request| request.window),
-                Ok(Duration::MAX)
-            );
+            assert_eq!(accepted("None", timeout, "None").window, Duration::MAX);
         }
     }
 
@@ -387,8 +389,8 @@ mod tests {
             );
         }
         assert_eq!(
-            request_of("None", "1", "2 ** 70").map(|request| request.min_responses),
-            Ok(Some(usize::MAX))
+            accepted("None", "1", "2 ** 70").min_responses,
+            Some(usize::MAX)
         );
     }
 
@@ -457,7 +459,10 @@ mod tests {
     fn a_blocking_ping_with_an_infinite_window_has_no_call_bound() {
         let window = match request_of("None", "float('inf')", "None") {
             Ok(request) => request.window,
-            Err(refused) => panic!("an infinite window is accepted: {}", refused.message),
+            Err(refused) => panic!(
+                "an infinite window is accepted: {}",
+                refused.error.message()
+            ),
         };
         assert_eq!(window, Duration::MAX);
         assert_eq!(

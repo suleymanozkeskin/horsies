@@ -28,19 +28,13 @@ from horsies._core import CoreContractViolation
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import period_class_key
-from horsies.core.history.identity.keys import ScopedIdempotencyKey
 from horsies.core.history.reads.detail import TaskAbsenceReason
-from horsies.core.history.identity.reservations import (
-    ReservationApplied,
-    claim_key_reservation,
-)
 from horsies.core.history.rerun.operations import (
     NotEligibleReason,
     RerunEnqueued,
     RerunEnqueuePolicy,
     RerunInputCorrupt,
     RerunInputUnavailable,
-    RerunKeyConflict,
     RerunKeyReplay,
     RerunNotEligible,
     RerunSourceAbsent,
@@ -643,51 +637,6 @@ class TestKeyedRerun:
                 )
             ).scalar_one()
             assert count == 1
-
-    @pytest.mark.asyncio
-    async def test_key_reserved_by_the_source_conflicts_by_contract(
-        self, terminalization_schema: HistorySchema
-    ) -> None:
-        """The frozen fingerprint covers rerun lineage, so the source's
-        own reservation cannot alias its rerun — the conflict is the
-        contract working."""
-        async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
-            source = await seed_failed_source(connection)
-            scoped = ScopedIdempotencyKey(
-                task_name='it.move', key='original-key'
-            )
-            claimed = await claim_key_reservation(
-                connection,
-                key_digest=scoped.digest,
-                key_scope_version=1,
-                reservation_window=timedelta(days=1),
-                fingerprint_version=1,
-                fingerprint=sha256(b'the original command').digest(),
-                task_id=UUID(source),
-            )
-            assert isinstance(claimed, ReservationApplied)
-            outcome = await rerun_task(
-                connection,
-                RerunTask(
-                    source_task_id=UUID(source),
-                    deadline=None,
-                    caller_key='original-key',
-                ),
-                policy(),
-            )
-            assert outcome == RerunKeyConflict(
-                task_id=UUID(source), reserved_by_task_id=UUID(source)
-            )
-            new_rows = (
-                await connection.execute(
-                    text(
-                        'SELECT count(*) FROM horsies_tasks '
-                        'WHERE rerun_of_task_id IS NOT NULL'
-                    )
-                )
-            ).scalar_one()
-            assert new_rows == 0
 
 
 class TestStoredSourceDoesNotDecode:

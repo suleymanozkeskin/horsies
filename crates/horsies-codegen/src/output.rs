@@ -12,8 +12,8 @@ use crate::catalogs::{group_by_module, render_module, render_package_init, CATAL
 use crate::constants::{render_constant_module, CONSTANT_MODULES};
 use crate::core_stub::{render_core_stub, CORE_STUB_FILE};
 use crate::error_classes::{
-    error_modules, render_error_detail_module, render_error_module, render_new_type_module,
-    ERROR_DETAIL_MODULE,
+    error_modules, exception_modules, render_error_detail_module, render_error_module,
+    render_exception_module, render_new_type_module, ERROR_DETAIL_MODULE,
 };
 use crate::manifest::{
     render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
@@ -153,6 +153,12 @@ pub fn render_all() -> Vec<GeneratedFile> {
         files.push(GeneratedFile {
             relative_path: catalog_folder.join(format!("{module}.py")),
             text: render_error_module(module, contents),
+        });
+    }
+    for (module, classes) in &exception_modules() {
+        files.push(GeneratedFile {
+            relative_path: catalog_folder.join(format!("{module}.py")),
+            text: render_exception_module(module, classes),
         });
     }
     files.push(GeneratedFile {
@@ -299,7 +305,8 @@ mod tests {
         // __init__.py, one file per catalog module, manifest.py,
         // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
         // one file per constant module, error_detail.py, one file per new
-        // type, one file per error module, _core.pyi
+        // type, one file per error module, one file per exception-class
+        // module, _core.pyi
         assert_eq!(
             files.len(),
             modules.len()
@@ -308,6 +315,7 @@ mod tests {
                 + 1
                 + TEXT_NEW_TYPES.len()
                 + error_modules().len()
+                + exception_modules().len()
         );
         let paths: std::collections::BTreeSet<&PathBuf> =
             files.iter().map(|file| &file.relative_path).collect();

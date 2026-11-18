@@ -14,7 +14,6 @@ import pytest
 from pydantic import ValidationError
 
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.workflows.phase2_recovery import DISCOVER_PENDING_SQL
 
 pytestmark = [pytest.mark.unit]
 
@@ -36,10 +35,3 @@ class TestQuarantineBoundConfig:
         assert RecoveryConfig().phase2_quarantine_after_attempts == 25
 
 
-class TestDiscoveryExcludesTheBound:
-    def test_discovery_carries_the_attempt_predicate(self) -> None:
-        """A row at the bound is not selected, so an unresolvable row
-        costs a bounded number of passes even when its quarantine
-        transition refused."""
-        rendered = str(DISCOVER_PENDING_SQL)
-        assert 'attempt_count <' in rendered

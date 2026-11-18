@@ -120,6 +120,67 @@ before you upgrade a 0.7 deployment.
   generated union `TaskSendCoreError` plus `TaskSendEventLoopLimit` and
   `TaskSendLoopRunnerFailed`, which only the Python client produces.
 
+- **`OutcomeDecodeError` is generated from the core, and the core builds
+  the error classes of `cancel_task`.** `OutcomeDecodeError` is rendered
+  into `horsies._catalog.lifecycle_errors`, and
+  `horsies.core.lifecycle.outcomes` re-exports it; its name, base, doc and
+  text do not change. A refused or failed `cancel_task` returns the
+  `TaskActionError` class that the core builds, with the same messages.
+  `TaskActionDbOperationFailed.exception` keeps the text of its cause, and
+  `TaskActionStoredDataInvalid.exception` is an `OutcomeDecodeError`.
+
+- **The core builds the error classes of the workflow handle.** A failed
+  pause, cancel, resume or handle read returns the
+  `HandleDbOperationFailed`, `HandleStoredDataInvalid` or
+  `HandleResumeRecoveryFailed` class that the core builds, with Python's
+  message: the operation's label, the workflow id and the cause's text
+  (`Status failed for workflow <id>: <cause>`). The records `HandleFailed`
+  and `WorkflowResumeRecoveryFailed` of `horsies._core` are removed.
+  `workflow_id` and the id in the message are the canonical text of the
+  UUID.
+  `HandleResumeRecoveryFailed.exception` holds the failure of the work
+  after the commit alone, as in 0.7, and its `retryable` is the rule of that
+  failure. A failed `result_for` read keeps the `BROKER_ERROR` message of
+  0.7, which names the node: `DB query failed for result_for node
+  <node_id> in workflow <id>: <cause>`.
+- **`HistoryContractError` is generated from the core, and the core builds
+  the error classes of the monitoring reads.** `HistoryContractError` is
+  rendered into `horsies._catalog.history_errors`, and
+  `horsies.core.history.errors` re-exports it; its name, base, doc and its
+  subclasses do not change. A failed monitoring read returns the
+  `MonitoringQueryError` class that the core builds, with the same
+  messages. The `exception` of `MonitoringQueryDbOperationFailed` is the
+  core's class of the cause with the cause's own text (the read is its
+  subject); the `exception` of `MonitoringQueryHistoryContractViolation` is
+  a `HistoryContractError` with the cause's own text, as in 0.7.
+
+- **`WorkflowHandle.workflow_id` is a `uuid.UUID`, and
+  `WorkflowHandle.for_id(text, broker)` parses a workflow id text.**
+  `for_id` returns `Ok(handle)` for every spelling that `uuid.UUID` accepts
+  (upper case, braces, `urn:uuid:`, no hyphens), or
+  `Err(HandleInvalidWorkflowId)` (new, exported from `horsies`: `message`,
+  `workflow_id_text`, `exception`) for text that is not a UUID; it reads
+  nothing. pyright refuses a `str` id in `WorkflowHandle(...)`, and
+  `pause_workflow`, `resume_workflow`, `pause_workflow_sync` and
+  `resume_workflow_sync` take a `uuid.UUID`. A handle that a start returns
+  holds the UUID that the start sent. The handle methods no longer parse the
+  id at each call: in 0.7 a handle made from text that is not a UUID
+  returned `DB_OPERATION_FAILED` from each call. The `workflow_id` of the
+  handle error classes stays a `str`, the canonical text of the UUID.
+
+- **The core builds the error classes of the broker.** A failed ping,
+  task info read, result read, worker state read, class read, task list
+  or schema install returns the `BrokerOperationFailed`,
+  `BrokerInvalidInput`, `BrokerInvalidJsonPayload` or
+  `BrokerListenerDisabled` class that the core builds, with the message of
+  0.7: `ping_database failed: <cause>`, `ping_workers failed: <cause>`,
+  `get_task_info failed for <task_id>: <cause>`, `Broker error while
+  retrieving task <task_id>: <cause>`, `<read> failed: <cause>`. The
+  record `BrokerFailure` of `horsies._core` is removed. `exception` is the
+  core's class of the cause with its own text, or `NoCause()` for a check
+  of the core; a refused class read and a worker snapshot that does not
+  read give `CoreContractViolation` (0.7: `ValueError`).
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async
@@ -136,6 +197,23 @@ before you upgrade a 0.7 deployment.
   runs on the core. `CoreStopped` means that a background task of the core
   panicked, a defect in horsies: restart the process.
 
+- **A worker child whose core stopped ends itself.** It never serves on
+  with a stopped core (`CoreStopped`) or as a fork of a child
+  (`ForkedAfterCoreStart`). The child exits with code 80, and the worker
+  starts a new child; the frame that the child sends last says that it
+  ends itself, so the worker sends it no other task. At the start of a
+  task, before task code ran, the
+  worker releases the claim with no attempt charged, and the new child runs
+  the task. After a body that finished, the child reports the result and
+  the worker writes it as for any task: the task keeps its result, with no
+  second run. A body that the refusal ended (a core call of the body raised
+  it) has no result: the child reports nothing, and the task takes the
+  crashed-child path (`WORKER_CRASHED`) and its retry policy, as does every
+  other run of a shared child whose body still runs at the exit. A fork
+  exits at once and writes nothing to the worker. The last log line of the
+  child names the cause; the worker logs the replacement of a child that
+  held no task at error level.
+
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of
   `BrokerIdempotencyKeyConflict`; the `task_id` of `Horsies.get_result`,
@@ -146,7 +224,7 @@ before you upgrade a 0.7 deployment.
   and the rerun outcomes; `mint_task_id()`; and in `horsies.monitoring`,
   `get_task_detail`, `cancel_task` and the task ids of their models. Text
   becomes a task id only at the web API path. Workflow ids keep their text
-  type.
+  type, except `WorkflowHandle.workflow_id`.
 
 - **One `input_json` holds the task input.** `TaskSendPayload.input_json`
   (the keyword arguments as one JSON object, or `None` for none) replaces
@@ -946,6 +1024,33 @@ unless it starts with "Added".
   `AsyncContext`; each has `message` and `workflow_id`. The fields become
   the methods `code()`, `message()`, `retryable()`, `workflow_id()` and
   `failure_cause()`.
+- **The `cause` of `HandleOperationError` is the `WorkflowError`.**
+  `DbOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
+  the `WorkflowError` that failed the operation (a failed connect is
+  `WorkflowError::Broker`), and `HandleOperationError` is no longer
+  `Clone`. The message of a failure starts with the operation's label, as
+  Python's: `Status failed for workflow <id>: <cause>`, and `Workflow <id>
+  not found` for `WorkflowNotFound`. The `WorkflowReadError::Database`
+  message of a failed `result_for` names the node: `DB query failed for
+  result_for node <node_id> in workflow <id>: <cause>`; the
+  `HandleOperation::ResultFor` variant holds the `node_id`. A blocking form
+  whose process runtime did not start has the cause
+  `BrokerError::ProcessRuntime` (new).
+- **`BrokerOperationError` carries typed causes.** `OperationFailed` has
+  `cause: BrokerOperationSource` (new: `Broker(BrokerError)`,
+  `ClassRead(ClassReadRefused)`, `Snapshot(WorkerStateUnreadable)`,
+  `Listen(ListenError)`, `TaskInfoMoved { task_id, passes }`,
+  `ArgumentUnreadable`); `EnqueueFailed`, `InvalidJsonPayload`,
+  `InvalidTaskOptions` and `InvalidInput` have `cause: BrokerCheckCause`
+  (new: `Error(BrokerError)` or `Check`). `BrokerOperationError` is no
+  longer `Clone`, and its `Error::source` is the cause. Constructors per
+  operation code build Python's message: `schema_init_failed`,
+  `task_info_query_failed`, `task_info_invalid_json`,
+  `raw_result_query_failed`, `monitoring_query_failed`,
+  `monitoring_query_refused`, `db_ping_failed`, `worker_ping_failed`
+  (with `WorkerPingStep`, new), `invalid_input`, `operation_failed`. The
+  messages of the health reads, `get_task_info` and the result reads gain
+  the operation's prefix, as Python's.
 - **`MonitoringQueryError` and `TaskActionError` are enums with one
   variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
   `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,

@@ -31,9 +31,11 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 use horsies_core::core::workflow::validate_start_retry;
+use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, wait_inside_task_message, FailureCause, HandleErrorCode, HandleOperationError,
-    HandleResult, ProcessRole, UserCode, WorkflowStartError, WorkflowStatus,
+    process_role, wait_inside_task_message, BrokerError, FailureCause, HandleErrorCode,
+    HandleOperation, HandleOperationError, HandleResult, ProcessRole, UserCode, WorkflowError,
+    WorkflowStartError, WorkflowStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -315,32 +317,32 @@ impl<T> WorkflowHandle<T> {
 impl<T> WorkflowHandleView<'_, T> {
     /// `WorkflowHandle::status`, blocking.
     pub fn status(&self) -> HandleResult<WorkflowStatus> {
-        self.block_handle(self.handle.status(), "status()")
+        self.block_handle(self.handle.status(), "status()", HandleOperation::Status)
     }
 
     /// `WorkflowHandle::results`, blocking.
     pub fn results(&self) -> HandleResult<BTreeMap<String, NodeResult>> {
-        self.block_handle(self.handle.results(), "results()")
+        self.block_handle(self.handle.results(), "results()", HandleOperation::Results)
     }
 
     /// `WorkflowHandle::tasks`, blocking.
     pub fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
-        self.block_handle(self.handle.tasks(), "tasks()")
+        self.block_handle(self.handle.tasks(), "tasks()", HandleOperation::Tasks)
     }
 
     /// `WorkflowHandle::cancel`, blocking.
     pub fn cancel(&self) -> HandleResult<()> {
-        self.block_handle(self.handle.cancel(), "cancel()")
+        self.block_handle(self.handle.cancel(), "cancel()", HandleOperation::Cancel)
     }
 
     /// `WorkflowHandle::pause`, blocking.
     pub fn pause(&self) -> HandleResult<bool> {
-        self.block_handle(self.handle.pause(), "pause()")
+        self.block_handle(self.handle.pause(), "pause()", HandleOperation::Pause)
     }
 
     /// `WorkflowHandle::resume`, blocking.
     pub fn resume(&self) -> HandleResult<bool> {
-        self.block_handle(self.handle.resume(), "resume()")
+        self.block_handle(self.handle.resume(), "resume()", HandleOperation::Resume)
     }
 
     /// `WorkflowHandle::result_for`, blocking. Not a wait: it runs in a
@@ -358,7 +360,8 @@ impl<T> WorkflowHandleView<'_, T> {
     }
 
     /// Run a handle method on the process runtime, or answer why it cannot
-    /// run.
+    /// run. A process runtime that did not start is `DB_OPERATION_FAILED`
+    /// of `operation`, retryable, with the refusal as its cause.
     ///
     /// # Panics
     ///
@@ -367,6 +370,7 @@ impl<T> WorkflowHandleView<'_, T> {
         &self,
         call: impl Future<Output = HandleResult<V>>,
         method: &str,
+        operation: HandleOperation,
     ) -> HandleResult<V> {
         let workflow_id = self.handle.workflow_id();
         match place(format_args!(
@@ -380,12 +384,21 @@ impl<T> WorkflowHandleView<'_, T> {
                 ),
                 workflow_id,
             }),
-            Place::RuntimeStartFailed(failed) => Err(HandleOperationError::DbOperationFailed {
-                message: format!("the call did not run: {failed}"),
-                retryable: true,
-                workflow_id,
-                cause: FailureCause::PreconditionFailed,
-            }),
+            Place::RuntimeStartFailed(failed) => {
+                let message = operation
+                    .failure_message(workflow_id, &format!("the call did not run: {failed}"));
+                Err(HandleOperationError::DbOperationFailed {
+                    message,
+                    retryable: true,
+                    workflow_id,
+                    cause: WorkflowError::Broker(BrokerError::ProcessRuntime(
+                        ProcessRuntimeRefusal::StartFailed {
+                            cause: failed.cause,
+                            os_error: failed.os_error,
+                        },
+                    )),
+                })
+            }
         }
     }
 

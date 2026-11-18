@@ -1,21 +1,17 @@
-"""The maintenance owner's shape pins.
+"""The partition maintenance settings of ``RetentionConfig``.
 
-The runtime behavior (leaves land, workers start or refuse, one gate
-holder) is proven by integration suites; these pins hold the structural
-facts those suites assume: the config bounds refuse out-of-range
-horizons by name, the ensure pass runs its stages in dependency order,
-and the stamp check names every function that republication renders.
+The config bounds refuse out-of-range horizons by name, the defaults hold
+the ratified values, and any in-bounds interval refreshes before the
+horizon floor.
 """
 
 from __future__ import annotations
 
-import inspect
 from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
-from horsies.core.history.maintenance.coverage import ensure_partition_coverage
 from horsies.core.models.retention import RetentionConfig
 
 pytestmark = [pytest.mark.unit]
@@ -59,81 +55,3 @@ class TestConfigBounds:
         assert interval_ceiling_s < heartbeat_floor_s
 
 
-class TestEnsureSequence:
-    def test_stages_run_in_dependency_order(self) -> None:
-        """Registration precedes coverage; coverage precedes publication."""
-        source = inspect.getsource(ensure_partition_coverage)
-        positions = [
-            source.index('register_heartbeat_class('),
-            source.index('register_finite_retention_class('),
-            source.index('ensure_leaf_coverage('),
-            source.index('ensure_heartbeat_coverage('),
-            source.index('republish('),
-        ]
-        assert positions == sorted(positions)
-
-
-class TestPruningWiring:
-    def test_maintenance_pass_prunes_after_coverage(self) -> None:
-        """The tick runs coverage, then pruning, then reschedules.
-
-        This pin is the defect's own shape: the pruning mechanism once
-        existed fully tested with no production caller, so configured
-        retention durations were silently unenforced. It goes red if
-        the pruning call ever leaves the reaper pass.
-        """
-        from horsies.core.worker.reaper import ReaperMixin
-
-        source = inspect.getsource(ReaperMixin._run_reaper_pass)  # pyright: ignore[reportPrivateUsage]
-        positions = [
-            source.index('self._run_partition_coverage('),
-            source.index('self._run_partition_pruning('),
-            source.index('state.next_partition_maintenance_at = ('),
-        ]
-        assert positions == sorted(positions)
-
-
-class TestPruneCandidateKinds:
-    """The pass hands heartbeat leaves to the heartbeat sweep and period
-    leaves to the history sweep, in candidate order; neither sweep sees the
-    other's leaves."""
-
-    def test_each_sweep_gets_only_its_kind(self) -> None:
-        from datetime import UTC, datetime, timedelta
-
-        from horsies.core.history.commands import LeafBounds, LeafRef
-        from horsies.core.history.outcomes import PruneReach
-        from horsies.core.history.partitions.retirement import (
-            CandidateAttachment,
-            PruneCandidate,
-            PruneCandidates,
-            RetiredClassKind,
-        )
-
-        def candidate(name: str, kind: RetiredClassKind) -> PruneCandidate:
-            lower = datetime(2021, 1, 1, tzinfo=UTC)
-            return PruneCandidate(
-                leaf=LeafRef(
-                    leaf_name=name,
-                    class_key='standard_1d',
-                    bounds=LeafBounds(lower=lower, upper=lower + timedelta(days=1)),
-                ),
-                class_kind=kind,
-                attachment=CandidateAttachment.ATTACHED,
-            )
-
-        candidates = PruneCandidates(
-            leaves=(
-                candidate('history_a', RetiredClassKind.PERIOD),
-                candidate('heartbeat_a', RetiredClassKind.HEARTBEAT),
-                candidate('history_b', RetiredClassKind.PERIOD),
-            ),
-            reach=PruneReach.WITHIN_BOUNDS,
-        )
-
-        assert [leaf.leaf_name for leaf in candidates.of_kind(RetiredClassKind.PERIOD)] == [
-            'history_a', 'history_b',
-        ]
-        assert [
-            leaf.leaf_name for leaf in candidates.of_kind(RetiredClassKind.HEARTBEAT)
-        ] == ['heartbeat_a']

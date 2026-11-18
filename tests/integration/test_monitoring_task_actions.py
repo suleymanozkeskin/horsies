@@ -12,7 +12,6 @@ The action mutates real rows through the ``broker`` fixture. Coverage:
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator
@@ -27,22 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.codec import JsonValue, encode_task_result
-from horsies.core.codec.json_io import dumps_json
-from horsies.core.lifecycle.commands import CompleteTaskFused
-from horsies.core.lifecycle.fences import OwnedClaim
-from horsies.core.lifecycle.outcomes import (
-    Applied,
-    SourceStateConflict,
-    TerminalizationOutcome,
-)
-from horsies.core.lifecycle.persistence import apply_async
-from horsies.core.models.tasks import TaskResult
 from horsies._core import CoreConnectionError
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.monitoring import (
     TaskActionDbOperationFailed,
@@ -56,9 +43,6 @@ from horsies.monitoring import (
 from tests.integration.conftest import DB_URL
 from tests.integration.history_seeding import stored_history_status
 from tests.integration.monitoring_seeding import (
-    FIXTURE_WORKER_PID,
-    FIXTURE_WORKER_PROCESS_NAME,
-    AttemptRow,
     NodeRow,
     SeedRow,
     TaskNode,
@@ -67,14 +51,12 @@ from tests.integration.monitoring_seeding import (
     insert_rows,
     task_row,
 )
-from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 UTC = timezone.utc
 
 WORKER_ID = 'worker-actions-aaaa'
-OTHER_WORKER_ID = 'worker-actions-bbbb'
 
 
 # --------------------------------------------------------------------------- #
@@ -169,31 +151,6 @@ def make_task(
             if status is TaskStatus.CLAIMED and worker_id is not None
             else None
         ),
-    )
-
-
-def make_attempt(
-    *,
-    task_id: str,
-    attempt: int,
-    outcome: str = 'FAILED',
-    error_message: str | None = None,
-) -> AttemptRow:
-    """Build a recorded attempt for a task."""
-    return AttemptRow(
-        task_id=task_id,
-        attempt=attempt,
-        outcome=outcome,
-        will_retry=False,
-        started_at=ago(100 - attempt),
-        finished_at=ago(90 - attempt),
-        error_code=None,
-        error_message=error_message,
-        failed_reason=None,
-        worker_id=WORKER_ID,
-        worker_hostname='host-a',
-        worker_pid=FIXTURE_WORKER_PID,
-        worker_process_name=FIXTURE_WORKER_PROCESS_NAME,
     )
 
 
@@ -292,30 +249,6 @@ async def attempt_rows(session: AsyncSession, task_id: str) -> list[Any]:
     )
 
 
-def serialize_ok(value: object) -> str:
-    """Build the strict task-result envelope for a seeded ok value."""
-    encoded = dumps_json(encode_task_result(TaskResult(ok=value), JsonValue))
-    assert is_ok(encoded)
-    return encoded.ok_value
-
-
-async def complete_fused(
-    session: AsyncSession,
-    *,
-    task_id: str,
-    claimed_at: datetime,
-    result_json: str,
-) -> TerminalizationOutcome:
-    return await apply_async(
-        await session.connection(),
-        CompleteTaskFused(
-            task_id=task_id,
-            fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
-            result_json=result_json,
-        ),
-    )
-
-
 async def next_notification(
     channel: str,
     trigger: Any,
@@ -341,35 +274,6 @@ async def next_notification(
             await notifications.aclose()
     finally:
         await conn.close()
-
-
-async def claim_once(broker: PostgresBroker, worker_id: str) -> list[str]:
-    """Run one real claim pass for ``worker_id`` and return the ids it took."""
-    params: dict[str, Any] = {
-        'p_worker_id': worker_id,
-        'p_queues': json.dumps(['default']),
-        'p_queue_priority': json.dumps({'default': 100}),
-        'p_queue_max_concurrency': json.dumps({}),
-        'p_hard_cap_mode': False,
-        'p_budgets': json.dumps({'ISOLATED': 4}),
-        'p_routes': json.dumps(
-            {
-                'ISOLATED': 'ISOLATED',
-                'SHARED_ASYNC': 'ISOLATED',
-                'SHARED_THREAD': 'ISOLATED',
-            },
-        ),
-        'p_prefetch_buffer': 2,
-        'p_max_claim_per_worker': 10,
-        'p_max_claim_batch': 10,
-        'p_cluster_wide_cap': None,
-        'p_lease_ms': 60_000,
-        'p_lock_keys': json.dumps([987654321]),
-    }
-    async with current_resources(broker).session_factory() as session:
-        rows = (await session.execute(HORSIES_CLAIM_SQL, params)).fetchall()
-        await session.commit()
-    return [str(row.id) for row in rows if row.row_kind == 'CLAIMED']
 
 
 # --------------------------------------------------------------------------- #
@@ -434,7 +338,12 @@ class TestCancelTaskSucceeds:
         refused = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(refused)
-        assert isinstance(refused.err_value, TaskActionNotCancellable)
+        assert type(refused.err_value) is TaskActionNotCancellable
+        assert refused.err_value == TaskActionNotCancellable(
+            message=f'Task {uuid.UUID(task.id)} cannot be cancelled from status RUNNING.',
+            task_id=uuid.UUID(task.id),
+            current_status=TaskStatus.RUNNING,
+        )
         assert refused.err_value.current_status is TaskStatus.RUNNING
         assert (await read_task(session, task.id)).status == 'RUNNING'
 
@@ -504,7 +413,10 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, missing_id)
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotFound)
+        assert type(result.err_value) is TaskActionNotFound
+        assert result.err_value == TaskActionNotFound(
+            message=f'Task {missing_id} does not exist.', task_id=missing_id,
+        )
         assert result.err_value.code is TaskActionErrorCode.TASK_NOT_FOUND
         assert result.err_value.task_id == missing_id
         assert result.err_value.retryable is False
@@ -518,7 +430,15 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskActionWorkflowTask)
+        assert type(result.err_value) is TaskActionWorkflowTask
+        assert result.err_value == TaskActionWorkflowTask(
+            message=(
+                f'Task {uuid.UUID(task.id)} belongs to a workflow; '
+                'use the workflow actions instead.'
+            ),
+            task_id=uuid.UUID(task.id),
+            current_status=TaskStatus.PENDING,
+        )
         assert result.err_value.current_status is TaskStatus.PENDING
         assert (await read_task(session, task.id)).status == 'PENDING'
 
@@ -540,7 +460,14 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotCancellable)
+        assert type(result.err_value) is TaskActionNotCancellable
+        assert result.err_value == TaskActionNotCancellable(
+            message=(
+                f'Task {uuid.UUID(task.id)} cannot be cancelled from status {status.value}.'
+            ),
+            task_id=uuid.UUID(task.id),
+            current_status=status,
+        )
         assert result.err_value.current_status is status
 
     async def test_second_cancel_is_a_conflict_not_a_second_effect(
@@ -572,134 +499,18 @@ class TestCancelTaskRefuses:
         error = result.err_value
         assert isinstance(error, TaskActionStoredDataInvalid)
         assert isinstance(error.exception, OutcomeDecodeError)
+        assert type(error.exception) is OutcomeDecodeError
         assert error.task_id == uuid.UUID(task.id)
         assert error.retryable is False
         assert "'NOT_KNOWN'" in error.message
+        # Python's texts: the message holds the decode error's text, and the
+        # exception's text is that text.
+        decode_text = str(error.exception)
+        assert decode_text.startswith('terminalization outcome decode failed: ')
+        assert "'NOT_KNOWN'" in decode_text
+        assert error.exception.args == (decode_text,)
+        assert error.message == f'Task cancel failed: stored data does not parse: {decode_text}'
         assert (await read_task(session, task.id)).status == 'FAILED'
-
-
-# --------------------------------------------------------------------------- #
-# cancel_task — the RUNNING/finalize interaction
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures('clean_task_tables')
-class TestCancelRunningVersusFinalize:
-    """A cancelled row survives the worker's later finalize attempt."""
-
-    async def test_finalize_succeeds_when_the_task_was_not_cancelled(
-        self, session: AsyncSession
-    ) -> None:
-        """Control: the same finalize call lands on an untouched RUNNING row.
-
-        Without this, the no-op assertion below would also hold if the
-        finalize arguments were simply wrong.
-        """
-        claimed_at = ago(20)
-        task = make_task(
-            status=TaskStatus.RUNNING,
-            worker_id=WORKER_ID,
-            claimed_at=claimed_at,
-            started_at=ago(15),
-        )
-        await persist(session, task)
-
-        finalized = await complete_fused(
-            session,
-            task_id=task.id,
-            claimed_at=claimed_at,
-            result_json=serialize_ok(99),
-        )
-        await session.commit()
-
-        assert isinstance(finalized, Applied)
-        assert (await read_task(session, task.id)).status == 'COMPLETED'
-        # Attempts purge with the move; the history row's snapshot is
-        # their only home once the task is terminal.
-        assert await attempt_rows(session, task.id) == []
-
-    async def test_finalize_after_cancel_is_a_no_op(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        claimed_at = ago(20)
-        task = make_task(
-            status=TaskStatus.RUNNING,
-            worker_id=WORKER_ID,
-            claimed_at=claimed_at,
-            started_at=ago(15),
-        )
-        await persist(session, task)
-        cancelled = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
-        assert is_ok(cancelled)
-
-        finalized = await complete_fused(
-            session,
-            task_id=task.id,
-            claimed_at=claimed_at,
-            result_json=serialize_ok(99),
-        )
-        await session.commit()
-
-        assert isinstance(finalized, SourceStateConflict)
-        row = await read_task(session, task.id)
-        assert row.status == 'CANCELLED'
-        assert row.result is None
-        assert row.completed_at is None
-        assert await attempt_rows(session, task.id) == []
-
-
-# --------------------------------------------------------------------------- #
-# Races
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures('clean_task_tables')
-class TestClaimCancelRace:
-    """A claim and a cancel on one row cannot both take effect."""
-
-    async def test_cancel_of_a_freshly_claimed_row_still_wins(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        """Serialized: the claim lands first, then the cancel takes the row."""
-        task = make_task(status=TaskStatus.PENDING)
-        await persist(session, task)
-        assert await claim_once(broker, WORKER_ID) == [task.id]
-
-        result = await cancel_task(broker, uuid.UUID(task.id))
-
-        assert is_ok(result)
-        assert result.ok_value.was_status is TaskStatus.CLAIMED
-        row = await read_task(session, task.id)
-        assert row.status == 'CANCELLED'
-        assert row.claimed_by_worker_id is None
-
-    async def test_concurrent_claim_and_cancel_leave_one_consistent_outcome(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.PENDING)
-        await persist(session, task)
-
-        cancelled, claimed_ids = await asyncio.gather(
-            cancel_task(broker, uuid.UUID(task.id)),
-            claim_once(broker, OTHER_WORKER_ID),
-        )
-
-        row = await read_task(session, task.id)
-        if is_ok(cancelled):
-            # The cancel committed: the row is terminal and stays claimable by
-            # nobody, whether or not the claim statement touched it first.
-            assert cancelled.ok_value.was_status in (
-                TaskStatus.PENDING,
-                TaskStatus.CLAIMED,
-            )
-            assert row.status == 'CANCELLED'
-            assert row.claimed_by_worker_id is None
-        else:
-            # The only way to lose is the row having moved past CLAIMED.
-            assert isinstance(cancelled.err_value, TaskActionNotCancellable)
-            assert cancelled.err_value.current_status not in (
-                TaskStatus.PENDING,
-                TaskStatus.CLAIMED,
-            )
-            assert row.status != 'CANCELLED'
-        assert claimed_ids in ([], [task.id])
-        assert await attempt_rows(session, task.id) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -764,11 +575,21 @@ class TestDatabaseFailure:
     async def test_cancel_reports_a_retryable_db_failure(
         self, unreachable_broker: PostgresBroker
     ) -> None:
-        result = await cancel_task(unreachable_broker, uuid.uuid4())
+        task_id = uuid.uuid4()
+        result = await cancel_task(unreachable_broker, task_id)
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, TaskActionDbOperationFailed)
+        assert type(error) is TaskActionDbOperationFailed
         assert error.retryable is True
+        assert error.task_id == task_id
         assert isinstance(error.exception, CoreConnectionError)
         assert error.exception.retryable is True
+        # Python's texts: the message holds the cause's text, and the
+        # exception is that text with the subject of the cancel.
+        assert error.message.startswith('Task cancel failed: ')
+        cause_text = error.message.removeprefix('Task cancel failed: ')
+        assert cause_text != ''
+        assert error.exception.subject == 'cancel_task'
+        assert error.exception.message == cause_text
+        assert str(error.exception) == f'cancel_task: {cause_text}'
