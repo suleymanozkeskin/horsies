@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 
 @dataclass(frozen=True, slots=True)

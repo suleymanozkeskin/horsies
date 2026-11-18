@@ -20,7 +20,7 @@ The API is on the client pages: [Broker Connections](/horsies/configuration/brok
 | `pool_size` | 5 | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | 10 | 0 to 10,000 | Additional connections beyond pool_size |
 | `pool_timeout` | 30 | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for connection |
-| `pool_pre_ping` | on | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every pool but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `pool_pre_ping` | on | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every pool but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `worker_pool_pre_ping` | off | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
 | `tcp_keepalives` | on | – | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `tcp_keepalives_idle` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |

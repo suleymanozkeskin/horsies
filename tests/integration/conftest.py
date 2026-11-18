@@ -45,7 +45,7 @@ from tests.fixtures.child_core import (
 )
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 
 # A fresh database for this session (tests/session_database.py): the install

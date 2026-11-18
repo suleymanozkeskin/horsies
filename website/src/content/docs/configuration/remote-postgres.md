@@ -128,9 +128,9 @@ Soft-cap semantics and fairness trade-offs are covered in
 
 Three settings can check a pooled connection at checkout, at one round trip
 each. The two pre-ping settings check a connection only when it waited in the
-pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`). A connection checked in more
-recently is used with no check, so a burst of statements pays no checks. The
-`check` of a child pool runs at every checkout.
+pool for more than 1 s. A connection checked in more recently is used with no
+check, so a burst of statements pays no checks. The `check` of a child pool
+runs at every checkout.
 
 | Setting | Default | Scope |
 |---------|---------|-------|

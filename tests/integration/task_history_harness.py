@@ -26,7 +26,7 @@ from tests.attempt_snapshot_support import encode_attempt_snapshot
 from tests.baseline_sql import baseline_sql
 from tests.integration.history_seeding import publish_history_readers
 from tests.task_ids import mint_task_id
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 TASK_HISTORY_PARENT: Final = 'horsies_task_history'
 """The history parent table of the baseline."""
