@@ -1,10 +1,11 @@
 # pyright: reportPrivateUsage=false
 """Result waits refuse at once in a process that runs task bodies.
 
-The broker is real and its URL is unreachable. The refusal is the first check
-of each wait, so no database is needed. With a refusal removed or moved after
-another check, the call reads the broker or returns that check's code, and
-the nothing-ran, code and label assertions fail.
+The broker is real and its URL is unreachable; a mock that records the calls
+wraps its core handle. The refusal is the first check of each wait, so no
+database is needed. With a refusal removed or moved after another check, the
+call reads the broker or returns that check's code, and the nothing-ran, code
+and label assertions fail.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Generator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -56,12 +57,15 @@ TIMEOUTS = pytest.mark.parametrize(
 
 @pytest.fixture
 def app() -> Generator[Horsies, None, None]:
-    """An app whose broker cannot connect. Stops the runner if a call started it."""
+    """An app whose broker cannot connect, and whose core handle records each
+    call it forwards. Stops the runner if a call started it."""
     app = Horsies(
         AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
     )
+    broker = app.get_broker()
+    broker._core_handle = MagicMock(wraps=broker._core_handle)
     yield app
-    app.get_broker()._loop_runner.stop()
+    broker._loop_runner.stop()
 
 
 @pytest.fixture
@@ -71,7 +75,11 @@ def task_process(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _assert_nothing_ran(broker: PostgresBroker) -> None:
-    """The sync runner never started and no resource set was built."""
+    """No core call ran, the sync runner never started, and no resource set
+    was built."""
+    core_handle = broker._core_handle
+    assert isinstance(core_handle, MagicMock), 'the app fixture wraps the core handle'
+    assert core_handle.mock_calls == []
     assert broker._loop_runner._started is False
     assert broker._loop_runner._thread is None
     assert broker._loop_sets == ()
