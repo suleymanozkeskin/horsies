@@ -2,13 +2,13 @@
 
 Rule of the baseline workflow functions: every write of a node to
 COMPLETED, FAILED or SKIPPED sets ``completed_at``. Each test runs one of
-the four skip writes of the Python progression:
+the skip writes of the core progression:
 
-- the level promotion: a join that can no longer be met
-  (``SKIP_PENDING_TASKS_BATCH_SQL``), and a join ``all`` with a failed
-  dependency (``SKIP_READY_TASKS_BATCH_SQL``);
-- the re-evaluation of one node (``try_make_ready_and_enqueue``): the same
-  two cases (``SKIP_WORKFLOW_TASK_SQL``, ``SKIP_READY_WORKFLOW_TASK_SQL``).
+- the level promotion of phase 2 (``horsies_workflow_promote_level``): a
+  join that can no longer be met, and a join ``all`` with a failed
+  dependency;
+- the re-evaluation of one node by the workflow recovery pass (case 0,
+  ``horsies_workflow_node_reevaluate``): the same two cases.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
-from horsies.core.workflows.engine import try_make_ready_and_enqueue
 
 from .conftest import (
     finish_task,
@@ -31,6 +30,7 @@ from .conftest import (
     make_workflow_spec,
     start_ok,
 )
+from tests.workflow_recovery_support import workflow_recovery_pass
 
 pytestmark = [pytest.mark.integration]
 
@@ -135,8 +135,7 @@ class TestSkipSetsCompletedAt:
         )
         await _fail_dependencies_in_place(session, handle.workflow_id, [0, 1])
 
-        await try_make_ready_and_enqueue(session, broker, handle.workflow_id, 2)
-        await session.commit()
+        _ = await workflow_recovery_pass(broker)
 
         status, completed_at = await _node(session, handle.workflow_id, 2)
         assert status == 'SKIPPED'
@@ -157,8 +156,7 @@ class TestSkipSetsCompletedAt:
         )
         await _fail_dependencies_in_place(session, handle.workflow_id, [0])
 
-        await try_make_ready_and_enqueue(session, broker, handle.workflow_id, 1)
-        await session.commit()
+        _ = await workflow_recovery_pass(broker)
 
         status, completed_at = await _node(session, handle.workflow_id, 1)
         assert status == 'SKIPPED'

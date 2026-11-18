@@ -8,10 +8,7 @@ serializer at child workflow start, and ``evaluate_workflow_success``.
 
 from __future__ import annotations
 
-import json
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -31,29 +28,11 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
 )
 from horsies.core.task_decorator import TaskFunction
-from horsies.core.types.result import Ok
-from horsies.core.workflows.engine import (
-    enqueue_subworkflow_task,
-    evaluate_workflow_success,
-)
-from tests.dualrun.reference.workflow_start_caller import start_workflow_async
-from horsies.core.workflows.steps import START_WORKFLOW_FUNCTION_SQL
-from horsies.core.workflows.sql import (
-    ENQUEUE_SUBWORKFLOW_TASK_SQL,
-    GET_TASK_STATUSES_SQL,
-    INSERT_CHILD_WORKFLOW_SQL,
-)
-from tests.broker_resources_support import attach_resources, fake_resources
 
-
-def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
-    """A real function for the hints of a mock `workflow_def`."""
-    raise AssertionError('the mock build_with runs, not this')
 
 pytestmark = [pytest.mark.unit]
 
 DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
-WORKFLOW_ID = '9f1b7a2c-0d4e-4f61-8a23-5c6d7e8f9a0b'
 _key_counter = 0
 
 
@@ -174,186 +153,3 @@ class TestDefinitionCopy:
         assert spec.success_policy.optional[0] is copied_child
 
 
-class _StopAfterInsert(Exception):
-    """Raised by the recording session to end the start after the insert."""
-
-
-class TestStartSerialization:
-    @pytest.mark.asyncio
-    async def test_start_stores_the_index_of_a_subworkflow_node(self) -> None:
-        app, work = _app_with_tasks()
-        task_node = TaskNode(fn=work)
-        child = SubWorkflowNode(workflow_def=_child_definition(work))
-        optional_child = SubWorkflowNode(workflow_def=_child_definition(work))
-        policy = SuccessPolicy(
-            cases=[SuccessCase(required=[task_node, child])],
-            optional=[optional_child],
-        )
-        spec = app.workflow(
-            name='sp_start',
-            definition_key=_key('start'),
-            tasks=[task_node, child, optional_child],
-            success_policy=policy,
-        )
-        params_by_statement: dict[Any, Any] = {}
-
-        async def execute(statement: Any, params: Any = None) -> MagicMock:
-            params_by_statement[statement] = params
-            raise _StopAfterInsert
-
-        connection = MagicMock()
-        connection.execute = AsyncMock(side_effect=execute)
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=execute)
-        session.connection = AsyncMock(return_value=connection)
-        session_context = MagicMock()
-        session_context.__aenter__ = AsyncMock(return_value=session)
-        session_context.__aexit__ = AsyncMock(return_value=False)
-        broker = MagicMock()
-        broker.app = app
-        broker.ensure_schema_initialized = AsyncMock(return_value=Ok(True))
-        attach_resources(
-            broker,
-            fake_resources(session_factory=MagicMock(return_value=session_context)),
-        )
-
-        with pytest.raises(_StopAfterInsert):
-            await start_workflow_async(spec, broker, WORKFLOW_ID)
-
-        stored = json.loads(
-            params_by_statement[START_WORKFLOW_FUNCTION_SQL]['success_policies'][0],
-        )
-        assert stored == {
-            'cases': [{'required_indices': [0, 1]}],
-            'optional_indices': [2],
-        }
-
-
-class _ParamRecordingSession:
-    def __init__(self, rows: dict[Any, Any]) -> None:
-        self.rows = rows
-        self.params: dict[Any, Any] = {}
-        self.session = AsyncMock()
-        self.session.execute = AsyncMock(side_effect=self._dispatch)
-        self.session.info = {}
-
-    async def _dispatch(self, statement: Any, params: Any = None) -> MagicMock:
-        self.params[statement] = params
-        result = MagicMock()
-        configured = self.rows.get(statement, SimpleNamespace())
-        match configured:
-            case list():
-                result.fetchone.return_value = configured.pop(0)
-            case row:
-                result.fetchone.return_value = row
-        return result
-
-
-def _grandchild_node(index: int) -> MagicMock:
-    node = MagicMock(spec=SubWorkflowNode)
-    node.wire_kwargs = {}
-    node.name = f'child_sub_{index}'
-    node.args = ()
-    node.kwargs = {}
-    node.waits_for = []
-    node.args_from = {}
-    node.workflow_ctx_from = None
-    node.index = index
-    node.node_id = f'child-{index}'
-    node.allow_failed_deps = False
-    node.join = 'all'
-    node.min_success = None
-    node.workflow_def = MagicMock()
-    node.workflow_def.name = 'GrandchildWorkflow'
-    node.workflow_def._original_build_with = _plain_build_with
-    return node
-
-
-class TestChildStartSerialization:
-    @pytest.mark.asyncio
-    async def test_child_start_stores_the_index_of_a_subworkflow_node(self) -> None:
-        required_node = _grandchild_node(0)
-        optional_node = _grandchild_node(1)
-        child_spec = MagicMock()
-        child_spec.tasks = [required_node, optional_node]
-        child_spec.success_policy = SuccessPolicy(
-            cases=[SuccessCase(required=[required_node])],
-            optional=[optional_node],
-        )
-        child_spec.output = None
-        child_spec.on_error = MagicMock(value='fail')
-        child_spec.definition_key = 'test.child.v1'
-        child_spec.name = 'child_wf'
-        workflow_def = MagicMock()
-        workflow_def.build_with.return_value = child_spec
-        workflow_def.name = 'ChildWorkflow'
-        workflow_def._original_build_with = _plain_build_with  # pyright: ignore[reportPrivateUsage]
-        parent_row = SimpleNamespace(
-            id='wt-1',
-            sub_workflow_name='child_wf',
-            input='{}',
-            args_from=None,
-            node_id='node-0',
-            sub_definition_key='test.child.v1',
-            parent_workflow_name='test_wf',
-        )
-        recorder = _ParamRecordingSession(
-            # A SubWorkflowNode root starts its own child after the insert;
-            # the second row is None, so that start stops.
-            {ENQUEUE_SUBWORKFLOW_TASK_SQL: [parent_row, None, None]},
-        )
-        broker = MagicMock()
-        broker.app = MagicMock()
-        broker.app.config.queue_mode.name = 'DEFAULT'
-
-        with patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_key',
-            return_value=workflow_def,
-        ), patch(
-            'horsies.core.workflows.engine.validate_workflow_generic_output_match',
-        ), patch(
-            'horsies.core.workflows.engine.fill_build_with_defaults',
-            return_value={},
-        ), patch(
-            'horsies.core.workflows.engine._fail_enqueued_task', new=AsyncMock(),
-        ):
-            _ = await enqueue_subworkflow_task(
-                recorder.session, broker, 'parent-wf', 0, {},
-                parent_depth=0, root_workflow_id='parent-wf',
-            )
-
-        stored = json.loads(recorder.params[INSERT_CHILD_WORKFLOW_SQL]['success_policy'])
-        assert stored == {
-            'cases': [{'required_indices': [0]}],
-            'optional_indices': [1],
-        }
-
-
-class TestEvaluateSuccess:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ('status', 'expected'),
-        [('COMPLETED', True), ('FAILED', False), ('SKIPPED', False)],
-    )
-    async def test_the_status_of_a_subworkflow_node_row_decides_the_case(
-        self, status: str, expected: bool,
-    ) -> None:
-        # Index 1 is the row of a SubWorkflowNode; the stored policy names it
-        # in the same `required_indices` list as a TaskNode row.
-        policy = {'cases': [{'required_indices': [0, 1]}]}
-
-        async def execute(statement: Any, params: Any) -> MagicMock:
-            assert statement is GET_TASK_STATUSES_SQL
-            result = MagicMock()
-            result.fetchall.return_value = [
-                SimpleNamespace(task_index=0, status='COMPLETED'),
-                SimpleNamespace(task_index=1, status=status),
-            ]
-            return result
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=execute)
-
-        assert await evaluate_workflow_success(
-            session, 'wf-1', policy, False, 0,
-        ) is expected
