@@ -32,6 +32,7 @@ use horsies_core::{
     check_worker_connections, ConnectivityRefusal, Execution, RegisteredTask, TaskOptions,
 };
 
+use crate::process_state::refuse_in_a_fork;
 use crate::{AppRole, ErrorCode, Horsies, HorsiesError, ValidationReport};
 
 /// The check passed.
@@ -141,8 +142,14 @@ impl Horsies {
     ///
     /// Errors: [`CheckReport`] with the refusals of the first phase that
     /// refused.
+    ///
+    /// # Panics
+    ///
+    /// After the static check passed, in a process that was forked without
+    /// `exec` after the core's process runtime started. Nothing connected.
     pub async fn check_live(&self) -> Result<CheckPassed, CheckReport> {
         let passed = self.check()?;
+        refuse_in_a_fork(format_args!("Horsies::check_live"));
         let broker = match self.handle().broker().await {
             Ok(broker) => broker,
             Err(error) => return Err(connectivity_report(&error.to_string())),

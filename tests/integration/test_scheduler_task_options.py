@@ -181,7 +181,7 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
             queue_name='default',
             task_id=slot_task_id,
             send_kind=SendKind.FIRST,
-            input_json=prepared.kwargs_json,
+            input_json=prepared.input_json,
             priority=priority,
             sent_at=slot,
             retention_class_key=resolve_queue_retention_class(

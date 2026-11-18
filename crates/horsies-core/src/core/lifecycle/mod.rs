@@ -315,6 +315,59 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// The field names of `command`. Each pattern names every field of its
+    /// variant and has no `..`, and the `match` has no wildcard arm: a field
+    /// or a variant added to the enum fails to compile here until it is
+    /// listed, and the tests below then judge it.
+    fn field_names(command: &TerminalizationCommand) -> Vec<&'static str> {
+        macro_rules! fields_of {
+            ($command:expr; $($variant:ident { $($field:ident),* }),* $(,)?) => {
+                match $command {
+                    $(TerminalizationCommand::$variant { $($field: _),* } => {
+                        vec![$(stringify!($field)),*]
+                    })*
+                }
+            };
+        }
+        fields_of!(
+            command;
+            CompleteTaskFused { task_id, fence, result_json },
+            ExpireOwnedClaim { task_id, fence, result_json, error_code },
+            ExpirePendingTasks { batch_size, result_json, error_code },
+            CancelOwnedOrphan { task_id, fence },
+            CancelOrphanedTasks { batch_size },
+            AbandonOwnedNode { task_id, fence },
+            AbandonOwnedNodes { fence },
+            AbandonNodesOfPausedWorkflows { workflow_ids },
+            CancelOwnedNode { task_id, fence, accepts_requeued_pending },
+            CancelOwnedNodes { fence },
+            CancelNodesOfCancelledWorkflow { workflow_ids },
+        )
+    }
+
+    fn names_a_task(command: &TerminalizationCommand) -> bool {
+        field_names(command).contains(&"task_id")
+    }
+
+    /// Every field that a command may carry, by role (Python
+    /// `TestIllegalStatesAreUnrepresentable::test_no_variant_carries_an_unaccounted_field`).
+    const ACCOUNTED_FIELDS: [&str; 10] = [
+        // What the command acts on.
+        "task_id",
+        "workflow_ids",
+        "batch_size",
+        // What proves that it may.
+        "fence",
+        "accepts_requeued_pending",
+        // What it records.
+        "result_json",
+        "error_code",
+        "failed_reason",
+        // What it wakes.
+        "notify_channel",
+        "notify_payload",
+    ];
+
     /// Python `test_lifecycle_commands.py::TestIllegalStatesAreUnrepresentable::test_batch_fences_belong_only_to_batch_commands`:
     /// a claim batch fence guards only the commands of a claim batch, which
     /// name no single task.
@@ -328,14 +381,22 @@ pub(crate) mod tests {
             variants_where(has_batch_fence),
             ["AbandonOwnedNodes", "CancelOwnedNodes"]
         );
+        for (variant, command) in sample_commands() {
+            match has_batch_fence(&command) {
+                true => assert!(!names_a_task(&command), "{variant}"),
+                false => {}
+            }
+        }
     }
 
     /// `TestIllegalStatesAreUnrepresentable::test_single_task_commands_do_not_carry_a_batch`:
-    /// no command of one task carries a claim batch fence.
+    /// no command of one task carries a claim batch fence. A command names a
+    /// task exactly when it is a command of one task.
     #[test]
     fn a_command_of_one_task_carries_no_batch_fence() {
         let single = variants_where(|command| subject_of(command) == Subject::OneTask);
         assert_eq!(single.len(), 5, "{single:?}");
+        assert_eq!(variants_where(names_a_task), single);
         for (variant, command) in sample_commands() {
             match subject_of(&command) {
                 Subject::OneTask => assert!(!has_batch_fence(&command), "{variant}"),
@@ -353,9 +414,114 @@ pub(crate) mod tests {
         assert_eq!(scoped.len(), 2, "{scoped:?}");
         for (variant, command) in sample_commands() {
             match subject_of(&command) {
-                Subject::Workflows => assert!(command.fence().is_none(), "{variant}"),
+                Subject::Workflows => {
+                    assert!(command.fence().is_none(), "{variant}");
+                    assert!(!names_a_task(&command), "{variant}");
+                }
                 Subject::OneTask | Subject::ClaimBatch | Subject::Sweep => {}
             }
         }
+    }
+
+    /// `TestIllegalStatesAreUnrepresentable::test_required_workflow_status_is_implied_by_the_variant`:
+    /// no command names the workflow status or the node statuses that its
+    /// guard requires. The variant means them, so a pause command cannot
+    /// verify a cancellation.
+    #[test]
+    fn no_command_names_the_status_its_guard_requires() {
+        for (variant, command) in sample_commands() {
+            for field in field_names(&command) {
+                assert!(
+                    ![
+                        "required_workflow_status",
+                        "required_node_statuses",
+                        "workflow_status"
+                    ]
+                    .contains(&field),
+                    "{variant} carries {field}"
+                );
+            }
+        }
+    }
+
+    /// `TestIllegalStatesAreUnrepresentable::test_node_disposition_is_implied_by_the_variant`:
+    /// no command carries a disposition or a node status that could
+    /// contradict its variant. A pause readies a node and a cancellation
+    /// skips it, by which command it is.
+    #[test]
+    fn no_command_carries_a_node_disposition() {
+        for (variant, command) in sample_commands() {
+            for field in field_names(&command) {
+                assert!(
+                    !["disposition", "node_status"].contains(&field),
+                    "{variant} carries {field}"
+                );
+            }
+        }
+    }
+
+    /// `TestIllegalStatesAreUnrepresentable::test_no_variant_carries_an_unaccounted_field`:
+    /// every field of every variant is what the command acts on, what
+    /// proves that it may, what it records, or what it wakes.
+    #[test]
+    fn every_field_of_a_command_has_a_role() {
+        for (variant, command) in sample_commands() {
+            for field in field_names(&command) {
+                assert!(
+                    ACCOUNTED_FIELDS.contains(&field),
+                    "{variant} carries the unaccounted field {field}"
+                );
+            }
+        }
+    }
+
+    /// The ownership that a fence compares.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FenceKind {
+        /// The worker, not the claim generation.
+        Worker,
+        /// The worker and the claim generation of one task.
+        WorkerAndGeneration,
+        /// The worker and the claim generation of each task of a batch.
+        WorkerAndGenerationPerTask,
+        /// No ownership predicate.
+        NoFence,
+    }
+
+    fn fence_kind(command: &TerminalizationCommand) -> FenceKind {
+        match command.fence() {
+            Some(TerminalFence::WorkerOwned(_)) => FenceKind::Worker,
+            Some(TerminalFence::OwnedClaim(_)) => FenceKind::WorkerAndGeneration,
+            Some(TerminalFence::OwnedClaimBatch(_)) => FenceKind::WorkerAndGenerationPerTask,
+            None => FenceKind::NoFence,
+        }
+    }
+
+    /// Python `test_lifecycle_operations.py::TestEachCommandCarriesTheFenceOfItsWriter::test_the_fence_type_is_the_writer_fence`:
+    /// per command, not per set, the fence is the ownership that its writer
+    /// compares (the `fence` of each writer of `tests/lifecycle_matrix.py`).
+    /// The failed attempt and the success of a workflow task have writers of
+    /// their own, whose commands hold an `OwnedClaim` by type
+    /// (`FinishFailedAttempt`, `FinishWorkflowSuccess`).
+    #[test]
+    fn each_command_carries_the_fence_of_its_writer() {
+        let expected = [
+            ("CompleteTaskFused", FenceKind::WorkerAndGeneration),
+            ("ExpireOwnedClaim", FenceKind::Worker),
+            ("ExpirePendingTasks", FenceKind::NoFence),
+            ("CancelOwnedOrphan", FenceKind::WorkerAndGeneration),
+            ("CancelOrphanedTasks", FenceKind::NoFence),
+            ("AbandonOwnedNode", FenceKind::WorkerAndGeneration),
+            ("AbandonOwnedNodes", FenceKind::WorkerAndGenerationPerTask),
+            ("AbandonNodesOfPausedWorkflows", FenceKind::NoFence),
+            ("CancelOwnedNode", FenceKind::WorkerAndGeneration),
+            ("CancelOwnedNodes", FenceKind::WorkerAndGenerationPerTask),
+            ("CancelNodesOfCancelledWorkflow", FenceKind::NoFence),
+        ];
+        let actual: Vec<(&'static str, FenceKind)> = sample_commands()
+            .iter()
+            .map(|(variant, command)| (*variant, fence_kind(command)))
+            .collect();
+        assert_eq!(actual, expected);
     }
 }

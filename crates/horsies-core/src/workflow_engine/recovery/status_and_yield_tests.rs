@@ -327,3 +327,30 @@ async fn the_completion_yield_is_the_share_of_scanned_workflows_that_are_candida
     assert_eq!(report.metrics.case2_3.candidates_returned, 1);
     assert_eq!(report.completion_candidate_yield, Some(0.25));
 }
+
+/// `test_yield_per_audit_result` (case `empty-page`): an audit page that
+/// scanned no workflow has no completion yield, not a yield of zero. The case
+/// `no-candidates` (a page with no candidate gives 0.0) is
+/// `tests::empty_global_workflow_audit_is_bounded_at_fifty_thousand_rows`.
+#[tokio::test]
+#[serial]
+async fn an_audit_page_that_scanned_no_workflow_has_no_completion_yield() {
+    let (database, pool) = owned_database().await;
+    let mut report = RecoveryReport::default();
+
+    let pass = audit_end_states(
+        &PostgresBroker::from_pool(pool.clone()),
+        &crate::test_support::child_specs::TestChildSpecs::empty(),
+        AUDIT_PAGE_ROWS,
+        &mut report,
+        RecoveryFailurePolicy::LogOnly,
+    )
+    .await;
+
+    pool.close().await;
+    database.drop().await;
+    assert!(pass.is_ok(), "{pass:?}");
+    assert_eq!(report.metrics.case2_3.rows_selected, 0);
+    assert_eq!(report.completion_candidate_yield, None);
+    assert!(serde_json::to_value(&report).unwrap()["completion_candidate_yield"].is_null());
+}

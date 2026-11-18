@@ -1,5 +1,6 @@
 """Cases of the async call form: the future of a call belongs to the calling
-loop, on asyncio and on uvloop; 1,000 calls in flight add no OS thread; a
+loop, on asyncio and on uvloop; 1,000 calls in flight add no OS thread; an
+idle producer after its first send keeps the threads of the core only; a
 cancelled read is dropped and a cancelled write runs to its end.
 
 The handles use the ``ASSUME_INITIALIZED`` schema mode: the database has the
@@ -44,6 +45,10 @@ CONCURRENT_AWAITS: Final = 1_000
 
 THREAD_SAMPLE_INTERVAL_S: Final = 0.001
 """The pause between two thread count samples while the calls are in flight."""
+
+PRODUCER_IDLE_S: Final = 2.0
+"""How long the producer case makes no call after its first send before its
+last thread count."""
 
 SETTLE_S: Final = 1.0
 """The wait after a released lock before the case reads the bridge records:
@@ -161,6 +166,32 @@ def thousand_awaits_uvloop() -> Report:
     return _run_on('uvloop', _thousand_awaits)
 
 
+async def _idle_producer_after_first_send() -> Report:
+    # An IP address in the URL, as in the thousand awaits case.
+    url = address_url(database_url())
+    handle = _handle(url)
+    task_id = minted_task_id()
+    threads_before_send = os_thread_count()
+    sent = await handle.enqueue_async(send_request(task_id))
+    threads_after_send = os_thread_count()
+    await asyncio.sleep(PRODUCER_IDLE_S)
+    threads_idle = os_thread_count()
+    delete_tasks(url, [task_id])
+    return {
+        'sent': type(sent).__name__,
+        'threads_before_send': threads_before_send,
+        'threads_after_send': threads_after_send,
+        'threads_idle': threads_idle,
+    }
+
+
+def idle_producer_after_first_send() -> Report:
+    """The OS thread count of a producer process before its first
+    ``enqueue_async``, after it, and after ``PRODUCER_IDLE_S`` with no call,
+    on an asyncio loop. The first send starts the core."""
+    return _run_on('asyncio', _idle_producer_after_first_send)
+
+
 async def _cancel_when_waiting(
     lock: TasksTableLock, start: Callable[[], asyncio.Future[Any]],
 ) -> Report:
@@ -240,6 +271,7 @@ if __name__ == '__main__':
             'future_on_calling_loop_uvloop': future_on_calling_loop_uvloop,
             'thousand_awaits_asyncio': thousand_awaits_asyncio,
             'thousand_awaits_uvloop': thousand_awaits_uvloop,
+            'idle_producer_after_first_send': idle_producer_after_first_send,
             'cancel_leaves_calls': cancel_leaves_calls,
         },
     )

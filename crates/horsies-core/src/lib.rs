@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-// `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
-// and `#[derive(horsies_macros::ManifestSchema)]` names
+// `#[derive(horsies_core_derive::CodeCatalog)]` names `::horsies_core::catalog`,
+// and `#[derive(horsies_core_derive::ManifestSchema)]` names
 // `::horsies_core::manifest_schema`; this crate reaches both through its own
 // name.
 extern crate self as horsies_core;
@@ -14,6 +14,7 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod error_catalog;
 pub mod failure_cause;
 pub mod handle;
 pub mod log_targets;
@@ -65,13 +66,13 @@ pub use crate::core::codec::{JsonText, JsonTextRefused};
 
 // broker re-exports
 pub use crate::broker::{
-    expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
-    CheckInterruption, CheckedSend, ConnectivityRefusal, DatabasePing, ExpiredTaskRow,
-    HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker,
-    RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
-    StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
-    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError,
+    BrokerOperationFailedCode, BrokerResult, CheckInterruption, CheckedSend, ConnectivityRefusal,
+    DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError,
+    PostgresBroker, RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure,
+    StaleTaskRow, StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead,
+    TaskInfoRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
@@ -214,8 +215,8 @@ pub use crate::core::history::rerun::{
 pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
 pub use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
 pub use crate::workflow_engine::child_spec::{
-    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
-    ChildStartSource, ClientChildSpec, ClientSpec,
+    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildStartSource,
+    ClientChildSpec, ClientSpec,
 };
 
 // The steps that a client's child spec source runs around its own builder:

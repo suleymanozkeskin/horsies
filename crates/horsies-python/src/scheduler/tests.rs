@@ -117,6 +117,31 @@ fn a_failed_family_check_is_a_start_failure_with_its_retryable_flag() {
     }
 }
 
+/// Python `test_scheduler_service.py::TestSchedulerStart::test_schema_init_failure_raises_runtime_error`:
+/// a connect or a schema install that fails before the core start is a
+/// start failure with the cause's text and its retryable flag, which the
+/// facade raises as `RuntimeError`.
+#[test]
+fn a_failed_connect_or_install_is_a_start_failure_with_its_cause() {
+    for (error, retryable) in [
+        (BrokerError::ConnectionFailed("no route".to_owned()), true),
+        (
+            BrokerError::ClaimContract("a broken answer".to_owned()),
+            false,
+        ),
+    ] {
+        match start_failed(&error) {
+            StartNotCompleted::Failed(failed) => {
+                assert_eq!(failed.message, error.to_string());
+                assert_eq!(failed.retryable, retryable);
+            }
+            StartNotCompleted::Refused(refused) => {
+                panic!("{error} is a start failure, not {refused:?}")
+            }
+        }
+    }
+}
+
 #[test]
 fn a_failed_tick_keeps_the_retryable_flag_of_its_cause() {
     let failed = tick_failed(&SchedulerTickError::DueRead(BrokerError::ConnectionFailed(

@@ -432,12 +432,11 @@ fn sort_direction(value: &str) -> Result<SortDirection, String> {
 
 /// The record of a failure of the read `operation` that the core reports.
 pub fn read_failed(operation: &'static str, error: MonitoringQueryError) -> MonitoringFailed {
-    let exception = FailureException::of(operation, &error);
     MonitoringFailed {
-        code: error.code.wire_value().to_owned(),
-        message: error.message,
-        retryable: error.retryable,
-        exception,
+        code: error.code().wire_value().to_owned(),
+        message: error.message().to_owned(),
+        retryable: error.retryable(),
+        exception: FailureException::of(operation, &error),
     }
 }
 

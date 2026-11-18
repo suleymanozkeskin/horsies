@@ -113,6 +113,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 - `AsyncContext` is the error of a blocking send on a thread that runs a runtime. The async sends do not return it. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread).
 - `PayloadMismatch`: the task id exists with another command or idempotency key; nothing was written.
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key with another command; nothing was written.
+- A send in a process that was forked without `exec` after the core's process runtime started panics, as every call that runs on the core: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals).
 
 The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
 

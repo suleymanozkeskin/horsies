@@ -127,11 +127,11 @@ class TestPrepareSchedules:
         assert result == Ok(
             {
                 'with_kwargs': PreparedSchedule(
-                    kwargs_json=dumps_json({'x': 1}).ok_value,
+                    input_json=dumps_json({'x': 1}).ok_value,
                     task_options_json=options_json,
                 ),
                 'without_kwargs': PreparedSchedule(
-                    kwargs_json=None,
+                    input_json=None,
                     task_options_json=options_json,
                 ),
             },

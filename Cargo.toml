@@ -4,6 +4,7 @@ members = [
     "crates/horsies",
     "crates/horsies-codegen",
     "crates/horsies-core",
+    "crates/horsies-core-derive",
     "crates/horsies-macros",
     "crates/horsies-python",
     "rust/examples",

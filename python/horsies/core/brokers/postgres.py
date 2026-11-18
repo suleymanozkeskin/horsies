@@ -126,7 +126,6 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
-    BrokerLoopRunnerFailed,
     BrokerOperationFailed,
     BrokerOperationFailedCode,
     BrokerPayloadMismatch,
@@ -148,7 +147,11 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
-from horsies.core.types.core_failure import core_error_retryable
+from horsies.core.types.core_failure import (
+    CoreCallRefusal,
+    call_refusal_or_raise,
+    core_error_retryable,
+)
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
     TASK_TERMINAL_STATES,
@@ -214,7 +217,6 @@ from horsies.core.process_role import (
 )
 from horsies.core.utils.loop_runner import (
     LoopRunner,
-    LoopRunnerError,
     async_context_message,
     in_running_event_loop,
 )
@@ -247,6 +249,16 @@ def _operation_failed(
             retryable=is_retryable_connection_error(exc),
             exception=without_validation_input(exc),
         )
+    )
+
+
+def _schema_init_failed(exc: CoreFailure | CoreCallRefusal) -> Err[BrokerOperationFailed]:
+    """``SCHEMA_INIT_FAILED`` with the cause of an install that failed, or
+    that the core of this process could not run. Pure."""
+    return _operation_failed(
+        BrokerErrorCode.SCHEMA_INIT_FAILED,
+        f'Schema initialization failed: {exc}',
+        exc,
     )
 
 
@@ -370,8 +382,8 @@ def _command_fingerprint(
 ) -> Result[bytes, BrokerInvalidInput]:
     """The version-1 command fingerprint of a send. Pure.
 
-    The input travels in the fingerprint's kwargs element as the stored
-    ``input`` text, and the args element is always null: a Python send has
+    The input travels in the fingerprint's ``input_json`` element as the
+    stored ``input`` text, and the args element is always null: a Python send has
     no positional arguments. The fingerprint is therefore a function of the
     stored row. A value that the fingerprint refuses is ``INVALID_INPUT``.
     """
@@ -380,8 +392,8 @@ def _command_fingerprint(
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            args_json=None,
-            kwargs_json=stored_input,
+            positional_args_json=None,
+            input_json=stored_input,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
             task_options_json=task_options,
@@ -600,10 +612,12 @@ def _enqueue_key(
     ))
 
 
-def _monitoring_call_failed(operation: str, exc: CoreError) -> Err[BrokerOperationFailed]:
-    """A core boundary error of a monitoring read (the core stopped, did not
-    start, the process is a fork, or the loop has too many calls in flight):
-    no statement ran, or the read was dropped. Nothing changed."""
+def _monitoring_call_failed(
+    operation: str, exc: CoreCallRefusal,
+) -> Err[BrokerOperationFailed]:
+    """A core boundary error of a monitoring read (the core did not start,
+    the loop has too many calls in flight, or a sync call reached its
+    bound): no statement ran, or the read was dropped. Nothing changed."""
     return Err(
         BrokerOperationFailed(
             code=BrokerErrorCode.MONITORING_QUERY_FAILED,
@@ -649,6 +663,70 @@ def _monitoring_read_failed(
             raise AssertionError(f'the core {operation} answered the code {code}')
 
 
+def _database_ping_call_failed(exc: CoreCallRefusal) -> Err[BrokerOperationFailed]:
+    """The ping's error for a core boundary error: ``DB_PING_FAILED`` with
+    the error, retryable by ``core_error_retryable``. Nothing changed."""
+    return Err(
+        BrokerOperationFailed(
+            code=BrokerErrorCode.DB_PING_FAILED,
+            message=f'ping_database failed: {exc}',
+            retryable=core_error_retryable(exc),
+            exception=exc,
+        ),
+    )
+
+
+def _database_ping_answer(
+    outcome: DatabasePingRecord | BrokerFailure,
+) -> BrokerResult[DatabasePing]:
+    """The answer of the core's database ping. Pure.
+
+    - ``DatabasePingRecord``: ``Ok(DatabasePing)`` with its latency.
+    - ``BrokerFailure`` with ``DB_PING_FAILED``: ``BrokerOperationFailed``
+      with the core's text, retryable flag and exception.
+
+    Another code contradicts the ping's catalog: ``AssertionError``.
+    """
+    match outcome:
+        case DatabasePingRecord(latency_ms=latency_ms):
+            return Ok(DatabasePing(latency_ms=latency_ms))
+        case BrokerFailure(
+            code='DB_PING_FAILED',
+            message=message,
+            retryable=retryable,
+            exception=exception,
+        ):
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.DB_PING_FAILED,
+                    message=f'ping_database failed: {message}',
+                    retryable=retryable,
+                    exception=exception,
+                ),
+            )
+        case BrokerFailure(code=code):
+            raise AssertionError(f'the core database ping answered the code {code}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _close_answer(errors: list[BaseException]) -> BrokerResult[None]:
+    """The answer of a close for the failures of its steps. Pure.
+
+    No failure: ``Ok(None)``. Otherwise ``CLOSE_FAILED`` with the count and
+    the first failure, retryable by ``is_retryable_connection_error``.
+    """
+    match errors:
+        case [first, *_]:
+            return _operation_failed(
+                BrokerErrorCode.CLOSE_FAILED,
+                f'Close failed ({len(errors)} error(s)): {first}',
+                first,
+            )
+        case _:
+            return Ok(None)
+
+
 def _loop_limit_err(  # pyright: ignore[reportUnusedFunction]
     operation: str, loop_limit: EventLoopLimit,
 ) -> Err[BrokerEventLoopLimit]:
@@ -662,21 +740,6 @@ def _loop_limit_err(  # pyright: ignore[reportUnusedFunction]
         BrokerEventLoopLimit(
             message=f'{operation}: {loop_limit.describe()}',
             loop_limit=loop_limit,
-        )
-    )
-
-
-def _loop_runner_err(
-    sync_call: str, exc: LoopRunnerError,
-) -> Err[BrokerLoopRunnerFailed]:
-    """Build the broker error for a sync facade whose runner could not run the call.
-
-    Nothing ran. Not retryable: a stopped runner does not start again.
-    """
-    return Err(
-        BrokerLoopRunnerFailed(
-            message=f'Loop runner failed for {sync_call}: {exc}',
-            exception=exc,
         )
     )
 
@@ -855,9 +918,21 @@ class _SyncSendEngineOpen:
     engine: Engine
 
 
-def _task_info_core_error(task_id: UUID, exc: CoreError) -> Err[BrokerOperationFailed]:
-    """The core of this process cannot run a task info read: it stopped, did
-    not start, has too many calls in flight, or a blocking call reached its
+@dataclass(frozen=True, slots=True)
+class _PythonResources:
+    """The Python-side resources that one close took from the broker: the
+    resource sets of the event loops, and the engine of the sync sends that
+    ran on the caller's thread."""
+
+    loop_sets: tuple[LoopResources, ...]
+    sync_send_engine: _SyncSendEngineNotOpen | _SyncSendEngineOpen
+
+
+def _task_info_core_error(
+    task_id: UUID, exc: CoreCallRefusal,
+) -> Err[BrokerOperationFailed]:
+    """The core of this process cannot run a task info read: it did not
+    start, has too many calls in flight, or a blocking call reached its
     bound. Nothing changed. Pure."""
     return Err(
         BrokerOperationFailed(
@@ -1154,10 +1229,12 @@ def _enqueue_request(
     ))
 
 
-def _enqueue_core_error(task_name: str, exc: CoreError) -> Err[BrokerEnqueueFailed]:
-    """The core of this process cannot run a send: it stopped, did not
-    start, has too many calls in flight, or a blocking call reached its
-    bound. The row may or may not exist after a timed-out call. Pure."""
+def _enqueue_core_error(
+    task_name: str, exc: CoreCallRefusal,
+) -> Err[BrokerEnqueueFailed]:
+    """The core of this process cannot run a send: it did not start, has
+    too many calls in flight, or a blocking call reached its bound. The row
+    may or may not exist after a timed-out call. Pure."""
     return Err(BrokerEnqueueFailed(
         message=f'Failed to enqueue task {task_name}: {exc}',
         retryable=core_error_retryable(exc),
@@ -1273,6 +1350,11 @@ class PostgresBroker:
     schema install ends with the startup coverage pass of its classes and
     horizons; with ``None`` the pass covers the classes of the default
     ``RetentionConfig``.
+
+    Every method that calls the core raises ``ForkedAfterCoreStart`` and
+    ``CoreStopped``: they are states of the process, never a result
+    (``call_refusal_or_raise``). The other core boundary errors
+    (``CoreCallRefusal``) are the failure code of the method.
     """
 
     _CORE_POOL_PROFILE: ClassVar[CorePoolProfile] = 'PRODUCER'
@@ -2035,18 +2117,18 @@ class PostgresBroker:
         install failed (``exception`` is the core's ``CoreFailure``), for
         example a database of the other client family or one this build
         cannot install into (not retryable), or the core of this process
-        cannot run the call (``exception`` is the ``CoreError``). The install
-        runs on the core pools, so ``BrokerEventLoopLimit`` is no longer a
-        failure exit. A cancel of the caller does not stop the install.
+        cannot run the call (``exception`` is the ``CoreCallRefusal``). The
+        install runs on the core pools, so ``BrokerEventLoopLimit`` is no
+        longer a failure exit. A cancel of the caller does not stop the
+        install. Raises ``ForkedAfterCoreStart`` and ``CoreStopped``
+        (``call_refusal_or_raise``).
         """
         try:
             await self._ensure_initialized()
-        except (CoreFailure, CoreError) as exc:
-            return _operation_failed(
-                BrokerErrorCode.SCHEMA_INIT_FAILED,
-                f'Schema initialization failed: {exc}',
-                exc,
-            )
+        except CoreFailure as exc:
+            return _schema_init_failed(exc)
+        except CoreError as exc:
+            return _schema_init_failed(call_refusal_or_raise(exc))
         return Ok(None)
 
     # ----------------- Async API -----------------
@@ -2130,7 +2212,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str,
         priority: int,
-        kwargs_json: str | None,
+        input_json: str | None,
         task_options: str | None,
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
     ) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
@@ -2146,7 +2228,7 @@ class PostgresBroker:
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            input_json=kwargs_json,
+            input_json=input_json,
             good_until=None,
             enqueue_delay_seconds=None,
             task_options=task_options,
@@ -2198,6 +2280,12 @@ class PostgresBroker:
         - ``PAYLOAD_MISMATCH``, ``IDEMPOTENCY_KEY_CONFLICT``: nothing was
           written.
 
+        Raises ``ForkedAfterCoreStart`` (this process was forked without
+        ``exec`` after the core started) and ``CoreStopped`` (a core
+        background task panicked): states of the process, never a result.
+        Nothing was written. Every other core error is ``ENQUEUE_FAILED``
+        with it as ``exception``.
+
         A cancel of the caller does not stop the write: the core runs it to
         its end.
         """
@@ -2224,7 +2312,7 @@ class PostgresBroker:
         try:
             outcome = await self._core_handle.enqueue_async(request)
         except CoreError as exc:
-            return _enqueue_core_error(task_name, exc)
+            return _enqueue_core_error(task_name, call_refusal_or_raise(exc))
         return _enqueue_result(outcome)
 
     def _build_raw_result_record(
@@ -2531,7 +2619,7 @@ class PostgresBroker:
           connect, the install or a read failed (``retryable`` is the core's
           classification, ``exception`` the core's exception of the cause), or the
           core of this process cannot run the call (``exception`` is the
-          ``CoreError``).
+          ``CoreCallRefusal``).
         """
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return _wait_inside_task_err(
@@ -2550,7 +2638,7 @@ class PostgresBroker:
                 task_id, timeout_ms=timeout_ms,
             )
         except CoreError as exc:
-            return self._raw_result_core_error(task_id, exc)
+            return self._raw_result_core_error(task_id, call_refusal_or_raise(exc))
         return self._raw_result_of_outcome(task_id, outcome)
 
     def get_raw_result_record(
@@ -2588,15 +2676,15 @@ class PostgresBroker:
         try:
             outcome = self._core_handle.raw_result_record(task_id, timeout_ms=timeout_ms)
         except CoreError as exc:
-            return self._raw_result_core_error(task_id, exc)
+            return self._raw_result_core_error(task_id, call_refusal_or_raise(exc))
         return self._raw_result_of_outcome(task_id, outcome)
 
     def _raw_result_core_error(
-        self, task_id: UUID, exc: CoreError,
+        self, task_id: UUID, exc: CoreCallRefusal,
     ) -> Err[BrokerOperationFailed]:
-        """The core of this process cannot run a result read: it stopped,
-        did not start, has too many calls in flight, or a blocking call
-        reached its bound. Logged on ``horsies.broker``; nothing changed."""
+        """The core of this process cannot run a result read: it did not
+        start, has too many calls in flight, or a blocking call reached its
+        bound. Logged on ``horsies.broker``; nothing changed."""
         self.logger.error(
             'Broker error while retrieving raw task result record for task %s: %s',
             task_id,
@@ -2712,41 +2800,30 @@ class PostgresBroker:
         bound; a handle that never connected closes without starting the
         core. The broker stays usable: a later async call builds a new set
         for its loop, and a later core operation opens new core pools.
+
+        Raises ``ForkedAfterCoreStart`` and ``CoreStopped`` from the core
+        handle's close, after the resource sets closed and the sync runner
+        stopped.
         """
-        current_loop = asyncio.get_running_loop()
-        with self._loop_sets_lock:
-            loop_sets = self._loop_sets
-            self._loop_sets = ()
-        per_set_errors = await asyncio.gather(
-            *(self._close_loop_set(entry, current_loop) for entry in loop_sets),
-        )
-        errors: list[BaseException] = [
-            error for set_errors in per_set_errors for error in set_errors
-        ]
-        with self._sync_send_lock:
-            sync_send_engine = self._sync_send_engine
-            self._sync_send_engine = _SyncSendEngineNotOpen()
-        match sync_send_engine:
-            case _SyncSendEngineOpen(engine=engine):
-                try:
-                    await asyncio.to_thread(engine.dispose)
-                except _DRIVER_ERRORS as exc:
-                    errors.append(exc)
-            case _SyncSendEngineNotOpen():
-                pass
-            case _ as unreachable:
-                assert_never(unreachable)
+        errors = await self._close_python_resources(self._take_python_resources())
         try:
             _ = await self._core_handle.close_async()
         except CoreError as exc:
-            # The core of this process cannot run the close: it stopped,
-            # failed to start, or this process is a fork of the one that
-            # started it.
-            errors.append(exc)
-        # If sync APIs started the LoopRunner, close_async should also tear it down
-        # when called from any thread except the loop-runner thread itself.
-        # stop() joins the runner thread (up to 2 s), so it runs on a worker
-        # thread and this loop keeps running during the join.
+            # The core of this process cannot run the close: it did not
+            # start, or the loop has too many calls in flight.
+            errors.append(call_refusal_or_raise(exc))
+        finally:
+            errors.extend(await self._stop_loop_runner_off_its_thread())
+        return _close_answer(errors)
+
+    async def _stop_loop_runner_off_its_thread(self) -> list[BaseException]:
+        """Stop the sync runner when sync APIs started it and this call does
+        not run on the runner's own thread. Returns the stop's failure, or
+        no failure.
+
+        ``stop()`` joins the runner thread (up to 2 s), so it runs on a
+        worker thread and this loop keeps running during the join.
+        """
         loop_thread = self._loop_runner._thread  # pyright: ignore[reportPrivateUsage]
         if (
             self._loop_runner._started  # pyright: ignore[reportPrivateUsage]
@@ -2756,14 +2833,44 @@ class PostgresBroker:
             try:
                 await asyncio.to_thread(self._loop_runner.stop)
             except Exception as exc:
-                errors.append(exc)
-        if errors:
-            return _operation_failed(
-                BrokerErrorCode.CLOSE_FAILED,
-                f'Close failed ({len(errors)} error(s)): {errors[0]}',
-                errors[0],
-            )
-        return Ok(None)
+                return [exc]
+        return []
+
+    def _take_python_resources(self) -> _PythonResources:
+        """Take the resource sets and the sync send engine from the broker, so
+        that no later call uses them. No I/O."""
+        with self._loop_sets_lock:
+            loop_sets = self._loop_sets
+            self._loop_sets = ()
+        with self._sync_send_lock:
+            sync_send_engine = self._sync_send_engine
+            self._sync_send_engine = _SyncSendEngineNotOpen()
+        return _PythonResources(loop_sets=loop_sets, sync_send_engine=sync_send_engine)
+
+    async def _close_python_resources(self, taken: _PythonResources) -> list[BaseException]:
+        """Close the taken resource sets, each by the rule for its loop, and
+        dispose the taken sync send engine, on the running loop.
+
+        Returns the failures; raises none except the caller's cancellation.
+        """
+        current_loop = asyncio.get_running_loop()
+        per_set_errors = await asyncio.gather(
+            *(self._close_loop_set(entry, current_loop) for entry in taken.loop_sets),
+        )
+        errors: list[BaseException] = [
+            error for set_errors in per_set_errors for error in set_errors
+        ]
+        match taken.sync_send_engine:
+            case _SyncSendEngineOpen(engine=engine):
+                try:
+                    await asyncio.to_thread(engine.dispose)
+                except _DRIVER_ERRORS as exc:
+                    errors.append(exc)
+            case _SyncSendEngineNotOpen():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        return errors
 
     # ------------- Operational & Monitoring Methods -------------
 
@@ -2786,12 +2893,12 @@ class PostgresBroker:
         - ``Err(INVALID_INPUT)``: ``stale_threshold_minutes`` is not an int
           from 0 to ``MAX_STALE_THRESHOLD_MINUTES``. Nothing ran.
         - ``Err(MONITORING_QUERY_FAILED)``: the read failed, or the core of
-          this process cannot run it (``CoreError``).
+          this process cannot run it (``CoreCallRefusal``).
         """
         try:
             outcome = await self._core_handle.stale_tasks_async(stale_threshold_minutes)
         except CoreError as exc:
-            return _monitoring_call_failed('get_stale_tasks', exc)
+            return _monitoring_call_failed('get_stale_tasks', call_refusal_or_raise(exc))
         return self._task_list_answer('get_stale_tasks', outcome)
 
     def _task_list_answer(
@@ -2826,43 +2933,33 @@ class PostgresBroker:
         - the connect or the statement failed; ``retryable`` is the core's
           classification of the cause, and ``exception`` the core's
           exception of the cause;
-        - the core of this process cannot run the call (``CoreError``: it
-          stopped, did not start, or has too many calls in flight); the
+        - the core of this process cannot run the call (``CoreCallRefusal``:
+          it did not start, has too many calls in flight, or a sync call
+          reached its bound); the
           ``exception`` is that error, and ``retryable`` follows
           ``core_error_retryable``.
         """
         try:
             outcome = await self._core_handle.ping_database_async()
         except CoreError as exc:
-            return Err(
-                BrokerOperationFailed(
-                    code=BrokerErrorCode.DB_PING_FAILED,
-                    message=f'ping_database failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
-                ),
-            )
-        match outcome:
-            case DatabasePingRecord(latency_ms=latency_ms):
-                return Ok(DatabasePing(latency_ms=latency_ms))
-            case BrokerFailure(
-                code='DB_PING_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=exception,
-            ):
-                return Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.DB_PING_FAILED,
-                        message=f'ping_database failed: {message}',
-                        retryable=retryable,
-                        exception=exception,
-                    ),
-                )
-            case BrokerFailure(code=code):
-                raise AssertionError(f'the core database ping answered the code {code}')
-            case _ as unreachable:
-                assert_never(unreachable)
+            return _database_ping_call_failed(call_refusal_or_raise(exc))
+        return _database_ping_answer(outcome)
+
+    def _ping_database_blocking(self) -> BrokerResult[DatabasePing]:
+        """The blocking form of ``ping_database_async``, for
+        ``Horsies.ping_database``: ``CoreHandle.ping_database`` on the calling
+        thread, with the GIL released. The same outcomes, plus
+        ``DB_PING_FAILED`` with the ``CoreCallTimedOut`` (retryable) for a
+        call that does not end within the core's bound of a blocking call.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.ping_database()
+        except CoreError as exc:
+            return _database_ping_call_failed(call_refusal_or_raise(exc))
+        return _database_ping_answer(outcome)
 
     async def ping_workers_async(
         self,
@@ -2899,7 +2996,7 @@ class PostgresBroker:
           ``assume_initialized=True`` and has no listener. Nothing ran.
         - ``Err(WORKER_PING_FAILED)``: the reply subscribe, the NOTIFY or the
           wait failed, or the core of this process cannot run the ping
-          (``CoreError``). The NOTIFY may have been sent.
+          (``CoreCallRefusal``). The NOTIFY may have been sent.
         """
         try:
             outcome = await self._core_handle.ping_workers_async(
@@ -2908,12 +3005,13 @@ class PostgresBroker:
                 min_responses=min_responses,
             )
         except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.WORKER_PING_FAILED,
-                    message=f'ping_workers failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
+                    message=f'ping_workers failed: {refusal}',
+                    retryable=core_error_retryable(refusal),
+                    exception=refusal,
                 ),
             )
         match outcome:
@@ -2963,12 +3061,12 @@ class PostgresBroker:
         ``Err(MONITORING_QUERY_FAILED)``: the read failed, a stored snapshot
         has a value of another shape than the worker writes (not
         retryable), or the core of this process cannot run the read
-        (``CoreError``). Nothing changed.
+        (``CoreCallRefusal``). Nothing changed.
         """
         try:
             outcome = await self._core_handle.worker_states_async()
         except CoreError as exc:
-            return _monitoring_call_failed('list_worker_states', exc)
+            return _monitoring_call_failed('list_worker_states', call_refusal_or_raise(exc))
         match outcome:
             case WorkerStatesRecord(states=states):
                 return Ok([worker_state_snapshot(state) for state in states])
@@ -2990,7 +3088,7 @@ class PostgresBroker:
         try:
             outcome = await self._core_handle.worker_state_async(worker_id)
         except CoreError as exc:
-            return _monitoring_call_failed('get_worker_state', exc)
+            return _monitoring_call_failed('get_worker_state', call_refusal_or_raise(exc))
         match outcome:
             case WorkerStateRecord() as state:
                 return Ok(worker_state_snapshot(state))
@@ -3024,7 +3122,9 @@ class PostgresBroker:
                 worker_id, limit=limit,
             )
         except CoreError as exc:
-            return _monitoring_call_failed('get_worker_state_history', exc)
+            return _monitoring_call_failed(
+                'get_worker_state_history', call_refusal_or_raise(exc),
+            )
         match outcome:
             case WorkerStatesRecord(states=states):
                 return Ok([worker_state_snapshot(state) for state in states])
@@ -3045,12 +3145,12 @@ class PostgresBroker:
         ``Err(MONITORING_QUERY_FAILED)``: a database or network error, a live
         snapshot whose ``class_capacity`` is unreadable, or a read that
         reached its bound (``retryable`` is ``False`` for the last two), or
-        the core of this process cannot run the read (``CoreError``).
+        the core of this process cannot run the read (``CoreCallRefusal``).
         """
         try:
             outcome = await self._core_handle.class_coverage_async()
         except CoreError as exc:
-            return _monitoring_call_failed('get_class_coverage', exc)
+            return _monitoring_call_failed('get_class_coverage', call_refusal_or_raise(exc))
         match outcome:
             case ClassCoverageRecord() as coverage:
                 return Ok(class_coverage_of(coverage))
@@ -3072,7 +3172,7 @@ class PostgresBroker:
         try:
             outcome = await self._core_handle.class_report_async()
         except CoreError as exc:
-            return _monitoring_call_failed('get_class_report', exc)
+            return _monitoring_call_failed('get_class_report', call_refusal_or_raise(exc))
         match outcome:
             case ClassReportRecord() as report:
                 return Ok(class_report_of(report))
@@ -3095,12 +3195,12 @@ class PostgresBroker:
         is logged.
 
         - ``Err(MONITORING_QUERY_FAILED)``: the read failed, or the core of
-          this process cannot run it (``CoreError``).
+          this process cannot run it (``CoreCallRefusal``).
         """
         try:
             outcome = await self._core_handle.expired_tasks_async()
         except CoreError as exc:
-            return _monitoring_call_failed('get_expired_tasks', exc)
+            return _monitoring_call_failed('get_expired_tasks', call_refusal_or_raise(exc))
         return self._task_list_answer('get_expired_tasks', outcome)
 
     async def mark_stale_tasks_as_failed(
@@ -3126,7 +3226,7 @@ class PostgresBroker:
         - the scan, the connect or the client family check failed;
           ``retryable`` is the core's classification of the cause;
         - a threshold below 0 or above 2,147,483,647 ms; not retryable;
-        - the core of this process cannot run the pass (``CoreError``);
+        - the core of this process cannot run the pass (``CoreCallRefusal``);
           ``retryable`` follows ``core_error_retryable``.
 
         A cancel of the caller does not stop the pass: the core runs it to
@@ -3149,12 +3249,13 @@ class PostgresBroker:
                 stale_threshold_ms, finalizing_stale_threshold_ms,
             )
         except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.CLEANUP_FAILED,
-                    message=f'mark_stale_tasks_as_failed failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
+                    message=f'mark_stale_tasks_as_failed failed: {refusal}',
+                    retryable=core_error_retryable(refusal),
+                    exception=refusal,
                 ),
             )
         match outcome:
@@ -3197,7 +3298,7 @@ class PostgresBroker:
         committed:
         - a database failure, or a batch outside the function's contract;
           ``retryable`` is the core's classification of the cause;
-        - the core of this process cannot run the pass (``CoreError``);
+        - the core of this process cannot run the pass (``CoreCallRefusal``);
           ``retryable`` follows ``core_error_retryable``.
 
         A cancel of the caller does not stop the pass: the core runs it to
@@ -3206,12 +3307,13 @@ class PostgresBroker:
         try:
             outcome = await self._core_handle.expire_pending_tasks_async()
         except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.CLEANUP_FAILED,
-                    message=f'expire_pending_tasks failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
+                    message=f'expire_pending_tasks failed: {refusal}',
+                    retryable=core_error_retryable(refusal),
+                    exception=refusal,
                 ),
             )
         match outcome:
@@ -3260,8 +3362,8 @@ class PostgresBroker:
         - a threshold below 0 or above 2,147,483,647 ms: nothing ran; not
           retryable.
 
-        - the core of this process cannot run the pass (``CoreError``: it
-          stopped, did not start, or has too many calls in flight); the
+        - the core of this process cannot run the pass (``CoreCallRefusal``:
+          it did not start, or has too many calls in flight); the
           ``exception`` is that error, and ``retryable`` follows
           ``core_error_retryable``.
 
@@ -3288,12 +3390,13 @@ class PostgresBroker:
                 stale_threshold_ms,
             )
         except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.CLEANUP_FAILED,
-                    message=f'requeue_stale_claimed failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
+                    message=f'requeue_stale_claimed failed: {refusal}',
+                    retryable=core_error_retryable(refusal),
+                    exception=refusal,
                 ),
             )
         match outcome:
@@ -3345,7 +3448,7 @@ class PostgresBroker:
           ``'55P03'``;
         - a database failure, or a page outside the function's contract;
           ``retryable`` is the core's classification of the cause;
-        - the core of this process cannot run the page (``CoreError``);
+        - the core of this process cannot run the page (``CoreCallRefusal``);
           ``retryable`` follows ``core_error_retryable``.
 
         A cancel of the caller does not stop the page: the core runs it to
@@ -3355,12 +3458,13 @@ class PostgresBroker:
         try:
             outcome = await self._core_handle.audit_orphaned_workflow_tasks_async()
         except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.CLEANUP_FAILED,
-                    message=f'audit_orphaned_workflow_tasks failed: {exc}',
-                    retryable=core_error_retryable(exc),
-                    exception=exc,
+                    message=f'audit_orphaned_workflow_tasks failed: {refusal}',
+                    retryable=core_error_retryable(refusal),
+                    exception=refusal,
                 ),
             )
         match outcome:
@@ -3540,6 +3644,8 @@ class PostgresBroker:
         and writes nothing. A call that does not end within the core's bound
         of a blocking call is ``ENQUEUE_FAILED`` with the
         ``CoreCallTimedOut`` (retryable): the row may or may not exist.
+        Raises ``ForkedAfterCoreStart`` and ``CoreStopped``, as
+        ``enqueue_async`` does.
         """
         if in_running_event_loop():
             return _async_context_err(
@@ -3568,7 +3674,7 @@ class PostgresBroker:
         try:
             outcome = self._core_handle.enqueue(request)
         except CoreError as exc:
-            return _enqueue_core_error(task_name, exc)
+            return _enqueue_core_error(task_name, call_refusal_or_raise(exc))
         return _enqueue_result(outcome)
 
     async def _history_task_info(
@@ -3736,7 +3842,7 @@ class PostgresBroker:
                 include_attempts=include_attempts,
             )
         except CoreError as exc:
-            return _task_info_core_error(task_id, exc)
+            return _task_info_core_error(task_id, call_refusal_or_raise(exc))
         return _task_info_result(task_id, outcome)
 
     def get_task_info(
@@ -3768,24 +3874,47 @@ class PostgresBroker:
                 include_attempts=include_attempts,
             )
         except CoreError as exc:
-            return _task_info_core_error(task_id, exc)
+            return _task_info_core_error(task_id, call_refusal_or_raise(exc))
         return _task_info_result(task_id, outcome)
 
     def close(self) -> BrokerResult[None]:
-        """Synchronous cleanup (runs close_async in background loop).
+        """The blocking form of ``close_async``: the core handle's close
+        (``CoreHandle.close``) on the calling thread, with the GIL released.
+        Then it stops the sync runner, which does not start again.
+
+        Resource sets and a sync send engine that earlier calls opened close
+        by the rules of ``close_async``, on an event loop that this call runs
+        for them; with none, no event loop runs. The core handle's writes in
+        flight end within the core's close bound; a handle that never
+        connected closes without starting the core. A raised signal handler
+        (Ctrl+C) leaves the close; the core's close runs on to its end.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and closes nothing: no resource set closes and the sync runner keeps
         its state. Use ``await close_async()`` there.
+
+        Raises ``ForkedAfterCoreStart`` and ``CoreStopped`` from the core
+        handle's close, after the resource sets closed and the sync runner
+        stopped.
         """
         if in_running_event_loop():
             return _async_context_err(
                 'PostgresBroker.close()', 'broker.close_async()',
             )
         try:
-            return self.run_sync(self.close_async)
-        except LoopRunnerError as exc:
-            return _loop_runner_err('PostgresBroker.close()', exc)
+            taken = self._take_python_resources()
+            match taken:
+                case _PythonResources(loop_sets=(), sync_send_engine=_SyncSendEngineNotOpen()):
+                    errors: list[BaseException] = []
+                case _PythonResources():
+                    errors = asyncio.run(self._close_python_resources(taken))
+            try:
+                _ = self._core_handle.close()
+            except CoreError as exc:
+                # As in close_async: the core of this process cannot run the
+                # close, or the close did not end within the core's bound.
+                errors.append(call_refusal_or_raise(exc))
+            return _close_answer(errors)
         finally:
             self._loop_runner.stop()
 

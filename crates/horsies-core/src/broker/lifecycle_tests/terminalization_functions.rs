@@ -339,6 +339,44 @@ mod kind_vocabulary {
 
         cleanup_tasks(&pool, &[task_id]).await;
     }
+
+    /// Python `tests/integration/test_history_maintenance_sql.py::test_the_miss_classes_of_the_database_are_the_equivalence_classes`:
+    /// two kinds share a class of `horsies_terminalization_family` exactly
+    /// when they share a class of `equivalence_class_of`. A terminal write
+    /// that missed answers `AlreadyApplied` by the database class; the core
+    /// judges a replay by its own.
+    #[tokio::test]
+    #[serial]
+    async fn the_miss_classes_of_the_database_are_the_equivalence_classes() {
+        let pool = pool().await;
+        let mut families: Vec<(TerminalizationKind, String)> = Vec::new();
+        for kind in TerminalizationKind::ALL {
+            let family: Option<String> =
+                sqlx::query_scalar("SELECT horsies_terminalization_family($1)")
+                    .bind(kind.as_str())
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read the database class");
+            let Some(family) = family else {
+                panic!("{} has no database class", kind.as_str());
+            };
+            families.push((kind, family));
+        }
+        for (kind, family) in &families {
+            let mut same: Vec<&str> = families
+                .iter()
+                .filter(|(_, other)| other == family)
+                .map(|(other, _)| other.as_str())
+                .collect();
+            same.sort_unstable();
+            let mut expected: Vec<&str> = crate::core::lifecycle::equivalence_class_of(*kind)
+                .iter()
+                .map(|member| member.as_str())
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(same, expected, "{}", kind.as_str());
+        }
+    }
 }
 
 mod fail_locked {
@@ -840,6 +878,39 @@ mod expire_owned_claim {
             panic!("expected a deadline refusal, got {outcomes:?}");
         };
         assert_eq!(deadline.good_until, None);
+        assert_eq!(
+            live_row(&pool, task_id).await.expect("live row")["status"],
+            "CLAIMED"
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestExpireOwnedClaim::test_another_workers_claim_is_lost`: the
+    /// deadline has passed, but another worker holds the claim, so the
+    /// expiry is a lost claim that names that worker, and the row stays
+    /// CLAIMED.
+    #[tokio::test]
+    #[serial]
+    async fn another_workers_claim_is_lost() {
+        let pool = pool().await;
+        let task_id = seed_task(
+            &pool,
+            &TaskSeed {
+                holder: Holder::other_worker(),
+                ..TaskSeed::claimed()
+            },
+        )
+        .await;
+        set_deadline(&pool, task_id, Deadline::PassedSecondsAgo(60.0)).await;
+
+        let outcomes = terminalize(&pool, &expire_claim(task_id))
+            .await
+            .expect("expire claim");
+
+        let [TerminalizationOutcome::LostClaim { observed, .. }] = outcomes.as_slice() else {
+            panic!("expected a lost claim, got {outcomes:?}");
+        };
+        assert_eq!(observed.worker_id.as_deref(), Some(OTHER_WORKER));
         assert_eq!(
             live_row(&pool, task_id).await.expect("live row")["status"],
             "CLAIMED"

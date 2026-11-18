@@ -12,12 +12,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    advance_parent_of, code, complete_workflow, node, ok, required, seed_node, seed_workflow,
-    shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed, ParentLink,
-    WorkflowSeed,
+    advance_parent_of, broker, code, complete_workflow, node, ok, required, seed_node,
+    seed_workflow, shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed,
+    ParentLink, WorkflowSeed,
 };
 use crate::core::{SubWorkflowSummary, TaskError, TaskResult, WorkflowStatus};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
+use crate::workflow_engine::steps::ParentAdvance;
 
 async fn complete(pool: &PgPool, workflow_id: Uuid) {
     complete_workflow(pool, workflow_id, &TestChildSpecs::empty()).await;
@@ -767,4 +769,83 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
         stored["ok"]["task_name_by_id"],
         serde_json::json!({"node_1": "port_task", "node_2": "port_task"})
     );
+}
+
+/// `test_workflow_finalization_contract.py::test_finalization_queues_the_parent_of_a_child_only`:
+/// the completion check reads the parent link under the workflow row lock and
+/// owes the parent advance of a child workflow that it ends, never of a root.
+#[tokio::test]
+#[serial]
+async fn the_completion_of_a_child_owes_its_parent_advance_and_a_root_owes_none() {
+    let pool = shared_pool().await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
+    for is_child in [false, true] {
+        let mut seed = WorkflowSeed::running();
+        let parent_id = if is_child {
+            let parent_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
+            seed.parent = Some(ParentLink::of_root(parent_id, 0));
+            Some(parent_id)
+        } else {
+            None
+        };
+        let workflow_id = seed_workflow(&pool, &seed).await;
+        seed_node(
+            &pool,
+            &NodeSeed::task(workflow_id, 0, "COMPLETED").result(done.clone()),
+        )
+        .await;
+
+        let completion = complete_in_tree(&broker(&pool), workflow_id)
+            .await
+            .expect("the completion check");
+
+        let advance = if is_child {
+            ParentAdvance::Owed {
+                child_workflow_id: workflow_id,
+            }
+        } else {
+            ParentAdvance::NotOwed
+        };
+        assert_eq!(
+            completion,
+            TreeCompletion::Written { advance },
+            "is_child = {is_child}"
+        );
+        assert_eq!(workflow(&pool, workflow_id).await.status, "COMPLETED");
+        if let Some(parent_id) = parent_id {
+            super::support::end_workflows(&pool, &[parent_id]).await;
+        }
+    }
+}
+
+/// `TestOnChildWorkflowComplete::test_not_a_child_workflow_returns`: the
+/// parent advance of a workflow that has no parent writes nothing:
+/// `horsies_workflow_child_finish` answers `NOT_A_CHILD`, and the driver of
+/// the advances ends without an error.
+#[tokio::test]
+#[serial]
+async fn a_parent_advance_of_a_workflow_with_no_parent_is_not_a_child() {
+    let pool = shared_pool().await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
+    let root = seed_workflow(&pool, &WorkflowSeed::running().status("COMPLETED")).await;
+    seed_node(
+        &pool,
+        &NodeSeed::task(root, 0, "COMPLETED").result(done.clone()),
+    )
+    .await;
+
+    let disposition: String = sqlx::query_scalar(
+        "SELECT disposition FROM horsies_workflow_child_finish($1) WHERE row_kind = 'OUTCOME'",
+    )
+    .bind(root)
+    .fetch_one(&pool)
+    .await
+    .expect("the child finish of a root");
+    advance_parent_of(&pool, root, &TestChildSpecs::empty()).await;
+
+    assert_eq!(disposition, "NOT_A_CHILD");
+    assert_eq!(workflow(&pool, root).await.status, "COMPLETED");
+    let row = node(&pool, root, 0).await;
+    assert_eq!(row.status, "COMPLETED");
+    assert_eq!(row.result, Some(done));
 }

@@ -51,7 +51,7 @@ use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, 
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, PlainSuccess, RowNotWritten};
 use crate::worker::retry::{admit_retry, RetryAdmission};
-use crate::workflow_engine::child_spec::ChildSpecs;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 /// The text of a worker failure with no detail (Python
 /// `_WORKER_FAILURE_FALLBACK`).
@@ -446,7 +446,7 @@ fn release_failed(
 pub struct OutcomeWriter {
     broker: Arc<PostgresBroker>,
     /// Where phase 2 gets the spec of a sub-workflow child that it starts.
-    child_specs: ChildSpecs,
+    child_specs: Arc<dyn ChildSpecSource>,
     worker_id: String,
     payload_policy: PayloadPolicy,
     successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
@@ -455,7 +455,7 @@ pub struct OutcomeWriter {
 impl OutcomeWriter {
     pub fn new(
         broker: Arc<PostgresBroker>,
-        child_specs: ChildSpecs,
+        child_specs: Arc<dyn ChildSpecSource>,
         worker_id: String,
         payload_policy: PayloadPolicy,
         successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
@@ -831,7 +831,7 @@ impl OutcomeWriter {
     ) {
         Box::pin(run_phase2(
             &self.broker,
-            self.child_specs.build(),
+            self.child_specs.as_ref(),
             Phase2Work {
                 task_id: task.task_id,
                 queue_name: task.queue_name.clone(),

@@ -18,7 +18,7 @@ use crate::failure_cause::FailureCause;
 ///    `HandleResult::Err(...)`.
 ///
 /// Categorized handle operation failure codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "workflow_handle", base = "str_enum")]
 pub enum HandleErrorCode {
     /// Workflow ID does not exist in the database.
@@ -55,22 +55,168 @@ impl std::fmt::Display for HandleErrorCode {
     }
 }
 
-/// Error payload for handle operations.
+/// The failure of a workflow handle operation: one variant per Python class
+/// of `python/horsies/core/models/workflow/handle_types.py` that the core or
+/// a client of the core produces, each with the facts of its state only.
+/// Carried inside `Err(...)` of a [`HandleResult`]. Each variant's doc is
+/// its Python class doc (`ErrorCatalog`).
 ///
-/// Carried inside `Err(...)` of a `HandleResult<T>`.
-#[derive(Debug, Clone)]
-pub struct HandleOperationError {
-    /// Which failure category.
-    pub code: HandleErrorCode,
-    /// Human-readable description.
-    pub message: String,
-    /// Whether the caller can safely retry.
-    pub retryable: bool,
-    /// The workflow this handle refers to.
-    pub workflow_id: Uuid,
-    /// What the operation met: the server's error, no answer, a broken read
-    /// contract, or a failed precondition (an absent workflow included).
-    pub cause: FailureCause,
+/// The classes that only the Python client produces are not variants:
+/// `HandleLoopRunnerFailed` and `HandleEventLoopLimit`. A variant without
+/// `cause` has the precondition cause of its state
+/// ([`Self::failure_cause`]); a variant without `retryable` never clears.
+#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+#[error_catalog(
+    module = "workflow_handle_errors",
+    code = "HandleErrorCode",
+    union = "HandleCoreError",
+    union_doc = "Every failure of a workflow handle operation that the core gives: one class per state."
+)]
+pub enum HandleOperationError {
+    /// No workflow has this id. Nothing changed.
+    ///
+    /// The same call returns this error while no workflow has this id.
+    #[error_class(
+        class = "HandleWorkflowNotFound",
+        code = "WorkflowNotFound",
+        never_retryable
+    )]
+    WorkflowNotFound {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
+    },
+    /// The operation failed with a database or driver error.
+    ///
+    /// ``retryable`` is the driver classification of the cause: ``True`` when
+    /// the condition may clear, for example a lost connection. A read changed
+    /// nothing. A write (``cancel``, ``pause``, or ``resume`` before its commit)
+    /// rolled back, or its commit outcome is unknown.
+    #[error_class(
+        class = "HandleDbOperationFailed",
+        code = "DbOperationFailed",
+        exception = "BaseException"
+    )]
+    DbOperationFailed {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "Bool")]
+        retryable: bool,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
+        #[error_slot(skip)]
+        cause: FailureCause,
+    },
+    /// A stored value of the workflow does not parse. Nothing changed.
+    ///
+    /// The value is a workflow status that is not a ``WorkflowStatus``
+    /// (``status``), or a subworkflow summary that is not valid (``tasks``). ``exception`` is the parse error. The same call returns this
+    /// error until the stored value changes.
+    #[error_class(
+        class = "HandleStoredDataInvalid",
+        code = "StoredDataInvalid",
+        never_retryable,
+        exception = "BaseException"
+    )]
+    StoredDataInvalid {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
+        #[error_slot(skip)]
+        cause: FailureCause,
+    },
+    /// ``resume`` committed, and the recovery pass for the workflow tree failed.
+    ///
+    /// The workflow is ``RUNNING`` and the resume enqueued its ready nodes. The
+    /// recovery pass runs after the commit, in a second transaction. It
+    /// completes the propagation for a task that finished while the resume
+    /// transaction ran, when the completion callback saw the workflow as
+    /// ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
+    /// ``exception`` is the database or driver error. The worker reaper runs
+    /// the same pass over all workflows. A repeated ``resume`` returns
+    /// ``Ok(False)``.
+    #[error_class(
+        class = "HandleResumeRecoveryFailed",
+        code = "ResumeRecoveryFailed",
+        never_retryable,
+        exception = "BaseException"
+    )]
+    ResumeRecoveryFailed {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
+        #[error_slot(skip)]
+        cause: FailureCause,
+    },
+    /// A sync method was called on a thread that runs an event loop. Nothing ran.
+    ///
+    /// Its wait would stall that loop. Call the ``*_async`` form; a sync call on
+    /// that thread returns this error again.
+    #[error_class(class = "HandleAsyncContext", code = "AsyncContext", never_retryable)]
+    AsyncContext {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
+    },
+}
+
+impl HandleOperationError {
+    /// The catalog code of the variant: the code of its Python class
+    /// (`ErrorCatalog`). Pure.
+    pub fn code(&self) -> HandleErrorCode {
+        crate::error_catalog::ErrorEnum::error_code(self)
+    }
+
+    /// What failed and why. Pure.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::WorkflowNotFound { message, .. }
+            | Self::DbOperationFailed { message, .. }
+            | Self::StoredDataInvalid { message, .. }
+            | Self::ResumeRecoveryFailed { message, .. }
+            | Self::AsyncContext { message, .. } => message,
+        }
+    }
+
+    /// Whether a repeat of the call can succeed: the classification of the
+    /// cause of `DbOperationFailed`, else `false`. Pure.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::DbOperationFailed { retryable, .. } => *retryable,
+            Self::WorkflowNotFound { .. }
+            | Self::StoredDataInvalid { .. }
+            | Self::ResumeRecoveryFailed { .. }
+            | Self::AsyncContext { .. } => false,
+        }
+    }
+
+    /// The workflow of the handle. Pure.
+    pub fn workflow_id(&self) -> Uuid {
+        match self {
+            Self::WorkflowNotFound { workflow_id, .. }
+            | Self::DbOperationFailed { workflow_id, .. }
+            | Self::StoredDataInvalid { workflow_id, .. }
+            | Self::ResumeRecoveryFailed { workflow_id, .. }
+            | Self::AsyncContext { workflow_id, .. } => *workflow_id,
+        }
+    }
+
+    /// The cause of the failure: the variant's `cause`, else a failed
+    /// precondition (an absent workflow, a refused thread). Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::DbOperationFailed { cause, .. }
+            | Self::StoredDataInvalid { cause, .. }
+            | Self::ResumeRecoveryFailed { cause, .. } => cause.clone(),
+            Self::WorkflowNotFound { .. } | Self::AsyncContext { .. } => {
+                FailureCause::PreconditionFailed
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for HandleOperationError {
@@ -78,7 +224,10 @@ impl std::fmt::Display for HandleOperationError {
         write!(
             f,
             "[{}] {} (workflow_id={}, retryable={})",
-            self.code, self.message, self.workflow_id, self.retryable,
+            self.code(),
+            self.message(),
+            self.workflow_id(),
+            self.retryable(),
         )
     }
 }
@@ -119,8 +268,7 @@ mod tests {
 
     #[test]
     fn handle_operation_error_display() {
-        let err = HandleOperationError {
-            code: HandleErrorCode::DbOperationFailed,
+        let err = HandleOperationError::DbOperationFailed {
             message: "connection refused".to_owned(),
             retryable: true,
             workflow_id: uuid::Uuid::nil(),
@@ -130,5 +278,66 @@ mod tests {
         assert!(s.contains("DB_OPERATION_FAILED"));
         assert!(s.contains(&uuid::Uuid::nil().to_string()));
         assert!(s.contains("retryable=true"));
+    }
+
+    /// Each variant has the code of its Python class; only
+    /// `DbOperationFailed` can be retryable, and a variant without a cause
+    /// has a failed precondition.
+    #[test]
+    fn each_variant_has_the_code_of_its_python_class() {
+        let workflow_id = uuid::Uuid::from_u128(9);
+        let cases = [
+            (
+                HandleOperationError::WorkflowNotFound {
+                    message: "m".to_owned(),
+                    workflow_id,
+                },
+                HandleErrorCode::WorkflowNotFound,
+                FailureCause::PreconditionFailed,
+            ),
+            (
+                HandleOperationError::DbOperationFailed {
+                    message: "m".to_owned(),
+                    retryable: false,
+                    workflow_id,
+                    cause: FailureCause::Connection,
+                },
+                HandleErrorCode::DbOperationFailed,
+                FailureCause::Connection,
+            ),
+            (
+                HandleOperationError::StoredDataInvalid {
+                    message: "m".to_owned(),
+                    workflow_id,
+                    cause: FailureCause::ContractViolation,
+                },
+                HandleErrorCode::StoredDataInvalid,
+                FailureCause::ContractViolation,
+            ),
+            (
+                HandleOperationError::ResumeRecoveryFailed {
+                    message: "m".to_owned(),
+                    workflow_id,
+                    cause: FailureCause::Connection,
+                },
+                HandleErrorCode::ResumeRecoveryFailed,
+                FailureCause::Connection,
+            ),
+            (
+                HandleOperationError::AsyncContext {
+                    message: "m".to_owned(),
+                    workflow_id,
+                },
+                HandleErrorCode::AsyncContext,
+                FailureCause::PreconditionFailed,
+            ),
+        ];
+        for (error, code, cause) in cases {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), "m");
+            assert_eq!(error.workflow_id(), workflow_id);
+            assert_eq!(error.failure_cause(), cause);
+            assert!(!error.retryable());
+        }
     }
 }

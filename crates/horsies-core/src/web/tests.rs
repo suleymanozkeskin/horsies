@@ -183,7 +183,7 @@ fn test_state(
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
-        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        children: Arc::new(TestChildSpecs::empty()),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -330,6 +330,32 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(json(response).await["code"], SCHEMA_UNKNOWN);
+}
+
+/// Python `tests/unit/test_web_auth.py::TestActGuard::test_rejects_a_wrong_intent_value`:
+/// an intent header with another value is refused as a missing intent, before
+/// the schema gate.
+#[tokio::test]
+async fn an_action_with_another_intent_value_is_refused() {
+    let unknown = status(SchemaState::Unknown, None);
+    let wrong_intent = Request::builder()
+        .method(Method::POST)
+        .uri("/api/tasks/not-a-uuid/cancel")
+        .header(INTENT_HEADER, "read")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .expect("action request");
+
+    let response = test_router(Arc::new(AllowAll), unknown, true)
+        .oneshot(wrong_intent)
+        .await
+        .expect("the router answers");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json(response).await,
+        serde_json::json!({"detail": "Missing X-Horsies-Intent: action header."})
+    );
 }
 
 #[tokio::test]
@@ -1204,7 +1230,7 @@ async fn migrated_state() -> WebState {
         actions_enabled: true,
         ui_config: MonitoringUiConfig::default(),
         assets: MemoryAssets::standard(),
-        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        children: Arc::new(TestChildSpecs::empty()),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -2089,7 +2115,7 @@ async fn a_resume_whose_child_build_raised_is_python_s_internal_server_error() {
     let mut state = migrated_state().await;
     let build = Arc::new(RaisingChildBuild::default());
     let source: Arc<dyn crate::ChildSpecSource> = build.clone();
-    state.children = crate::monitoring::ResumeChildren::Client(source);
+    state.children = source;
     let pool = state.broker.pool().clone();
     let prefix = format!("web_resume_raised_{}__", Uuid::new_v4().simple());
     clean_w4(&pool, &prefix).await;
@@ -2174,7 +2200,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     );
     let handler = MonitoringHandler::new(
         Arc::clone(&broker),
-        crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        Arc::new(TestChildSpecs::empty()),
         MonitoringHandlerConfig {
             actions_enabled: true,
             ui: MonitoringUiConfig::default(),

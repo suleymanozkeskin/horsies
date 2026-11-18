@@ -45,7 +45,7 @@ use crate::log_targets::STALE_RUNNING_PASS;
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::liveness::OWNER_GONE_SPAN;
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
-use crate::workflow_engine::child_spec::ChildSpecs;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 pub(crate) mod owner_gone;
 
@@ -260,7 +260,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -358,7 +358,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -419,7 +419,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -611,7 +611,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::test_support::child_specs::no_child_specs(),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
             &recovery,
             &retention,
             &health,
@@ -863,7 +863,7 @@ pub fn new_reaper_health() -> ReaperHealth {
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
-    child_specs: ChildSpecs,
+    child_specs: Arc<dyn ChildSpecSource>,
     config: RecoveryConfig,
     retention: RetentionConfig,
     health: ReaperHealth,
@@ -901,7 +901,7 @@ pub fn spawn_reaper(
             let pass = async {
                 run_reaper_pass(
                     &broker,
-                    &child_specs,
+                    child_specs.as_ref(),
                     &config,
                     &retention,
                     &health,
@@ -1094,7 +1094,7 @@ async fn end_gate(gate: Transaction<'_>) {
 /// liveness rows of ended workers) and partition maintenance.
 async fn run_reaper_pass(
     broker: &PostgresBroker,
-    child_specs: &ChildSpecs,
+    child_specs: &dyn ChildSpecSource,
     config: &RecoveryConfig,
     retention: &RetentionConfig,
     health: &ReaperHealth,
@@ -1322,7 +1322,7 @@ async fn run_reaper_pass(
     let workflow_recovery =
         crate::workflow_engine::recovery::recover_stuck_workflows_observed_with(
             broker,
-            child_specs.build(),
+            child_specs,
             config.workflow_recovery_failure_limit,
         )
         .await;
@@ -1343,7 +1343,7 @@ async fn run_reaper_pass(
     // Discovery and each record run on the main core pool with the reserve.
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with(
         broker,
-        child_specs.build(),
+        child_specs,
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
         config.phase2_quarantine_after_attempts,
@@ -2340,7 +2340,7 @@ mod tests {
                 advisory_key_reaper(),
                 run_reaper_pass(
                     &broker,
-                    &crate::test_support::child_specs::no_child_specs(),
+                    crate::test_support::child_specs::no_child_specs().as_ref(),
                     &recovery,
                     &RetentionConfig::default(),
                     &health,

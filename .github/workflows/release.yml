@@ -9,9 +9,9 @@ on:
         default: true
         type: boolean
       # Off unless the dispatch turns it on. With it off, the crate jobs
-      # still package and verify the three crates, and publish nothing.
+      # still package and verify the four crates, and publish nothing.
       publish_crates:
-        description: Publish horsies-macros, horsies-core and horsies to crates.io
+        description: Publish horsies-core-derive, horsies-core, horsies-macros and horsies to crates.io
         required: true
         default: false
         type: boolean
@@ -24,8 +24,9 @@ permissions: {}
 
 jobs:
   # The wheel and every published crate carry one version: pyproject.toml,
-  # horsies-macros, horsies-core and horsies, and each version requirement of
-  # one of these crates on another. Every build and publish job reads it here.
+  # horsies-core-derive, horsies-core, horsies-macros and horsies, and each
+  # version requirement of one of these crates on another. Every build and
+  # publish job reads it here.
   metadata:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -50,9 +51,10 @@ jobs:
           # (file, key path) of every value that must equal the one version.
           SOURCES = (
               ("pyproject.toml", ("project", "version")),
-              ("crates/horsies-macros/Cargo.toml", ("package", "version")),
+              ("crates/horsies-core-derive/Cargo.toml", ("package", "version")),
               ("crates/horsies-core/Cargo.toml", ("package", "version")),
-              ("crates/horsies-core/Cargo.toml", ("dependencies", "horsies-macros", "version")),
+              ("crates/horsies-core/Cargo.toml", ("dependencies", "horsies-core-derive", "version")),
+              ("crates/horsies-macros/Cargo.toml", ("package", "version")),
               ("crates/horsies/Cargo.toml", ("package", "version")),
               ("crates/horsies/Cargo.toml", ("dependencies", "horsies-core", "version")),
               ("crates/horsies/Cargo.toml", ("dependencies", "horsies-macros", "version")),
@@ -74,7 +76,7 @@ jobs:
           version = next(iter(values.values()))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"version={version}\n")
-          print(f"horsies {version}: the wheel, horsies-macros, horsies-core and horsies")
+          print(f"horsies {version}: the wheel, horsies-core-derive, horsies-core, horsies-macros and horsies")
           PY
 
   # The publish gate is the full suite — both PostgreSQL majors, every e2e
@@ -218,15 +220,15 @@ jobs:
           rustup toolchain install
           rustc --version
 
-      # Packages the three crates in dependency order (horsies-macros,
-      # horsies-core, horsies) and builds each package. A build resolves the
-      # crates of this release from the packages made in this step, so a new
-      # version needs nothing on crates.io yet. Cargo leaves the path-only
-      # dev-dependency of horsies-macros on horsies out of the packaged
-      # manifest. A version that is already on crates.io is a warning here and
-      # an error in the publish jobs.
+      # Packages the four crates in dependency order (horsies-core-derive,
+      # horsies-core, horsies-macros, horsies) and builds each package. A
+      # build resolves the crates of this release from the packages made in
+      # this step, so a new version needs nothing on crates.io yet. Cargo
+      # leaves the path-only dev-dependency of horsies-macros on horsies out of
+      # the packaged manifest. A version that is already on crates.io is a
+      # warning here and an error in the publish jobs.
       - name: Package and verify the crates
-        run: cargo publish --dry-run -p horsies-macros -p horsies-core -p horsies
+        run: cargo publish --dry-run -p horsies-core-derive -p horsies-core -p horsies-macros -p horsies
 
       # horsies-core compiles in the baseline SQL files (include_str!) and,
       # with the `web` feature, the web UI build (include_dir!). A package
@@ -267,14 +269,15 @@ jobs:
         with:
           name: horsies-crates-${{ needs.metadata.outputs.version }}
           path: |
-            target/package/horsies-macros-${{ needs.metadata.outputs.version }}.crate
+            target/package/horsies-core-derive-${{ needs.metadata.outputs.version }}.crate
             target/package/horsies-core-${{ needs.metadata.outputs.version }}.crate
+            target/package/horsies-macros-${{ needs.metadata.outputs.version }}.crate
             target/package/horsies-${{ needs.metadata.outputs.version }}.crate
           if-no-files-found: error
 
   # One job per crate, in dependency order, so that "Re-run failed jobs"
   # after a failed publish does not publish a crate again.
-  publish-horsies-macros:
+  publish-horsies-core-derive:
     if: ${{ inputs.publish_crates }}
     needs: [metadata, build-crates]
     runs-on: ubuntu-latest
@@ -308,8 +311,8 @@ jobs:
       - name: Check the package against the verified crate
         run: |
           set -euo pipefail
-          cargo package -p horsies-macros --no-verify
-          name="horsies-macros-${VERSION}.crate"
+          cargo package -p horsies-core-derive --no-verify
+          name="horsies-core-derive-${VERSION}.crate"
           built="$(sha256sum "target/package/$name" | cut -d' ' -f1)"
           verified="$(sha256sum "$RUNNER_TEMP/verified-crates/$name" | cut -d' ' -f1)"
           if [ "$built" != "$verified" ]; then
@@ -324,14 +327,14 @@ jobs:
         id: crates-io-auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      - name: Publish horsies-macros
+      - name: Publish horsies-core-derive
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
-        run: cargo publish -p horsies-macros
+        run: cargo publish -p horsies-core-derive
 
   publish-horsies-core:
     if: ${{ inputs.publish_crates }}
-    needs: [metadata, publish-horsies-macros]
+    needs: [metadata, publish-horsies-core-derive]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
@@ -357,9 +360,9 @@ jobs:
           name: horsies-crates-${{ needs.metadata.outputs.version }}
           path: ${{ runner.temp }}/verified-crates
 
-      # The package now resolves horsies-macros from crates.io. The sha256
-      # matches the verified crate only when the horsies-macros on crates.io
-      # is the verified one.
+      # The package now resolves horsies-core-derive from crates.io. The
+      # sha256 matches the verified crate only when the horsies-core-derive on
+      # crates.io is the verified one.
       - name: Check the package against the verified crate
         run: |
           set -euo pipefail
@@ -382,7 +385,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
         run: cargo publish -p horsies-core
 
-  publish-horsies:
+  publish-horsies-macros:
     if: ${{ inputs.publish_crates }}
     needs: [metadata, publish-horsies-core]
     runs-on: ubuntu-latest
@@ -410,9 +413,60 @@ jobs:
           name: horsies-crates-${{ needs.metadata.outputs.version }}
           path: ${{ runner.temp }}/verified-crates
 
-      # The packaged Cargo.lock records the checksums of horsies-macros and
-      # horsies-core as crates.io serves them. The sha256 matches the verified
-      # crate only when both crates on crates.io are the verified ones.
+      - name: Check the package against the verified crate
+        run: |
+          set -euo pipefail
+          cargo package -p horsies-macros --no-verify
+          name="horsies-macros-${VERSION}.crate"
+          built="$(sha256sum "target/package/$name" | cut -d' ' -f1)"
+          verified="$(sha256sum "$RUNNER_TEMP/verified-crates/$name" | cut -d' ' -f1)"
+          if [ "$built" != "$verified" ]; then
+            echo "::error::$name sha256 $built differs from the verified crate $verified"
+            exit 1
+          fi
+          echo "OK: $name sha256 $built"
+
+      - name: Get a crates.io token
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish horsies-macros
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish -p horsies-macros
+
+  publish-horsies:
+    if: ${{ inputs.publish_crates }}
+    needs: [metadata, publish-horsies-macros]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Download verified crates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-crates-${{ needs.metadata.outputs.version }}
+          path: ${{ runner.temp }}/verified-crates
+
+      # The packaged Cargo.lock records the checksums of horsies-core-derive,
+      # horsies-core and horsies-macros as crates.io serves them. The sha256
+      # matches the verified crate only when the three crates on crates.io are
+      # the verified ones.
       - name: Check the package against the verified crate
         run: |
           set -euo pipefail

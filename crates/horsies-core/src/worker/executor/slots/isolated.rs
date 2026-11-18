@@ -46,7 +46,8 @@ use crate::worker::executor::protocol::{
     ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{
-    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
+    log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
+    FrameWait, LossCause, MailboxBound, SendFailure,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
@@ -317,7 +318,13 @@ async fn serve_generation(
     shared.board.set(index, SlotPhase::Retiring);
     match channel.has_exited() || channel.channel_closed() {
         true => {
-            let _ = channel.dispose_lost().await;
+            // The child ended by itself while it held no task.
+            let pid = channel.pid();
+            let exit = channel.dispose_lost().await;
+            match EndWithoutTask::of(exit) {
+                EndWithoutTask::CoreStopped => log_core_stopped_child(pid),
+                EndWithoutTask::Other => {}
+            }
         }
         false => {
             let _ = channel.retire().await;
@@ -675,3 +682,6 @@ async fn end_after_return(
         }
     }
 }
+
+#[cfg(test)]
+mod answer_tests;

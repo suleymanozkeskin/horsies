@@ -50,6 +50,7 @@ from horsies.core.models.tasks import (
     RetrievalCode,
     OutcomeCode,
 )
+from horsies.core.types.core_failure import call_refusal_or_raise
 from horsies.core.types.result import Ok, Err, Result, is_err
 from horsies.core.types.status import TASK_TERMINAL_STATES
 
@@ -706,6 +707,10 @@ class WorkflowHandle(Generic[OutT]):
     ``ASYNC_CONTEXT`` (``HandleAsyncContext`` for the wrap strategy,
     ``RetrievalCode`` for the fold strategy) and runs nothing. Use the
     ``*_async`` form there.
+
+    Every method that calls the core, in both strategies, raises
+    ``ForkedAfterCoreStart`` and ``CoreStopped``: they are states of the
+    process, never a result (``call_refusal_or_raise``).
     """
 
     workflow_id: str
@@ -831,7 +836,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.STATUS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.STATUS,
+            ))
         match record:
             case WorkflowStatusRead(status=status):
                 return Ok(WorkflowStatus(status))
@@ -931,10 +938,12 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key, timeout_ms=timeout_ms,
             )
         except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
             return cast(
                 'TaskResult[OutT, TaskError]',
                 _broker_task_error(
-                    f'Get failed for workflow {self.workflow_id}: {type(exc).__name__}: {exc}',
+                    f'Get failed for workflow {self.workflow_id}: '
+                    f'{type(refusal).__name__}: {refusal}',
                 ),
             )
         match record:
@@ -1099,10 +1108,12 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key, node_id,
             )
         except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
             return cast(
                 'TaskResult[OkT, TaskError]',
                 _broker_task_error(
-                    f'DB query failed for {failure_subject}: {type(exc).__name__}: {exc}',
+                    f'DB query failed for {failure_subject}: '
+                    f'{type(refusal).__name__}: {refusal}',
                 ),
             )
         match record:
@@ -1188,7 +1199,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.RESULTS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.RESULTS,
+            ))
         match record:
             case WorkflowAbsent():
                 return Err(HandleWorkflowNotFound(
@@ -1268,7 +1281,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.TASKS))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.TASKS,
+            ))
         match record:
             case WorkflowAbsent():
                 return Err(HandleWorkflowNotFound(
@@ -1401,7 +1416,9 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_key,
             )
         except CoreError as exc:
-            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.CANCEL))
+            return Err(core_call_error(
+                call_refusal_or_raise(exc), self.workflow_id, WorkflowOperation.CANCEL,
+            ))
         # The CANCELLED status write fires horsies_workflow_notify_trigger
         # per workflow row, so no workflow_done notify is sent here.
         match record:

@@ -7,7 +7,11 @@
 //! test process holds many spawners, so each test runs in a child process
 //! of the test binary, alone.
 
-use std::io::Read;
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, Read};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -16,7 +20,9 @@ use crate::worker::executor::protocol::{
     PoolMaxSize, PoolMinSize, TaskSendPool,
 };
 use crate::worker::executor::supervisor::exit::{ChildExit, ReapedExit};
-use crate::worker::executor::supervisor::spawner::{wait_for_exit, Spawner};
+use crate::worker::executor::supervisor::spawner::{
+    wait_for_exit, ExitWatch, Intake, KillOutcome, Queue, Shared, Spawner, SpawnerStopReport, Waker,
+};
 
 /// The child test to run, set in the environment of a child process.
 const CHILD_TEST_ENV: &str = "HORSIES_PRELOAD_CHILD_TEST";
@@ -29,15 +35,28 @@ const TEST_WAIT: Duration = Duration::from_secs(20);
 /// mode). Behaviours:
 /// - `fork`: ready, then a double fork per request.
 /// - `refuse`: refuse at the start, exit 1.
-/// - `never_ready`: read the init frame and sleep.
+/// - `never_ready`: read the init frame and sleep. `never_ready:<file>`
+///   also writes its pid to `<file>`.
 /// - `fork_fails`: ready, then `fork_failed` per request.
 /// - `silent`: ready, then never answer a request.
 /// - `exit_once:<dir>`: as `fork`, but the first process of the test
 ///   exits at its first request.
 /// - `orphan:<file>`: as `fork`, and each middle process leaves an exited
 ///   orphan in its own session, whose pid goes to `<file>`.
+/// - `exit_at_once`: as `fork`, but the forked child exits 9 after its
+///   `setsid`, and the middle process reports it only after that exit.
+/// - `late:<file>`: as `fork`, but the pid of the forked child goes to
+///   `<file>`, and the answer comes one second after the fork bound.
+/// - `close_on_request`: ready, then at a request it closes its socket and
+///   sleeps.
+/// - `ready_again`: ready, then at a request it sends `preload_ready` again
+///   and sleeps.
+/// - `thread_pid:<file>`: ready, then at a request it starts a helper
+///   process in its own session with a second thread, writes `<helper pid>
+///   <thread id>` to `<file>`, and reports the thread id as the forked
+///   child. A pidfd of a thread that leads no process cannot open.
 const SCRIPTED_PRELOAD: &str = r#"
-import ctypes, json, os, signal, socket, struct, sys, time
+import ctypes, json, os, signal, socket, struct, sys, threading, time
 
 behaviour, fd, worker_pid, mode = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 ctrl = socket.socket(fileno=fd)
@@ -55,6 +74,14 @@ def read_exact(count):
         data += chunk
     return data
 
+def argument():
+    return behaviour.split(':', 1)[1]
+
+def write_whole(path, text):
+    with open(path + '.part', 'w') as out:
+        out.write(text)
+    os.replace(path + '.part', path)
+
 meta_bytes, body_bytes = struct.unpack('>IQ', read_exact(12))
 init = json.loads(read_exact(meta_bytes))
 read_exact(body_bytes)
@@ -62,12 +89,14 @@ assert init['kind'] == 'init', init
 if behaviour == 'refuse':
     send({'kind': 'preload_refused', 'reason': 'import failed'})
     os._exit(1)
-if behaviour == 'never_ready':
+if behaviour.startswith('never_ready'):
+    if behaviour.startswith('never_ready:'):
+        write_whole(argument(), str(os.getpid()))
     time.sleep(3600)
     os._exit(0)
 exit_now = False
 if behaviour.startswith('exit_once:'):
-    marker = os.path.join(behaviour.split(':', 1)[1], 'exited')
+    marker = os.path.join(argument(), 'exited')
     exit_now = not os.path.exists(marker)
     if exit_now:
         open(marker, 'w').close()
@@ -87,6 +116,34 @@ while True:
     if behaviour == 'silent':
         os.close(child_fd)
         continue
+    if behaviour == 'close_on_request':
+        os.close(child_fd)
+        ctrl.close()
+        time.sleep(3600)
+        os._exit(0)
+    if behaviour == 'ready_again':
+        os.close(child_fd)
+        send({'kind': 'preload_ready', 'pid': os.getpid()})
+        time.sleep(3600)
+        os._exit(0)
+    if behaviour.startswith('thread_pid:'):
+        os.close(child_fd)
+        helper = os.fork()
+        if helper == 0:
+            ctrl.close()
+            os.setsid()
+            def hold():
+                write_whole(argument(), str(os.getpid()) + ' ' + str(threading.get_native_id()))
+                time.sleep(3600)
+            threading.Thread(target=hold, daemon=True).start()
+            time.sleep(3600)
+            os._exit(0)
+        while not os.path.exists(argument()):
+            time.sleep(0.01)
+        with open(argument()) as found:
+            thread_id = int(found.read().split()[1])
+        send({'kind': 'child_forked', 'pid': thread_id})
+        continue
     read_end, write_end = os.pipe()
     middle = os.fork()
     if middle == 0:
@@ -96,7 +153,7 @@ while True:
                 os.setsid()
                 os._exit(0)
             os.waitid(os.P_PID, stray, os.WEXITED | os.WNOWAIT)
-            with open(behaviour.split(':', 1)[1], 'w') as out:
+            with open(argument(), 'w') as out:
                 out.write(str(stray))
         child = os.fork()
         if child == 0:
@@ -104,6 +161,8 @@ while True:
             os.close(read_end)
             os.close(write_end)
             os.setsid()
+            if behaviour == 'exit_at_once':
+                os._exit(9)
             deadline = time.monotonic() + 5
             while os.getppid() != worker_pid:
                 if time.monotonic() > deadline:
@@ -112,6 +171,8 @@ while True:
             ctypes.CDLL(None).prctl(1, signal.SIGKILL, 0, 0, 0)
             os.set_inheritable(child_fd, True)
             os.execv('/bin/sh', ['/bin/sh', '-c', CHILD, str(child_fd), str(worker_pid)])
+        if behaviour == 'exit_at_once':
+            os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
         os.write(write_end, str(child).encode())
         os._exit(0)
     os.close(write_end)
@@ -119,6 +180,9 @@ while True:
     os.close(read_end)
     os.waitpid(middle, 0)
     os.close(child_fd)
+    if behaviour.startswith('late:'):
+        write_whole(argument(), reported.decode())
+        time.sleep(6)
     send({'kind': 'child_forked', 'pid': int(reported)})
 "#;
 
@@ -544,4 +608,561 @@ fn the_wait_bound_never_passes_the_next_preload_deadline() {
 fn the_preload_mode_argument_is_the_python_value() {
     assert_eq!(PreloadMode::Library.argument(), "library");
     assert_eq!(PreloadMode::App.argument(), "app");
+}
+
+// ---------------------------------------------------------------------------
+// The rules of Python `tests/unit/test_preload.py` on the core
+// ---------------------------------------------------------------------------
+
+/// How long the `late:<file>` behaviour waits before it answers a request.
+const LATE_ANSWER: Duration = Duration::from_secs(6);
+
+/// The longest wait of a test for a process to end.
+const END_WAIT: Duration = Duration::from_secs(20);
+
+/// A file under the temporary directory, named after the test process.
+fn scratch_file(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("horsies-{name}-{}", std::process::id()))
+}
+
+/// The pids that a scripted process wrote to `path`, in order.
+fn read_pids(path: &Path) -> Vec<libc::pid_t> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse().unwrap())
+        .collect()
+}
+
+/// The `PR_SET_CHILD_SUBREAPER` flag of this process: 0 or 1.
+fn subreaper_flag() -> libc::c_int {
+    let mut value: libc::c_int = -1;
+    let unused: libc::c_ulong = 0;
+    // SAFETY: PR_GET_CHILD_SUBREAPER writes one int to the pointer, which
+    // points at a live local.
+    let result = unsafe {
+        libc::prctl(
+            libc::PR_GET_CHILD_SUBREAPER,
+            std::ptr::addr_of_mut!(value),
+            unused,
+            unused,
+            unused,
+        )
+    };
+    assert_eq!(result, 0, "{}", io::Error::last_os_error());
+    value
+}
+
+/// Whether `pid` is gone or a zombie that no one reaped yet.
+fn process_ended(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 checks the process and sends nothing.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    match alive {
+        false => true,
+        true => std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|stat| {
+                stat.rsplit(')')
+                    .next()
+                    .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+            })
+            .unwrap_or(false),
+    }
+}
+
+/// Wait until `pid` is gone or a zombie.
+async fn wait_until_ended(pid: libc::pid_t) {
+    let deadline = Instant::now() + END_WAIT;
+    while !process_ended(pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(process_ended(pid), "process {pid} still runs");
+}
+
+/// Wait until `pid` is gone: ended and reaped.
+async fn wait_until_gone(pid: ProcessId) {
+    let deadline = Instant::now() + END_WAIT;
+    while process_exists(pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!process_exists(pid), "process {} still exists", pid.get());
+}
+
+/// `SIGKILL` to `pid` alone.
+fn kill_process(pid: ProcessId) {
+    // SAFETY: kill sends a signal; it touches no memory of this process.
+    let sent = unsafe { libc::kill(pid.as_pid_t(), libc::SIGKILL) };
+    assert_eq!(sent, 0, "{}", io::Error::last_os_error());
+}
+
+/// Wait until `pid`, a child of this process, exited, and leave it
+/// unreaped.
+fn wait_until_exited(pid: libc::pid_t) {
+    let id = libc::id_t::try_from(pid).unwrap();
+    // SAFETY: an all-zero siginfo_t is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waitid writes into a live local siginfo_t.
+    let result = unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+    assert_eq!(result, 0, "{}", io::Error::last_os_error());
+}
+
+/// Whether `waitpid` reaps `pid` now; the exit status when it does.
+fn reap_now(pid: libc::pid_t) -> Option<libc::c_int> {
+    let mut status: libc::c_int = 0;
+    // SAFETY: waitpid of one pid, writing into a live local.
+    let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    match reaped == pid {
+        true => Some(status),
+        false => None,
+    }
+}
+
+/// The `pre_exec` hook of a child that leads its own session.
+fn lead_a_new_session() -> io::Result<()> {
+    // SAFETY: setsid takes no argument.
+    match unsafe { libc::setsid() } {
+        -1 => Err(io::Error::last_os_error()),
+        _ => Ok(()),
+    }
+}
+
+/// A spawner loop with no thread, for the rules of the preload path that
+/// need no process.
+fn spawner_loop() -> SpawnerLoop {
+    let waker = Waker::new().unwrap();
+    let watch = ExitWatch::new(waker.read.as_raw_fd()).unwrap();
+    let shared = Arc::new(Shared {
+        queue: Mutex::new(Queue {
+            requests: VecDeque::new(),
+            intake: Intake::Open,
+        }),
+        waker,
+    });
+    SpawnerLoop::new(shared, watch)
+}
+
+/// A plan whose program does not exist: every start of it fails.
+fn missing_program_plan() -> PreloadPlan {
+    PreloadPlan {
+        command: ChildCommand {
+            program: "/nonexistent/horsies-preload".into(),
+            args: Vec::new(),
+        },
+        mode: PreloadMode::Library,
+        init: init(),
+    }
+}
+
+/// Python `TestSupport::test_a_kernel_with_no_pidfd_uses_exec` and
+/// `::test_a_blocked_prctl_uses_exec`: a kernel that refuses a pidfd or the
+/// subreaper flag has no preload path, and the answer names the call.
+#[test]
+fn a_kernel_without_pidfd_or_the_subreaper_flag_has_no_preload_path() {
+    assert_eq!(kernel_support(Ok(()), || Ok(())), Ok(()));
+    assert_eq!(
+        kernel_support(
+            Err(io::Error::from_raw_os_error(libc::ENOSYS)),
+            || -> io::Result<()> { panic!("the flag is tried only after a pidfd opened") },
+        ),
+        Err(PreloadUnsupported::MissingKernelSupport {
+            reason: format!("pidfd_open: {}", io::Error::from_raw_os_error(libc::ENOSYS))
+        })
+    );
+    assert_eq!(
+        kernel_support(Ok(()), || Err(io::Error::from_raw_os_error(libc::EPERM))),
+        Err(PreloadUnsupported::MissingKernelSupport {
+            reason: format!(
+                "prctl is refused: {}",
+                io::Error::from_raw_os_error(libc::EPERM)
+            )
+        })
+    );
+}
+
+/// Python `TestOrphanSweep::test_a_child_in_this_session_keeps_its_exit_status`:
+/// an exited child in the worker's own session is no landed orphan; the
+/// sweep stops at it and leaves its status to its own waiter.
+#[test]
+fn the_sweep_leaves_an_exited_child_of_the_worker_session_to_its_waiter() {
+    in_own_process(
+        "the_sweep_leaves_an_exited_child_of_the_worker_session_to_its_waiter",
+        || {
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 3"])
+                .spawn()
+                .unwrap();
+            let pid = libc::pid_t::try_from(child.id()).unwrap();
+            wait_until_exited(pid);
+
+            sweep_landed_orphans(&HashMap::new());
+
+            let status = reap_now(pid).expect("the sweep took the exit status of the child");
+            assert!(libc::WIFEXITED(status));
+            assert_eq!(libc::WEXITSTATUS(status), 3);
+        },
+    );
+}
+
+/// Python `TestOrphanSweep::test_the_sweep_is_bounded`: one sweep reaps at
+/// most [`ORPHAN_SWEEP_LIMIT`] landed orphans.
+#[test]
+fn one_sweep_reaps_at_most_its_bound_of_landed_orphans() {
+    in_own_process(
+        "one_sweep_reaps_at_most_its_bound_of_landed_orphans",
+        || {
+            let count = ORPHAN_SWEEP_LIMIT + 2;
+            let mut pids = Vec::new();
+            for _ in 0..count {
+                let mut command = std::process::Command::new("/bin/sh");
+                command.args(["-c", "exit 0"]);
+                // SAFETY: the hook runs in the forked child before `exec` and
+                // calls only setsid.
+                unsafe {
+                    command.pre_exec(lead_a_new_session);
+                }
+                let child = command.spawn().unwrap();
+                pids.push(libc::pid_t::try_from(child.id()).unwrap());
+            }
+            for &pid in &pids {
+                wait_until_exited(pid);
+            }
+
+            sweep_landed_orphans(&HashMap::new());
+
+            let left = pids.iter().filter(|&&pid| reap_now(pid).is_some()).count();
+            assert_eq!(left, 2, "one sweep reaped {} of {count}", pids.len() - left);
+        },
+    );
+}
+
+/// Python `TestForkReplies::test_a_new_child_is_registered_before_the_sweep`:
+/// a forked child that exited before its pid was reported is a landed
+/// orphan at the sweep. It enters the registry first, so the sweep leaves
+/// its exit to the spawner.
+#[test]
+fn a_forked_child_that_exits_at_once_keeps_its_exit_for_the_spawner() {
+    in_own_process(
+        "a_forked_child_that_exits_at_once_keeps_its_exit_for_the_spawner",
+        || {
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            runtime().block_on(async {
+                let _preload = ready_pid(handle.start_preload(plan("exit_at_once")).await);
+                let child = handle.spawn(exec_command()).await.unwrap();
+                assert_eq!(
+                    close_and_wait(child).await,
+                    ChildExit::Reaped(ReapedExit::ExitedWith(9))
+                );
+            });
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+        },
+    );
+}
+
+/// Python `TestForkReplies::test_a_failed_request_ends_the_parent_and_clears_the_flag`:
+/// the channel may hold half a frame, so a preload process whose socket
+/// fails during a request is killed; the subreaper flag is cleared, and the
+/// child starts with `exec`.
+#[test]
+fn a_request_whose_channel_closes_ends_the_preload_and_clears_the_flag() {
+    in_own_process(
+        "a_request_whose_channel_closes_ends_the_preload_and_clears_the_flag",
+        || {
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            runtime().block_on(async {
+                let preload = ready_pid(handle.start_preload(plan("close_on_request")).await);
+                let child = handle.spawn(exec_command()).await.unwrap();
+                assert_eq!(&first_bytes(&child), EXEC_MARK);
+                assert_eq!(subreaper_flag(), 0);
+                wait_until_gone(preload).await;
+                let _exit = close_and_wait(child).await;
+            });
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+        },
+    );
+}
+
+/// Python `TestForkReplies::test_an_unexpected_frame_ends_the_parent`.
+#[test]
+fn an_unexpected_frame_during_a_request_ends_the_preload() {
+    in_own_process(
+        "an_unexpected_frame_during_a_request_ends_the_preload",
+        || {
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            runtime().block_on(async {
+                let preload = ready_pid(handle.start_preload(plan("ready_again")).await);
+                let child = handle.spawn(exec_command()).await.unwrap();
+                assert_eq!(&first_bytes(&child), EXEC_MARK);
+                assert_eq!(subreaper_flag(), 0);
+                wait_until_gone(preload).await;
+                let _exit = close_and_wait(child).await;
+            });
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+        },
+    );
+}
+
+/// Python `TestForkReplies::test_a_pid_that_cannot_be_watched_is_no_child`:
+/// no exit can be seen for a reported pid whose pidfd does not open, so
+/// that process is killed, its pid leaves the registry, the child starts
+/// with `exec`, and the preload process stays.
+#[test]
+fn a_forked_pid_that_cannot_be_watched_is_killed_and_the_spawn_uses_exec() {
+    in_own_process(
+        "a_forked_pid_that_cannot_be_watched_is_killed_and_the_spawn_uses_exec",
+        || {
+            let report = scratch_file("thread-pid");
+            let behaviour = format!("thread_pid:{}", report.display());
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            runtime().block_on(async {
+                let preload = ready_pid(handle.start_preload(plan(&behaviour)).await);
+                let child = handle.spawn(exec_command()).await.unwrap();
+                assert_eq!(&first_bytes(&child), EXEC_MARK);
+                let pids = read_pids(&report);
+                let (helper, thread) = (pids[0], pids[1]);
+                assert_ne!(helper, thread);
+                wait_until_ended(helper).await;
+                assert!(process_exists(preload));
+                let _exit = close_and_wait(child).await;
+            });
+            // The stop ends only when the registry is empty.
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+            std::fs::remove_file(&report).unwrap();
+        },
+    );
+}
+
+/// Python `TestForkedChild::test_the_subreaper_flag_is_off_between_spawns`.
+#[test]
+fn the_subreaper_flag_is_off_between_spawns() {
+    in_own_process("the_subreaper_flag_is_off_between_spawns", || {
+        let spawner = Spawner::start().unwrap();
+        let handle = spawner.handle();
+        runtime().block_on(async {
+            let _preload = ready_pid(handle.start_preload(plan("fork")).await);
+            assert_eq!(subreaper_flag(), 0);
+            let mut children = Vec::new();
+            for _ in 0..2 {
+                let child = handle.spawn(exec_command()).await.unwrap();
+                assert_eq!(&first_bytes(&child), FORKED_MARK);
+                assert_eq!(subreaper_flag(), 0);
+                children.push(child);
+            }
+            for child in children {
+                let _exit = close_and_wait(child).await;
+            }
+        });
+        assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+    });
+}
+
+/// Python `TestPreloadParentDeath::test_running_tasks_finish_and_new_children_use_exec`:
+/// the worker is the parent of a forked child, so the death of the preload
+/// process does not touch it; until the restart, new children use `exec`.
+#[test]
+fn a_forked_child_outlives_its_preload_and_new_children_use_exec() {
+    in_own_process(
+        "a_forked_child_outlives_its_preload_and_new_children_use_exec",
+        || {
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            runtime().block_on(async {
+                let preload = ready_pid(handle.start_preload(plan("fork")).await);
+                let forked = handle.spawn(exec_command()).await.unwrap();
+                assert_eq!(&first_bytes(&forked), FORKED_MARK);
+
+                kill_process(preload);
+                wait_until_gone(preload).await;
+
+                let after = handle.spawn(exec_command()).await.unwrap();
+                assert_eq!(&first_bytes(&after), EXEC_MARK);
+                assert!(process_exists(forked.pid));
+                assert_eq!(
+                    close_and_wait(forked).await,
+                    ChildExit::Reaped(ReapedExit::ExitedWith(7))
+                );
+                assert_eq!(
+                    close_and_wait(after).await,
+                    ChildExit::Reaped(ReapedExit::ExitedWith(8))
+                );
+            });
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+        },
+    );
+}
+
+/// Python `TestPreloadParentDeath::test_no_preload_parent_and_no_exec_is_a_pool_failure`,
+/// the spawner half: with the preload process down, a child that cannot
+/// `exec` is a spawn failure, which the pool counts as a boot attempt.
+#[test]
+fn with_the_preload_down_a_child_that_cannot_exec_is_a_spawn_failure() {
+    in_own_process(
+        "with_the_preload_down_a_child_that_cannot_exec_is_a_spawn_failure",
+        || {
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            runtime().block_on(async {
+                let preload = ready_pid(handle.start_preload(plan("fork")).await);
+                kill_process(preload);
+                wait_until_gone(preload).await;
+                let missing = ChildCommand {
+                    program: "/nonexistent/horsies-child".into(),
+                    args: Vec::new(),
+                };
+                assert!(matches!(
+                    handle.spawn(missing).await,
+                    Err(SpawnError::SpawnFailed { .. })
+                ));
+            });
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+        },
+    );
+}
+
+/// Python `TestPreloadParentDeath::test_a_failed_restart_spends_one_attempt_only`:
+/// a restart that does not start uses one attempt and plans the next one.
+#[test]
+fn a_failed_restart_uses_one_attempt_and_plans_the_next() {
+    let mut spawner = spawner_loop();
+    spawner.preload.plan = Some(missing_program_plan());
+
+    spawner.restart(0);
+    assert!(
+        matches!(
+            spawner.preload.state,
+            PreloadState::Restarting { restarts: 1, .. }
+        ),
+        "{:?}",
+        spawner.preload.state
+    );
+    spawner.restart(1);
+    assert!(
+        matches!(
+            spawner.preload.state,
+            PreloadState::Restarting { restarts: 2, .. }
+        ),
+        "{:?}",
+        spawner.preload.state
+    );
+}
+
+/// Python `TestPreloadParentDeath::test_restarts_are_bounded`: after
+/// [`PRELOAD_RESTART_LIMIT`] restarts, no restart is planned and every
+/// child uses `exec`, also when the last restart did not start.
+#[test]
+fn restarts_stop_at_the_limit() {
+    let mut spawner = spawner_loop();
+    let last = PRELOAD_RESTART_LIMIT - 1;
+    spawner.schedule_restart(last);
+    assert!(
+        matches!(spawner.preload.state, PreloadState::Restarting { restarts, .. } if restarts == last),
+        "{:?}",
+        spawner.preload.state
+    );
+    spawner.schedule_restart(PRELOAD_RESTART_LIMIT);
+    assert!(
+        matches!(spawner.preload.state, PreloadState::ExecOnly),
+        "{:?}",
+        spawner.preload.state
+    );
+
+    spawner.preload.plan = Some(missing_program_plan());
+    spawner.restart(last);
+    assert!(
+        matches!(spawner.preload.state, PreloadState::ExecOnly),
+        "{:?}",
+        spawner.preload.state
+    );
+}
+
+/// Python `TestPreloadParentDeath::test_a_bad_fork_never_shares_a_socket_with_an_exec_child`:
+/// the fork is answered after the bound. The forked child holds the first
+/// socket pair; the `exec` child gets a new one, and the forked child ends
+/// at the close of its pair.
+#[test]
+fn a_late_fork_answer_leaves_the_exec_child_its_own_socket() {
+    assert!(PRELOAD_FORK_TIMEOUT < LATE_ANSWER);
+    in_own_process(
+        "a_late_fork_answer_leaves_the_exec_child_its_own_socket",
+        || {
+            let pid_file = scratch_file("late-fork");
+            let behaviour = format!("late:{}", pid_file.display());
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            runtime().block_on(async {
+                let preload = ready_pid(handle.start_preload(plan(&behaviour)).await);
+                let began = Instant::now();
+                let child = handle.spawn(exec_command()).await.unwrap();
+                assert!(began.elapsed() >= PRELOAD_FORK_TIMEOUT);
+                assert_eq!(&first_bytes(&child), EXEC_MARK);
+                let late = read_pids(&pid_file)[0];
+                assert_ne!(late, child.pid.as_pid_t());
+                wait_until_ended(late).await;
+                wait_until_gone(preload).await;
+                let _exit = close_and_wait(child).await;
+            });
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+            std::fs::remove_file(&pid_file).unwrap();
+        },
+    );
+}
+
+/// Python `TestPreloadParentDeath::test_a_cancelled_start_ends_the_preload_parent`:
+/// a stop while the start waits for `preload_ready` ends the preload
+/// process, and the start answers that the spawner stopped.
+#[test]
+fn a_stop_during_the_preload_start_ends_the_preload_process() {
+    in_own_process(
+        "a_stop_during_the_preload_start_ends_the_preload_process",
+        || {
+            let pid_file = scratch_file("never-ready");
+            let behaviour = format!("never_ready:{}", pid_file.display());
+            let spawner = Spawner::start().unwrap();
+            let handle = spawner.handle();
+            let runtime = runtime();
+            let start = {
+                let handle = handle.clone();
+                runtime.spawn(async move { handle.start_preload(plan(&behaviour)).await })
+            };
+            let preload = runtime.block_on(async {
+                let deadline = Instant::now() + END_WAIT;
+                while !pid_file.exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the preload process did not start"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                read_pids(&pid_file)[0]
+            });
+            assert!(!start.is_finished());
+
+            assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+
+            assert!(process_ended(preload));
+            assert_eq!(
+                runtime.block_on(start).unwrap(),
+                PreloadStart::SpawnerStopped
+            );
+            std::fs::remove_file(&pid_file).unwrap();
+        },
+    );
+}
+
+/// Python `TestKillBeforeSession::test_a_child_with_no_group_is_killed_alone`:
+/// a forked child before its `setsid` leads no session; the kill reaches it
+/// by its pid.
+#[test]
+fn a_child_that_leads_no_session_is_killed_by_its_pid() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let pid = ProcessId::new(child.id()).unwrap();
+
+    assert_eq!(kill_session(pid), KillOutcome::Sent);
+
+    assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
 }

@@ -21,7 +21,6 @@ use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChi
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::resume_client_workflow;
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// Whether `error` is a start refused for its spec: the spec, a child spec
 /// or a value that the start cannot store (the class that a client names
@@ -940,7 +939,7 @@ async fn recovery_enqueues_a_ready_node_with_its_input() {
 
     let report = recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         3,
     )
     .await

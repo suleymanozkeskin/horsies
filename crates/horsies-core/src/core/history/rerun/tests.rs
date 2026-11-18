@@ -726,7 +726,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .await
         .unwrap_err();
     assert_eq!(
-        history_error.code,
+        history_error.code(),
         crate::BrokerErrorCode::InvalidJsonPayload
     );
     let absent = Uuid::new_v4();
@@ -1351,14 +1351,14 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .await
         .unwrap_err();
     assert_eq!(
-        history_info_error.code,
+        history_info_error.code(),
         crate::BrokerErrorCode::InvalidJsonPayload
     );
     let raw_error = broker
         .get_raw_result_record(completed, None)
         .await
         .unwrap_err();
-    assert_eq!(raw_error.code, crate::BrokerErrorCode::InvalidJsonPayload);
+    assert_eq!(raw_error.code(), crate::BrokerErrorCode::InvalidJsonPayload);
 
     let non_object = b"[]".to_vec();
     sqlx::query(
@@ -1375,7 +1375,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(completed, None)
         .await
         .unwrap_err();
-    assert_eq!(shape_error.code, crate::BrokerErrorCode::InvalidJsonPayload);
+    assert_eq!(
+        shape_error.code(),
+        crate::BrokerErrorCode::InvalidJsonPayload
+    );
 
     // The baseline stores no result content type: format version 1 implies
     // it, so a stored content type cannot disagree with the version.
@@ -1407,10 +1410,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     // INVALID_JSON_PAYLOAD; an attempt snapshot that does not decode is
     // TASK_INFO_QUERY_FAILED, not retryable.
     assert_eq!(
-        attempt_error.code,
+        attempt_error.code(),
         crate::BrokerErrorCode::TaskInfoQueryFailed
     );
-    assert!(!attempt_error.retryable);
+    assert!(!attempt_error.retryable());
 
     cleanup(&pool, &[completed, failed, expired, cancelled], &[]).await;
 
@@ -1425,9 +1428,9 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .expect_err("a removed detail reader refuses the history read");
-    assert_eq!(refused.code, crate::BrokerErrorCode::TaskInfoQueryFailed);
-    assert!(!refused.retryable);
-    assert!(refused.message.contains("42883"), "{}", refused.message);
+    assert_eq!(refused.code(), crate::BrokerErrorCode::TaskInfoQueryFailed);
+    assert!(!refused.retryable());
+    assert!(refused.message().contains("42883"), "{}", refused.message());
     let mut publication = pool.begin().await.unwrap();
     StagedLoaderPublisher
         .republish(publication.as_mut())

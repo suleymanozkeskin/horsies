@@ -34,6 +34,7 @@ use horsies_core::{
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
 use crate::{TaskError, UserErrorCode};
 
@@ -168,15 +169,17 @@ impl ReadError {
     /// The failure of a read. A stored payload that does not read keeps its
     /// own variant.
     pub(crate) fn of_operation(task_id: Uuid, error: BrokerOperationError) -> Self {
-        match error.code {
-            BrokerErrorCode::InvalidJsonPayload => Self::StoredResultUnreadable {
-                task_id,
-                cause: error.message,
-            },
-            code => Self::Database {
-                code,
-                message: error.message,
-                retryable: error.retryable,
+        match error {
+            BrokerOperationError::InvalidJsonPayload { message, .. } => {
+                Self::StoredResultUnreadable {
+                    task_id,
+                    cause: message,
+                }
+            }
+            other => Self::Database {
+                code: other.code(),
+                message: other.message().to_owned(),
+                retryable: other.retryable(),
             },
         }
     }
@@ -202,6 +205,13 @@ pub struct TaskInfoParts {
 
 /// The handle of one sent task, with its output type `T` and code type `E`.
 /// Clones share one task and one kept read.
+///
+/// # Panics
+///
+/// Every method that runs on the core, async or blocking, panics in a
+/// process that was forked without `exec` after the core's process runtime
+/// started in its parent: a fork is a state of the process, never an error
+/// value of a call. Nothing ran.
 pub struct TaskHandle<T, E> {
     task_id: Uuid,
     reads: Arc<CoreHandle>,
@@ -267,7 +277,14 @@ where
         read_task_info(&self.reads, self.task_id, parts).await
     }
 
+    /// The result read of the task, up to `limit`.
+    ///
+    /// # Panics
+    ///
+    /// In a fork, without `exec`, of the process that started the core's
+    /// process runtime. Nothing ran.
     async fn read(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        refuse_in_a_fork(format_args!("TaskHandle::get for task {}", self.task_id));
         let broker = self
             .reads
             .initialized_broker()
@@ -305,11 +322,17 @@ where
 
 /// The task info of `task_id` through `reads`. Python `info`: the info of
 /// the live row or of the history record, attempts newest first.
+///
+/// # Panics
+///
+/// In a fork, without `exec`, of the process that started the core's
+/// process runtime. Nothing ran.
 pub(crate) async fn read_task_info(
     reads: &CoreHandle,
     task_id: Uuid,
     parts: TaskInfoParts,
 ) -> Result<TaskInfo, ReadError> {
+    refuse_in_a_fork(format_args!("the info read of task {task_id}"));
     let broker = reads
         .initialized_broker()
         .await
@@ -875,10 +898,8 @@ mod tests {
     fn an_invalid_payload_read_is_unreadable_and_another_failure_is_database() {
         let unreadable = ReadError::of_operation(
             task(),
-            BrokerOperationError {
-                code: BrokerErrorCode::InvalidJsonPayload,
+            BrokerOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
-                retryable: false,
                 cause: horsies_core::FailureCause::ContractViolation,
             },
         );
@@ -888,8 +909,8 @@ mod tests {
         ));
         let database = ReadError::of_operation(
             task(),
-            BrokerOperationError {
-                code: BrokerErrorCode::TaskInfoQueryFailed,
+            BrokerOperationError::OperationFailed {
+                code: horsies_core::BrokerOperationFailedCode::TaskInfoQueryFailed,
                 message: "timeout".to_owned(),
                 retryable: true,
                 cause: horsies_core::FailureCause::Connection,

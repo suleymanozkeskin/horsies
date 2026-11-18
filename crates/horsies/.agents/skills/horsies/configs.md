@@ -440,11 +440,15 @@ fn run_worker(app: Horsies) -> ExitCode {
   that `main` installed.
 - `run_worker` and `run_scheduler` stop at `SIGTERM` or `SIGINT`.
 - `WorkerRunError`: `CheckRefused`, `ManifestBound`, `ChildCommandRefused`,
-  `ProfileRefused`, `ConnectionSettingsRefused`, `RuntimeUnavailable`,
-  `BootFailed { cause }`, `Failed { cause }`.
+  `ProfileRefused`, `ConnectionSettingsRefused`,
+  `RuntimeUnavailable(RuntimeStartFailed)`, `BootFailed { cause }`,
+  `Failed { cause }`.
 - `SchedulerRunError`: `NotConfigured`, `Disabled`, `CheckRefused`,
   `ManifestRefused`, `StartRefused`, `StartFailed { retryable }`,
-  `RuntimeUnavailable`.
+  `RuntimeUnavailable(RuntimeStartFailed)`.
+- `RuntimeStartFailed`: the operating system refused the threads of the
+  core's process runtime; a later run tries again. A fork is not one: the
+  run panics (`SKILL.md`, Result Types).
 
 ### The shipped `horsies` binary
 

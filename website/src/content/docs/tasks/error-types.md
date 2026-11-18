@@ -59,15 +59,29 @@ These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ens
 - The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They do not return `LOOP_RUNNER_FAILED`. They still return `ASYNC_CONTEXT` on a thread that runs an event loop.
 - `BrokerEnqueueError`, `BrokerSyncCallError`, `TaskSendError` and the return type of `ensure_schema_initialized()` keep the two variants, so an exhaustive `match` names them.
 
-When the core of the process cannot run the call, the call returns its failure code (`ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. The core errors are in `horsies._core`:
+When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. The core errors are in `horsies._core`:
 
 | Core error | When | `retryable` | After the failure |
 | ---------- | ---- | ----------- | ----------------- |
 | `TooManyPendingCalls` | 65,536 core calls are in flight on the calling event loop | `True` | Nothing ran |
 | `CoreCallTimedOut` | A sync form did not end within 30 minutes. For `get_raw_result_record()` with a `timeout_ms`, the bound is `timeout_ms` plus 30 minutes; with no `timeout_ms`, the call has no bound | `True` | A read changed nothing. After `enqueue()` or a sync send, the row may or may not exist |
-| `CoreStopped` | A core background task panicked, so the core is stopped in this process. The message names the first panic | `False` | Nothing ran |
 | `CoreStartFailed` | The core runtime could not start | `False` | Nothing ran |
-| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent. Start children that call horsies with `spawn` or `forkserver` | `False` | Nothing ran |
+
+Two more core errors are never a result: see [Process-State Refusals](#process-state-refusals).
+
+#### Process-State Refusals
+
+`ForkedAfterCoreStart` and `CoreStopped` are states of the process, not of one call. The core refuses every later call in the process, so a retry in the same process gets the same refusal.
+
+- Every call that runs on the core raises them. No call returns them as a result, and no result type has a variant for them.
+- This covers the task sends and the four retry methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
+- Nothing ran. `close()` and `close_async()` raise them after the resource sets of the broker closed and its sync runner stopped.
+- The Rust client has the fork state only. Every public call of the Rust client that runs on the core panics in a process that was forked without `exec` after the core's process runtime started in its parent, async and blocking forms alike, with both process ids and the fix; nothing ran. No Rust result type holds the fork. The Rust client has no stopped-core state: a panic in a core task of a Rust program is the program's panic.
+
+| Raised | Cause | What to do |
+| ------ | ----- | ---------- |
+| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task. `args` are `(core_pid, this_pid, advice)` | Start child processes that call horsies with the `spawn` or `forkserver` start method. Or start the core after the fork: the core starts at the first call that runs on it, so fork before the parent's first call |
+| `CoreStopped` | A background task of the core panicked: a defect in horsies, not a failure of the database or of your code. The core then stops in this process. `args` are the `(subject, cause)` of the first panic | Restart the process: the core does not start again in it. Report the panic's subject and cause as a defect |
 
 When the core ran the call and the call failed, `exception` is the core's class of the cause, from `horsies._core`. The declared type of `exception` does not change:
 

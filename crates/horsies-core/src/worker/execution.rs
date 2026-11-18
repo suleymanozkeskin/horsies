@@ -50,9 +50,10 @@ use crate::db::{
 use crate::workflow_engine::args_merge::{
     args_from_inner_text, object_members, object_text, ARGS_FROM_ENVELOPE_KEY,
 };
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::phase2_recovery::Phase2Wake;
 use crate::workflow_engine::steps::{
-    advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
+    advance_parents, node_finish_alone, node_finish_in_transaction, Dependents,
     NodeFinishDisposition, OwedParentAdvances,
 };
 
@@ -819,7 +820,7 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 /// when the failure may clear.
 pub(crate) async fn finalize_workflow_phase(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
@@ -933,7 +934,7 @@ pub(crate) fn capacity_wake(queue_name: &str) -> Phase2Wake {
 /// counts the record.
 async fn finish_workflow_node(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     task_id: Uuid,
     capacity_notified: bool,
     phase_two: PhaseTwoForm,
@@ -1178,7 +1179,11 @@ pub(crate) async fn mark_task_finalizing(
 /// owes run after it, one transaction per level, with their own retries
 /// ([`retry_parent_advances`]). Both build the child of each sub-workflow
 /// node that they promote with `build`.
-pub(crate) async fn run_phase2(broker: &PostgresBroker, build: ChildBuild<'_>, work: Phase2Work) {
+pub(crate) async fn run_phase2(
+    broker: &PostgresBroker,
+    build: &dyn ChildSpecSource,
+    work: Phase2Work,
+) {
     let finished = Box::pin(retry_phase2(broker, build, &work)).await;
     match finished {
         Ok(owed) if !owed.is_empty() => {
@@ -1203,7 +1208,7 @@ pub(crate) async fn run_phase2(broker: &PostgresBroker, build: ChildBuild<'_>, w
 /// (already logged).
 async fn retry_phase2(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     work: &Phase2Work,
 ) -> Result<OwedParentAdvances, FinalizeError> {
     let mut attempt: u32 = 0;
@@ -1278,7 +1283,7 @@ async fn retry_phase2(
 /// under a live parent node). Logs every failure.
 async fn retry_parent_advances(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     task_id: Uuid,
     first_owed: OwedParentAdvances,
 ) {

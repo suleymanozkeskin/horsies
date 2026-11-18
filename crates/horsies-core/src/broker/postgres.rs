@@ -41,7 +41,7 @@ use crate::broker::health::{
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
-    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
+    BrokerOperationError, BrokerOperationFailedCode, BrokerResult, RawResultRead, RawResultRecord,
     StoredEnvelopeText, TaskInfoRead,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow};
@@ -200,6 +200,7 @@ mod checked_send_tests {
 mod raw_result_probe_tests {
     //! The probe records of the staged result reader's rows. Pure.
     use super::*;
+    use crate::broker::result_types::BrokerErrorCode;
     use crate::core::history::archive::versions::{
         archive_digest, JSON_CONTENT_TYPE, JSON_UTF8_CODEC,
     };
@@ -259,8 +260,8 @@ mod raw_result_probe_tests {
         else {
             panic!("a digest mismatch is refused");
         };
-        assert_eq!(refused.code, BrokerErrorCode::InvalidJsonPayload);
-        assert!(!refused.retryable);
+        assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert!(!refused.retryable());
     }
 
     #[test]
@@ -271,7 +272,43 @@ mod raw_result_probe_tests {
         ) else {
             panic!("a live status in history is refused");
         };
-        assert_eq!(refused.code, BrokerErrorCode::InvalidJsonPayload);
+        assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
+    }
+
+    /// Python `test_broker_postgres.py::TestPythonRawResultRead::test_live_row_with_a_terminal_status_returns_record_with_none_payload`:
+    /// a live row holds no result, so each terminal status read from it is a
+    /// record with no result.
+    #[test]
+    fn a_live_row_with_a_terminal_status_is_a_record_with_no_result() {
+        for status in [
+            crate::core::TaskStatus::Completed,
+            crate::core::TaskStatus::Failed,
+            crate::core::TaskStatus::Expired,
+            crate::core::TaskStatus::Cancelled,
+        ] {
+            let Ok(RawResultProbe::Record(record)) =
+                raw_result_from_live(TASK_ID, "result.task".to_owned(), &status.to_string())
+            else {
+                panic!("a live {status} row is a record");
+            };
+            assert_eq!(record.task_id, TASK_ID);
+            assert_eq!(record.task_name, "result.task");
+            assert_eq!(record.status, status);
+            assert_eq!(record.raw_result, None, "{status}");
+        }
+    }
+
+    /// Python `test_broker_postgres.py::TestPythonRawResultRead::test_an_empty_stored_result_text_is_invalid_json_payload`:
+    /// an empty stored result is not JSON and is not "no result".
+    #[test]
+    fn an_empty_stored_result_is_invalid_json_payload() {
+        let Err(refused) =
+            raw_result_from_history_result(TASK_ID, history("COMPLETED", stored("")))
+        else {
+            panic!("an empty stored result is refused");
+        };
+        assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert!(!refused.retryable());
     }
 
     #[test]
@@ -289,10 +326,7 @@ mod raw_result_probe_tests {
         ));
         assert!(matches!(
             raw_result_from_live(TASK_ID, "result.task".to_owned(), "NOT_A_STATUS"),
-            Err(BrokerOperationError {
-                code: BrokerErrorCode::InvalidJsonPayload,
-                ..
-            })
+            Err(BrokerOperationError::InvalidJsonPayload { .. })
         ));
     }
 }
@@ -2031,8 +2065,8 @@ impl PostgresBroker {
                 TaskInfoPass::BecameLive => {}
             }
         }
-        Err(BrokerOperationError {
-            code: BrokerErrorCode::TaskInfoQueryFailed,
+        Err(BrokerOperationError::OperationFailed {
+            code: BrokerOperationFailedCode::TaskInfoQueryFailed,
             message: format!(
                 "task {task_id} was absent from the live table and live in the history read \
                  on {TASK_INFO_READ_PASSES} passes in a row"
@@ -2057,8 +2091,8 @@ impl PostgresBroker {
                 task_info_row,
             )
             .await
-            .map_err(|error| BrokerOperationError {
-                code: BrokerErrorCode::TaskInfoQueryFailed,
+            .map_err(|error| BrokerOperationError::OperationFailed {
+                code: BrokerOperationFailedCode::TaskInfoQueryFailed,
                 message: error.to_string(),
                 retryable: error.is_retryable(),
                 cause: error.failure_cause(),
@@ -2213,8 +2247,8 @@ impl PostgresBroker {
             Ok(_row) => Ok(DatabasePing {
                 latency_ms: start.elapsed().as_secs_f64() * 1000.0,
             }),
-            Err(error) => Err(BrokerOperationError {
-                code: BrokerErrorCode::DbPingFailed,
+            Err(error) => Err(BrokerOperationError::OperationFailed {
+                code: BrokerOperationFailedCode::DbPingFailed,
                 message: format!("database ping failed: {error}"),
                 retryable: error.is_retryable(),
                 cause: error.failure_cause(),
@@ -2275,12 +2309,13 @@ impl PostgresBroker {
             reply_channel: reply_channel.as_str().to_owned(),
             target_worker_id: target_worker_id.map(str::to_owned),
         };
-        let payload = serde_json::to_string(&request).map_err(|e| BrokerOperationError {
-            code: BrokerErrorCode::WorkerPingFailed,
-            message: format!("ping_workers payload encode failed: {}", e),
-            retryable: false,
-            cause: FailureCause::ContractViolation,
-        })?;
+        let payload =
+            serde_json::to_string(&request).map_err(|e| BrokerOperationError::OperationFailed {
+                code: BrokerOperationFailedCode::WorkerPingFailed,
+                message: format!("ping_workers payload encode failed: {}", e),
+                retryable: false,
+                cause: FailureCause::ContractViolation,
+            })?;
 
         let _notified = self
             .execute_main(
@@ -2312,8 +2347,8 @@ impl PostgresBroker {
                 // a full reply queue, are lost; the window goes on.
                 Ok(PayloadEvent::Gap | PayloadEvent::Overflowed) => continue,
                 Ok(PayloadEvent::Stopped) => {
-                    return Err(BrokerOperationError {
-                        code: BrokerErrorCode::WorkerPingFailed,
+                    return Err(BrokerOperationError::OperationFailed {
+                        code: BrokerOperationFailedCode::WorkerPingFailed,
                         message: "ping_workers reply wait failed: the listener stopped".to_owned(),
                         retryable: true,
                         cause: FailureCause::Connection,
@@ -2682,15 +2717,17 @@ mod rerun_family_error_tests {
 /// history result is checked in [`history_task_info`]; the live row holds no
 /// result.
 fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
-    let code = match &error {
-        BrokerError::Serialization(_) => BrokerErrorCode::InvalidJsonPayload,
-        _ => BrokerErrorCode::TaskInfoQueryFailed,
-    };
-    BrokerOperationError {
-        code,
-        message: error.to_string(),
-        retryable: error.is_retryable(),
-        cause: error.failure_cause(),
+    match &error {
+        BrokerError::Serialization(_) => BrokerOperationError::InvalidJsonPayload {
+            message: error.to_string(),
+            cause: error.failure_cause(),
+        },
+        _ => BrokerOperationError::OperationFailed {
+            code: BrokerOperationFailedCode::TaskInfoQueryFailed,
+            message: error.to_string(),
+            retryable: error.is_retryable(),
+            cause: error.failure_cause(),
+        },
     }
 }
 
@@ -2838,26 +2875,26 @@ fn stored_envelope_text(text: String) -> BrokerResult<Option<StoredEnvelopeText>
 }
 
 fn invalid_raw_result(message: String) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::InvalidJsonPayload,
+    BrokerOperationError::InvalidJsonPayload {
         message,
-        retryable: false,
         cause: FailureCause::ContractViolation,
     }
 }
 
 fn raw_result_operation_error(error: BrokerError) -> BrokerOperationError {
-    let code = match &error {
+    match &error {
         BrokerError::Serialization(_)
         | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidStatus(_) => BrokerErrorCode::InvalidJsonPayload,
-        _ => BrokerErrorCode::TaskInfoQueryFailed,
-    };
-    BrokerOperationError {
-        code,
-        message: error.to_string(),
-        retryable: error.is_retryable(),
-        cause: error.failure_cause(),
+        | BrokerError::InvalidStatus(_) => BrokerOperationError::InvalidJsonPayload {
+            message: error.to_string(),
+            cause: error.failure_cause(),
+        },
+        _ => BrokerOperationError::OperationFailed {
+            code: BrokerOperationFailedCode::TaskInfoQueryFailed,
+            message: error.to_string(),
+            retryable: error.is_retryable(),
+            cause: error.failure_cause(),
+        },
     }
 }
 
@@ -3037,8 +3074,8 @@ fn list_shape_error(statement: &TypedStatement, shape: ListShapeError) -> Broker
 /// `retryable` is the classification of the cause, as Python's
 /// `_operation_failed`.
 fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::MonitoringQueryFailed,
+    BrokerOperationError::OperationFailed {
+        code: BrokerOperationFailedCode::MonitoringQueryFailed,
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
         cause: error.failure_cause(),
@@ -3051,26 +3088,25 @@ fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperatio
 /// `WORKER_PING_FAILED` with the listener's retryable flag.
 fn worker_ping_subscribe_error(error: &ListenError) -> BrokerOperationError {
     match error {
-        ListenError::NoSessionUrl => BrokerOperationError {
-            code: BrokerErrorCode::ListenerDisabled,
+        ListenError::NoSessionUrl => BrokerOperationError::ListenerDisabled {
             message: format!("ping_workers needs a listener: {error}"),
-            retryable: false,
-            cause: error.failure_cause(),
         },
-        ListenError::PlanRefused(_) | ListenError::Subscribe(_) => BrokerOperationError {
-            code: BrokerErrorCode::WorkerPingFailed,
-            message: format!("ping_workers reply subscribe failed: {error}"),
-            retryable: error.is_retryable(),
-            cause: error.failure_cause(),
-        },
+        ListenError::PlanRefused(_) | ListenError::Subscribe(_) => {
+            BrokerOperationError::OperationFailed {
+                code: BrokerOperationFailedCode::WorkerPingFailed,
+                message: format!("ping_workers reply subscribe failed: {error}"),
+                retryable: error.is_retryable(),
+                cause: error.failure_cause(),
+            }
+        }
     }
 }
 
 /// Build a `WORKER_PING_FAILED` broker error for a failed core statement of
 /// a ping. `retryable` is the classification of the cause.
 fn worker_ping_statement_error(operation: &str, error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::WorkerPingFailed,
+    BrokerOperationError::OperationFailed {
+        code: BrokerOperationFailedCode::WorkerPingFailed,
         message: format!("ping_workers {operation} failed: {error}"),
         retryable: error.is_retryable(),
         cause: error.failure_cause(),
@@ -3080,10 +3116,8 @@ fn worker_ping_statement_error(operation: &str, error: BrokerError) -> BrokerOpe
 /// Build an `INVALID_INPUT` broker error: an argument was refused before
 /// anything ran, and the same argument is refused again.
 fn invalid_input(message: String) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::InvalidInput,
+    BrokerOperationError::InvalidInput {
         message,
-        retryable: false,
         cause: FailureCause::PreconditionFailed,
     }
 }
@@ -4430,6 +4464,7 @@ mod broker_operation_error_tests {
     //! classification of its cause (`core/brokers/postgres.py`,
     //! `_operation_failed`).
     use super::*;
+    use crate::broker::result_types::BrokerErrorCode;
     use crate::db::StatementFailure;
 
     /// No server listens on port 1, so a call that reached the pool would
@@ -4502,8 +4537,8 @@ mod broker_operation_error_tests {
             panic!("a zero timeout must be refused");
         };
 
-        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
-        assert!(!refused.retryable);
+        assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
+        assert!(!refused.retryable());
     }
 
     #[tokio::test]
@@ -4517,8 +4552,8 @@ mod broker_operation_error_tests {
             panic!("min_responses of 0 must be refused");
         };
 
-        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
-        assert!(!refused.retryable);
+        assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
+        assert!(!refused.retryable());
     }
 
     /// A broker with no listener (built from a pool with no session URL):
@@ -4539,8 +4574,8 @@ mod broker_operation_error_tests {
                 panic!("a broker without a listener cannot ping");
             };
 
-            assert_eq!(refused.code, BrokerErrorCode::ListenerDisabled);
-            assert!(!refused.retryable);
+            assert_eq!(refused.code(), BrokerErrorCode::ListenerDisabled);
+            assert!(!refused.retryable());
         }
     }
 
@@ -4553,8 +4588,8 @@ mod broker_operation_error_tests {
             let Err(refused) = broker.get_worker_state_history("w1", Some(limit)).await else {
                 panic!("limit {limit} must be refused");
             };
-            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{limit}");
-            assert!(!refused.retryable, "{limit}");
+            assert_eq!(refused.code(), BrokerErrorCode::InvalidInput, "{limit}");
+            assert!(!refused.retryable(), "{limit}");
         }
     }
 
@@ -4574,13 +4609,13 @@ mod broker_operation_error_tests {
             panic!("no server listens on the unreachable URL");
         };
 
-        assert_eq!(failed.code, BrokerErrorCode::DbPingFailed);
+        assert_eq!(failed.code(), BrokerErrorCode::DbPingFailed);
         assert!(
-            !failed.message.contains("pool is closed"),
+            !failed.message().contains("pool is closed"),
             "the ping must run on new pools: {}",
-            failed.message
+            failed.message()
         );
-        assert!(failed.retryable, "{}", failed.message);
+        assert!(failed.retryable(), "{}", failed.message());
     }
 
     fn checkout_failed(cause: crate::db::CheckoutFailure) -> BrokerError {
@@ -4605,17 +4640,15 @@ mod broker_operation_error_tests {
 
     #[test]
     fn a_monitoring_read_failure_carries_the_driver_classification() {
-        assert!(monitoring_query_error("read", checkout_timed_out()).retryable);
-        assert!(!monitoring_query_error("read", pool_closed()).retryable);
-        assert!(
-            !monitoring_query_error(
-                "read",
-                BrokerError::RowDecode(RowDecodeError::NoRow { statement: "read" })
-            )
-            .retryable
-        );
-        assert!(worker_ping_statement_error("notify", checkout_timed_out()).retryable);
-        assert!(!worker_ping_statement_error("notify", pool_closed()).retryable);
+        assert!(monitoring_query_error("read", checkout_timed_out()).retryable());
+        assert!(!monitoring_query_error("read", pool_closed()).retryable());
+        assert!(!monitoring_query_error(
+            "read",
+            BrokerError::RowDecode(RowDecodeError::NoRow { statement: "read" })
+        )
+        .retryable());
+        assert!(worker_ping_statement_error("notify", checkout_timed_out()).retryable());
+        assert!(!worker_ping_statement_error("notify", pool_closed()).retryable());
     }
 }
 
@@ -4658,6 +4691,7 @@ mod result_wait_tests {
     //! listener gap, and polling with no listener or when the listener stops
     //! (`python/horsies/core/brokers/postgres.py:3265-3285`).
     use super::*;
+    use crate::broker::result_types::BrokerErrorCode;
     use crate::broker::wait_limit::MAX_WAIT_LIMIT_MS;
     use serial_test::serial;
 
@@ -4687,8 +4721,8 @@ mod result_wait_tests {
             else {
                 panic!("limit {limit:?} must be refused");
             };
-            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{limit:?}");
-            assert!(!refused.retryable);
+            assert_eq!(refused.code(), BrokerErrorCode::InvalidInput, "{limit:?}");
+            assert!(!refused.retryable());
         }
     }
 
@@ -4876,6 +4910,7 @@ mod stale_and_expired_list_tests {
     //! to one year, a bound of `TASK_LIST_BOUND` rows, Python's verdict and
     //! order, and the expired record's `enqueued_at` and `expired_for`.
     use super::*;
+    use crate::broker::result_types::BrokerErrorCode;
     use serial_test::serial;
 
     #[tokio::test]
@@ -4894,7 +4929,7 @@ mod stale_and_expired_list_tests {
             let Err(refused) = broker.get_stale_tasks(minutes).await else {
                 panic!("threshold {minutes} must be refused");
             };
-            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{minutes}");
+            assert_eq!(refused.code(), BrokerErrorCode::InvalidInput, "{minutes}");
         }
     }
 
@@ -5412,6 +5447,7 @@ mod task_info_code_tests {
     //! `:4973-4977`): only a stored result that fails its check is
     //! `INVALID_JSON_PAYLOAD`.
     use super::*;
+    use crate::broker::result_types::BrokerErrorCode;
     use crate::db::StatementFailure;
 
     #[test]
@@ -5420,8 +5456,8 @@ mod task_info_code_tests {
 
         let error = task_info_history_error(BrokerError::Serialization(parse_error));
 
-        assert_eq!(error.code, BrokerErrorCode::InvalidJsonPayload);
-        assert!(!error.retryable);
+        assert_eq!(error.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert!(!error.retryable());
     }
 
     #[test]
@@ -5431,8 +5467,8 @@ mod task_info_code_tests {
             BrokerError::HistoryReadContract("unknown task-attempt outcome".to_owned()),
         ] {
             let mapped = task_info_history_error(error);
-            assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
-            assert!(!mapped.retryable);
+            assert_eq!(mapped.code(), BrokerErrorCode::TaskInfoQueryFailed);
+            assert!(!mapped.retryable());
         }
     }
 
@@ -5440,8 +5476,8 @@ mod task_info_code_tests {
     fn a_database_failure_is_task_info_query_failed_with_the_driver_flag() {
         let mapped = task_info_history_error(BrokerError::Database(sqlx::Error::PoolTimedOut));
 
-        assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
-        assert!(mapped.retryable);
+        assert_eq!(mapped.code(), BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(mapped.retryable());
     }
 
     #[test]
@@ -5454,14 +5490,14 @@ mod task_info_code_tests {
                     waited: Duration::from_secs(30),
                 }),
             }));
-        assert_eq!(timed_out.code, BrokerErrorCode::TaskInfoQueryFailed);
-        assert!(timed_out.retryable);
+        assert_eq!(timed_out.code(), BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(timed_out.retryable());
 
         let undecodable = task_info_history_error(BrokerError::RowDecode(RowDecodeError::NoRow {
             statement: "live_task_exists",
         }));
-        assert_eq!(undecodable.code, BrokerErrorCode::TaskInfoQueryFailed);
-        assert!(!undecodable.retryable);
+        assert_eq!(undecodable.code(), BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(!undecodable.retryable());
     }
 
     /// A FAILED history row whose stored result is `payload`, with a
@@ -5522,11 +5558,11 @@ mod task_info_code_tests {
             panic!("a stored result of {shown:.40} must not read");
         };
         assert_eq!(
-            refused.code,
+            refused.code(),
             BrokerErrorCode::InvalidJsonPayload,
             "{shown:.40}"
         );
-        assert!(!refused.retryable, "{shown:.40}");
+        assert!(!refused.retryable(), "{shown:.40}");
     }
 
     fn history_attempt(

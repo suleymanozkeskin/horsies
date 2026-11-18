@@ -232,7 +232,7 @@ impl ManifestValue for PayloadBytes {
 
 /// Stale task detection and crash recovery (Python `RecoveryConfig`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryManifest {
@@ -254,7 +254,7 @@ pub struct RecoveryManifest {
 
 /// How long worker state snapshots are kept.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum WorkerStateRetention {
@@ -266,7 +266,7 @@ pub enum WorkerStateRetention {
 
 /// How long terminal workflow records are kept.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TerminalRecordRetention {
@@ -278,7 +278,7 @@ pub enum TerminalRecordRetention {
 
 /// When a paused workflow expires.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PausedWorkflowExpiry {
@@ -290,7 +290,7 @@ pub enum PausedWorkflowExpiry {
 
 /// How long a task sent on a queue keeps its history record.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum QueueRetention {
@@ -302,7 +302,9 @@ pub enum QueueRetention {
 
 /// How long records live and how their storage is kept ahead (Python
 /// `RetentionConfig`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionManifest {
     pub worker_state_retention: WorkerStateRetention,
@@ -322,7 +324,7 @@ pub struct RetentionManifest {
 
 /// How often the backoff after a database error tries again.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum RetryAttemptLimit {
@@ -335,7 +337,7 @@ pub enum RetryAttemptLimit {
 /// Retry and backoff after database errors, and the poll interval (Python
 /// `WorkerResilienceConfig`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct ResilienceManifest {
@@ -347,7 +349,7 @@ pub struct ResilienceManifest {
 
 /// A payload size threshold.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PayloadLimit {
@@ -359,7 +361,7 @@ pub enum PayloadLimit {
 
 /// The size guard of serialized payloads (Python `PayloadPolicy`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct PayloadManifest {

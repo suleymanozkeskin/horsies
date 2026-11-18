@@ -442,6 +442,19 @@ pub(crate) fn idle_child_recording_pid(pid_file: &Path) -> ChildCommand {
     ))
 }
 
+/// A child of any kind that writes its pid to `pid_file`, boots, then holds
+/// its first run: it reads the run frame and answers nothing. It exits 0 at
+/// the stop frame, 3 at any other frame after the run, or when it is killed.
+pub(crate) fn child_holding_its_first_run(pid_file: &Path) -> ChildCommand {
+    shell(&format!(
+        "echo $$ > '{}'; {}{}{}exit 3",
+        pid_file.display(),
+        boot_any_kind(),
+        read_frame(),
+        read_frame()
+    ))
+}
+
 /// Children of any kind whose ready frame reports an RSS by boot order: the
 /// n-th child to boot reports `readings[n - 1]`, a later child the last
 /// reading. Each then serves nothing: it exits at the stop frame. The boot

@@ -330,14 +330,14 @@ fn an_unreadable_estimate_is_a_contract_violation_that_is_not_retryable() {
     let error = MonitoringQueryError::history("task list estimate decode", refused);
 
     assert_eq!(
-        error.code,
+        error.code(),
         MonitoringQueryErrorCode::HistoryContractViolation
     );
-    assert!(!error.retryable);
+    assert!(!error.retryable());
     assert!(
-        error.message.contains("estimate decode failed"),
+        error.message().contains("estimate decode failed"),
         "{}",
-        error.message
+        error.message()
     );
 }
 
@@ -414,11 +414,11 @@ async fn an_unknown_stored_status_in_history_is_a_contract_violation() {
         .expect_err("an unknown status is refused");
 
     assert_eq!(
-        error.code,
+        error.code(),
         MonitoringQueryErrorCode::HistoryContractViolation
     );
-    assert!(!error.retryable);
-    assert!(error.message.contains("NOT_KNOWN"), "{}", error.message);
+    assert!(!error.retryable());
+    assert!(error.message().contains("NOT_KNOWN"), "{}", error.message());
     database.drop().await;
 }
 
@@ -645,8 +645,8 @@ async fn a_detail_read_on_an_unreachable_database_is_an_error_not_absence() {
         .await
         .expect_err("an unreachable database fails the read");
 
-    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
-    assert!(error.retryable, "{error:?}");
+    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert!(error.retryable(), "{error:?}");
 }
 
 /// Python `TestDatabaseFailure::test_aggregate_failure_is_reported`.
@@ -656,6 +656,6 @@ async fn a_stats_read_on_an_unreachable_database_is_a_retryable_error() {
         .await
         .expect_err("an unreachable database fails the read");
 
-    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
-    assert!(error.retryable, "{error:?}");
+    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert!(error.retryable(), "{error:?}");
 }

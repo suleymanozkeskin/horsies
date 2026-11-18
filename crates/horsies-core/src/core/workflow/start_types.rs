@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// The members are Python's, in Python's order
 /// (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`
 /// and `EVENT_LOOP_LIMIT` are produced by the Python client only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "workflow_start", base = "str_enum")]
 pub enum WorkflowStartErrorCode {
     /// Config error: no broker attached.
@@ -45,21 +45,104 @@ impl std::fmt::Display for WorkflowStartErrorCode {
     }
 }
 
-/// Error payload for workflow start operations.
+/// The failure of a workflow start: one variant per Python class of
+/// `python/horsies/core/workflows/start_types.py` that the core or a client
+/// of the core produces, each with the facts of its state only. Carried
+/// inside `Err(...)` of a [`WorkflowStartResult`].
 ///
-/// Carried inside `Err(...)` of a `WorkflowStartResult<T>`.
+/// The classes that only the Python client produces are not variants:
+/// `WorkflowStartBrokerNotConfigured`, `WorkflowStartLoopRunnerFailed` and
+/// `WorkflowStartEventLoopLimit`.
 #[derive(Debug, Clone)]
-pub struct WorkflowStartError {
-    /// Which failure category.
-    pub code: WorkflowStartErrorCode,
-    /// Human-readable description.
-    pub message: String,
-    /// Whether the caller can safely retry.
-    pub retryable: bool,
-    /// Workflow spec name (always available).
-    pub workflow_name: String,
-    /// Generated workflow ID (`None` when validation failed before minting).
-    pub workflow_id: Option<Uuid>,
+pub enum WorkflowStartError {
+    /// Python `WorkflowStartValidationFailed`: the spec, its arguments or
+    /// the error passed to a retry was refused. Nothing was written.
+    /// `workflow_id` is `None` when the refusal came before the start had an
+    /// id.
+    ValidationFailed {
+        message: String,
+        workflow_name: String,
+        workflow_id: Option<Uuid>,
+    },
+    /// Python `WorkflowStartIdConflict`: the id holds the workflow
+    /// `existing_workflow_name`. Nothing was written.
+    IdConflict {
+        message: String,
+        workflow_name: String,
+        workflow_id: Uuid,
+        existing_workflow_name: String,
+    },
+    /// Python `WorkflowStartEnqueueFailed`: the connect, the schema install
+    /// or the start failed. Nothing was committed, or the commit reply was
+    /// lost: a start again with the same id finds the workflow.
+    EnqueueFailed {
+        message: String,
+        retryable: bool,
+        workflow_name: String,
+        workflow_id: Uuid,
+    },
+    /// Python `WorkflowStartAsyncContext`: a sync or blocking start on a
+    /// thread that runs an event loop or a tokio runtime. Nothing was
+    /// written; `retry_start` completes the start with `workflow_id`.
+    AsyncContext {
+        message: String,
+        workflow_name: String,
+        workflow_id: Uuid,
+    },
+}
+
+impl WorkflowStartError {
+    /// The catalog code of the variant. Pure.
+    pub fn code(&self) -> WorkflowStartErrorCode {
+        match self {
+            Self::ValidationFailed { .. } => WorkflowStartErrorCode::ValidationFailed,
+            Self::IdConflict { .. } => WorkflowStartErrorCode::WorkflowIdConflict,
+            Self::EnqueueFailed { .. } => WorkflowStartErrorCode::EnqueueFailed,
+            Self::AsyncContext { .. } => WorkflowStartErrorCode::AsyncContext,
+        }
+    }
+
+    /// What failed and why. Pure.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::ValidationFailed { message, .. }
+            | Self::IdConflict { message, .. }
+            | Self::EnqueueFailed { message, .. }
+            | Self::AsyncContext { message, .. } => message,
+        }
+    }
+
+    /// Whether a start again can succeed: the classification of the cause
+    /// of `EnqueueFailed`, else `false`. Pure.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::EnqueueFailed { retryable, .. } => *retryable,
+            Self::ValidationFailed { .. } | Self::IdConflict { .. } | Self::AsyncContext { .. } => {
+                false
+            }
+        }
+    }
+
+    /// The name of the workflow spec of the start. Pure.
+    pub fn workflow_name(&self) -> &str {
+        match self {
+            Self::ValidationFailed { workflow_name, .. }
+            | Self::IdConflict { workflow_name, .. }
+            | Self::EnqueueFailed { workflow_name, .. }
+            | Self::AsyncContext { workflow_name, .. } => workflow_name,
+        }
+    }
+
+    /// The id of the start: `None` only for a refusal before the start had
+    /// an id. Pure.
+    pub fn workflow_id(&self) -> Option<Uuid> {
+        match self {
+            Self::ValidationFailed { workflow_id, .. } => *workflow_id,
+            Self::IdConflict { workflow_id, .. }
+            | Self::EnqueueFailed { workflow_id, .. }
+            | Self::AsyncContext { workflow_id, .. } => Some(*workflow_id),
+        }
+    }
 }
 
 impl std::fmt::Display for WorkflowStartError {
@@ -67,12 +150,12 @@ impl std::fmt::Display for WorkflowStartError {
         write!(
             f,
             "[{}] {} (workflow={}, id={}, retryable={})",
-            self.code,
-            self.message,
-            self.workflow_name,
-            self.workflow_id
+            self.code(),
+            self.message(),
+            self.workflow_name(),
+            self.workflow_id()
                 .map_or_else(|| "<unminted>".to_owned(), |id| id.to_string()),
-            self.retryable,
+            self.retryable(),
         )
     }
 }
@@ -101,46 +184,39 @@ pub fn validate_start_retry(
     error: &WorkflowStartError,
     spec_name: &str,
 ) -> Result<Uuid, WorkflowStartError> {
-    match error.code {
-        WorkflowStartErrorCode::EnqueueFailed | WorkflowStartErrorCode::AsyncContext => {}
-        WorkflowStartErrorCode::BrokerNotConfigured
-        | WorkflowStartErrorCode::ValidationFailed
-        | WorkflowStartErrorCode::WorkflowIdConflict
-        | WorkflowStartErrorCode::LoopRunnerFailed
-        | WorkflowStartErrorCode::EventLoopLimit => {
-            return Err(WorkflowStartError {
-                code: WorkflowStartErrorCode::ValidationFailed,
+    let (workflow_name, workflow_id) = match error {
+        WorkflowStartError::EnqueueFailed {
+            workflow_name,
+            workflow_id,
+            ..
+        }
+        | WorkflowStartError::AsyncContext {
+            workflow_name,
+            workflow_id,
+            ..
+        } => (workflow_name, *workflow_id),
+        WorkflowStartError::ValidationFailed { .. } | WorkflowStartError::IdConflict { .. } => {
+            return Err(WorkflowStartError::ValidationFailed {
                 message: format!(
                     "retry_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got {}",
-                    error.code,
+                    error.code(),
                 ),
-                retryable: false,
                 workflow_name: spec_name.to_owned(),
-                workflow_id: error.workflow_id.clone(),
+                workflow_id: error.workflow_id(),
             });
         }
-    }
-
-    if error.workflow_name != spec_name {
-        return Err(WorkflowStartError {
-            code: WorkflowStartErrorCode::ValidationFailed,
+    };
+    if workflow_name != spec_name {
+        return Err(WorkflowStartError::ValidationFailed {
             message: format!(
-                "cross-workflow retry rejected: error from '{}', spec is '{}'",
-                error.workflow_name, spec_name,
+                "cross-workflow retry rejected: error from '{workflow_name}', spec is \
+                 '{spec_name}'",
             ),
-            retryable: false,
             workflow_name: spec_name.to_owned(),
-            workflow_id: error.workflow_id.clone(),
+            workflow_id: Some(workflow_id),
         });
     }
-
-    error.workflow_id.ok_or_else(|| WorkflowStartError {
-        code: WorkflowStartErrorCode::ValidationFailed,
-        message: "retry_start requires an error with a minted workflow ID".to_owned(),
-        retryable: false,
-        workflow_name: spec_name.to_owned(),
-        workflow_id: None,
-    })
+    Ok(workflow_id)
 }
 
 #[cfg(test)]
@@ -166,12 +242,11 @@ mod tests {
     #[test]
     fn workflow_start_error_display() {
         let workflow_id = Uuid::new_v4();
-        let err = WorkflowStartError {
-            code: WorkflowStartErrorCode::EnqueueFailed,
+        let err = WorkflowStartError::EnqueueFailed {
             message: "connection refused".to_owned(),
             retryable: true,
             workflow_name: "my_pipeline".to_owned(),
-            workflow_id: Some(workflow_id),
+            workflow_id,
         };
         let s = format!("{}", err);
         assert!(s.contains("ENQUEUE_FAILED"));
@@ -179,17 +254,71 @@ mod tests {
         assert!(s.contains(&workflow_id.to_string()));
     }
 
+    /// Each variant has the code of its Python class; only `EnqueueFailed`
+    /// can be retryable.
+    #[test]
+    fn each_variant_has_the_code_of_its_python_class() {
+        let workflow_id = Uuid::new_v4();
+        let name = || "wf".to_owned();
+        let cases = [
+            (
+                WorkflowStartError::ValidationFailed {
+                    message: "m".to_owned(),
+                    workflow_name: name(),
+                    workflow_id: None,
+                },
+                WorkflowStartErrorCode::ValidationFailed,
+                None,
+            ),
+            (
+                WorkflowStartError::IdConflict {
+                    message: "m".to_owned(),
+                    workflow_name: name(),
+                    workflow_id,
+                    existing_workflow_name: "other".to_owned(),
+                },
+                WorkflowStartErrorCode::WorkflowIdConflict,
+                Some(workflow_id),
+            ),
+            (
+                WorkflowStartError::EnqueueFailed {
+                    message: "m".to_owned(),
+                    retryable: false,
+                    workflow_name: name(),
+                    workflow_id,
+                },
+                WorkflowStartErrorCode::EnqueueFailed,
+                Some(workflow_id),
+            ),
+            (
+                WorkflowStartError::AsyncContext {
+                    message: "m".to_owned(),
+                    workflow_name: name(),
+                    workflow_id,
+                },
+                WorkflowStartErrorCode::AsyncContext,
+                Some(workflow_id),
+            ),
+        ];
+        for (error, code, id) in cases {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), "m");
+            assert_eq!(error.workflow_name(), "wf");
+            assert_eq!(error.workflow_id(), id);
+            assert!(!error.retryable());
+        }
+    }
+
     // -- validate_start_retry (ported from Python test_workflow_retry_start.py) --
 
     #[test]
     fn validate_retry_accepts_enqueue_failed() {
         let workflow_id = Uuid::new_v4();
-        let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::EnqueueFailed,
+        let error = WorkflowStartError::EnqueueFailed {
             message: "DB connection lost".to_owned(),
             retryable: true,
             workflow_name: "test-wf".to_owned(),
-            workflow_id: Some(workflow_id),
+            workflow_id,
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_ok());
@@ -199,12 +328,10 @@ mod tests {
     #[test]
     fn validate_retry_accepts_async_context() {
         let workflow_id = Uuid::new_v4();
-        let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::AsyncContext,
+        let error = WorkflowStartError::AsyncContext {
             message: "a blocking start on a runtime thread".to_owned(),
-            retryable: false,
             workflow_name: "test-wf".to_owned(),
-            workflow_id: Some(workflow_id),
+            workflow_id,
         };
         let result = validate_start_retry(&error, "test-wf");
         assert_eq!(result.unwrap(), workflow_id);
@@ -212,82 +339,59 @@ mod tests {
 
     #[test]
     fn validate_retry_rejects_async_context_of_another_workflow() {
-        let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::AsyncContext,
+        let error = WorkflowStartError::AsyncContext {
             message: "a blocking start on a runtime thread".to_owned(),
-            retryable: false,
             workflow_name: "other-workflow".to_owned(),
-            workflow_id: Some(Uuid::new_v4()),
+            workflow_id: Uuid::new_v4(),
         };
         let result = validate_start_retry(&error, "my-workflow");
         let err = result.unwrap_err();
-        assert_eq!(err.code, WorkflowStartErrorCode::ValidationFailed);
-        assert!(err.message.contains("cross-workflow"));
-    }
-
-    #[test]
-    fn validate_retry_rejects_broker_not_configured() {
-        let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::BrokerNotConfigured,
-            message: "No broker".to_owned(),
-            retryable: false,
-            workflow_name: "test-wf".to_owned(),
-            workflow_id: Some(Uuid::new_v4()),
-        };
-        let result = validate_start_retry(&error, "test-wf");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, WorkflowStartErrorCode::ValidationFailed);
-        assert!(err.message.contains("ENQUEUE_FAILED"));
+        assert_eq!(err.code(), WorkflowStartErrorCode::ValidationFailed);
+        assert!(err.message().contains("cross-workflow"));
     }
 
     #[test]
     fn validate_retry_rejects_validation_failed() {
-        let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::ValidationFailed,
+        let error = WorkflowStartError::ValidationFailed {
             message: "Bad DAG".to_owned(),
-            retryable: false,
             workflow_name: "test-wf".to_owned(),
             workflow_id: Some(Uuid::new_v4()),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().code,
-            WorkflowStartErrorCode::ValidationFailed,
-        );
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), WorkflowStartErrorCode::ValidationFailed);
+        assert!(err.message().contains("ENQUEUE_FAILED"));
     }
 
     #[test]
     fn validate_retry_rejects_workflow_id_conflict() {
-        let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::WorkflowIdConflict,
+        let error = WorkflowStartError::IdConflict {
             message: "id belongs to another workflow".to_owned(),
-            retryable: false,
             workflow_name: "test-wf".to_owned(),
-            workflow_id: Some(Uuid::new_v4()),
+            workflow_id: Uuid::new_v4(),
+            existing_workflow_name: "other-wf".to_owned(),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err().code,
+            result.unwrap_err().code(),
             WorkflowStartErrorCode::ValidationFailed,
         );
     }
 
     #[test]
     fn validate_retry_rejects_cross_workflow_name() {
-        let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::EnqueueFailed,
+        let error = WorkflowStartError::EnqueueFailed {
             message: "DB connection lost".to_owned(),
             retryable: true,
             workflow_name: "other-workflow".to_owned(),
-            workflow_id: Some(Uuid::new_v4()),
+            workflow_id: Uuid::new_v4(),
         };
         let result = validate_start_retry(&error, "my-workflow");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.code, WorkflowStartErrorCode::ValidationFailed);
-        assert!(err.message.contains("cross-workflow"));
+        assert_eq!(err.code(), WorkflowStartErrorCode::ValidationFailed);
+        assert!(err.message().contains("cross-workflow"));
     }
 }

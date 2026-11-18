@@ -199,7 +199,7 @@ The check runs without a database. A worker skips it: a worker never sends a sch
 | `ManifestRefused { cause }` | The core refused the scheduler manifest: a value outside its bound, a pattern that breaks its rules, or a repeated schedule name. Nothing started |
 | `StartRefused { schedule, reason }` | The start refused `schedule` before any state write: a time zone that the core does not know, a send that the rules refuse, or a pattern with no slot after the database time |
 | `StartFailed { message, retryable }` | The connect, the schema install or the client family check failed. No schedule state was written |
-| `RuntimeUnavailable(..)` | The process runtime of the core cannot listen for the stop signals. Nothing started |
+| `RuntimeUnavailable(RuntimeStartFailed)` | The operating system refused the threads of the core's process runtime, which listens for the stop signals. Nothing started; a later run tries the start again. In a fork, `run_scheduler` panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals) |
 
 Several schedulers can run against one database: each fire locks the state row of its schedule, so a second scheduler writes nothing for a slot that the first one fired.
 

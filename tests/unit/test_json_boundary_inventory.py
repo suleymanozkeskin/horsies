@@ -252,6 +252,8 @@ class TestRuntimeInventory:
         )
         assert parsing == Counter({
             (_CODEC_MODULE, 'loads_json', 'loads'): 1,
+            # The JSON text that the core writes from its model of a monitoring read.
+            (_CODEC_MODULE, 'validate_core_model_json', 'validate_json'): 1,
             ('python/horsies/core/codec/typed.py', '_validate_wire', 'validate_json'): 1,
         })
 

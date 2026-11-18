@@ -357,8 +357,12 @@ async fn run_checkout(
 
 ### `WorkflowStartError`
 
-Fields: `code`, `message`, `retryable`, `workflow_name`, `workflow_id`
-(`Option<Uuid>`).
+An enum with one variant per state: `ValidationFailed { message,
+workflow_name, workflow_id: Option<Uuid> }`, `IdConflict { message,
+workflow_name, workflow_id, existing_workflow_name }`, `EnqueueFailed {
+message, retryable, workflow_name, workflow_id }` and `AsyncContext {
+message, workflow_name, workflow_id }`. The methods `code()`, `message()`,
+`retryable()`, `workflow_name()` and `workflow_id()` read every variant.
 
 | `WorkflowStartErrorCode` | When |
 |---|---|
@@ -369,8 +373,8 @@ Fields: `code`, `message`, `retryable`, `workflow_name`, `workflow_id`
 
 `WorkflowFunction::retry_start(&error)` starts again with the error's
 `workflow_id`. It takes an `EnqueueFailed` or an `AsyncContext` error. It
-refuses with `ValidationFailed` an error with another code, an error of
-another workflow name, and an error with no workflow id. For a template, call `start_with_id(params, workflow_id)`
+refuses with `ValidationFailed` an error with another code and an error of
+another workflow name. For a template, call `start_with_id(params, workflow_id)`
 with the error's id.
 
 ## `WorkflowHandle<T>`
@@ -413,8 +417,10 @@ with the error's id.
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed |
 
 `HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
-`pause`, `resume`) has `code`, `message`, `retryable`, `workflow_id`. The
-operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
+`pause`, `resume`) is an enum with one variant per state; every variant
+has `message` and `workflow_id`, and `DbOperationFailed` has `retryable`.
+The methods `code()`, `message()`, `retryable()`, `workflow_id()` and
+`failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
 `StoredDataInvalid` (`status`, `tasks`, `resume`), and
 `ResumeRecoveryFailed` (`resume` committed and the work after it failed:
 the workflow is RUNNING). A blocking form (`handle.blocking()`) on a thread

@@ -36,12 +36,13 @@ use futures_util::StreamExt;
 use horsies_core::handle::CoreHandle;
 use horsies_core::web::{
     route_access, AccessGrant, AccessNeed, EventFrames, EventStreamItem, MonitoringHandler,
-    MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, ResumeChildren, Verdict,
-    HEARTBEAT, MAX_REQUEST_BODY_BYTES,
+    MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict, HEARTBEAT,
+    MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use tokio::sync::OnceCell;
 
+use crate::process_state::refuse_in_a_fork;
 use crate::workflow::WorkflowRegistry;
 use crate::Horsies;
 
@@ -121,7 +122,13 @@ impl<P> Mount<P> {
     /// handle. A failed build is not kept.
     ///
     /// Errors: the [`BrokerError`] of the handle's connect.
+    ///
+    /// # Panics
+    ///
+    /// At every request, in a process that was forked without `exec` after
+    /// the core's process runtime started. Nothing ran.
     async fn handler(&self) -> Result<&MonitoringHandler, BrokerError> {
+        refuse_in_a_fork(format_args!("the monitoring request"));
         self.handler.get_or_try_init(|| self.build_handler()).await
     }
 
@@ -133,10 +140,9 @@ impl<P> Mount<P> {
         let broker = self.handle.broker().await?;
         let registry = Arc::clone(&self.workflows);
         let source: Arc<dyn ChildSpecSource> = registry;
-        let children = ResumeChildren::Client(source);
         Ok(MonitoringHandler::new(
             broker,
-            children,
+            source,
             self.settings.clone(),
         ))
     }

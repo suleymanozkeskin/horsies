@@ -17,7 +17,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy.exc import OperationalError
 
-from horsies._core import CoreError
+from horsies._core import CoreStartFailed
 from horsies.core.app import Horsies
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
@@ -916,11 +916,13 @@ class TestCheckLiveWorkerConnections:
     def test_a_core_that_cannot_run_the_call_is_one_unread_limit_error(self) -> None:
         app = _app({'small': WorkerProfile(isolated=IsolatedChildren(count=1))})
 
-        with _live_core(refusals=CoreError('the core stopped')) as built:
+        with _live_core(
+            refusals=CoreStartFailed('the core runtime could not start'),
+        ) as built:
             errors = app.check(live=True)
 
         assert [(error.code, error.notes) for error in errors] == [
-            (ErrorCode.CHECK_WORKER_CONNECTIONS, ['the core stopped']),
+            (ErrorCode.CHECK_WORKER_CONNECTIONS, ['the core runtime could not start']),
         ]
         assert errors[0].message == 'the server connection limit could not be read'
         assert built[0].closes == 1

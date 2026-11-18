@@ -396,6 +396,8 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key
   with another command. Nothing was written.
 - `error.code()` returns the `TaskSendErrorCode`.
+- A send in a fork panics, as every call that runs on the core: see
+  `SKILL.md`, Result Types.
 
 ```rust
 use horsies::{task, TaskError, TaskFunction, TaskHandle, TaskSendError};
@@ -516,11 +518,11 @@ The process-wide starts have the blocking functions
   returns the `ASYNC_CONTEXT` member of its catalog:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
   `retry_send(&error).await` completes the same send),
-  `ReadError::AsyncContext`, a `BrokerOperationError` with
-  `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
-  `WorkflowStartErrorCode::AsyncContext` (with the `workflow_id` of the
+  `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
+  `CheckReport` with `HRS-217`,
+  `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
   start; `retry_start(&error).await` completes the same start from async
-  code), `HandleErrorCode::AsyncContext`, or
+  code), `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
   task, so a blocking send or workflow start works there. A result wait in

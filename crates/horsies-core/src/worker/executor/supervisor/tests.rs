@@ -81,6 +81,52 @@ fn exit_codes_are_read_in_the_protocol() {
     );
     assert!(ReapedExit::KilledBySignal(libc::SIGKILL).is_sigkill());
     assert!(!ReapedExit::ExitedWith(libc::SIGKILL).is_sigkill());
+    assert_eq!(
+        ReapedExit::ExitedWith(80).meaning(),
+        ExitMeaning::Protocol(ChildExitCode::CoreStopped)
+    );
+}
+
+/// A child that held no task and ended with the core-stopped code is
+/// replaced with an error log; every other end keeps its path.
+#[test]
+fn an_end_without_a_task_names_a_stopped_core_only() {
+    assert_eq!(
+        EndWithoutTask::of(exited(ChildExitCode::CoreStopped.code())),
+        EndWithoutTask::CoreStopped
+    );
+    let others = [
+        exited(0),
+        exited(1),
+        exited(ChildExitCode::ParentGone.code()),
+        exited(ChildExitCode::BootFailed.code()),
+        exited(ChildExitCode::ChildHookFailed.code()),
+        killed(),
+        ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGSEGV)),
+        ChildExit::ReapedElsewhere,
+        ChildExit::ExitUnknown,
+    ];
+    for exit in others {
+        assert_eq!(EndWithoutTask::of(exit), EndWithoutTask::Other, "{exit}");
+    }
+}
+
+/// A child that dies with the core-stopped code before its ready frame is a
+/// boot failure lost before ready, as the other codes of a child.
+#[test]
+fn a_core_stopped_exit_before_ready_is_lost_before_ready() {
+    let exit = exited(ChildExitCode::CoreStopped.code());
+    let cause = cause_of(boot_end_of(BootReply::Lost(lost(
+        LossCause::ChildDied,
+        exit,
+    ))));
+    assert_eq!(
+        cause,
+        BootFailureCause::LostBeforeReady {
+            loss: LossCause::ChildDied,
+            exit,
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +593,31 @@ async fn a_kill_after_the_reap_refuses_a_pid_that_a_live_child_holds() {
         KillOutcome::Sent
     );
     assert_eq!(wait_for_exit(&mut live.exit, TEST_WAIT).await, killed());
+    stop(spawner);
+}
+
+/// Python `TestKillBeforeSession::test_a_reaped_child_is_left_alone`: the
+/// kill of a reaped child signals its session only, never the bare pid. A
+/// process outside the spawner that holds the pid and leads no session
+/// keeps running.
+#[tokio::test]
+async fn a_kill_after_the_reap_leaves_a_process_that_holds_the_pid_alone() {
+    let spawner = Spawner::start().unwrap();
+    let mut holder = std::process::Command::new("/bin/sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let reaped = ChildId::reaped_child_with_pid(ProcessId::new(holder.id()).unwrap());
+
+    assert_eq!(
+        spawner.handle().kill_session(reaped).await,
+        KillOutcome::SessionGone
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(holder.try_wait().unwrap().is_none());
+    holder.kill().unwrap();
+    let _status = holder.wait().unwrap();
     stop(spawner);
 }
 

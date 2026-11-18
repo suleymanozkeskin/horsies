@@ -15,10 +15,11 @@ from typing import Final
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStopped,
+    CoreStartFailed,
     MonitoringFailed,
     MonitoringJson,
     TaskBreakdownQuery,
@@ -253,13 +254,25 @@ class TestFailures:
         with pytest.raises(AssertionError, match='EVENT_LOOP_LIMIT'):
             await _list(_record(MonitoringFailed, code='EVENT_LOOP_LIMIT', message=MESSAGE, retryable=False))
 
+    @pytest.mark.asyncio
+    async def test_a_core_text_that_does_not_match_the_model_raises_its_error(self) -> None:
+        text = '{"rows": []}'
+        with pytest.raises(ValidationError) as expected:
+            _ = TaskListPage.model_validate_json(text)
+
+        with pytest.raises(ValidationError) as raised:
+            _ = await _list(_record(MonitoringJson, json=text))
+
+        assert raised.value.title == expected.value.title == 'TaskListPage'
+        assert raised.value.errors(include_url=False) == expected.value.errors(include_url=False)
+
     @pytest.mark.parametrize(
         ('raised', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.monitoring_list_tasks_async', 65_536), True),
-            (CoreStopped('core task', 'panic'), False),
+            (CoreStartFailed('the core runtime could not start'), False),
         ],
-        ids=['too-many-calls', 'stopped'],
+        ids=['too-many-calls', 'start-failed'],
     )
     @pytest.mark.asyncio
     async def test_a_core_boundary_error_is_a_database_failure(

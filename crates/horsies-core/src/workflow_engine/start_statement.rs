@@ -13,6 +13,7 @@
 //! (`horsies_workflow_child_start`, `child_start.rs`).
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -26,7 +27,7 @@ use crate::workflow_engine::args_merge::{
     ArgsFromRead, ChildBuildInput, ChildStaticInput, DepResult, MergedNodeKind,
 };
 use crate::workflow_engine::child_spec::{
-    ChildSpecRequest, ChildSpecSource, ClientChildSpec, ClientSpec, NodeFailure, QueueClasses,
+    queue_class_key, ChildSpecRequest, ChildSpecSource, ClientChildSpec, ClientSpec, NodeFailure,
 };
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
@@ -35,7 +36,7 @@ use crate::workflow_engine::start::{
     stored_queue_and_priority, stored_workflow_ctx_from, ChildSpecError,
 };
 use crate::workflow_engine::steps::{
-    run_alone, run_in_transaction, step_row_select, step_rows, ChildBuild, ChildStartSource,
+    run_alone, run_in_transaction, step_row_select, step_rows, ChildStartSource,
     OwedParentAdvances, StepContractError, StepDisposition,
 };
 
@@ -176,8 +177,9 @@ pub(crate) struct StartArguments {
 /// One workflow of the tree, before its rows are pushed.
 struct TreeWorkflow<'a> {
     spec: Cow<'a, WorkflowSpec>,
-    /// Where the retention class of each task queue of `spec` comes from.
-    classes: QueueClasses<'a>,
+    /// The retention class key of each task queue of `spec`, by queue name,
+    /// as the client resolved it.
+    classes: Cow<'a, BTreeMap<String, String>>,
     workflow_id: Uuid,
     /// The parent workflow and the index of its sub-workflow node; `None`
     /// for the top-level workflow.
@@ -187,12 +189,12 @@ struct TreeWorkflow<'a> {
 
 /// What the host build made of the child of a sub-workflow node.
 pub(crate) enum ChildBuildOutcome<'a> {
-    /// The child spec, at its depth, with the source of its task queues'
-    /// retention classes.
+    /// The child spec, at its depth, with the retention class key of each of
+    /// its task queues that the client resolved.
     Built {
         spec: WorkflowSpec,
         depth: i32,
-        classes: QueueClasses<'a>,
+        classes: Cow<'a, BTreeMap<String, String>>,
     },
     /// The child cannot start: the node fails with this error, and its
     /// workflow's `on_error` applies (Python's node-level failure,
@@ -232,12 +234,12 @@ pub(crate) async fn client_start_arguments(
     tree_arguments(
         TreeWorkflow {
             spec: Cow::Borrowed(&spec.spec),
-            classes: QueueClasses::Client(Cow::Borrowed(&spec.queue_classes)),
+            classes: Cow::Borrowed(&spec.queue_classes),
             workflow_id,
             parent: None,
             depth: 0,
         },
-        ChildBuild::Client(source),
+        source,
     )
     .await
 }
@@ -245,7 +247,7 @@ pub(crate) async fn client_start_arguments(
 /// The child workflow of an owed child start, before its rows are built.
 pub(crate) struct ChildTree<'a> {
     pub(crate) spec: WorkflowSpec,
-    pub(crate) classes: QueueClasses<'a>,
+    pub(crate) classes: Cow<'a, BTreeMap<String, String>>,
     pub(crate) child_workflow_id: Uuid,
     pub(crate) parent_workflow_id: Uuid,
     pub(crate) parent_task_index: i32,
@@ -259,7 +261,7 @@ pub(crate) struct ChildTree<'a> {
 /// [`client_start_arguments`].
 pub(crate) async fn child_tree_arguments(
     child: ChildTree<'_>,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<StartArguments, WorkflowError> {
     tree_arguments(
         TreeWorkflow {
@@ -278,7 +280,7 @@ pub(crate) async fn child_tree_arguments(
 /// child only below the depth limit, so the work list ends.
 async fn tree_arguments<'a>(
     top: TreeWorkflow<'a>,
-    build: ChildBuild<'a>,
+    build: &'a dyn ChildSpecSource,
 ) -> Result<StartArguments, WorkflowError> {
     let mut arguments = StartArguments::default();
     let mut pending = vec![top];
@@ -377,7 +379,7 @@ pub(crate) async fn build_child<'a>(
     node: ChildOfNode<'_>,
     input: ChildInput,
     params: SubWorkflowParams,
-    build: ChildBuild<'a>,
+    build: &'a dyn ChildSpecSource,
 ) -> Result<ChildBuildOutcome<'a>, WorkflowError> {
     let depth = match child_workflow_depth(
         node.parent_depth,
@@ -399,21 +401,19 @@ pub(crate) async fn build_child<'a>(
         args_from: input.args_from,
         sources: input.sources,
     };
-    match build {
-        ChildBuild::Client(source) => match source.child_spec(request).await? {
-            ClientChildSpec::Built(client) => Ok(ChildBuildOutcome::Built {
-                spec: client.spec,
-                depth,
-                classes: QueueClasses::Client(Cow::Owned(client.queue_classes)),
-            }),
-            ClientChildSpec::NodeFails {
-                message,
-                failure_result,
-            } => Ok(ChildBuildOutcome::NodeFails(NodeFailure::Client {
-                message,
-                failure_result,
-            })),
-        },
+    match build.child_spec(request).await? {
+        ClientChildSpec::Built(client) => Ok(ChildBuildOutcome::Built {
+            spec: client.spec,
+            depth,
+            classes: Cow::Owned(client.queue_classes),
+        }),
+        ClientChildSpec::NodeFails {
+            message,
+            failure_result,
+        } => Ok(ChildBuildOutcome::NodeFails(NodeFailure::Client {
+            message,
+            failure_result,
+        })),
     }
 }
 
@@ -806,7 +806,7 @@ impl StartArguments {
         &mut self,
         workflow_id: Uuid,
         node: &AnyNode,
-        classes: &QueueClasses<'_>,
+        classes: &BTreeMap<String, String>,
     ) -> Result<(), WorkflowError> {
         let (queue, priority) = stored_queue_and_priority(node)?;
         let merged_task_options = merge_good_until_into_options(
@@ -820,7 +820,7 @@ impl StartArguments {
             false => Some(node_task_facts(
                 node,
                 merged_task_options.as_deref(),
-                Some(classes.class_key(queue)?),
+                Some(queue_class_key(classes, queue)?),
             )?),
         };
         let dependencies = node
@@ -988,7 +988,7 @@ pub(crate) async fn start_tree(
     broker: &PostgresBroker,
     arguments: &StartArguments,
     sent_at: DateTime<Utc>,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<StartedTree, WorkflowError> {
     let statement = start_statement(arguments, &sent_at);
     let (disposition, detail, parent_advances) = match arguments.has_failed_records() {

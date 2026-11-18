@@ -1,7 +1,7 @@
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
 use crate::core::config::retention::PausedWorkflowAge;
-use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
+use crate::core::workflow::handle_types::{HandleOperationError, HandleResult};
 #[cfg(test)]
 use crate::test_support::child_specs::TestChildSpecs;
 #[cfg(test)]
@@ -12,7 +12,7 @@ use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::steps::{
-    self, advance_parents, run_alone, CancelOutcome, ChildBuild, PauseOutcome, ResumeDisposition,
+    self, advance_parents, run_alone, CancelOutcome, PauseOutcome, ResumeDisposition,
     StepContractError,
 };
 
@@ -115,34 +115,37 @@ fn to_handle_error(e: WorkflowError, workflow_id: Uuid) -> HandleOperationError 
 ///   `args_from` merge refuses, a built child spec that the tree arguments refuse); Python's resume lets
 ///   every exception other than a database error propagate.
 pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> HandleOperationError {
-    let (code, retryable) = match e {
-        WorkflowError::WorkflowNotFound { .. } => (HandleErrorCode::WorkflowNotFound, false),
-        WorkflowError::Database(error) => (
-            HandleErrorCode::DbOperationFailed,
-            crate::broker::is_retryable_sqlx_error(error),
-        ),
-        WorkflowError::Broker(error) => (HandleErrorCode::DbOperationFailed, error.is_retryable()),
+    let db_operation_failed = |retryable: bool| HandleOperationError::DbOperationFailed {
+        message: e.to_string(),
+        retryable,
+        workflow_id,
+        cause: e.failure_cause(),
+    };
+    match e {
+        WorkflowError::WorkflowNotFound { .. } => HandleOperationError::WorkflowNotFound {
+            message: e.to_string(),
+            workflow_id,
+        },
+        WorkflowError::Database(error) => {
+            db_operation_failed(crate::broker::is_retryable_sqlx_error(error))
+        }
+        WorkflowError::Broker(error) => db_operation_failed(error.is_retryable()),
         // The step rolled back: a build that did not run is retryable; an
         // interrupted one, or one that raised, is not. The Python client
         // raises the interrupt, or the exception of a start or a resume,
         // again to its caller before it reads this record.
-        WorkflowError::ChildSpecSource(error) => {
-            (HandleErrorCode::DbOperationFailed, error.is_retryable())
-        }
+        WorkflowError::ChildSpecSource(error) => db_operation_failed(error.is_retryable()),
         WorkflowError::InvalidStatus(_) | WorkflowError::Serialization(_) => {
-            (HandleErrorCode::StoredDataInvalid, false)
+            HandleOperationError::StoredDataInvalid {
+                message: e.to_string(),
+                workflow_id,
+                cause: e.failure_cause(),
+            }
         }
         WorkflowError::Validation(_) | WorkflowError::StepContract(_) => panic!(
             "workflow handle operation on workflow {workflow_id} failed with an error that has no \
              handle catalog entry (a defect): {e}"
         ),
-    };
-    HandleOperationError {
-        code,
-        message: e.to_string(),
-        retryable,
-        workflow_id,
-        cause: e.failure_cause(),
     }
 }
 
@@ -412,7 +415,7 @@ pub(crate) async fn resume_client_workflow(
     workflow_id: Uuid,
     source: &dyn ChildSpecSource,
 ) -> HandleResult<bool> {
-    Box::pin(resume_with(broker, workflow_id, ChildBuild::Client(source)))
+    Box::pin(resume_with(broker, workflow_id, source))
         .await
         .map_err(|failure| failure.into_handle_error(workflow_id))
 }
@@ -451,7 +454,7 @@ impl ResumeFailure {
 pub(crate) async fn resume_with(
     broker: &PostgresBroker,
     workflow_id: Uuid,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<bool, ResumeFailure> {
     admit_workflow_write(broker, workflow_id)
         .await
@@ -495,12 +498,10 @@ pub(crate) async fn resume_with(
 /// The error of a resume that committed and whose work after the commit failed: `RESUME_RECOVERY_FAILED`, not
 /// retryable (the workflow is RUNNING).
 fn resume_recovery_failed(workflow_id: Uuid, error: &WorkflowError) -> HandleOperationError {
-    HandleOperationError {
-        code: HandleErrorCode::ResumeRecoveryFailed,
+    HandleOperationError::ResumeRecoveryFailed {
         message: format!(
             "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
         ),
-        retryable: false,
         workflow_id,
         cause: error.failure_cause(),
     }
@@ -1199,7 +1200,7 @@ mod p7_lifecycle_tests {
         );
         let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
             &crate::broker::PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             parent_id,
         )
         .await
@@ -1316,7 +1317,7 @@ mod p7_lifecycle_tests {
 
         let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
             &crate::broker::PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             parent_id,
         )
         .await
@@ -1499,6 +1500,7 @@ mod cancel_lock_order_tests {
 #[cfg(test)]
 mod cancel_tree_tests {
     use super::*;
+    use crate::core::workflow::handle_types::HandleErrorCode;
     use serial_test::serial;
 
     async fn seed_workflow(pool: &PgPool, id: Uuid, status: &str, parent: Option<Uuid>) {
@@ -1633,9 +1635,9 @@ mod cancel_tree_tests {
             .unwrap();
 
         let error = outcome.unwrap_err();
-        assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
+        assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
         // RAISE EXCEPTION is SQLSTATE P0001, which is not a retryable class.
-        assert!(!error.retryable);
+        assert!(!error.retryable());
         assert_eq!(
             workflow_state(&pool, parent_id).await,
             ("RUNNING".to_owned(), false)
@@ -1657,25 +1659,25 @@ mod cancel_tree_tests {
             &WorkflowError::Database(sqlx::Error::PoolTimedOut),
             workflow_id,
         );
-        assert_eq!(transient.code, HandleErrorCode::DbOperationFailed);
-        assert!(transient.retryable);
+        assert_eq!(transient.code(), HandleErrorCode::DbOperationFailed);
+        assert!(transient.retryable());
         let persistent = handle_operation_error(
             &WorkflowError::Database(sqlx::Error::RowNotFound),
             workflow_id,
         );
-        assert_eq!(persistent.code, HandleErrorCode::DbOperationFailed);
-        assert!(!persistent.retryable);
+        assert_eq!(persistent.code(), HandleErrorCode::DbOperationFailed);
+        assert!(!persistent.retryable());
         let stored = handle_operation_error(
             &WorkflowError::InvalidStatus("CORRUPT".to_owned()),
             workflow_id,
         );
-        assert_eq!(stored.code, HandleErrorCode::StoredDataInvalid);
-        assert!(!stored.retryable);
+        assert_eq!(stored.code(), HandleErrorCode::StoredDataInvalid);
+        assert!(!stored.retryable());
         let missing = handle_operation_error(
             &WorkflowError::WorkflowNotFound { workflow_id },
             workflow_id,
         );
-        assert_eq!(missing.code, HandleErrorCode::WorkflowNotFound);
+        assert_eq!(missing.code(), HandleErrorCode::WorkflowNotFound);
     }
 }
 
@@ -1684,6 +1686,7 @@ mod client_family_tests {
     //! A workflow operation of a handle checks the client family before its first write.
     use super::*;
     use crate::broker::client_family::ClientFamily;
+    use crate::core::workflow::handle_types::HandleErrorCode;
     use serial_test::serial;
 
     async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
@@ -1728,12 +1731,12 @@ mod client_family_tests {
                 .expect_err("cancel of another family"),
         ];
         for refused in refusals {
-            assert_eq!(refused.code, HandleErrorCode::DbOperationFailed);
-            assert!(!refused.retryable);
+            assert_eq!(refused.code(), HandleErrorCode::DbOperationFailed);
+            assert!(!refused.retryable());
             assert!(
-                refused.message.contains("its own family"),
+                refused.message().contains("its own family"),
                 "{}",
-                refused.message
+                refused.message()
             );
         }
         assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");

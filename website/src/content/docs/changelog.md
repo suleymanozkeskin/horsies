@@ -3,7 +3,7 @@ title: Changelog
 section: site
 summary: >-
   Notable changes per release. 0.7.0 runs tasks in three execution modes (isolated, shared async and shared thread children), starts each worker with a named profile (`--profile`), and takes fewer round trips per task (schema v61). 0.6.1 identifies a retention class by its period (`standard_<days>d`; queues with one period share one class; `retention_classes` becomes `retention_periods` and `with_options(retention_class_key=...)` becomes `with_options(retention=...)`; a period is whole days from 1 to 1825; no schema change) and makes the windowed monitoring reads take a bounded `MonitoringWindow`; 0.6.0 runs each task in a child process that the worker owns (a crash, an out-of-memory kill or a timeout ends only that task, and on Linux a preload parent forks each child in milliseconds), holds every value to its declared type from definition to read, makes the JSON boundary strict, closes the error types of the public API into unions of frozen variants, bounds `timeout_ms` at 4,294,967,295 ms, gives each startup error a code and a fix, and advances the schema to v52 (stop every process before the upgrade); 0.5.5 gives each open event loop its own broker resource set (at most 5 open loops besides the sync runner loop; a call from one more returns `EVENT_LOOP_LIMIT`), runs sync workflow calls on the broker's own sync runner, and replaces `PostgresBroker.session_factory`, `.async_engine` and `.listener` with `select_resources()`; 0.5.4 advances the schema from v36 to v51 (stop every process before the first 0.5.4 start; v37 refuses unknown workflow node statuses) — a FAILED workflow stores no result, enqueue validates the whole `retry_policy`, `tcp_user_timeout_ms` (default 30 s) bounds writes to a dead connection, partition maintenance works under any session time zone, a pause that races a resume no longer strands a node, worker start no longer fails on uneven child start times, and the claim, recovery, result-read, finalize and history-move paths run fewer and cheaper statements; 0.5.3 uses the session-capable database path for partition maintenance, bounds its lock waits, reduces healthy coverage to at most three statements, verifies exact partition and index conformance, bounds global recovery work with durable cursors and schema v36 indexes, and reduces fresh unkeyed enqueue to one SQL round trip; 0.5.2 requires an OFFLINE schema v35 upgrade for existing 0.5.0/0.5.1 databases (stop every unit; `forever` converts from an unbounded LIST leaf to a RANGE-partitioned parent, and the cutover attestation must commit before restart) — it also sets retention per queue (`AppConfig.retention.queue_retention`, resolved on every enqueue path and snapshotted at send), stops one missing history leaf from failing every finalize, bounds partition detach and finalize, and fixes monitoring pagination, facet totals and nullable sorting; 0.5.1 lets a deployment declare its own finite retention classes (`RecoveryConfig.retention_classes`, key plus duration, registered by the worker maintenance pass, immutable once registered, duration a minimum at daily partition granularity) and widens send-time retention validation to the declared set; 0.5.0 is the live/history split (schema v34) — terminal task records move to a partitioned history archive at terminalization, the live table holds only live rows, retention drops whole partitions driven by the worker maintenance pass, task and workflow identity become native UUIDv7, `retention_class_key` at enqueue chooses the retention class (30-day default; explicit None for forever), manual terminal retry is replaced by the rerun API with recorded lineage, monitoring reads resolve across live and history behind a bounded terminal window, `WorkflowStatus.EXPIRED` and opt-in paused-workflow auto-cancel land, and existing deployments require an offline cutover (or a fresh database); 0.4.7 makes terminal writers own the complete final-attempt summary (schema v26) — a stale `failed_reason` left by automatic retry is no longer carried onto completed, failed, or expired rows, effective fleet-wide once the first upgraded process migrates the schema; 0.4.6 consolidates terminal task transitions behind fifteen typed database functions (schema v25), records the operation that ended each task, enforces terminal timestamps after the required per-deployment 0.4.5 rolling rollout, and honors sub-second staleness thresholds exactly; 0.4.5 is a task lifecycle release (schema v17, additive) — workflow pause and cancellation stop terminalizing a task whose claim has been replaced (the abandon or cancel now applies only to the claim generation it was issued against, fenced per task on batches), and `horsies_tasks.terminal_at` records the canonical terminal instant on every terminal transition from this release forward, with the CHECK constraint tying it to terminal status deferred to 0.4.6 so a rolling restart cannot fail a pre-0.4.5 worker's finalize; 0.4.4 is a workflow-retention performance release — workflow-batched retention deletes with a once-per-statement live-task guard (a full backlog drain drops ~24x), clearer finalize logs, and a typed-path fix in the agent skill; 0.4.3 is a monitoring read-path performance release (schema v16) — task-list sort and facet indexes (`idx_horsies_tasks_enqueued_at`, `idx_horsies_tasks_task_name`), list pages stop fetching task payload columns, the unfiltered list total becomes a planner estimate, and the web UI refreshes aggregates on timers instead of per task event; 0.4.2 is a retention and payload-path performance release (schema v15) — per-queue terminal retention windows (`queue_terminal_record_retention_hours`, validated against declared queues), a payload-size guardrail (`AppConfig.payload`: warn at 1 MiB by default, optional enqueue reject with `PAYLOAD_TOO_LARGE`), configurable retention sweep cadence and batch size (defaults change from hourly/5,000-row to 5-minute/500-row), set-wise `task_attempts` purge replacing the per-row FK cascade in retention, a narrowed result-wait terminal fetch that stops shipping args/kwargs with result polls, and a ~60 s cadence for the scheduler's missing-row existence check; 0.4.1 stops a timeout kill during process-pool warmup from failing the executor restart and exiting the worker (a backlog of timeout-prone tasks could crash-loop it), publishes replacement pools only after they are fully warm, splits ensure-vs-replace so a dispatch request can no longer destroy a freshly built pool, and bounds kill-shaped warmup interruptions with a typed retry; 0.4.0 ships the web monitoring dashboard — the `horsies[web]` extra with a mountable FastAPI app and `horsies web` CLI (bundled SPA, fail-closed auth, no-DDL schema probing, SSE live updates), the typed `horsies.monitoring` query API with registry-free task cancel/retry, the Acme Clothing showcase application, and a codec fix so `args_from` envelopes decode for `TaskResult | None` targets under any/quorum joins; 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
-related: [./migrations/migration-to-0-7-0, ./migrations/migration-to-0-6-0, ./migrations/migration-to-0-5-0, ./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
+related: [./migrations/migration-to-0-8-0, ./migrations/migration-to-0-7-0, ./migrations/migration-to-0-6-0, ./migrations/migration-to-0-5-0, ./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
 tags: [changelog, releases, breaking-changes, 0.7.0, 0.6.1, 0.6.0, 0.5.5, 0.5.4, 0.5.3, 0.5.2, 0.5.1, 0.5.0, 0.4.7, 0.4.6, 0.4.5, 0.4.4, 0.4.3, 0.4.2, 0.4.1, 0.4.0, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
@@ -14,7 +14,9 @@ there is no migration contract between pre-1.0 versions.
 ## Unreleased
 
 Draft notes of 0.8.0. The Python client and the Rust client run on one core,
-written in Rust, on a new baseline schema.
+written in Rust, on a new baseline schema. Read the
+[migration guide to 0.8.0](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-8-0/)
+before you upgrade a 0.7 deployment.
 
 ### Changed
 
@@ -41,9 +43,9 @@ written in Rust, on a new baseline schema.
   returns its failure code with the core error as `exception`:
   `TooManyPendingCalls` (65,536 calls in flight on one event loop) and
   `CoreCallTimedOut` (a sync call over 30 minutes) are retryable;
-  `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not. Only
-  a workflow start and a workflow resume keep a resource set per event loop.
-  The sync send pool is gone.
+  `CoreStartFailed` is not. `CoreStopped` and `ForkedAfterCoreStart` are
+  raised instead (see below). Only a workflow start and a workflow resume
+  keep a resource set per event loop. The sync send pool is gone.
 
 - **The `exception` of a database failure is the core's class of the
   cause.** Where a call ran on the core and failed, the `exception` field of
@@ -65,6 +67,22 @@ written in Rust, on a new baseline schema.
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
 
+- **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
+  Both are states of the process: the core refuses every later call in it.
+  Every call that runs on the core raises them, in its sync and async
+  forms: the sends and their retry methods, `PostgresBroker.enqueue`, the
+  task, result and health reads, the broker's task lists and recovery
+  passes, `ensure_schema_initialized`, `close`, `check(live=True)`, the
+  workflow start, `WorkflowHandle`, `pause_workflow` and `resume_workflow`,
+  the reads and `cancel_task` of `horsies.monitoring`, and the schema probe
+  of `horsies web`. No call returns them as a result: they are no longer
+  the `exception` of `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`,
+  `MONITORING_QUERY_FAILED`, `DB_OPERATION_FAILED` or another failure
+  code. The result types do not change. For a fork, use the `spawn` or
+  `forkserver` start method, or fork before the parent's first call that
+  runs on the core. `CoreStopped` means that a background task of the core
+  panicked, a defect in horsies: restart the process.
+
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of
   `BrokerIdempotencyKeyConflict`; the `task_id` of `Horsies.get_result`,
@@ -83,7 +101,9 @@ written in Rust, on a new baseline schema.
   `enqueue_async` take `input_json` in their place and require `sent_at` and
   `send_kind`. The row stores the text as sent, `{}` for none; an input that
   is not a JSON object or null is `INVALID_INPUT`.
-  `horsies.core.utils.fingerprint.enqueue_fingerprint` is removed.
+  `PostgresBroker.prepare_send_command` takes `input_json` in place of
+  `kwargs_json`. `horsies.core.utils.fingerprint.enqueue_fingerprint` is
+  removed.
 
 - **A database URL takes the scheme `postgresql://` or `postgres://`.**
   `postgresql+psycopg://`, the one scheme 0.7 accepted, and every other
@@ -269,6 +289,20 @@ written in Rust, on a new baseline schema.
   core worker write the same key. An isolated or `SHARED_THREAD` timeout
   has no `cancel_end`. The `data` keeps `task_id` and `timeout_ms`.
 
+- **A workflow whose start did not finish fails with
+  `WORKFLOW_START_INCOMPLETE`.** `OperationalErrorCode` has the new member
+  `WORKFLOW_START_INCOMPLETE`. When recovery finds a RUNNING workflow with
+  no node rows, it fails the workflow and stores a `TaskError` with this
+  code, the message `Orphaned workflow '<name>': no workflow_tasks found.
+  Workflow task insertion did not complete.` and the `data` keys
+  `workflow_id` and `recovery` (`case_4`). `WorkflowHandle.get()` returns
+  this error. 0.7 stored an error object with the code `E400` that is not a
+  `TaskError`, and `WorkflowHandle.get()` returned
+  `RESULT_DESERIALIZATION_ERROR`. `TaskError` refuses the text
+  `'WORKFLOW_START_INCOMPLETE'` as a user code; 0.7 accepted it. Add the
+  member to an exhaustive `match` on `OperationalErrorCode`, and rename a
+  user code with this name.
+
 - **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
   longer age is refused when the config is built: Python raises
   `ConfigurationError` with `CONFIG_INVALID_RETENTION` (HRS-216), and the
@@ -436,6 +470,13 @@ written in Rust, on a new baseline schema.
   key of `GET /api/workers/classes`, and the `not_recorded` value of
   `slot_health` (`GET /api/workers`). On the baseline schema every snapshot
   records these facts.
+
+- **`RerunInputUnavailable.reference_locator`.** `RerunInputUnavailable`
+  keeps `task_id` and `disposition`. The baseline history row stores no
+  input reference: a row without a stored input holds only its disposition
+  (`DECLINED_BY_POLICY`, `OVER_BOUND` or `NEVER_ELIGIBLE`). In 0.7 no
+  writer stored a reference, so the field was always `None`. Remove the
+  read.
 
 - **The Python route modules of the web app.** `horsies.web.routes`,
   `horsies.web.events`, `horsies.web.read_cache`,
@@ -763,11 +804,60 @@ unless it starts with "Added".
   that runs a tokio runtime it runs nothing and answers `ASYNC_CONTEXT`:
   `TaskSendError::AsyncContext` with the prepared task id and payload (an
   async retry sends them), `ReadError::AsyncContext` (added; not kept by
-  the handle), `BrokerErrorCode::AsyncContext`, `HRS-217` in the check
-  report, `WorkflowStartErrorCode::AsyncContext` with the workflow id of
-  the start, `HandleErrorCode::AsyncContext`, or
+  the handle), `BrokerOperationError::AsyncContext`, `HRS-217` in the check
+  report, `WorkflowStartError::AsyncContext` with the workflow id of
+  the start, `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
+- **Every call that runs on the core panics in a fork.** In a process that
+  was forked without `exec` after the core's process runtime started in its
+  parent, every public call that runs on the core panics with the call,
+  both process ids and the fix, async and blocking forms alike: the sends
+  and retries, the reads, the health reads, `check_live`, the workflow
+  starts, the methods of `WorkflowHandle`, `horsies::monitoring`,
+  `rerun_task`, `run_worker`, `run_scheduler` and the monitoring mount. No
+  call returns the fork as an error value; Python raises
+  `ForkedAfterCoreStart` in the same state. A runtime whose threads the
+  operating system refused to start is still the retryable database failure
+  of the call. `WorkerRunError::RuntimeUnavailable` and
+  `SchedulerRunError::RuntimeUnavailable` hold `RuntimeStartFailed` (new)
+  in place of `ProcessRuntimeRefusal`, which had the fork case too.
+- **`BrokerOperationError` is an enum with one variant per state.** The
+  variants are Python's classes that the core produces: `OperationFailed`
+  (with a `BrokerOperationFailedCode`, the nine operation codes),
+  `EnqueueFailed`, `PayloadMismatch`, `IdempotencyKeyConflict` (with
+  `owner_task_id`), `InvalidJsonPayload`, `InvalidTaskOptions`,
+  `InvalidInput`, `AsyncContext`, `ListenerDisabled` and `WaitInsideTask`.
+  Each has only the facts of its state; `retryable` is a field of
+  `OperationFailed` and `EnqueueFailed` only. The fields `code`, `message`,
+  `retryable` and `cause` become the methods `code()`, `message()`,
+  `retryable()` and `failure_cause()`.
+- **`WorkflowStartError` is an enum with one variant per state.**
+  `ValidationFailed` (with `workflow_id: Option<Uuid>`), `IdConflict` (with
+  `workflow_id` and `existing_workflow_name`, the name that holds the id),
+  `EnqueueFailed` (with `workflow_id` and `retryable`) and `AsyncContext`
+  (with `workflow_id`); each has `message` and `workflow_name`. The fields
+  become the methods `code()`, `message()`, `retryable()`,
+  `workflow_name()` and `workflow_id()`. Only `ValidationFailed` can lack
+  a workflow id, so `retry_start` no longer refuses an error without one.
+- **`HandleOperationError` is an enum with one variant per state.**
+  `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`),
+  `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and
+  `AsyncContext`; each has `message` and `workflow_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `workflow_id()` and
+  `failure_cause()`.
+- **`MonitoringQueryError` and `TaskActionError` are enums with one
+  variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
+  `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,
+  each with `message` and `source`; the fields become the methods
+  `code()`, `message()`, `retryable()`, `error_source()` and
+  `failure_cause()`. `TaskActionError`: `NotFound`, `NotCancellable` and
+  `WorkflowTask` (each with `current_status`, a `TaskStatus`, not an
+  `Option`), `DbOperationFailed` (with `retryable` and `cause`) and
+  `StoredDataInvalid`; each has `message` and `task_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `task_id()` and
+  `failure_cause()`. Python's `EVENT_LOOP_LIMIT` classes are not
+  variants: no Rust call gives them.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a
@@ -927,6 +1017,8 @@ unless it starts with "Added".
   `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
   `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
   `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+  `InputUnavailable` has `task_id` and `disposition`: its field
+  `reference_locator`, which was always `None`, is removed.
 - **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
   sent_at)`**, the rerun in a transaction that the caller owns (Python
   `rerun_task(connection, ...)`): the core builds each statement and

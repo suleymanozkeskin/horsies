@@ -36,9 +36,12 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | `get_class_coverage()` | `ClassCoverage`: whether a live worker can run each pending execution class |
 | `get_class_report()` | `ClassReport`: the load of each execution class |
 
-- Every read returns `Result<_, BrokerOperationError>` (`code`, `message`,
-  `retryable`). Each read connects the app's handle and installs the schema
-  once per handle, as a send does.
+- Every read returns `Result<_, BrokerOperationError>`: one variant per
+  state, with `code()`, `message()` and `retryable()`. A failed read is
+  `OperationFailed` with its `BrokerOperationFailedCode`; a refused
+  argument is `InvalidInput`; an app with no listener is
+  `ListenerDisabled`. Each read connects the app's handle and installs the
+  schema once per handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,
   `min_responses` workers replied, `timeout` passed. A zero `timeout` is
   `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
@@ -118,31 +121,34 @@ Query builders:
   ended still answers. `TaskDetailNotFound.reason` is a
   `TaskAbsenceReason` (see `tasks.md`).
 
-`MonitoringQueryError` has `code`, `message`, `retryable` and `source`:
+`MonitoringQueryError` is an enum, one variant per state, each with
+`message` and `source`; `code()`, `message()`, `retryable()`,
+`error_source()` and `failure_cause()` read them:
 
-| `MonitoringQueryErrorCode` | When |
+| Variant | When |
 |---|---|
-| `DbOperationFailed` | The database or the connect failed. `retryable` is the classification of the cause |
+| `DbOperationFailed { retryable, .. }` | The database or the connect failed. `retryable` is the classification of the cause |
 | `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`). Not retryable |
-| `EventLoopLimit` | Python client only. The Rust client never returns it |
+
+`MonitoringQueryErrorCode::EventLoopLimit` is Python's only; no variant
+has it.
 
 ## Task Cancel
 
 ```rust
-use horsies::monitoring::{cancel_task, TaskActionErrorCode};
+use horsies::monitoring::{cancel_task, TaskActionError};
 use horsies::Horsies;
 use uuid::Uuid;
 
 async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
     match cancel_task(app, task_id, false).await {
         Ok(_cancelled) => Ok(true),
-        Err(error) => match error.code {
-            TaskActionErrorCode::TaskNotCancellable | TaskActionErrorCode::TaskNotFound => Ok(false),
-            TaskActionErrorCode::TaskIsWorkflowTask
-            | TaskActionErrorCode::DbOperationFailed
-            | TaskActionErrorCode::StoredDataInvalid
-            | TaskActionErrorCode::EventLoopLimit => Err(error.message),
-        },
+        Err(TaskActionError::NotCancellable { .. } | TaskActionError::NotFound { .. }) => Ok(false),
+        Err(
+            error @ (TaskActionError::WorkflowTask { .. }
+            | TaskActionError::DbOperationFailed { .. }
+            | TaskActionError::StoredDataInvalid { .. }),
+        ) => Err(error.message().to_owned()),
     }
 }
 ```
@@ -160,17 +166,19 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
 - A workflow task is refused: use `WorkflowHandle::cancel`, `pause` and
   `resume`.
 
-`TaskActionError` has `code`, `message`, `retryable`, `task_id`,
-`current_status`:
+`TaskActionError` is an enum, one variant per state, each with `message`
+and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
+`failure_cause()` read them:
 
-| `TaskActionErrorCode` | HTTP | When |
+| Variant | HTTP | When |
 |---|---|---|
-| `TaskNotFound` | 404 | No live or history row has the id. Nothing changed |
-| `TaskNotCancellable` | 409 | Terminal, or RUNNING without `include_running`. `current_status` is set. Nothing changed |
-| `TaskIsWorkflowTask` | 400 | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed` | 503 | The statement or the connect failed: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TaskNotCancellable` with `CANCELLED` |
+| `NotFound` | 404 | No live or history row has the id. Nothing changed |
+| `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
+| `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
+| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
 | `StoredDataInvalid` | 500 | Stored data does not parse. Nothing changed |
-| `EventLoopLimit` | 503 | Python client only. The Rust client never returns it |
+
+`TaskActionErrorCode::EventLoopLimit` is Python's only; no variant has it.
 
 There is no manual retry action. Re-execution is a rerun (see `tasks.md`).
 

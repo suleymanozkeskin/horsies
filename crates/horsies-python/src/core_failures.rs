@@ -212,7 +212,7 @@ impl CoreFailureSource for MonitoringQueryError {
         self.failure_cause()
     }
     fn exception_retryable(&self) -> bool {
-        self.retryable
+        self.retryable()
     }
 }
 
@@ -266,9 +266,9 @@ impl FailureException {
     pub fn of_operation_error(subject: &'static str, error: &BrokerOperationError) -> Self {
         Self::new(
             subject,
-            error.message.clone(),
-            error.retryable,
-            error.cause.clone(),
+            error.message().to_owned(),
+            error.retryable(),
+            error.failure_cause(),
         )
     }
 
@@ -276,9 +276,9 @@ impl FailureException {
     pub fn of_handle_error(subject: &'static str, error: &HandleOperationError) -> Self {
         Self::new(
             subject,
-            error.message.clone(),
-            error.retryable,
-            error.cause.clone(),
+            error.message().to_owned(),
+            error.retryable(),
+            error.failure_cause(),
         )
     }
 }
@@ -359,8 +359,8 @@ mod tests {
 
     #[test]
     fn an_operation_error_keeps_its_message_not_its_display() {
-        let error = BrokerOperationError {
-            code: horsies_core::BrokerErrorCode::TaskInfoQueryFailed,
+        let error = BrokerOperationError::OperationFailed {
+            code: horsies_core::BrokerOperationFailedCode::TaskInfoQueryFailed,
             message: "read failed".to_owned(),
             retryable: true,
             cause: FailureCause::Server(ServerErrorFacts::of_code(
@@ -371,6 +371,6 @@ mod tests {
         let exception = FailureException::of_operation_error("task_info", &error);
         assert_eq!(exception.message, "read failed");
         assert!(exception.retryable);
-        assert_eq!(exception.cause, error.cause);
+        assert_eq!(exception.cause, error.failure_cause());
     }
 }

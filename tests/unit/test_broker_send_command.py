@@ -64,7 +64,7 @@ def _command(broker: PostgresBroker, **changes: object) -> SendCommand:
         'task_name': 'tasks.report',
         'queue_name': 'default',
         'priority': 100,
-        'kwargs_json': '{"value":1}',
+        'input_json': '{"value":1}',
         'task_options': _OPTIONS,
         'retention_class_key': 'standard_7d',
     }
@@ -119,7 +119,7 @@ def test_the_command_holds_the_values_that_an_enqueue_stores() -> None:
 
 
 def test_no_kwargs_store_an_empty_object_and_no_options_store_no_retries() -> None:
-    command = _command(_broker(), kwargs_json=None, task_options=None)
+    command = _command(_broker(), input_json=None, task_options=None)
 
     assert (command.stored_input, command.task_options) == ('{}', None)
     assert (command.execution, command.max_retries) == (Execution.ISOLATED, 0)
@@ -137,7 +137,7 @@ def test_kwargs_that_are_not_an_object_are_refused_as_input() -> None:
         task_name='tasks.report',
         queue_name='default',
         priority=100,
-        kwargs_json='[1]',
+        input_json='[1]',
         task_options=None,
     ):
         case Err(BrokerInvalidInput() as refused):
@@ -151,7 +151,7 @@ def test_options_that_do_not_parse_are_refused_as_task_options() -> None:
         task_name='tasks.report',
         queue_name='default',
         priority=100,
-        kwargs_json=None,
+        input_json=None,
         task_options='{not json',
     ):
         case Err(BrokerInvalidTaskOptions() as refused):
@@ -186,7 +186,7 @@ def test_options_with_an_integer_above_u64_max_are_refused_as_the_core_refuses_t
         task_name='tasks.report',
         queue_name='default',
         priority=100,
-        kwargs_json=None,
+        input_json=None,
         task_options=_exponential_options_text(2**64),
     ):
         case Err(BrokerInvalidTaskOptions() as refused):

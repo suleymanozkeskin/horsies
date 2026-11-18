@@ -23,7 +23,6 @@ use crate::core::TaskResult;
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// The definition key that the parent nodes name (the tests resolve no child).
 const CHILD_KEY: &str = "tests.port.denest_child.v1";
@@ -92,6 +91,51 @@ async fn a_completed_child_advances_and_completes_its_parent() {
     }
 }
 
+/// `test_chain_drives_every_ancestor_level`: grandparent <- parent <- child,
+/// with the child already COMPLETED. Its completion call advances the parent
+/// node and completes the parent; the advance that this completion owes
+/// then advances the grandparent node and completes the grandparent, each
+/// level in its own transaction.
+#[tokio::test]
+#[serial]
+async fn a_completed_child_advances_every_ancestor_level() {
+    let pool = shared_pool().await;
+    let grandparent = seed_workflow(&pool, &WorkflowSeed::running()).await;
+    let parent = seed_workflow(
+        &pool,
+        &WorkflowSeed::child(ParentLink::of_root(grandparent, 0)).output(0),
+    )
+    .await;
+    let child = seed_workflow(
+        &pool,
+        &WorkflowSeed::child(ParentLink {
+            workflow_id: parent,
+            task_index: 0,
+            root_workflow_id: grandparent,
+            depth: 2,
+        })
+        .status("COMPLETED")
+        .output(0)
+        .result(child_result()),
+    )
+    .await;
+    seed_node(
+        &pool,
+        &NodeSeed::sub_workflow(grandparent, 0, "RUNNING", CHILD_KEY, Some(parent)),
+    )
+    .await;
+    seed_node(
+        &pool,
+        &NodeSeed::sub_workflow(parent, 0, "RUNNING", CHILD_KEY, Some(child)),
+    )
+    .await;
+
+    advance_parent_of(&pool, child, &TestChildSpecs::empty()).await;
+
+    assert_eq!(statuses(&pool, parent).await, completed_twice());
+    assert_eq!(statuses(&pool, grandparent).await, completed_twice());
+}
+
 /// `test_recovery_isolates_poison_child_and_continues`: two parents of
 /// COMPLETED children wait for recovery case 1.6. The node write of the
 /// first parent is refused; that candidate fails alone, and the pass
@@ -126,7 +170,7 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
 
     let report = recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         RECOVERY_FAILURE_LIMIT,
     )
     .await
@@ -200,7 +244,7 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
 
     run_phase2(
         &PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         Phase2Work {
             task_id: child_task,
             queue_name: "default".to_owned(),

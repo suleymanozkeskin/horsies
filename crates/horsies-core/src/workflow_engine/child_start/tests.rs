@@ -22,7 +22,7 @@ use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 use crate::test_support::terminal_writes;
-use crate::workflow_engine::child_spec::ChildSpecRequest;
+use crate::workflow_engine::child_spec::{ChildSpecRequest, ChildSpecSource};
 use crate::workflow_engine::lifecycle::{pause_workflow, resume_client_workflow};
 use crate::workflow_engine::start_statement::{merged_child_input, NodeInput};
 use crate::workflow_engine::steps::{
@@ -44,7 +44,7 @@ const WORKER: &str = "child-start-worker";
 /// made, so the future ends on its first poll.
 fn host_build(
     owed: &OwedChildStart,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<ChildStartKind, WorkflowError> {
     futures::executor::block_on(child_start_kind(owed, build))
 }
@@ -353,7 +353,7 @@ fn every_child_start_disposition_text_reads_and_others_do_not() {
 fn a_registered_child_is_a_tree_under_its_node() {
     let workflow_id = Uuid::new_v4();
     let children = children_with_child();
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
 
     let kind = host_build(&owed(workflow_id, 3, CHILD_KEY), build).expect("host build");
 
@@ -376,7 +376,7 @@ fn a_registered_child_is_a_tree_under_its_node() {
 fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     let workflow_id = Uuid::new_v4();
     let children = children_with_child();
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
 
     let missing = failure_error(
         host_build(&owed(workflow_id, 0, "tests.child_start.missing.v1"), build)
@@ -429,7 +429,7 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
 fn the_depth_limit_is_checked_before_the_child_definition_is_resolved() {
     let workflow_id = Uuid::new_v4();
     let children = children_with_child();
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
     let missing_key = "tests.child_start.missing.v1";
     let depth_limit = crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
@@ -457,7 +457,7 @@ fn an_args_from_key_that_names_a_static_member_fails_the_node() {
     conflicting.node_input = r#"{"value": 1}"#.to_owned();
     conflicting.args_from = Some(r#"{"value": 0}"#.to_owned());
 
-    let kind = host_build(&conflicting, ChildBuild::Client(&children)).expect("host build");
+    let kind = host_build(&conflicting, &children).expect("host build");
 
     let error = failure_error(kind);
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
@@ -487,7 +487,7 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
             }
         });
     let children = TestChildSpecs::empty().with_build(CHILD_KEY, builder);
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
     let mut merged = owed(workflow_id, 0, CHILD_KEY);
     merged.sub_workflow_params = SubWorkflowParams::Given;
     merged.args_from = Some(r#"{"value": 0}"#.to_owned());
@@ -547,8 +547,7 @@ fn a_static_member_that_the_builder_refuses_fails_the_node_as_a_serialization_er
     refused.node_input = r#"{"count": "x"}"#.to_owned();
     refused.sub_workflow_params = SubWorkflowParams::Given;
 
-    let error =
-        failure_error(host_build(&refused, ChildBuild::Client(&children)).expect("host build"));
+    let error = failure_error(host_build(&refused, &children).expect("host build"));
 
     assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
     assert_eq!(
@@ -599,8 +598,7 @@ fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization
         result: Some(r#"{"__h_task_result__":true,"ok":"seven","err":null}"#.to_owned()),
     }];
 
-    let error =
-        failure_error(host_build(&refused, ChildBuild::Client(&children)).expect("host build"));
+    let error = failure_error(host_build(&refused, &children).expect("host build"));
 
     assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
     assert_eq!(
@@ -879,10 +877,9 @@ async fn phase_two_commits_the_child_of_the_node_it_promotes() {
     complete_task(&pool, task_id).await;
     let children = children_with_child();
 
-    let committed =
-        node_finish_in_transaction(&broker, task_id, false, ChildBuild::Client(&children))
-            .await
-            .expect("phase 2");
+    let committed = node_finish_in_transaction(&broker, task_id, false, &children)
+        .await
+        .expect("phase 2");
 
     assert_eq!(committed.disposition, NodeFinishDisposition::Applied);
     assert!(committed.parent_advances.is_empty());
@@ -905,10 +902,9 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
     complete_task(&pool, task_id).await;
     let children = TestChildSpecs::empty();
 
-    let committed =
-        node_finish_in_transaction(&broker, task_id, false, ChildBuild::Client(&children))
-            .await
-            .expect("phase 2");
+    let committed = node_finish_in_transaction(&broker, task_id, false, &children)
+        .await
+        .expect("phase 2");
 
     assert_eq!(committed.disposition, NodeFinishDisposition::Applied);
     assert_eq!(
@@ -978,7 +974,7 @@ async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
         OwedParentAdvances::of(ParentAdvance::Owed {
             child_workflow_id: ended_child,
         }),
-        ChildBuild::Client(&children),
+        &children,
     )
     .await
     .expect("parent advance");

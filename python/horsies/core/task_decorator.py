@@ -223,7 +223,8 @@ def _mint_send_task_id() -> UUID:
 
     Raises ``ValueError`` with the source's cause when it refuses (the
     millisecond clock is outside the 48-bit range), as the Python generator
-    raised.
+    raised. Raises ``ForkedAfterCoreStart`` and ``CoreStopped``, the
+    refusals of every core call in this process.
     """
     match core_mint_task_id():
         case UUID() as task_id:
@@ -1057,6 +1058,12 @@ class _TaskFunctionMembers(Protocol[P, T]):
 
     `TaskFunction` and `AsyncTaskFunction` add the direct call. The generic
     parameter T represents the success type in TaskResult[T, TaskError].
+
+    The sends, the schedules and the four retry methods raise
+    `ForkedAfterCoreStart` (this process was forked without `exec` after
+    the core started) and `CoreStopped` (a core background task panicked).
+    These are states of the process: nothing was sent, and no send result
+    names them.
     """
 
     task_name: str
@@ -2420,7 +2427,7 @@ def create_task_wrapper(
             ))
 
         # Serialize kwargs against the receiver's declared parameter types.
-        kwargs_json: str | None = None
+        input_json: str | None = None
         if kwargs_dict:
             try:
                 encoded_kwargs = encode_kwargs_read_back(fn, kwargs_dict)
@@ -2435,17 +2442,17 @@ def create_task_wrapper(
                     message=f'Failed to serialize encoded kwargs for {task_name}: {kwargs_r.err_value}',
                     exception=kwargs_r.err_value,
                 ))
-            kwargs_json = kwargs_r.ok_value
+            input_json = kwargs_r.ok_value
 
             warn_if_payload_large(
                 app.config.payload,
                 task_name=task_name,
                 kind='kwargs',
-                payload_text=kwargs_json,
+                payload_text=input_json,
             )
             match check_payload_size(
                 app.config.payload,
-                payload_text=kwargs_json,
+                payload_text=input_json,
             ):
                 case PayloadWithinLimit():
                     pass
@@ -2471,7 +2478,7 @@ def create_task_wrapper(
             task_name=task_name,
             queue_name=validated_queue_name,
             priority=priority,
-            input_json=kwargs_json,
+            input_json=input_json,
             sent_at=sent_at,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
