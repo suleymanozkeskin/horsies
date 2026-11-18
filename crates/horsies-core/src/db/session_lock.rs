@@ -2,11 +2,13 @@
 //! advisory lock for as long as its session lives.
 //!
 //! - [`LockSession::open`] connects with a [`ConnectPlan`] and runs the lock
-//!   statement: a `pg_try_advisory_lock` that takes one text argument and
-//!   answers one boolean. A `true` answer means this session holds the lock
-//!   ([`LockTake::Taken`]); a `false` answer means another session holds it
-//!   ([`LockTake::HeldElsewhere`]). Nothing unlocks it: the server releases
-//!   the lock when the session ends.
+//!   statement: a statement that tries the lock with `pg_try_advisory_lock`
+//!   (no wait), takes one text argument and answers one boolean. A `true`
+//!   answer means this session holds the lock ([`LockTake::Taken`]); a
+//!   `false` answer means another session holds it
+//!   ([`LockTake::HeldElsewhere`]). An answer arrives only after the
+//!   statement's transaction committed. Nothing unlocks the lock: the server
+//!   releases it when the session ends.
 //! - [`LockSession::probe`] confirms that the session still lives
 //!   (`SELECT 1`); [`LockSession::take`] runs the lock statement again.
 //! - Each statement ends within [`SESSION_LOCK_STATEMENT_BOUND`], the
@@ -119,8 +121,8 @@ pub struct LockSession {
 
 impl LockSession {
     /// Opens one connection with `plan` and runs `lock_sql` with `argument`
-    /// as its one text parameter. `lock_sql` is a `pg_try_advisory_lock`
-    /// statement that answers one boolean.
+    /// as its one text parameter. `lock_sql` tries the lock with
+    /// `pg_try_advisory_lock` and answers one boolean.
     ///
     /// The driver of the connection runs as a task of the current runtime.
     ///

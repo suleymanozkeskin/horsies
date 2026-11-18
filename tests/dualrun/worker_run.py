@@ -33,8 +33,10 @@ fields of the attempt archive), the run measures of a kill report as tokens
 (``KILL_REPORT_MEASURES``), and ``enqueued_at`` as ``TimeOrderBeforeRun``
 (``RUN_WRITTEN_ORDER_COLUMNS``). The heartbeat, worker-state and reaper scan
 cursor tables are left out of the compare: their rows follow the run time,
-not a decision of the code. Run times inside the run window compare as ``DuringRun``, the
-worker id as its label. Speed numbers never come from these pairs.
+not a decision of the code. The liveness generation table is left out too:
+only the core worker holds a liveness lock. Run times inside the run window
+compare as ``DuringRun``, the worker id as its label. Speed numbers never
+come from these pairs.
 
 The reference side starts the Python worker parent and its version-1 child
 from their copy (``tests.dualrun.reference.worker_parent``, made by
@@ -124,10 +126,12 @@ UNCOMPARED_TABLES: Final = frozenset({
     'horsies_heartbeats',
     'horsies_worker_states',
     'horsies_recovery_scan_cursors',
+    'horsies_worker_liveness',
 })
 """Tables whose rows follow the run time: one heartbeat per interval, one
 state sample per interval, and the scan cursors of the reaper, which move
-once per reaper pass."""
+once per reaper pass. Also the liveness generations: only the core worker
+holds a liveness lock, so only its side writes a row."""
 
 PROCESS_ID_COLUMNS: Final = frozenset({
     'worker_pid',
