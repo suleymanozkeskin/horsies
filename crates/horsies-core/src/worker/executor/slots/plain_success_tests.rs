@@ -11,10 +11,13 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
+use crate::broker::lifecycle_tests::support::{
+    database_options, unpinged_single_connection_pool, WireProxy,
+};
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::db::{PoolSizing, Reserve, WORKER_RESERVED_CONNECTIONS};
-use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd};
+use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
 use crate::worker::retry::read_stored_options;
@@ -337,4 +340,73 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
         .execute(&pool)
         .await
         .expect("remove the workflow");
+}
+
+/// Python `tests/integration/test_round_trips.py::test_a_plain_success_finalize_is_one_statement`
+/// (case `pre_ping_on`; the `pre_ping_off` case is
+/// `broker::lifecycle_tests::finalize_batch_rows::a_batch_of_rows_is_one_round_trip`):
+/// a plain success that the outcome writer settles through the batcher is
+/// one round trip on a warm connection of a broker whose pools ping a
+/// connection only after it was idle past their limit.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_plain_success_settle_is_one_round_trip() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let upstream = database_options(&pool);
+    let proxy = WireProxy::start(&upstream).await;
+    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+    let writer = writer(Arc::new(PostgresBroker::from_pool(proxied.clone())));
+    let warm_up = claimed_now();
+    seed_running(&pool, warm_up.task_id, WORKER, warm_up.claimed_at).await;
+    assert_eq!(
+        writer.settle(&warm_up, reported_value()).await,
+        Settlement::Written
+    );
+    let task = claimed_now();
+    seed_running(&pool, task.task_id, WORKER, task.claimed_at).await;
+
+    proxy.reset_round_trips();
+    let settled = writer.settle(&task, reported_value()).await;
+    let round_trips = proxy.round_trips();
+
+    assert_eq!(settled, Settlement::Written);
+    assert_eq!(round_trips, 1);
+    assert_eq!(live_status(&pool, task.task_id).await, None);
+    assert_eq!(
+        history_status(&pool, task.task_id).await.as_deref(),
+        Some("COMPLETED")
+    );
+    proxied.close().await;
+}
+
+/// Python `tests/integration/test_round_trips.py::test_a_workflow_check_failure_finalize_sends_nothing`:
+/// a workflow task whose child stopped before start because no node links
+/// it (the orphan self-heal off) owes nothing, and its settle sends no
+/// statement. The row stays CLAIMED
+/// (`settle_tests::a_task_whose_node_is_not_linked_stays_claimed`).
+#[tokio::test]
+#[serial_test::serial]
+async fn a_stop_for_a_node_not_linked_sends_no_statement() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let upstream = database_options(&pool);
+    let proxy = WireProxy::start(&upstream).await;
+    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+    let writer = writer(Arc::new(PostgresBroker::from_pool(proxied.clone())));
+    let task = ClaimedTask {
+        kind: TaskKind::WorkflowTask,
+        ..claimed_now()
+    };
+
+    proxy.reset_round_trips();
+    let settled = writer
+        .settle(
+            &task,
+            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
+        )
+        .await;
+    let round_trips = proxy.round_trips();
+
+    assert_eq!(settled, Settlement::NothingOwed);
+    assert_eq!(round_trips, 0);
+    proxied.close().await;
 }
