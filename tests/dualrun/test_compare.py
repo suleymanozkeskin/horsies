@@ -9,7 +9,12 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.catalog import BASELINE_CATALOG
+from tests.dualrun.catalog import (
+    BASELINE_CATALOG,
+    NOTIFICATIONS,
+    NOTIFIED_CATALOG,
+    notification_row,
+)
 from tests.dualrun.cells import (
     NormalizeError,
     RawRow,
@@ -791,6 +796,146 @@ def test_a_tie_that_a_change_breaks_still_reports_the_change() -> None:
 
     assert reference.ambiguities == ()
     assert [type(entry) for entry in diff.entries] == [ExtraRow]
+
+
+# ---- Ties in blocks ----
+
+STATUS_EVENT: Final = 'horsies_workflow_status'
+DONE_EVENT: Final = 'workflow_done'
+
+
+def _workflow_events(
+    grandparent: str, parent: str, child: str
+) -> list[tuple[str, str]]:
+    """The workflow events of a chain of three workflows that no table holds
+    after the run (the test deletes them): one status event per insert, then
+    the parent and the grandparent complete (done, then status)."""
+    return [
+        (STATUS_EVENT, grandparent),
+        (STATUS_EVENT, parent),
+        (STATUS_EVENT, child),
+        (DONE_EVENT, parent),
+        (STATUS_EVENT, parent),
+        (DONE_EVENT, grandparent),
+        (STATUS_EVENT, grandparent),
+    ]
+
+
+def _notified(events: Sequence[tuple[str, str]], run: datetime) -> NormalizedSnapshot:
+    """The snapshot of ``NOTIFIED_CATALOG`` with no table row and the notifications ``events``."""
+    tables = tuple(RawTable(name=rules.name, rows=()) for rules in BASELINE_CATALOG.tables)
+    sent = RawTable(
+        name=NOTIFICATIONS.name,
+        rows=tuple(notification_row(channel, payload) for channel, payload in events),
+    )
+    return _unwrap(
+        normalize_snapshot(RawSnapshot(tables=(*tables, sent)), NOTIFIED_CATALOG, _window(run))
+    )
+
+
+def test_two_workflows_whose_events_tie_in_blocks_are_interchangeable() -> None:
+    """Two workflows of the chain have two status events each and one done
+    event; the four status rows tie. Each block holds the id of one
+    workflow, and the blocks are equal apart from it."""
+    reference = _notified(_workflow_events('g-a', 'p-a', 'c-a'), RUN_A)
+    candidate = _notified(list(reversed(_workflow_events('g-b', 'p-b', 'c-b'))), RUN_B)
+
+    assert reference.ambiguities == ()
+    assert candidate.ambiguities == ()
+    assert compare_snapshots(reference, candidate).entries == ()
+
+
+def test_a_status_event_that_moves_to_the_other_workflow_of_a_block_is_a_difference() -> None:
+    reference = _notified(_workflow_events('g-a', 'p-a', 'c-a'), RUN_A)
+    events = _workflow_events('g-b', 'p-b', 'c-b')
+    events[4] = (STATUS_EVENT, 'g-b')
+    candidate = _notified(events, RUN_B)
+
+    diff = compare_snapshots(reference, candidate)
+
+    assert candidate.ambiguities == ()
+    assert diff.entries
+    assert not [entry for entry in diff.entries if isinstance(entry, AmbiguousRows)]
+
+
+def test_a_done_event_that_moves_to_the_other_workflow_of_a_block_is_a_difference() -> None:
+    reference = _notified(_workflow_events('g-a', 'p-a', 'c-a'), RUN_A)
+    events = _workflow_events('g-b', 'p-b', 'c-b')
+    events[3] = (DONE_EVENT, 'g-b')
+    candidate = _notified(events, RUN_B)
+
+    diff = compare_snapshots(reference, candidate)
+
+    assert candidate.ambiguities == ()
+    assert diff.entries
+    assert not [entry for entry in diff.entries if isinstance(entry, AmbiguousRows)]
+
+
+LINKS: Final = SnapshotCatalog(
+    tables=(
+        TableRules(
+            name='links',
+            columns=(
+                ColumnSpec(name='kind', rule=Exact()),
+                ColumnSpec(name='task', rule=NormalisedId(family=IdFamily.TASK)),
+                ColumnSpec(name='other', rule=NormalisedId(family=IdFamily.TASK)),
+                ColumnSpec(name='worker', rule=NormalisedId(family=IdFamily.WORKER)),
+            ),
+            order_by=('kind', 'task', 'other', 'worker'),
+            identity=('kind', 'task', 'other', 'worker'),
+        ),
+        TableRules(
+            name='marks',
+            columns=(ColumnSpec(name='task', rule=NormalisedId(family=IdFamily.TASK)),),
+            order_by=('task',),
+            identity=('task',),
+        ),
+    ),
+)
+"""Rows that hold two new values each, then rows that hold one task each."""
+
+
+def _links(
+    links: Sequence[tuple[str | None, str | None, str | None]], marks: Sequence[str]
+) -> NormalizedSnapshot:
+    raw = RawSnapshot(
+        tables=(
+            RawTable(name='links', rows=tuple(('link', *link) for link in links)),
+            RawTable(name='marks', rows=tuple((mark,) for mark in marks)),
+        ),
+    )
+    return _unwrap(normalize_snapshot(raw, LINKS, _window(RUN_A)))
+
+
+def test_tied_rows_whose_own_values_are_held_by_two_blocks_are_ambiguous() -> None:
+    """Six rows on a cycle of three tasks and three workers: each task and
+    each worker is in two rows. Another order of the rows labels another
+    cycle, so the order decides which task shares a row with which worker."""
+    snapshot = _links(
+        [
+            ('t1', None, 'w1'),
+            ('t2', None, 'w1'),
+            ('t2', None, 'w2'),
+            ('t3', None, 'w2'),
+            ('t3', None, 'w3'),
+            ('t1', None, 'w3'),
+        ],
+        [],
+    )
+
+    assert [group.row_count for group in snapshot.ambiguities] == [6]
+
+
+def test_rows_of_one_block_that_hold_its_values_in_other_orders_are_ambiguous() -> None:
+    """Two blocks of two rows; in each block one row holds its two tasks in
+    one order and the other row in the other order. A block is free only
+    when its rows give its values one order, which marks them."""
+    snapshot = _links(
+        [('a', 'b', None), ('b', 'a', None), ('c', 'd', None), ('d', 'c', None)],
+        ['a', 'b', 'c', 'd'],
+    )
+
+    assert [group.row_count for group in snapshot.ambiguities] == [4]
 
 
 def _baseline_raw(table: str, rows: Sequence[dict[str, str | None]]) -> RawSnapshot:
