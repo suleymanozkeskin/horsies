@@ -76,9 +76,11 @@ use crate::db::{
 /// `VALIDATION_FAILED`, `core/task_decorator.py:2378-2387`). An object input is Python's keyword input: no
 /// member name is an engine key, and each member value has no engine key at any depth and at most
 /// `MAX_VALUE_JSON_DEPTH` levels. Any other input except `null` is one value under the same rules. A text that
-/// is not strict JSON is refused.
+/// is not strict JSON is refused. The members are checked from their texts, so an integer of any width that
+/// the strict rule takes is checked as it is sent.
 fn check_sent_input(input: &str) -> Result<(), BrokerError> {
-    let value: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
+    crate::core::codec::check_json_text(input).map_err(|refused| {
+        let error = crate::core::codec::JsonReadError::Refused(refused);
         BrokerError::EnqueueContract(EnqueueRefusal::unreadable_json(
             SendPart::Input,
             format!("task input refused: {error}"),
@@ -86,17 +88,7 @@ fn check_sent_input(input: &str) -> Result<(), BrokerError> {
         ))
     })?;
     let no_engine_members: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let checked = match &value {
-        serde_json::Value::Object(members) => {
-            crate::core::codec::user_value::check_task_input(&[], members, &no_engine_members)
-        }
-        serde_json::Value::Null => Ok(()),
-        other => crate::core::codec::user_value::check_task_input(
-            std::slice::from_ref(other),
-            &serde_json::Map::new(),
-            &no_engine_members,
-        ),
-    };
+    let checked = crate::core::codec::user_value::check_input_text(input, &no_engine_members);
     checked.map_err(|refusal| {
         BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
             SendPart::Input,
@@ -131,6 +123,14 @@ mod sent_input_tests {
         assert!(check_sent_input(r#"{"x": {"y": [1, 2]}}"#).is_ok());
         assert!(check_sent_input("[1]").is_ok());
         assert!(check_sent_input("null").is_ok());
+        let wide = format!(
+            r#"{{"max": 340282366920938463463374607431768211455, "below": -9223372036854775809, "long": {}}}"#,
+            "9".repeat(400)
+        );
+        assert!(
+            check_sent_input(&wide).is_ok(),
+            "an integer of any width the strict rule takes"
+        );
     }
 }
 
@@ -701,33 +701,14 @@ fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
 
 /// The runtime pool of a worker broker: the batch users get
 /// `pool_size + max_overflow - WORKER_RESERVED_CONNECTIONS` connections, as
-/// the worker profile pool's batch limit; the reserve has its own pool.
+/// the worker profile pool's batch limit. The reaper and the per-task writes
+/// check out the reserve of the worker profile core pool.
 fn pg_worker_runtime_pool_options(config: &PostgresConfig) -> PgPoolOptions {
     let batch_limit = config
         .pool_size
         .saturating_add(config.max_overflow)
         .saturating_sub(WORKER_RESERVED_CONNECTIONS.get());
     pg_pool_options(config).max_connections(batch_limit)
-}
-
-/// The worker reserve on `database_url`: [`WORKER_RESERVED_CONNECTIONS`]
-/// connections with the runtime pool's settings.
-fn pg_reserve_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    pg_pool_options(config).max_connections(WORKER_RESERVED_CONNECTIONS.get())
-}
-
-/// The sqlx pools of the worker reserve: connections that the users of
-/// [`PostgresBroker::pool`] cannot take. The reaper takes its gate and runs
-/// its pass on them, so a pass runs while the runtime pool is exhausted
-/// (Python keeps the reaper's gate session and pass body in the parent
-/// pool's reserve of 2).
-struct ReservePools {
-    /// [`WORKER_RESERVED_CONNECTIONS`] connections on `database_url`,
-    /// opened at first use.
-    runtime: PgPool,
-    /// The reaper's partition maintenance: the session pool when the session
-    /// URL differs, else `runtime`.
-    maintenance: PgPool,
 }
 
 fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
@@ -805,6 +786,11 @@ impl SendCommand {
         retain_rerun_input: bool,
     ) -> Result<Self, BrokerError> {
         check_sent_input(input)?;
+        // The options are read with the strict rule before the retry limit,
+        // as `CheckedSend::check` reads them, so a text that does not read
+        // names its reader's error (Python `_parse_enqueue_task_options`).
+        let _options = parse_optional_object(task_options)
+            .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
         let retention_class_key = retention.class_key();
         let facts = prepare_enqueue_facts(
@@ -861,7 +847,8 @@ impl<'a> CheckedSend<'a> {
     /// both `enqueued_at` and `enqueue_delay_seconds`; a `sent_at` in the
     /// future of a send that starts now; an input that the rules of a user
     /// value refuse (`check_sent_input`); options that do not read by the
-    /// strict rule, or whose retry limit does not fit; a `sent_at` with no
+    /// strict rule, that hold an integer outside `i64::MIN` to `u64::MAX`,
+    /// or whose retry limit does not fit; a `sent_at` with no
     /// whole-microsecond form; and the facts of the row
     /// (`prepare_enqueue_facts`): the strict JSON rule, the execution
     /// class, the command fingerprint and the scope of the idempotency key.
@@ -972,7 +959,6 @@ impl<'a> CheckedSend<'a> {
 pub struct PostgresBroker {
     core: CoreHandle,
     statement_log: StatementLog,
-    reserve: ReservePools,
     pool: PgPool,
     session_pool: PgPool,
     pgbouncer_transaction_mode: bool,
@@ -1042,16 +1028,9 @@ impl PostgresBroker {
         schema_initialization_mode: SchemaInitializationMode,
         listener: ProcessListener,
     ) -> Self {
-        let reserve_runtime = PgPoolOptions::new()
-            .max_connections(WORKER_RESERVED_CONNECTIONS.get())
-            .connect_lazy_with((*pool.connect_options()).clone());
         Self {
             core: crate::broker::pools::handle_for_test_pool(&pool),
             statement_log: StatementLog::Off,
-            reserve: ReservePools {
-                maintenance: reserve_runtime.clone(),
-                runtime: reserve_runtime,
-            },
             session_pool: pool.clone(),
             pool,
             pgbouncer_transaction_mode: false,
@@ -1169,8 +1148,6 @@ impl PostgresBroker {
             PoolProfile::Producer | PoolProfile::Child { .. } => pg_pool_options(config),
             PoolProfile::Worker => pg_worker_runtime_pool_options(config),
         };
-        let reserve_runtime =
-            pg_reserve_pool_options(config).connect_lazy_with(connect_options.clone());
         let pool = runtime_options.connect_lazy_with(connect_options);
 
         let session_pool = if config.effective_session_database_url() == config.database_url {
@@ -1180,18 +1157,9 @@ impl PostgresBroker {
                 pg_connect_options(config.effective_session_database_url(), config.echo)?;
             pg_session_pool_options(config).connect_lazy_with(session_options)
         };
-        let reserve = ReservePools {
-            maintenance: match config.effective_session_database_url() == config.database_url {
-                true => reserve_runtime.clone(),
-                false => session_pool.clone(),
-            },
-            runtime: reserve_runtime,
-        };
-
         Ok(Self {
             core,
             statement_log: StatementLog::from_echo(config.echo),
-            reserve,
             pool,
             session_pool,
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
@@ -1389,20 +1357,6 @@ impl PostgresBroker {
     /// statement layer.
     pub fn session_pool(&self) -> &PgPool {
         &self.session_pool
-    }
-
-    /// The sqlx pool of the worker reserve on `database_url`:
-    /// [`WORKER_RESERVED_CONNECTIONS`] connections, opened at first use,
-    /// that the users of [`PostgresBroker::pool`] cannot take. The reaper
-    /// takes its gate and runs its pass on it.
-    pub fn reserve_pool(&self) -> &PgPool {
-        &self.reserve.runtime
-    }
-
-    /// The pool of the reaper's partition maintenance: the session pool when
-    /// the session URL differs, else [`PostgresBroker::reserve_pool`].
-    pub fn reserve_maintenance_pool(&self) -> &PgPool {
-        &self.reserve.maintenance
     }
 
     /// The open core pools, for a lifecycle writer that runs on the main
@@ -3134,14 +3088,15 @@ fn decode_pong(
 use crate::worker::retry::stored_max_retries;
 
 /// The `max_retries` that enqueue stores, by Python's rule
-/// (`python/horsies/core/codec/task_options.py:80-103`, `stored_max_retries`): no
-/// options and no `retry_policy` store 0; a policy stores its `max_retries`.
-/// The options are read with the reader of the dispatch
+/// (`python/horsies/core/codec/task_options.py`, `stored_max_retries`): no
+/// options (`None`) and no `retry_policy` store 0; a policy stores its
+/// `max_retries`. The options are read with the reader of the dispatch
 /// ([`stored_max_retries`]), so a text that the worker would refuse is refused
-/// here, before any statement: text that does not parse, that is not a JSON
-/// object, or whose `retry_policy` does not fit Python's `RetryPolicy` (a
-/// limit outside 1 to 20, a wrong field, no code) is `EnqueueContract`, which
-/// a send reports as `VALIDATION_FAILED`. Other keys are not judged here.
+/// here, before any statement: text that does not parse (an empty text
+/// included), that is not a JSON object, or whose `retry_policy` does not fit
+/// Python's `RetryPolicy` (a limit outside 1 to 20, a wrong field, no code) is
+/// `EnqueueContract`, which a send reports as `VALIDATION_FAILED`. Other keys
+/// are not judged here.
 fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
     stored_max_retries(task_options).map_err(|refusal| {
         BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
@@ -3155,7 +3110,7 @@ fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i3
 // Result wait
 // ---------------------------------------------------------------------------
 
-/// Re-poll interval of the workflow result wait (`get_workflow_result`),
+/// Re-poll interval of the workflow result wait (`wait_workflow_end`),
 /// bounding each `subscription.recv()` so a NOTIFY lost during a listener
 /// reconnect is recovered by a fresh terminal-status poll instead of hanging
 /// the caller forever.
@@ -4637,7 +4592,6 @@ mod connect_tests {
 
         assert_eq!(broker.pool().size(), 0);
         assert_eq!(broker.session_pool().size(), 0);
-        assert_eq!(broker.reserve_pool().size(), 0);
     }
 
     #[tokio::test]
@@ -5173,7 +5127,6 @@ mod enqueue_task_options_tests {
     fn no_options_and_no_policy_store_zero_retries() {
         for options in [
             None,
-            Some(""),
             Some(r#"{"retry_policy": null, "execution": "ISOLATED"}"#),
             Some("{}"),
         ] {
@@ -5182,6 +5135,79 @@ mod enqueue_task_options_tests {
                 0,
                 "{options:?}"
             );
+        }
+    }
+
+    /// An empty text is not "no options": the retry limit refuses it with
+    /// the reason of the dispatch reader (`read_stored_options`).
+    #[test]
+    fn an_empty_text_is_refused_with_the_dispatch_reason() {
+        let reason = match crate::worker::retry::read_stored_options(Some("")) {
+            crate::worker::retry::StoredOptions::Unreadable { reason } => reason,
+            readable => panic!("the dispatch reads an empty text as {readable:?}"),
+        };
+
+        match enqueue_max_retries("t", Some("")) {
+            Err(BrokerError::EnqueueContract(refusal)) => assert_eq!(
+                refusal,
+                EnqueueRefusal::by_rule(
+                    SendPart::TaskOptions,
+                    format!("task_options refused for t: {reason}"),
+                )
+            ),
+            other => panic!("an empty text gave {other:?}"),
+        }
+    }
+
+    /// A send command and a send read the options with the strict rule
+    /// before the retry limit, so both refuse an empty text with the strict
+    /// read's error, not with the retry limit's.
+    #[test]
+    fn both_send_paths_refuse_an_empty_text_with_the_strict_read_error() {
+        let expected = EnqueueRefusal {
+            part: SendPart::TaskOptions,
+            message: "task_options JSON is refused: JSON text is empty".to_owned(),
+            cause: crate::broker::error::EnqueueRefusalCause::JsonUnreadable(
+                "JSON text is empty".to_owned(),
+            ),
+        };
+        let command = SendCommand::prepare(
+            "t",
+            "default",
+            100,
+            "{}",
+            Some(""),
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_command| ());
+        let send = CheckedSend::check(
+            "t",
+            "{}",
+            "default",
+            100,
+            None,
+            None,
+            None,
+            Some(""),
+            Some(Uuid::from_u128(7)),
+            None,
+            None,
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_send| ());
+
+        for (path, outcome) in [
+            ("SendCommand::prepare", command),
+            ("CheckedSend::check", send),
+        ] {
+            match outcome {
+                Err(BrokerError::EnqueueContract(refusal)) => {
+                    assert_eq!(refusal, expected, "{path}");
+                }
+                other => panic!("{path}: an empty text gave {other:?}"),
+            }
         }
     }
 

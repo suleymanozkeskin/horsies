@@ -5,6 +5,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use super::no_member_after_the_tag;
+use crate::core::codec::{JsonText, JsonTextRefused};
 
 /// Days of the week.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -773,11 +774,14 @@ pub struct TaskSchedule {
     pub task_name: String,
     /// Schedule pattern defining when the task runs.
     pub pattern: SchedulePattern,
-    /// The task input as one JSON value, stored as the task row's `input`.
-    /// Absent is `null` (a task without input). It replaced `args` and
-    /// `kwargs`; a config that names either is refused as an unknown key.
+    /// The task input as its JSON text, stored as the task row's `input`.
+    /// `None` (no member, or `null` in a config text) is a task without
+    /// input. A config read keeps the member's text, and the builder writes
+    /// the text with the strict writer, so an integer outside the `i64` and
+    /// `u64` range keeps every digit. It replaced `args` and `kwargs`; a
+    /// config that names either is refused as an unknown key.
     #[serde(default)]
-    pub input: serde_json::Value,
+    pub input: Option<JsonText>,
     /// Target queue name (None = default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
@@ -808,7 +812,7 @@ impl TaskSchedule {
             name: name.into(),
             task_name: task_name.into(),
             pattern,
-            input: serde_json::Value::Null,
+            input: None,
             queue_name: None,
             enabled: default_true(),
             timezone: default_timezone(),
@@ -817,9 +821,20 @@ impl TaskSchedule {
         }
     }
 
-    pub fn input(mut self, input: serde_json::Value) -> Self {
-        self.input = input;
-        self
+    /// Set the input to the JSON text of `input`, the task's input value,
+    /// written by the core's strict writer, the writer of every stored
+    /// form: compact, each float as Python writes it, an integer of any
+    /// width with all its digits. Pure.
+    ///
+    /// Errors: [`JsonTextRefused`] for a value that does not write as JSON
+    /// (a non-finite float, a map key that is not a text, a `Serialize`
+    /// impl that fails) or whose text breaks the strict read rule (deeper
+    /// than [`crate::core::codec::MAX_JSON_DEPTH`] levels, an integer of
+    /// more than [`crate::core::codec::MAX_INT_DIGITS`] digits, a repeated
+    /// key). The schedule is dropped with the error.
+    pub fn input<T: Serialize>(mut self, input: &T) -> Result<Self, JsonTextRefused> {
+        self.input = Some(JsonText::of(input)?);
+        Ok(self)
     }
 
     pub fn queue(mut self, queue_name: impl Into<String>) -> Self {
@@ -988,6 +1003,8 @@ fn default_check_interval() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -1184,7 +1201,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    input: serde_json::Value::Null,
+                    input: None,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1200,7 +1217,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    input: serde_json::Value::Null,
+                    input: None,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1227,7 +1244,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    input: serde_json::Value::Null,
+                    input: None,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1243,7 +1260,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    input: serde_json::Value::Null,
+                    input: None,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1269,7 +1286,7 @@ mod tests {
                     days: vec![Weekday::Monday, Weekday::Monday],
                     time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -1468,7 +1485,7 @@ mod tests {
                     minute: 60,
                     second: 0,
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -1491,7 +1508,7 @@ mod tests {
                     day: 0,
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -1513,7 +1530,7 @@ mod tests {
                 pattern: SchedulePattern::Daily(DailySchedule {
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "Not/A_Timezone".to_owned(),
@@ -1537,7 +1554,7 @@ mod tests {
                 pattern: SchedulePattern::Daily(DailySchedule {
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "America/New_York".to_owned(),
@@ -1568,7 +1585,7 @@ mod tests {
         assert!(!sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 100);
         assert!(sched.queue_name.is_none());
-        assert_eq!(sched.input, serde_json::Value::default());
+        assert_eq!(sched.input, None);
     }
 
     #[test]
@@ -1588,7 +1605,7 @@ mod tests {
         assert!(!sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 100);
         assert!(sched.queue_name.is_none());
-        assert_eq!(sched.input, serde_json::Value::Null);
+        assert_eq!(sched.input, None);
     }
 
     #[test]
@@ -1601,7 +1618,8 @@ mod tests {
                 second: 0,
             }),
         )
-        .input(serde_json::json!({"key": "val"}))
+        .input(&BTreeMap::from([("key", "val")]))
+        .expect("a map of texts writes as JSON")
         .queue("high")
         .enabled(false)
         .timezone("Europe/London")
@@ -1613,7 +1631,10 @@ mod tests {
         assert_eq!(sched.timezone, "Europe/London");
         assert!(sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 50);
-        assert_eq!(sched.input, serde_json::json!({"key": "val"}));
+        assert_eq!(
+            sched.input.as_ref().map(JsonText::get),
+            Some(r#"{"key":"val"}"#)
+        );
     }
 
     #[test]
@@ -1660,7 +1681,94 @@ mod tests {
         assert!(sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 50);
         assert_eq!(sched.queue_name.as_deref(), Some("high"));
-        assert_eq!(sched.input, serde_json::json!({"key": "val"}));
+        assert_eq!(
+            sched.input.as_ref().map(JsonText::get),
+            Some(r#"{ "key": "val" }"#)
+        );
+    }
+
+    /// The text of `u128::MAX`, outside the `i64` and `u64` range.
+    const U128_MAX_TEXT: &str = "340282366920938463463374607431768211455";
+
+    /// #1892: the builder writes the task's input with the strict writer,
+    /// so `u128::MAX` keeps every digit; a config read keeps the member's
+    /// text, which decodes to `u128::MAX`.
+    #[test]
+    fn an_input_of_u128_max_keeps_every_digit() {
+        let pattern = SchedulePattern::Interval(IntervalSchedule {
+            seconds: Some(30),
+            ..IntervalSchedule::default()
+        });
+        let built = TaskSchedule::new("wide", "my_task", pattern)
+            .input(&BTreeMap::from([("n", u128::MAX)]))
+            .expect("a map of an integer writes as JSON");
+        let written = format!(r#"{{"n":{U128_MAX_TEXT}}}"#);
+        assert_eq!(
+            built.input.as_ref().map(JsonText::get),
+            Some(written.as_str())
+        );
+
+        let read: TaskSchedule = serde_json::from_str(&format!(
+            r#"{{"name": "wide", "task_name": "my_task",
+                "pattern": {{"type": "interval", "seconds": 30}},
+                "input": {{"n": {U128_MAX_TEXT}}}}}"#
+        ))
+        .expect("a schedule with a wide input reads");
+        let input = read.input.expect("the input member is kept");
+        assert_eq!(input.get(), format!(r#"{{"n": {U128_MAX_TEXT}}}"#));
+        let decoded: BTreeMap<String, u128> = input.decode().expect("the text decodes");
+        assert_eq!(decoded.get("n"), Some(&u128::MAX));
+    }
+
+    /// A config input of `null` is a schedule without input, as no member.
+    #[test]
+    fn a_config_input_of_null_is_no_input() {
+        let read: TaskSchedule = serde_json::from_str(
+            r#"{"name": "s", "task_name": "t",
+                "pattern": {"type": "interval", "seconds": 30}, "input": null}"#,
+        )
+        .expect("a schedule with a null input reads");
+        assert_eq!(read.input, None);
+    }
+
+    /// Only serde_json gives the text of a value: a TOML config with an
+    /// `input` member is refused, and one without it reads with no input.
+    #[test]
+    fn a_toml_schedule_input_is_refused() {
+        let without = one_schedule_toml(r#"{ type = "interval", seconds = 30 }"#);
+        let config: ScheduleConfig =
+            toml::from_str(&without).expect("a schedule without input reads");
+        assert_eq!(config.schedules[0].input, None);
+        let with = format!("{without}input = {{ n = 1 }}\n");
+        assert!(toml::from_str::<ScheduleConfig>(&with).is_err());
+    }
+
+    /// The builder refuses an input that does not write as JSON, and one
+    /// whose text breaks the strict read rule.
+    #[test]
+    fn an_input_that_does_not_write_as_strict_json_is_refused() {
+        let schedule = || {
+            TaskSchedule::new(
+                "s",
+                "t",
+                SchedulePattern::Interval(IntervalSchedule {
+                    seconds: Some(30),
+                    ..IntervalSchedule::default()
+                }),
+            )
+        };
+        assert!(matches!(
+            schedule().input(&f64::NAN),
+            Err(JsonTextRefused::NotJsonNative(_))
+        ));
+        let mut deep = serde_json::json!(1);
+        for _ in 0..=crate::core::codec::MAX_JSON_DEPTH {
+            deep = serde_json::Value::Array(vec![deep]);
+        }
+        assert!(matches!(
+            schedule().input(&deep),
+            Err(JsonTextRefused::NotStrictJson(_))
+        ));
     }
 
     #[test]
@@ -1674,7 +1782,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            input: serde_json::json!({"k": "v"}),
+            input: Some(JsonText::parse(r#"{"k":"v"}"#).expect("a strict JSON text")),
             queue_name: Some("q".to_owned()),
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -1684,6 +1792,7 @@ mod tests {
         let json = serde_json::to_string(&sched).unwrap();
         let back: TaskSchedule = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "rt");
+        assert_eq!(back.input, sched.input);
         assert_eq!(back.max_catch_up_runs, 10);
         assert!(back.catch_up_missed);
     }
@@ -2137,7 +2246,7 @@ mod tests {
                     month: vec![CronEnumTerm::Every],
                     day: DaySelector::EveryDay,
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),

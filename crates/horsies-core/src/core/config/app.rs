@@ -1216,7 +1216,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                input: serde_json::Value::Null,
+                input: None,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -1906,5 +1906,35 @@ EXTRA
         );
         let without = AppConfig::for_database_url("postgresql://localhost/db").format_for_logging();
         assert!(!without.contains("worker_profiles"), "{without}");
+    }
+
+    /// The refusal of `config` as a client folds `AppConfig::validate` into
+    /// one error: each refusal through `to_horsies_error`, collected by a
+    /// `ValidationReport`.
+    fn config_refusal(config: &AppConfig) -> HorsiesError {
+        let mut report = crate::core::error::ValidationReport::new("config");
+        for refusal in config.validate() {
+            report.add(refusal.to_horsies_error());
+        }
+        report.into_result().expect_err("the config is refused")
+    }
+
+    /// One retention refusal keeps `HRS-216`; two are collected into one
+    /// error that keeps `HRS-216`, with a note each.
+    #[test]
+    fn retention_refusals_keep_hrs_216_for_single_and_collected_errors() {
+        use crate::core::error::ErrorCode;
+
+        let mut single = default_config();
+        single.retention.history_leaf_horizon_days = 1;
+        let error = config_refusal(&single);
+        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+
+        let mut collected = default_config();
+        collected.retention.history_leaf_horizon_days = 1;
+        collected.retention.heartbeat_leaf_horizon_hours = 1;
+        let error = config_refusal(&collected);
+        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+        assert_eq!(error.notes.len(), 2);
     }
 }

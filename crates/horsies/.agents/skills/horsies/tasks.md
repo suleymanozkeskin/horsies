@@ -131,7 +131,7 @@ name of a built-in code or of the reserved code `WORKFLOW_STOPPED`.
 | `.code()` | `&TaskErrorCode<E>`: `Library(BuiltInTaskCode)` or `User(E)` |
 | `.code().text()` | The stored code text |
 | `.message()` | `Option<&str>` |
-| `.data()` | `Option<&serde_json::Value>`, as stored |
+| `.data()` | `Option<&JsonText>`: the stored text; `decode::<T>()` reads it, an integer of any width with all its digits |
 | `.exception()` | `Option<&ExceptionRecord>`: set by the library for a panic of the body |
 | `.sub_workflow()` | `Option<&SubWorkflowFailure>`: the failed child of a sub-workflow node |
 
@@ -271,11 +271,10 @@ use horsies::{BuiltInTaskCode, OutcomeCode, TaskError, TaskErrorCode, UserErrorC
 
 fn cancel_end<E: UserErrorCode>(error: &TaskError<E>) -> Option<String> {
     match error.code() {
-        TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout)) => error
-            .data()
-            .and_then(|data| data.get("cancel_end"))
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
+        TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout)) => {
+            let data: serde_json::Value = error.data()?.decode().ok()?;
+            data.get("cancel_end")?.as_str().map(str::to_owned)
+        }
         _ => None,
     }
 }
@@ -480,7 +479,8 @@ async fn print_outcome(
 
 `handle.info(TaskInfoParts { result, failed_reason, attempts })` returns the
 `TaskInfo`: status and times, plus the parts asked for (attempts newest
-first). The info is not kept. Its errors are `TaskNotFound`,
+first). Its `result` is a `TaskResult<JsonText>`: the value as its stored
+text, read with `decode::<T>()`. The info is not kept. Its errors are `TaskNotFound`,
 `StoredResultUnreadable` and `Database`.
 
 Reads by task id, on the app:
@@ -503,20 +503,32 @@ calling thread.
 |---|---|---|
 | `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `schedule`, `schedule_with_options`, `with_options(..).send/.schedule`, `retry_send`, `retry_schedule` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
-| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live` |
+| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id` |
+| `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
+| `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
+| `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |
+
+The process-wide starts have the blocking functions
+`horsies::blocking::start_workflow::<D>()` and
+`horsies::blocking::start_workflow_with::<D>(params)`.
 
 - On a thread that runs a tokio runtime, a blocking call runs nothing and
   returns the `ASYNC_CONTEXT` member of its catalog:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
   `retry_send(&error).await` completes the same send),
   `ReadError::AsyncContext`, a `BrokerOperationError` with
-  `BrokerErrorCode::AsyncContext`, or a `CheckReport` with `HRS-217`.
+  `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
+  `WorkflowStartErrorCode::AsyncContext` (with the `workflow_id` of the
+  start; `retry_start` refuses it, so call `start_with_id` with that id
+  from async code), `HandleErrorCode::AsyncContext`, or
+  `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
-  task, so a blocking send works there. A result wait in a worker child is
-  still `WaitInsideTask`.
+  task, so a blocking send or workflow start works there. A result wait in
+  a worker child is still `WaitInsideTask`.
 - A refused input is refused before the thread check: a suppressed send is
-  `SendSuppressed` on any thread.
-- The workflow start and the workflow handle have no blocking view.
+  `SendSuppressed` on any thread. A workflow start checks the thread
+  first, as Python's `WorkflowSpec.start`: on a runtime thread a
+  template's build does not run. `retry_start` checks its error first.
 
 ## Rerun a Terminal Task
 
@@ -628,6 +640,7 @@ again in each child.
 **Wait for no result in a task body.** A result wait in a worker child is
 refused with `WaitInsideTask`. Pass the result with a workflow (`arg_from`).
 
+<!-- rust-check: skip elided -- a Wrong / Correct pair of statements -->
 ```rust
 // WRONG: in a task body
 let total = other_task_handle.get(WaitLimit::NoLimit).await;
@@ -643,7 +656,8 @@ node with the old key fails with `WORKER_SERIALIZATION_ERROR`.
 
 **Write the stored form in schedule input and `input_json`.** A task
 `fn validate_order(order: Order)` reads `{"order": {...}}`, not the fields
-of `Order`.
+of `Order`: a schedule's `.input` takes `validate_order::Input { order }`,
+not the `Order`.
 
 **Use the async forms on a runtime thread.** A blocking call on a thread
 that runs a tokio runtime returns `ASYNC_CONTEXT` and runs nothing.

@@ -1,10 +1,11 @@
-//! Port of the stale recovery cases of Python
-//! `tests/integration/baseline_lifecycle_functions.sql` ("Stale RUNNING
+//! Port of the stale recovery cases of
+//! `sql_tests/cases/baseline_lifecycle_functions.sql` ("Stale RUNNING
 //! recovery: horsies_stale_running_scan, horsies_finish_stale_attempt" and
 //! "horsies_requeue_stale_claims"), which
-//! `tests/integration/test_baseline_sql.py` runs: the same cases, through
-//! the core's statements on a core pool (`broker::stale_recovery`), and the
-//! reaper's steps that call them (`worker::recovery`).
+//! `sql_tests::baseline_lifecycle_functions::single_session_cases` runs: the
+//! same cases, through the core's statements on a core pool
+//! (`broker::stale_recovery`), and the reaper's steps that call them
+//! (`worker::recovery`).
 //!
 //! The argument refusals of the SQL cases (a batch of 0 or above 10 000, a
 //! negative threshold, a retry slot that does not fit its kind, a NULL error

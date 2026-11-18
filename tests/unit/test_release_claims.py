@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 
+from horsies._catalog.release_bounds import MAX_RELEASED_CLAIMS
 from horsies._core import (
     ClaimsReleased,
     CoreConnectionError,
@@ -20,7 +21,6 @@ from horsies._core import (
 )
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.worker.release import (
-    MAX_RELEASE_ROWS,
     RELEASE_CLAIMS_SQL,
     ClaimRelease,
     HeldClaim,
@@ -139,7 +139,7 @@ class TestReleaseClaims:
         connection = _connection()
         claims = tuple(
             _claim(f'019a8f3e-0000-7000-8000-{index:012x}')
-            for index in range(MAX_RELEASE_ROWS + 1)
+            for index in range(MAX_RELEASED_CLAIMS + 1)
         )
 
         released = await release_claims(
@@ -150,7 +150,7 @@ class TestReleaseClaims:
         )
 
         sizes = [len(call.args[1]['task_ids']) for call in connection.execute.await_args_list]
-        assert sizes == [MAX_RELEASE_ROWS, 1]
+        assert sizes == [MAX_RELEASED_CLAIMS, 1]
         assert tuple(each.claim for each in released) == claims
 
 
@@ -216,11 +216,11 @@ class TestReleaseClaimsInCore:
 
     @pytest.mark.asyncio
     async def test_a_list_longer_than_one_call_is_split_in_order(self) -> None:
-        ids = [f'019a8f3e-0000-7000-8000-{position:012x}' for position in range(MAX_RELEASE_ROWS + 1)]
+        ids = [f'019a8f3e-0000-7000-8000-{position:012x}' for position in range(MAX_RELEASED_CLAIMS + 1)]
         claims = tuple(_claim(task_id) for task_id in ids)
         handle = _core_handle(
-            _released(*(_released_row(task_id) for task_id in ids[:MAX_RELEASE_ROWS])),
-            _released(_not_held_row(ids[MAX_RELEASE_ROWS])),
+            _released(*(_released_row(task_id) for task_id in ids[:MAX_RELEASED_CLAIMS])),
+            _released(_not_held_row(ids[MAX_RELEASED_CLAIMS])),
         )
 
         with patch('horsies.core.worker.release.ReleaseClaimsRequest'):

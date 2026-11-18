@@ -315,9 +315,6 @@ fn start_failed(error: &BrokerError) -> StartNotCompleted {
 }
 
 /// The record of a refused manifest start. Pure.
-///
-/// Panics: on the refusals of the app-config start (`InvalidScheduleConfig`,
-/// `NotPrepared`, `PayloadTooLarge`), which a manifest start never gives.
 fn start_not_completed(error: &SchedulerStartError) -> StartNotCompleted {
     match error {
         SchedulerStartError::UnknownTimezone { schedule, .. }
@@ -333,11 +330,6 @@ fn start_not_completed(error: &SchedulerStartError) -> StartNotCompleted {
                 message: error.to_string(),
                 retryable: cause.is_retryable(),
             })
-        }
-        SchedulerStartError::InvalidScheduleConfig(_)
-        | SchedulerStartError::NotPrepared { .. }
-        | SchedulerStartError::PayloadTooLarge { .. } => {
-            panic!("a manifest start gave a refusal of the app-config start: {error}")
         }
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::de::Error as _;
+use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -8,8 +8,8 @@ use serde_json::value::RawValue;
 use super::error::{
     BuiltInTaskCode, OperationalErrorCode, StoredErrorRefused, TaskError, TaskErrorCode,
 };
-use crate::core::codec::user_value::{check_user_value, MAX_VALUE_JSON_DEPTH};
-use crate::core::codec::{JsonReadError, StrictJsonError};
+use crate::core::codec::user_value::{check_user_value_text, MAX_VALUE_JSON_DEPTH};
+use crate::core::codec::{JsonText, StrictJsonError};
 
 /// Outcome of a task or workflow result retrieval.
 ///
@@ -57,56 +57,25 @@ impl<T: Serialize> Serialize for TaskResult<T> {
     }
 }
 
-/// The envelope is taken as raw text and read by the core's strict reader (`crate::core::codec::from_json_str`):
-/// the depth bound is the core's 300 levels, not the 128 of the caller's deserializer, so a value of 200 levels
-/// reads back inside its envelopes (Python `core/codec/json_value.py:54-75`).
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for TaskResult<T> {
+/// The envelope is taken as raw text and read by [`read_task_result_text`]: the depth bound is the core's 300
+/// levels, not the 128 of the caller's deserializer, so a value of 200 levels reads back inside its envelopes
+/// (Python `core/codec/json_value.py:54-75`). The `ok` slot is checked under the rules of a user value and `T`
+/// decodes from the slot's own text, so an integer outside the `i64` and `u64` range reads as `u128` or `i128`.
+///
+/// A deserializer that buffers the value (`#[serde(flatten)]`, an untagged or an internally tagged enum) gives
+/// no raw text, and the read fails.
+impl<'de, T: DeserializeOwned> Deserialize<'de> for TaskResult<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw_text = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
-        let raw: serde_json::Value =
-            crate::core::codec::from_json_str(raw_text.get()).map_err(D::Error::custom)?;
-        let serde_json::Value::Object(mut envelope) = raw else {
-            return Err(D::Error::custom(
-                "TaskResult envelope must be a JSON object",
-            ));
-        };
-        match envelope.get(TASK_RESULT_ENVELOPE_KEY) {
-            Some(serde_json::Value::Bool(true)) => {}
-            _ => {
-                return Err(D::Error::custom(format!(
-                    "TaskResult envelope missing {TASK_RESULT_ENVELOPE_KEY:?} marker (or marker is not true)"
-                )))
-            }
-        }
-        if let Some(extra) = envelope
-            .keys()
-            .find(|key| !matches!(key.as_str(), TASK_RESULT_ENVELOPE_KEY | OK_SLOT | ERR_SLOT))
-        {
-            return Err(D::Error::custom(format!(
-                "unexpected key {extra:?} in TaskResult envelope"
-            )));
-        }
-        let (Some(ok_slot), Some(err_slot)) = (envelope.remove(OK_SLOT), envelope.remove(ERR_SLOT))
-        else {
-            return Err(D::Error::custom(
-                "TaskResult envelope missing a required key (ok, err)",
-            ));
-        };
-        match (ok_slot, err_slot) {
-            (ok_slot, serde_json::Value::Null) => {
+        let raw_text = Box::<RawValue>::deserialize(deserializer)?;
+        match read_task_result_text(raw_text.get()).map_err(D::Error::custom)? {
+            TaskResultText::Err(error) => Ok(Self::Err(error)),
+            TaskResultText::Ok(ok_slot) => {
                 // Python `decode_value` on the ok slot: the rules of a user value
                 // (`core/codec/typed.py:590-629`).
-                check_user_value(&ok_slot, MAX_VALUE_JSON_DEPTH).map_err(D::Error::custom)?;
-                T::deserialize(ok_slot)
-                    .map(Self::Ok)
-                    .map_err(D::Error::custom)
+                let value = JsonText::of_checked_part(ok_slot);
+                check_user_value_text(&value, MAX_VALUE_JSON_DEPTH).map_err(D::Error::custom)?;
+                value.decode::<T>().map(Self::Ok).map_err(D::Error::custom)
             }
-            (serde_json::Value::Null, err_slot) => TaskError::from_stored_value(err_slot)
-                .map(Self::Err)
-                .map_err(D::Error::custom),
-            (_, _) => Err(D::Error::custom(
-                "TaskResult envelope has both ok and err populated; exactly one must be set",
-            )),
         }
     }
 }
@@ -143,10 +112,6 @@ pub enum TaskResultTextRefused {
     MissingSlot,
     #[error("TaskResult envelope has both ok and err populated; exactly one must be set")]
     BothSlotsSet,
-    /// The `err` slot does not decode as a JSON value: the two readers
-    /// disagree on the text.
-    #[error("the err slot of the TaskResult envelope does not decode: {0}")]
-    ErrorSlotUndecodable(JsonReadError),
     #[error("the err slot of the TaskResult envelope is not a task error: {0}")]
     ErrorRefused(#[from] StoredErrorRefused),
 }
@@ -176,11 +141,7 @@ pub fn read_task_result_text(text: &str) -> Result<TaskResultText<'_>, TaskResul
     };
     match (ok_slot.get(), err_slot.get()) {
         (_, "null") => Ok(TaskResultText::Ok(ok_slot)),
-        ("null", err_text) => {
-            let stored: serde_json::Value = crate::core::codec::from_json_str(err_text)
-                .map_err(TaskResultTextRefused::ErrorSlotUndecodable)?;
-            Ok(TaskResultText::Err(TaskError::from_stored_value(stored)?))
-        }
+        ("null", err_text) => Ok(TaskResultText::Err(TaskError::from_stored_text(err_text)?)),
         (_, _) => Err(TaskResultTextRefused::BothSlotsSet),
     }
 }
@@ -488,6 +449,39 @@ mod tests {
         assert!(serde_json::from_str::<TaskResult<serde_json::Value>>(&deep).is_err());
     }
 
+    /// The value of the ok slot and the `data` of the err slot decode from their own text: an integer outside
+    /// the `i64` and `u64` range reads as `u128` or `i128`, and a read that only checks the envelope
+    /// (`IgnoredAny`) takes it.
+    #[test]
+    fn a_value_outside_i64_and_u64_reads_from_its_text() {
+        let wide: TaskResult<u128> = serde_json::from_str(
+            r#"{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null}"#,
+        )
+        .unwrap();
+        assert!(matches!(wide, TaskResult::Ok(u128::MAX)));
+        let below: TaskResult<i128> = serde_json::from_str(
+            r#"{"__h_task_result__":true,"ok":-9223372036854775809,"err":null}"#,
+        )
+        .unwrap();
+        assert_eq!(below.unwrap(), i128::from(i64::MIN) - 1);
+        let narrow = serde_json::from_str::<TaskResult<u64>>(
+            r#"{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null}"#,
+        );
+        assert!(narrow.is_err());
+        let err_text = r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":"X","data":[340282366920938463463374607431768211455,-9223372036854775809],"message":null}}"#;
+        let error = serde_json::from_str::<TaskResult<serde::de::IgnoredAny>>(err_text)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.data.as_ref().map(JsonText::get),
+            Some("[340282366920938463463374607431768211455,-9223372036854775809]")
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskResult::<()>::Err(error)).unwrap(),
+            err_text
+        );
+    }
+
     /// The core's strict reader reads the envelope: a repeated key is refused, and a value deeper than
     /// serde_json's own limit of 128 reads back inside a caller's plain `serde_json::from_str`.
     #[test]
@@ -541,8 +535,8 @@ mod tests {
         }
     }
 
-    /// One text per refusal of the text reader. `Undecodable` and
-    /// `ErrorSlotUndecodable` have no text: strict JSON always decodes.
+    /// One text per refusal of the text reader. `Undecodable` has no text:
+    /// strict JSON always decodes.
     #[test]
     fn the_text_reader_refuses_what_the_value_reader_refuses() {
         let refusal = |text: &str| match read_task_result_text(text) {

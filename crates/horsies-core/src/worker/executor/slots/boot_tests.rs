@@ -3,18 +3,23 @@
 //! restart rules in a running pool, down slots, and the stop of a booting
 //! or down slot.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::time::{Duration, Instant};
 
+use super::booting::{
+    attempt_failed_line, back_in_service_line, init_for_slot, outside_kill_line, slot_down_line,
+    DownRecord,
+};
 use super::scripted::{
     answer_of, answer_runs, boot, boot_failed, ended, fail_boot, idle_child, input,
-    isolated_config, isolated_init, reported, result_frame, serving, shell, short_of_descriptors,
-    start_isolated, submit_isolated, take, task, ticket, tickets, until, TestDir,
-    SPAWNER_STOP_WAIT, STATE_WAIT,
+    isolated_config, isolated_init, reported, result_frame, serving, shared_async_init,
+    shared_thread_init, shell, short_of_descriptors, start_isolated, submit_isolated, take_init,
+    task, ticket, tickets, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
+use crate::worker::children::CHILD_PROCESS_NAME;
 use crate::worker::executor::protocol::{
-    IsolatedWork, ParentFrame, ReportedBootCause, ShortageErrno,
+    InitFrame, IsolatedWork, ReportedBootCause, ShortageErrno,
 };
 use crate::worker::executor::supervisor::{
     BootFailure, BootFailureCause, ChildCommand, ChildExit, LossCause, ReapedExit, Spawner,
@@ -42,10 +47,6 @@ fn exhausted(failure: PoolFailure) -> BootFailure {
         }
         other => panic!("expected the boot attempts to run out, got {other:?}"),
     }
-}
-
-fn take_init() -> String {
-    take(&ParentFrame::Init(isolated_init()))
 }
 
 const EMFILE_DETAIL: &str = "OSError: [Errno 24] Too many open files";
@@ -97,7 +98,9 @@ async fn a_start_hook_that_fails_at_boot_fails_the_pool_at_once() {
 
 /// Python `TestBoot::test_boot_failure_is_bounded_and_named`: a child that
 /// dies before its ready frame counts; the third counted attempt fails the
-/// pool with the cause and the exit.
+/// pool with the cause and the exit. The text of the failure is Python's
+/// `describe_pool_failure` (`python/horsies/core/worker/slots.py:852`):
+/// the cause names no loss, and the detail names the loss and the exit once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_boot_that_fails_three_times_fails_the_pool_with_its_cause() {
     let dir = TestDir::new();
@@ -105,7 +108,13 @@ async fn a_boot_that_fails_three_times_fails_the_pool_with_its_cause() {
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
 
-    let last = exhausted(failure_of(&board).await);
+    let failure = failure_of(&board).await;
+    assert_eq!(
+        failure.to_string(),
+        "3 child boot attempts failed; the last one: the child ended before it was ready: \
+         child died: exit code 1"
+    );
+    let last = exhausted(failure);
 
     assert_eq!(
         last.cause,
@@ -171,6 +180,10 @@ async fn a_shortage_on_the_only_slot_counts_every_attempt_and_fails_waiting_task
             EMFILE_DETAIL,
         )
     );
+    match board.phase(0) {
+        SlotPhase::Down(down) => assert_eq!(down.failed_boots.get(), CHILD_BOOT_ATTEMPTS),
+        other => panic!("the last counted attempt leaves the slot down, got {other:?}"),
+    }
     assert_eq!(
         answer_of(waiting).await,
         AttemptEnd::NotDispatched(NotRunCause::PoolFailed)
@@ -538,4 +551,121 @@ async fn the_stop_does_not_wait_for_a_down_slot() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(report, PoolStopReport::Drained);
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
+}
+
+// ---------------------------------------------------------------------------
+// Log lines
+// ---------------------------------------------------------------------------
+
+fn emfile_failure() -> BootFailure {
+    BootFailure::new(
+        BootFailureCause::ResourceShortage(ShortageErrno::Emfile),
+        EMFILE_DETAIL,
+    )
+}
+
+/// Python `TestBoot::test_a_task_loop_failure_on_the_only_slot_uses_every_attempt`
+/// and `tests/e2e/test_task_loop_boot.py`: the line of a slot that is down
+/// names the slot, the cause, the detail, the failed boots, the counted
+/// attempts and the wait before the next boot.
+#[test]
+fn the_slot_down_line_names_the_slot_the_cause_and_the_counts() {
+    let down = DownRecord {
+        counted: 3,
+        failed_boots: NonZeroU32::new(3).unwrap(),
+        wait: Duration::from_secs(4),
+    };
+
+    assert_eq!(
+        slot_down_line(0, down, &emfile_failure()),
+        "Slot 0 is down: the OS ran short of a resource (EMFILE): OSError: [Errno 24] Too \
+         many open files. Failed boots: 3, counted attempts: 3/3. Next boot in 4.0s"
+    );
+}
+
+/// Python `_record_failed_boot`: the line of a failed attempt of a cause
+/// that repeats names the count, the bound, the slot and the failure.
+#[test]
+fn the_attempt_failed_line_names_the_count_the_slot_and_the_failure() {
+    let failure = BootFailure::new(
+        BootFailureCause::AppLoadFailed,
+        "ModuleNotFoundError: No module named 'app'",
+    );
+
+    assert_eq!(
+        attempt_failed_line(1, 2, &failure),
+        "Child boot attempt 2/3 failed on slot 1: the app or a task module could not be \
+         imported: ModuleNotFoundError: No module named 'app'"
+    );
+}
+
+/// Python `TestDownSlots::test_a_down_slot_returns_to_service_and_its_boots_do_not_count`
+/// (`back in service after 2 failed boots`) and `_log_back_in_service`.
+#[test]
+fn the_back_in_service_line_names_the_failed_boots_and_the_cause() {
+    let down = DownState {
+        cause: BootFailureCause::ResourceShortage(ShortageErrno::Emfile),
+        detail: EMFILE_DETAIL.to_owned(),
+        down_since: chrono::Utc::now(),
+        failed_boots: NonZeroU32::new(2).unwrap(),
+    };
+
+    assert_eq!(
+        back_in_service_line(1, &down),
+        "Slot 1 is back in service after 2 failed boots (the OS ran short of a resource \
+         (EMFILE))"
+    );
+}
+
+/// Python `_boot_child`: the line of a booting replacement that a kill from
+/// outside ended while another child serves.
+#[test]
+fn the_outside_kill_line_names_the_slot_and_the_kills_in_a_row() {
+    assert_eq!(
+        outside_kill_line(2, 4),
+        "Replacement child on slot 2 was killed during boot, 4 in a row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Child names
+// ---------------------------------------------------------------------------
+
+/// The init frame of `template` with the process name of the worker.
+fn named_worker_child(template: InitFrame) -> InitFrame {
+    InitFrame {
+        process_name: CHILD_PROCESS_NAME.to_owned(),
+        ..template
+    }
+}
+
+/// Python `_Slot.init_for` and `_SharedSlot.init_for`: a slot sends the init
+/// frame of its pool with the name of the slot, so a Python child's
+/// `multiprocessing.current_process().name` is `horsies-child-<slot>`, and
+/// `horsies-child-shared-<slot>` or `horsies-child-thread-<slot>` for a
+/// shared child. The slot is the board index. Only the name changes.
+#[test]
+fn each_slot_names_its_child_in_the_init_frame() {
+    let isolated = named_worker_child(isolated_init());
+    let shared_async = named_worker_child(shared_async_init(2));
+    let shared_thread = named_worker_child(shared_thread_init(2));
+
+    let first = init_for_slot(&isolated, 0);
+    assert_eq!(first.process_name, "horsies-child-0");
+    assert_eq!(
+        InitFrame {
+            process_name: CHILD_PROCESS_NAME.to_owned(),
+            ..first
+        },
+        isolated
+    );
+    assert_eq!(init_for_slot(&isolated, 1).process_name, "horsies-child-1");
+    assert_eq!(
+        init_for_slot(&shared_async, 2).process_name,
+        "horsies-child-shared-2"
+    );
+    assert_eq!(
+        init_for_slot(&shared_thread, 3).process_name,
+        "horsies-child-thread-3"
+    );
 }

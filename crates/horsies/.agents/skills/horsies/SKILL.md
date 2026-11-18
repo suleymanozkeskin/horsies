@@ -85,6 +85,7 @@ The app's own binary runs the worker, the scheduler and the check. Build the
 app in one function and hand it to `horsies::cli::run` from a plain
 `fn main`:
 
+<!-- rust-check: alone -->
 ```rust
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -147,6 +148,7 @@ the exit codes.
 
 A producer process builds the same app and registers the same tasks:
 
+<!-- rust-check: alone -->
 ```rust
 use std::convert::Infallible;
 use std::time::Duration;
@@ -190,6 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 A program with no tokio runtime uses the blocking views:
 
+<!-- rust-check: alone -->
 ```rust
 use std::convert::Infallible;
 

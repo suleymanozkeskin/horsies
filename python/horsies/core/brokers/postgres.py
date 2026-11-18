@@ -151,7 +151,12 @@ from horsies.core.types.status import (
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, SerializationError, loads_json
-from horsies.core.codec.task_options import stored_execution, stored_max_retries
+from horsies.core.codec.task_options import (
+    OPTIONS_INTEGER_OUT_OF_RANGE,
+    options_integer_out_of_range,
+    stored_execution,
+    stored_max_retries,
+)
 from horsies.core.codec.validation_errors import without_validation_input
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.models.class_coverage import ClassCoverage, ClassReport
@@ -208,7 +213,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.utils.task_loop_registry import is_task_loop
-from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
+from horsies.core.utils.url import sqlalchemy_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
@@ -447,15 +452,24 @@ def _parse_enqueue_task_options(
 
     ``serialize_task_options()`` always produces this text, so malformed JSON
     is a bug, not a runtime condition, and it must not be silently swallowed.
-    No options store no retries and ``ISOLATED``.
+    No options (None) store no retries and ``ISOLATED``. An empty text is
+    not JSON and is refused, as the core refuses it. Options that hold an int
+    outside ``MIN_OPTIONS_INTEGER`` to ``MAX_OPTIONS_INTEGER`` (for example a
+    ``max_delay_seconds`` of ``2**64``) are refused before the retry limit is
+    read, as the core refuses them.
     """
-    if not task_options:
+    if task_options is None:
         return Ok(_EnqueueOptions(max_retries=0, execution=Execution.ISOLATED))
     opts_r = loads_json(task_options)
     if is_err(opts_r):
         return Err(BrokerInvalidTaskOptions(
             message=f'task_options JSON corrupt: {opts_r.err_value}',
             exception=opts_r.err_value,
+        ))
+    if options_integer_out_of_range(opts_r.ok_value):
+        return Err(BrokerInvalidTaskOptions(
+            message=OPTIONS_INTEGER_OUT_OF_RANGE,
+            exception=NoCause(),
         ))
     retry_limit_r = stored_max_retries(opts_r.ok_value)
     if is_err(retry_limit_r):
@@ -482,13 +496,9 @@ def _parse_enqueue_json(
 ) -> Result[Json, BrokerInvalidInput]:
     """Parse one JSON input text.
 
-    Empty text is refused: it is not JSON, and ``loads_json`` reads it as null.
+    A text that does not read is refused, an empty text included
+    (``EmptyJsonTextError``).
     """
-    if not text:
-        return Err(BrokerInvalidInput(
-            message=f'{label} JSON corrupt for {task_name}: empty text',
-            exception=NoCause(),
-        ))
     loaded = loads_json(text)
     if is_err(loaded):
         return Err(BrokerInvalidInput(
@@ -859,7 +869,9 @@ def _strict_result_envelope(
 
     A text that does not read (malformed, a non-finite number) or a value
     that is neither an object nor null is ``INVALID_JSON_PAYLOAD``, as the
-    Python read of a stored result before the switch.
+    Python read of a stored result before the switch. An empty text does not
+    read either (``EmptyJsonTextError``): a task with no result stores NULL,
+    which the caller reads before this call.
     """
     loaded = loads_json(result_json)
     if is_err(loaded):
@@ -1379,7 +1391,7 @@ class PostgresBroker:
             case False:
                 listener = ListenerEnabled(
                     listener=PostgresListener(
-                        to_psycopg_url(session_url),
+                        session_url,
                         tcp_user_timeout_ms=self.config.tcp_user_timeout_ms,
                     ),
                 )
@@ -1725,9 +1737,7 @@ class PostgresBroker:
         async with resources.partition_maintenance.connect() as connection:
             await connection.execute(text('SELECT 1'))
         try:
-            await probe_session_capability(
-                to_psycopg_url(self.config.effective_session_database_url)
-            )
+            await probe_session_capability(self.config.effective_session_database_url)
         except (asyncio.TimeoutError, psycopg.Error) as exc:
             raise ConfigurationError(
                 message='broker session capability check failed',
@@ -1820,7 +1830,7 @@ class PostgresBroker:
         readers and this client's family gets no lock and no write.
         """
         connection = await psycopg.AsyncConnection.connect(
-            to_psycopg_url(self.config.effective_session_database_url),
+            self.config.effective_session_database_url,
             autocommit=True,
         )
         try:
@@ -1917,7 +1927,7 @@ class PostgresBroker:
         lock until the context ends. The wait for the lock has no bound.
         """
         connection = await psycopg.AsyncConnection.connect(
-            to_psycopg_url(self.config.effective_session_database_url),
+            self.config.effective_session_database_url,
             autocommit=True,
         )
         key = self._schema_advisory_key()
@@ -2199,12 +2209,20 @@ class PostgresBroker:
     ) -> BrokerResult[RawResultRecord | None]:
         """Decode the result column into a ``RawResultRecord``.
 
-        Returns ``Err(INVALID_JSON_PAYLOAD)`` when the stored JSON is
-        malformed (parser failure, NaN / Infinity rejected by the
-        parse-constant guard) or when the top-level payload is neither
+        ``result_json`` None (no stored result) gives a record without a
+        result. Returns ``Err(INVALID_JSON_PAYLOAD)`` when the stored JSON is
+        malformed (parser failure, an empty text, NaN / Infinity rejected by
+        the parse-constant guard) or when the top-level payload is neither
         ``None`` nor a JSON object (the envelope grammar requires a
         ``dict``). Otherwise wraps the loaded value into the record.
         """
+        if result_json is None:
+            return Ok(RawResultRecord(
+                task_id=task_id,
+                task_name=task_name,
+                status=status,
+                raw_result=None,
+            ))
         _lr = loads_json(result_json)
         if is_err(_lr):
             return Err(BrokerInvalidJsonPayload(

@@ -40,8 +40,9 @@ pub use horsies_core::monitoring::{
     TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused, WorkerClassLoadInfo,
     WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge, WorkflowNodeInfo,
     WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
-    INTERNAL_SERVER_ERROR_TEXT, MAX_TASK_PAGE_REACH, MONITORING_WINDOW_DEFAULT,
-    MONITORING_WINDOW_MAX, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
+    INTERNAL_SERVER_ERROR_TEXT, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
+    MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
+    RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 
 /// The count of each task status over the live table and the history
@@ -291,9 +292,6 @@ mod tests {
         let app = app();
         let source = match resume_children(&app) {
             core_monitoring::ResumeChildren::Client(source) => source,
-            core_monitoring::ResumeChildren::Registry { .. } => {
-                panic!("the Rust client builds through its child spec source")
-            }
         };
         let request = horsies_core::ChildSpecRequest {
             parent_workflow_id: Uuid::nil(),

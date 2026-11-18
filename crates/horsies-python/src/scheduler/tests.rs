@@ -118,14 +118,6 @@ fn a_failed_family_check_is_a_start_failure_with_its_retryable_flag() {
 }
 
 #[test]
-#[should_panic(expected = "a manifest start gave a refusal of the app-config start")]
-fn a_refusal_of_the_app_config_start_is_a_defect_of_a_manifest_start() {
-    let _defect = start_not_completed(&SchedulerStartError::NotPrepared {
-        schedule: "nightly".to_owned(),
-    });
-}
-
-#[test]
 fn a_failed_tick_keeps_the_retryable_flag_of_its_cause() {
     let failed = tick_failed(&SchedulerTickError::DueRead(BrokerError::ConnectionFailed(
         "no route".to_owned(),

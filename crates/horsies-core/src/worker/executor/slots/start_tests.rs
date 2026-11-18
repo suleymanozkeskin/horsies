@@ -167,11 +167,7 @@ async fn the_first_start_is_degraded_when_one_slot_boots() {
 /// A failed start hook ends the start with the pool failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_start_hook_ends_the_start_with_the_failure() {
-    let init = isolated_init();
-    let script = format!(
-        "{}exit 173",
-        super::scripted::take(&crate::worker::executor::protocol::ParentFrame::Init(init))
-    );
+    let script = format!("{}exit 173", super::scripted::take_init());
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
     let off = limits(MemoryLimit::Off, MemoryLimit::Off, MemoryLimit::Off);

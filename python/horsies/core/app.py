@@ -1190,7 +1190,7 @@ class Horsies:
                         )
 
             task_options_json = task.task_options_json
-            if not task_options_json:
+            if task_options_json is None:
                 continue
 
             options_result = loads_json(task_options_json)

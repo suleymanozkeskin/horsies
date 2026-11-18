@@ -21,8 +21,8 @@ use serde_json::value::RawValue;
 
 use super::input::{InputRefused, NodeInput};
 use crate::task::body::{
-    decode_checked, decode_unit, encode_read_back, unread_member, value_free_encode_text,
-    DecodeFailure,
+    decode_checked, decode_unit, encode_read_back, raw_value_of, unread_member,
+    value_free_encode_text, value_parts, DecodeFailure, ValueParts,
 };
 use crate::{ErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
 
@@ -315,15 +315,17 @@ pub(crate) fn decode_check<A: Serialize + DeserializeOwned + 'static>(
 /// The read-back compare of a node input (Python's node kwargs check with
 /// `extra='forbid'`): `bytes` is the input text that decoded as `decoded`.
 /// The members of `bytes` named in `compared` are compared with the
-/// encoding of `decoded` ([`unread_member`]). A member that the encoding
-/// does not hold, at any depth, is a [`DecodeFailure`] at its key path and
-/// depth with serde's text for a key that binds to no field (`unknown
-/// field`). Pure.
+/// encoding of `decoded` ([`unread_member`]). The compare reads members as
+/// texts and parses no number, so an integer of any width that the strict
+/// read rule takes passes it. A member that the encoding does not hold, at
+/// any depth, is a [`DecodeFailure`] at its key path and depth with
+/// serde's text for a key that binds to no field (`unknown field`). The
+/// callers pass a text that passed the strict read rule. Pure.
 ///
 /// Errors: that failure; a decoded value that does not encode as JSON (the
 /// value-free text of the encoder). The input text decoded, so it reads as
 /// a JSON value.
-fn unread_node_member<A: Serialize>(
+pub(crate) fn unread_node_member<A: Serialize>(
     bytes: &[u8],
     decoded: &A,
     compared: &[&str],
@@ -336,15 +338,17 @@ fn unread_node_member<A: Serialize>(
             value_free_encode_text(&error)
         ),
     })?;
-    let given = match decode_checked::<serde_json::Value>(bytes)? {
-        serde_json::Value::Object(mut members) => {
-            members.retain(|key, _value| compared.contains(&key.as_str()));
-            serde_json::Value::Object(members)
-        }
-        other => other,
+    let given = match value_parts(raw_value_of(bytes)?) {
+        ValueParts::Object(members) => ValueParts::Object(
+            members
+                .into_iter()
+                .filter(|(key, _value)| compared.contains(&key.as_str()))
+                .collect(),
+        ),
+        other @ (ValueParts::List(_) | ValueParts::Null | ValueParts::Scalar) => other,
     };
-    let read = decode_checked::<serde_json::Value>(&encoded)?;
-    match unread_member(&given, &read) {
+    let read = raw_value_of(&encoded)?;
+    match unread_member(given, read) {
         None => Ok(()),
         Some(member) => Err(DecodeFailure {
             path: member.path,
@@ -845,6 +849,32 @@ pub(crate) mod tests {
             &["order_id", "amount"]
         )
         .is_ok());
+    }
+
+    /// The input of [`a_node_member_of_400_digits_passes_the_key_check`]: a
+    /// field that keeps the text of its value.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct WideInput {
+        amount: horsies_core::JsonText,
+    }
+
+    /// #1893: the read-back compare of a node input reads members as texts
+    /// and parses no number, so an integer of 400 digits in a `JsonText`
+    /// field passes. A compared member that the type does not read is still
+    /// named.
+    #[test]
+    fn a_node_member_of_400_digits_passes_the_key_check() {
+        let wide = "9".repeat(400);
+        let input = format!(r#"{{"amount": {wide}}}"#);
+        let decoded: WideInput = decode_checked(input.as_bytes()).unwrap();
+        assert_eq!(decoded.amount.get(), wide);
+        assert!(unread_node_member(input.as_bytes(), &decoded, &["amount"]).is_ok());
+        assert!(decode_check::<WideInput>(input.as_bytes(), &["amount"]).is_ok());
+        let unread = format!(r#"{{"amount": {wide}, "note": {wide}}}"#);
+        let failure =
+            unread_node_member(unread.as_bytes(), &decoded, &["amount", "note"]).unwrap_err();
+        assert_eq!(failure.path, "note");
+        assert_eq!(failure.text, "unknown field `note`");
     }
 
     #[test]

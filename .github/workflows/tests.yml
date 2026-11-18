@@ -108,6 +108,14 @@ jobs:
       - name: Run dual-run unit tests
         run: uv run --no-sync pytest tests/dualrun/ -m unit -v --tb=short
 
+      # The public API of the installed wheel against tests/public_api/
+      # baseline.json and baseline-pyright.json: exports, the deep imports of
+      # the docs, the skill files and the showcase, signatures, fields, enum
+      # members, the pyright completeness score and diagnostics. An intended
+      # change updates the baseline with `python -m tests.public_api.runner`.
+      - name: Compare the public API with the baseline
+        run: uv run --no-sync pytest tests/public_api/ -v --tb=short
+
   dualrun:
     needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'
@@ -155,6 +163,57 @@ jobs:
         env:
           DB_PASSWORD: testpassword
         run: uv run --no-sync pytest tests/dualrun/ -m integration -v --tb=short
+
+  extension:
+    needs: [scope, python-wheel]
+    if: needs.scope.outputs.run_python == 'true'
+    # The tests of horsies._core itself, each case in a fresh interpreter
+    # (tests/extension/). Most cases connect: the session database of
+    # tests/session_database.py, with the schema that
+    # CoreHandle.install_schema installs. The uvloop cases need uvloop from
+    # the dev group.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --no-deps dist/horsies-*.whl
+
+      - name: Run the extension module tests
+        env:
+          DB_PASSWORD: testpassword
+        run: uv run --no-sync pytest tests/extension/ -v --tb=short
 
   newest-pydantic:
     needs: [scope, python-wheel]
@@ -342,7 +401,9 @@ jobs:
           fi
           base="$(git merge-base "$BASE_SHA" HEAD)"
           # The rust job checks and tests every crate of the workspace.
-          if git diff --quiet "$base" HEAD -- crates/ rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
+          # The Rust pages of the docs site hold the code blocks that
+          # horsies-docs-check builds.
+          if git diff --quiet "$base" HEAD -- crates/ rust/ website/src/content/docs/rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
             echo 'run_rust=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
@@ -438,7 +499,13 @@ jobs:
       # Cargo unifies the features of the checked crates: horsies-python turns
       # on the `web` feature of horsies-core here.
       - name: Check the workspace
-        run: cargo check --workspace --all-targets --exclude horsies-test-worker
+        run: cargo check --workspace --all-targets --exclude horsies-test-worker --exclude horsies-docs-check
+
+      # Every `rust` block of website/src/content/docs/rust/ and of the Rust
+      # skill files, as a module of the crate; the error names the page.
+      # The block markers: rust/tests/docs-check/src/lib.rs.
+      - name: Build the Rust code blocks of the docs and the skill files
+        run: cargo check -p horsies-docs-check --all-targets
 
       - name: Check the core without the web feature
         run: cargo check -p horsies-core --all-targets

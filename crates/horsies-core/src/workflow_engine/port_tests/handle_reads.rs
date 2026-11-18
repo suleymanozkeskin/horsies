@@ -16,10 +16,12 @@ use super::support::{
 use crate::core::workflow::handle_types::HandleErrorCode;
 use crate::core::PausedWorkflowAge;
 use crate::core::{
-    OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry, WorkflowStatus,
-    WorkflowTaskStatus,
+    OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus, WorkflowTaskStatus,
 };
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::expire_paused_workflows;
+use crate::workflow_engine::query::NodesRead;
 
 /// How long `get()` waits for a workflow that is terminal before the call.
 const GET_WAIT: Duration = Duration::from_secs(1);
@@ -54,12 +56,7 @@ fn ok_value(result: &TaskResult<serde_json::Value>) -> &serde_json::Value {
 #[serial]
 async fn status_reads_running() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("status_running"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("status_running"), &TestChildSpecs::empty()).await;
 
     assert_eq!(status(&pool, workflow_id).await, WorkflowStatus::Running);
 }
@@ -69,9 +66,21 @@ async fn status_reads_running() {
 #[serial]
 async fn status_reads_completed() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(&pool, &single("status_completed", OnError::Fail), &registry).await;
-    let _task = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(10)), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(
+        &pool,
+        &single("status_completed", OnError::Fail),
+        &child_specs,
+    )
+    .await;
+    let _task = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(10)),
+        &child_specs,
+    )
+    .await;
 
     assert_eq!(status(&pool, workflow_id).await, WorkflowStatus::Completed);
 }
@@ -81,14 +90,14 @@ async fn status_reads_completed() {
 #[serial]
 async fn status_reads_failed() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(&pool, &single("status_failed", OnError::Fail), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(&pool, &single("status_failed", OnError::Fail), &child_specs).await;
     let _task = finish_node(
         &pool,
         workflow_id,
         0,
         &err("TEST_FAIL", "failed"),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -100,14 +109,19 @@ async fn status_reads_failed() {
 #[serial]
 async fn status_reads_paused() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(&pool, &single("status_paused", OnError::Pause), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(
+        &pool,
+        &single("status_paused", OnError::Pause),
+        &child_specs,
+    )
+    .await;
     let _task = finish_node(
         &pool,
         workflow_id,
         0,
         &err("TEST_FAIL", "failed"),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -134,9 +148,9 @@ async fn status_of_an_unknown_id_is_workflow_not_found() {
 /// A PAUSED workflow of one failed node, set back an hour so that a paused
 /// expiry with a short age selects it.
 async fn paused_an_hour_ago(pool: &PgPool, name: &str) -> Uuid {
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(pool, &single(name, OnError::Pause), &registry).await;
-    let _task = finish_node(pool, workflow_id, 0, &err("FAIL", "pause"), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(pool, &single(name, OnError::Pause), &child_specs).await;
+    let _task = finish_node(pool, workflow_id, 0, &err("FAIL", "pause"), &child_specs).await;
     assert_eq!(status(pool, workflow_id).await, WorkflowStatus::Paused);
     sqlx::query(
         "UPDATE horsies_workflows SET updated_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
@@ -152,7 +166,7 @@ async fn paused_an_hour_ago(pool: &PgPool, name: &str) -> Uuid {
 /// an expired pause reads EXPIRED, and `get()` gives `WORKFLOW_EXPIRED`. The
 /// Python test's second half (a 0.x text error read as `WORKFLOW_EXPIRED`) is
 /// not ported: the clean slate keeps no 0.x stored values, and the core fails
-/// closed on such a text (`workflow_handle_get_fails_closed_on_malformed_expiry_error`).
+/// closed on such a text (`the_result_read_fails_closed_on_a_malformed_expiry_error`).
 #[tokio::test]
 #[serial]
 async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
@@ -168,7 +182,8 @@ async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
     assert_eq!(status(&db.pool, workflow_id).await, WorkflowStatus::Expired);
     let got = handle(&db.pool, workflow_id)
         .get(Some(Duration::ZERO))
-        .await;
+        .await
+        .expect("the result read");
     assert_eq!(code(error_of(&got)).as_deref(), Some("WORKFLOW_EXPIRED"));
     db.drop().await;
 }
@@ -219,16 +234,12 @@ async fn the_longest_age_reads_its_candidates_without_a_range_error() {
 #[serial]
 async fn get_gives_wait_timeout_when_the_workflow_does_not_finish() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("get_timeout"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("get_timeout"), &TestChildSpecs::empty()).await;
 
     let got = handle(&pool, workflow_id)
         .get(Some(Duration::from_millis(500)))
-        .await;
+        .await
+        .expect("the result read");
 
     assert_eq!(code(error_of(&got)).as_deref(), Some("WAIT_TIMEOUT"));
 }
@@ -238,26 +249,38 @@ async fn get_gives_wait_timeout_when_the_workflow_does_not_finish() {
 #[serial]
 async fn get_after_cancel_gives_workflow_cancelled() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("get_cancelled"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("get_cancelled"), &TestChildSpecs::empty()).await;
     let workflow_handle = handle(&pool, workflow_id);
     workflow_handle.cancel().await.expect("cancel()");
 
-    let got = workflow_handle.get(Some(GET_WAIT)).await;
+    let got = workflow_handle
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
 
     assert_eq!(code(error_of(&got)).as_deref(), Some("WORKFLOW_CANCELLED"));
 }
 
 /// A finished chain: A gave 10 and B gave 20.
 async fn finished_chain(pool: &PgPool, name: &str) -> Uuid {
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(pool, &chain(name), &registry).await;
-    let _a = finish_node(pool, workflow_id, 0, &ok(serde_json::json!(10)), &registry).await;
-    let _b = finish_node(pool, workflow_id, 1, &ok(serde_json::json!(20)), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(pool, &chain(name), &child_specs).await;
+    let _a = finish_node(
+        pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(10)),
+        &child_specs,
+    )
+    .await;
+    let _b = finish_node(
+        pool,
+        workflow_id,
+        1,
+        &ok(serde_json::json!(20)),
+        &child_specs,
+    )
+    .await;
     workflow_id
 }
 
@@ -287,30 +310,37 @@ async fn result_for_gives_the_typed_result_of_one_node() {
     let workflow_handle = handle(&pool, workflow_id);
 
     for (node_id, expected) in [("node_0", 10_i64), ("node_1", 20_i64)] {
-        match workflow_handle.result_for::<i64>(node_id).await {
+        match workflow_handle
+            .result_for::<i64>(node_id)
+            .await
+            .expect("the node result read")
+        {
             TaskResult::Ok(value) => assert_eq!(value, expected, "{node_id}"),
             TaskResult::Err(error) => panic!("result_for({node_id}): {error:?}"),
         }
     }
 }
 
-/// `TestWorkflowHandleResults.test_result_for_returns_error_when_not_ready`
+/// `TestWorkflowHandleResults.test_result_for_returns_error_when_not_ready`:
+/// the node of an unfinished workflow stores no result, which a client reads
+/// as `RESULT_NOT_READY`.
 #[tokio::test]
 #[serial]
-async fn result_for_an_unfinished_node_gives_result_not_ready() {
+async fn an_unfinished_node_stores_no_result() {
     let pool = shared_pool().await;
     let workflow_id = start(
         &pool,
         &single("result_for_not_ready", OnError::Fail),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
-    let result = handle(&pool, workflow_id)
-        .result_for::<serde_json::Value>("node_0")
-        .await;
+    let stored = handle(&pool, workflow_id)
+        .node_result("node_0")
+        .await
+        .expect("the node result read");
 
-    assert_eq!(code(error_of(&result)).as_deref(), Some("RESULT_NOT_READY"));
+    assert_eq!(stored, None);
 }
 
 /// `TestWorkflowHandleResults.test_results_empty_when_no_tasks_completed`
@@ -318,12 +348,7 @@ async fn result_for_an_unfinished_node_gives_result_not_ready() {
 #[serial]
 async fn results_is_empty_before_any_node_finishes() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("results_empty"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("results_empty"), &TestChildSpecs::empty()).await;
 
     let results = handle(&pool, workflow_id)
         .results()
@@ -338,12 +363,7 @@ async fn results_is_empty_before_any_node_finishes() {
 #[serial]
 async fn tasks_gives_one_entry_per_node_with_its_task_name() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("tasks_info"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("tasks_info"), &TestChildSpecs::empty()).await;
 
     let tasks = handle(&pool, workflow_id).tasks().await.expect("tasks()");
 
@@ -368,7 +388,7 @@ async fn tasks_is_ordered_by_node_index() {
                 join,
             ],
         ),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -383,12 +403,7 @@ async fn tasks_is_ordered_by_node_index() {
 #[serial]
 async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
     let pool = shared_pool().await;
-    let workflow_id = start(
-        &pool,
-        &chain("tasks_status"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    let workflow_id = start(&pool, &chain("tasks_status"), &TestChildSpecs::empty()).await;
 
     let tasks = handle(&pool, workflow_id).tasks().await.expect("tasks()");
 
@@ -403,9 +418,16 @@ async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
 #[serial]
 async fn tasks_gives_the_result_and_times_of_a_finished_node() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let workflow_id = start(&pool, &single("tasks_fields", OnError::Fail), &registry).await;
-    let _task = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(42)), &registry).await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = start(&pool, &single("tasks_fields", OnError::Fail), &child_specs).await;
+    let _task = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(42)),
+        &child_specs,
+    )
+    .await;
 
     let tasks = handle(&pool, workflow_id).tasks().await.expect("tasks()");
 
@@ -426,7 +448,7 @@ async fn a_task_node_has_no_child_and_no_summary() {
     let workflow_id = start(
         &pool,
         &single("subwf_regular", OnError::Fail),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 
@@ -500,53 +522,45 @@ async fn a_finished_sub_workflow_node_gives_its_summary() {
     end_workflows(&pool, &[parent, child]).await;
 }
 
-/// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_corrupt_summary_returns_err`
+/// The stored sub-workflow summary of the node 0 of `parent`, as the node
+/// read returns it.
+async fn stored_summary_of(pool: &PgPool, parent: Uuid) -> Option<String> {
+    match handle(pool, parent).nodes().await.expect("the node read") {
+        NodesRead::Nodes(nodes) => nodes[0].sub_workflow_summary.clone(),
+        NodesRead::WorkflowAbsent => panic!("the parent {parent} has a row"),
+    }
+}
+
+/// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_corrupt_summary_returns_err`:
+/// the node read returns a summary that is not JSON as stored; a client
+/// refuses it with `STORED_DATA_INVALID`.
 #[tokio::test]
 #[serial]
-async fn a_corrupt_summary_makes_tasks_return_stored_data_invalid() {
+async fn a_corrupt_summary_is_read_as_stored() {
     let pool = shared_pool().await;
     let (parent, child) =
         seed_linked_child(&pool, "FAILED", "FAILED", Some("{not valid json!!!")).await;
 
-    let refused = handle(&pool, parent).tasks().await;
+    let summary = stored_summary_of(&pool, parent).await;
 
     end_workflows(&pool, &[parent, child]).await;
-    let error = refused.expect_err("a summary that does not parse is refused");
-
-    assert_eq!(error.code, HandleErrorCode::StoredDataInvalid);
-    assert!(!error.retryable);
-    assert!(
-        error.message.contains("sub_workflow_summary"),
-        "{}",
-        error.message
-    );
+    assert_eq!(summary.as_deref(), Some("{not valid json!!!"));
 }
 
 /// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_bad_status_summary_returns_err`:
-/// an unknown status is never read as FAILED.
+/// the node read returns a summary with an unknown status as stored; a
+/// client refuses it with `STORED_DATA_INVALID` and never reads it as FAILED.
 #[tokio::test]
 #[serial]
-async fn a_summary_with_an_unknown_status_makes_tasks_return_stored_data_invalid() {
+async fn a_summary_with_an_unknown_status_is_read_as_stored() {
     let pool = shared_pool().await;
-    let (parent, child) = seed_linked_child(
-        &pool,
-        "COMPLETED",
-        "COMPLETED",
-        Some(r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#),
-    )
-    .await;
+    let stored = r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#;
+    let (parent, child) = seed_linked_child(&pool, "COMPLETED", "COMPLETED", Some(stored)).await;
 
-    let refused = handle(&pool, parent).tasks().await;
+    let summary = stored_summary_of(&pool, parent).await;
 
     end_workflows(&pool, &[parent, child]).await;
-    let error = refused.expect_err("a summary with an unknown status is refused");
-
-    assert_eq!(error.code, HandleErrorCode::StoredDataInvalid);
-    assert!(
-        error.message.contains("sub_workflow_summary"),
-        "{}",
-        error.message
-    );
+    assert_eq!(summary.as_deref(), Some(stored));
 }
 
 /// `TestWorkflowHandleOutput.test_output_failed_returns_failed`
@@ -554,21 +568,31 @@ async fn a_summary_with_an_unknown_status_makes_tasks_return_stored_data_invalid
 #[serial]
 async fn a_failed_output_node_makes_get_give_its_error() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let mut workflow_spec = chain("output_failed");
     workflow_spec.output_index = Some(1);
-    let workflow_id = start(&pool, &workflow_spec, &registry).await;
-    let _a = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(10)), &registry).await;
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+    let _a = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(10)),
+        &child_specs,
+    )
+    .await;
     let _b = finish_node(
         &pool,
         workflow_id,
         1,
         &err("OUTPUT_FAIL", "Output failed"),
-        &registry,
+        &child_specs,
     )
     .await;
 
-    let got = handle(&pool, workflow_id).get(Some(GET_WAIT)).await;
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
 
     assert_eq!(code(error_of(&got)).as_deref(), Some("OUTPUT_FAIL"));
 }
@@ -578,14 +602,14 @@ async fn a_failed_output_node_makes_get_give_its_error() {
 #[serial]
 async fn results_keys_two_nodes_of_one_task_by_node_id() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let workflow_id = start(
         &pool,
         &spec(
             "dup_tasks",
             vec![task_node(0, "fetch_data"), task_node(1, "fetch_data")],
         ),
-        &registry,
+        &child_specs,
     )
     .await;
     let _a = finish_node(
@@ -593,7 +617,7 @@ async fn results_keys_two_nodes_of_one_task_by_node_id() {
         workflow_id,
         0,
         &ok(serde_json::json!(100)),
-        &registry,
+        &child_specs,
     )
     .await;
     let _b = finish_node(
@@ -601,7 +625,7 @@ async fn results_keys_two_nodes_of_one_task_by_node_id() {
         workflow_id,
         1,
         &ok(serde_json::json!(200)),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -658,14 +682,21 @@ async fn a_lost_database_makes_status_give_a_retryable_db_operation_failed() {
     assert_eq!(error.workflow_id, workflow_id);
 }
 
-/// `TestWorkflowHandleInfraErrors.test_get_db_error_returns_taskresult_broker_error`
+/// `TestWorkflowHandleInfraErrors.test_get_db_error_returns_taskresult_broker_error`:
+/// the result read on a lost database fails with a retryable database
+/// error, which a client's handle names `BROKER_ERROR`.
 #[tokio::test]
-async fn a_lost_database_makes_get_give_broker_error() {
-    let got = unreachable_handle(Uuid::new_v4())
+async fn a_lost_database_makes_the_result_read_fail_retryably() {
+    let error = unreachable_handle(Uuid::new_v4())
         .get(Some(Duration::from_millis(500)))
-        .await;
+        .await
+        .expect_err("the result read with no database");
 
-    assert_eq!(code(error_of(&got)).as_deref(), Some("BROKER_ERROR"));
+    assert!(
+        matches!(error, WorkflowError::Database(_) | WorkflowError::Broker(_)),
+        "{error:?}"
+    );
+    assert!(error.is_retryable(), "{error:?}");
 }
 
 /// `TestWorkflowHandleInfraErrors.test_cancel_db_error_returns_err_db_operation_failed`
@@ -701,16 +732,16 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
 #[serial]
 async fn get_polls_when_the_listener_cannot_connect() {
     let mut db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let mut workflow_spec = single("listen_fallback", OnError::Fail);
     workflow_spec.output_index = Some(0);
-    let workflow_id = start(&db.pool, &workflow_spec, &registry).await;
+    let workflow_id = start(&db.pool, &workflow_spec, &child_specs).await;
     let _task = finish_node(
         &db.pool,
         workflow_id,
         0,
         &ok(serde_json::json!(100)),
-        &registry,
+        &child_specs,
     )
     .await;
     // The handle's reads run on the core pool of its broker: a status read
@@ -726,6 +757,7 @@ async fn get_polls_when_the_listener_cannot_connect() {
     let got = workflow_handle.get(Some(Duration::from_secs(5))).await;
 
     db.allow_connections(true).await;
+    let got = got.expect("the result read polls");
     assert_eq!(ok_value(&got), &serde_json::json!(100));
     db.drop().await;
 }

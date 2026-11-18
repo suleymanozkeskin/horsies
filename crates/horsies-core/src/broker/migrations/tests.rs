@@ -333,6 +333,8 @@ fn test_chain() -> Vec<EmbeddedMigration> {
             script: SqlScript::new("test_migration", "SELECT 1"),
             family_row: FamilyRow::NotWritten,
             readers: ReaderPublication::NotPublished,
+            exact_indexes: &[],
+            retired_indexes: &[],
             checksum: [u8::try_from(version - 999).expect("a small test version"); CHECKSUM_BYTES],
         })
         .into()
@@ -372,25 +374,27 @@ fn a_schema_without_a_ledger_is_empty_zero_x_or_unknown() {
     let chain = test_chain();
     assert_eq!(
         classify(no_ledger(false, &[]), &chain),
-        DatabaseState::Empty
+        Classification::Settled(DatabaseState::Empty)
     );
     assert_eq!(
         classify(
             no_ledger(true, &["horsies_schema_version", "horsies_tasks"]),
             &chain
         ),
-        DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::ZeroXPython {
             tables: vec![
                 "horsies_schema_version".to_owned(),
                 "horsies_tasks".to_owned()
             ],
-        }),
+        })),
     );
     assert_eq!(
         classify(no_ledger(false, &["horsies_tasks"]), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::UnknownHorsiesObjects {
-            tables: vec!["horsies_tasks".to_owned()],
-        }),
+        Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::UnknownHorsiesObjects {
+                tables: vec!["horsies_tasks".to_owned()],
+            }
+        )),
     );
 }
 
@@ -401,10 +405,10 @@ fn a_version_above_the_chain_is_newer() {
     applied.push(foreign(1003));
     assert_eq!(
         classify(ledger(applied, RUST), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
             stored: 1003,
             own: 1002,
-        }),
+        })),
     );
 }
 
@@ -425,7 +429,9 @@ fn bookkeeping_that_does_not_start_the_chain_is_foreign() {
     for (applied, versions) in cases {
         assert_eq!(
             classify(ledger(applied, RUST), &chain),
-            DatabaseState::Unsupported(SchemaRefusal::ForeignMigrations { versions }),
+            Classification::Settled(DatabaseState::Unsupported(
+                SchemaRefusal::ForeignMigrations { versions }
+            )),
         );
     }
 }
@@ -437,18 +443,20 @@ fn a_failed_row_is_incomplete_and_a_changed_checksum_is_edited() {
     failed[1].run = RecordedRun::Failed;
     assert_eq!(
         classify(ledger(failed, RUST), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::MigrationIncomplete { version: 1001 }),
+        Classification::Settled(DatabaseState::Unsupported(
+            SchemaRefusal::MigrationIncomplete { version: 1001 }
+        )),
     );
 
     let mut edited: Vec<AppliedMigration> = chain.iter().map(succeeded).collect();
     edited[0].checksum = vec![0];
     assert_eq!(
         classify(ledger(edited, RUST), &chain),
-        DatabaseState::Unsupported(SchemaRefusal::MigrationEdited {
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::MigrationEdited {
             version: 1000,
             stored_checksum: vec![0],
             own_checksum: chain[0].checksum.to_vec(),
-        }),
+        })),
     );
 }
 
@@ -463,14 +471,14 @@ fn a_start_of_the_chain_is_behind_and_the_whole_chain_is_current() {
             ),
             &chain
         ),
-        DatabaseState::Behind {
+        Classification::Settled(DatabaseState::Behind {
             applied: 2,
             family: RecordedFamily::NotRecorded,
-        },
+        }),
     );
     assert_eq!(
         classify(ledger(chain.iter().map(succeeded).collect(), RUST), &chain),
-        DatabaseState::Current { family: RUST },
+        Classification::ChainCurrent { family: RUST },
     );
 }
 
@@ -511,20 +519,50 @@ fn each_state_decides_its_action() {
         (
             DatabaseState::Current {
                 family: RecordedFamily::Recorded(Python),
+                readers: ReaderPresence::Published,
             },
             Python,
             InstallAction::Ready,
         ),
         (
             DatabaseState::Current {
+                family: RecordedFamily::Recorded(Python),
+                readers: ReaderPresence::Missing,
+            },
+            Python,
+            InstallAction::CompleteInstall,
+        ),
+        (
+            DatabaseState::Current {
                 family: RecordedFamily::NotRecorded,
+                readers: ReaderPresence::Published,
             },
             Rust,
-            InstallAction::RecordFamily,
+            InstallAction::CompleteInstall,
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::NotRecorded,
+                readers: ReaderPresence::Missing,
+            },
+            Rust,
+            InstallAction::CompleteInstall,
         ),
         (
             DatabaseState::Current {
                 family: RecordedFamily::Recorded(Rust),
+                readers: ReaderPresence::Published,
+            },
+            Python,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: Rust,
+                own: Python,
+            }),
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(Rust),
+                readers: ReaderPresence::Missing,
             },
             Python,
             InstallAction::Refuse(InstallRefusal::OtherFamily {
@@ -1009,7 +1047,7 @@ async fn a_database_of_the_other_family_is_refused_before_any_write() {
 }
 
 /// A database that holds the chain with no family row gets this client's
-/// row, and no migration runs again (Python `RecordFamily`).
+/// row, and no migration runs again (Python `CompleteInstall`).
 #[tokio::test]
 #[serial]
 async fn a_database_with_no_family_row_gets_this_client_s_row() {
@@ -1028,6 +1066,158 @@ async fn a_database_with_no_family_row_gets_this_client_s_row() {
 
     assert_eq!(family_row(&database).await.as_deref(), Some("PYTHON"));
     assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
+/// The signatures of the history readers that do not exist, in order.
+async fn missing_readers(database: &MigrationTestDatabase) -> Vec<String> {
+    database
+        .client()
+        .query(
+            "SELECT s.signature FROM horsies_history_reader_signatures() AS s \
+             WHERE to_regprocedure(s.signature) IS NULL ORDER BY 1",
+            &[],
+        )
+        .await
+        .expect("read the reader signatures")
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+/// The leaf names of the lookup manifest, in probe order.
+async fn manifest_leaves(database: &MigrationTestDatabase) -> Vec<String> {
+    database
+        .client()
+        .query(
+            "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
+            &[],
+        )
+        .await
+        .expect("read the manifest")
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+/// A database that holds the chain and its family row with readers missing
+/// and an empty lookup manifest (an install that stopped before the
+/// publication, as Python's install left it) gets the readers and the
+/// manifest row of the static forever leaf, and no migration runs again
+/// (Python `CompleteInstall`;
+/// `test_an_install_that_stopped_before_the_publication_is_completed`).
+#[tokio::test]
+#[serial]
+async fn a_database_whose_readers_are_missing_gets_them_published() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Python, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute(
+            "DROP FUNCTION horsies_task_detail_staged(uuid); \
+             DROP FUNCTION horsies_task_result_staged(uuid); \
+             DELETE FROM horsies_task_lookup_manifest;",
+        )
+        .await;
+    assert_eq!(
+        missing_readers(&database).await,
+        vec![
+            "horsies_task_detail_staged(uuid)".to_owned(),
+            "horsies_task_result_staged(uuid)".to_owned(),
+        ]
+    );
+    let before = installed_on(&database).await;
+
+    database
+        .install(ClientFamily::Python, InstallLockPlan::fleet())
+        .await
+        .expect("complete the install");
+
+    assert!(missing_readers(&database).await.is_empty());
+    assert_eq!(
+        manifest_leaves(&database).await,
+        vec!["horsies_task_history_forever_open".to_owned()]
+    );
+    let current: bool = database
+        .client()
+        .query_one("SELECT horsies_history_readers_current()", &[])
+        .await
+        .expect("read the reader stamps")
+        .get(0);
+    assert!(current);
+    assert_eq!(installed_on(&database).await, before);
+    assert_eq!(family_row(&database).await.as_deref(), Some("PYTHON"));
+    database.drop().await;
+}
+
+/// A database with readers missing and no family row gets both, the
+/// readers first (Python `CompleteInstall`).
+#[tokio::test]
+#[serial]
+async fn a_database_with_no_readers_and_no_family_row_gets_both() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute(
+            "DROP FUNCTION horsies_task_history_duplicate_staged(uuid); \
+             DELETE FROM horsies_task_lookup_manifest; \
+             DELETE FROM horsies_client_family;",
+        )
+        .await;
+    let before = installed_on(&database).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("complete the install");
+
+    assert!(missing_readers(&database).await.is_empty());
+    assert_eq!(
+        manifest_leaves(&database).await,
+        vec!["horsies_task_history_forever_open".to_owned()]
+    );
+    assert_eq!(family_row(&database).await.as_deref(), Some("RUST"));
+    assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
+/// A database of the other family with readers missing is refused and
+/// changed in nothing: the family is checked before the publication.
+#[tokio::test]
+#[serial]
+async fn a_database_of_the_other_family_with_readers_missing_is_refused_unchanged() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute("DROP FUNCTION horsies_task_detail_staged(uuid);")
+        .await;
+
+    let refused = database
+        .install(ClientFamily::Python, InstallLockPlan::fleet())
+        .await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(SchemaInstallError::OtherFamily {
+                stored: ClientFamily::Rust,
+                own: ClientFamily::Python,
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        missing_readers(&database).await,
+        vec!["horsies_task_detail_staged(uuid)".to_owned()]
+    );
     database.drop().await;
 }
 
@@ -1422,5 +1612,381 @@ async fn a_failed_reader_publication_rolls_back_migration_1000() {
     assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
     assert!(!relation_exists(&database, "horsies_client_family").await);
     assert!(!relation_exists(&database, "horsies_task_lookup_manifest").await);
+    database.drop().await;
+}
+
+// ---- Index steps ----
+
+/// The exact index of the index-step tests.
+static STEP_EXACT: [ExactIndex; 1] = [exact_index!(
+    "horsies_test_step_idx",
+    "horsies_tasks",
+    "(queue_name, priority)"
+)];
+
+/// The key of [`STEP_EXACT`], as `pg_get_indexdef` writes it.
+const STEP_EXACT_KEY: &str = "(queue_name, priority)";
+
+/// The retired index of the index-step tests.
+static STEP_RETIRED: [RetiredIndex; 1] =
+    [retired_index!("horsies_test_retired_idx", "horsies_tasks")];
+
+/// A chain of migration 1000 (installed by the test, never applied from
+/// here) and migration 1001 with `script`, [`STEP_EXACT`] and
+/// [`STEP_RETIRED`].
+fn step_chain(script: SqlScript) -> Vec<EmbeddedMigration> {
+    vec![
+        EmbeddedMigration {
+            version: BASELINE_MIGRATION_VERSION,
+            description: "baseline",
+            script: SqlScript::new("test_baseline", "SELECT 1"),
+            family_row: FamilyRow::NotWritten,
+            readers: ReaderPublication::NotPublished,
+            exact_indexes: &[],
+            retired_indexes: &[],
+            checksum: [0; CHECKSUM_BYTES],
+        },
+        EmbeddedMigration {
+            version: 1001,
+            description: "index steps",
+            script,
+            family_row: FamilyRow::NotWritten,
+            readers: ReaderPublication::NotPublished,
+            exact_indexes: &STEP_EXACT,
+            retired_indexes: &STEP_RETIRED,
+            checksum: [1; CHECKSUM_BYTES],
+        },
+    ]
+}
+
+/// The script of migration 1001 that commits.
+const STEP_SCRIPT: SqlScript = SqlScript::new("test_index_steps", "SELECT 1");
+
+/// The script of migration 1001 that fails: its transaction rolls back.
+const FAILING_STEP_SCRIPT: SqlScript = SqlScript::new(
+    "test_index_steps_failing",
+    "SELECT horsies_test_no_such_function()",
+);
+
+impl MigrationTestDatabase {
+    /// Installs migration 1000 alone, then applies `chain` from index 1 on
+    /// ([`apply_chain`]) on one session-work connection of a new core
+    /// handle.
+    async fn apply_after_baseline(
+        &self,
+        chain: &[EmbeddedMigration],
+    ) -> Result<(), SchemaInstallError> {
+        let handle = core_handle(self.database.url());
+        let open = handle
+            .pools()
+            .expect("the statement layer accepts the test URL");
+        let mut connection = open
+            .pools()
+            .session_work()
+            .checkout(CheckoutClass::Batch)
+            .await
+            .expect("check out a connection");
+        let applied = apply_chain(
+            &mut connection,
+            chain,
+            1,
+            ClientFamily::Rust,
+            StatementLog::Off,
+        )
+        .await;
+        drop(connection);
+        drop(open);
+        let _closed = handle.close().await;
+        applied
+    }
+
+    /// The oid of the relation `name`, or `None` when no relation has it.
+    async fn relation_oid(&self, name: &str) -> Option<u32> {
+        self.client()
+            .query_one(
+                "SELECT to_regclass($1)::oid FROM (SELECT 1) AS one",
+                &[&name],
+            )
+            .await
+            .expect("read the catalog")
+            .get(0)
+    }
+
+    /// The definition and the validity of the index `name`, or `None` when
+    /// no index has the name.
+    async fn index_form(&self, name: &str) -> Option<(String, bool)> {
+        self.client()
+            .query_opt(
+                "SELECT pg_get_indexdef(i.indexrelid), i.indisvalid FROM pg_index AS i \
+                 WHERE i.indexrelid = to_regclass($1)",
+                &[&name],
+            )
+            .await
+            .expect("read the index")
+            .map(|row| (row.get(0), row.get(1)))
+    }
+}
+
+/// Every declared index name of the chain and of these tests is an unquoted
+/// identifier whose build and claim names stay inside the identifier limit.
+#[test]
+fn every_declared_index_name_leaves_room_for_its_build_and_claim_names() {
+    let exact = embedded_migrations()
+        .iter()
+        .flat_map(|migration| migration.exact_indexes.iter())
+        .chain(STEP_EXACT.iter());
+    for index in exact {
+        assert!(
+            index.name.len() <= MAX_STEP_INDEX_NAME_BYTES,
+            "{}",
+            index.name
+        );
+        for name in [index.name, index.table, index.build_name, index.claim_name] {
+            assert!(crate::db::SqlIdentifier::parse(name).is_ok(), "{name}");
+        }
+    }
+    let retired = embedded_migrations()
+        .iter()
+        .flat_map(|migration| migration.retired_indexes.iter())
+        .chain(STEP_RETIRED.iter());
+    for index in retired {
+        assert!(
+            index.name.len() <= MAX_STEP_INDEX_NAME_BYTES,
+            "{}",
+            index.name
+        );
+        for name in [index.name, index.table, index.claim_name] {
+            assert!(crate::db::SqlIdentifier::parse(name).is_ok(), "{name}");
+        }
+    }
+}
+
+/// Python `TestExactIndexInstall::test_an_upgrade_keeps_each_exact_index_whose_shape_matches`:
+/// an index whose name and form match the declaration is kept, not rebuilt.
+#[tokio::test]
+#[serial]
+async fn an_index_step_keeps_an_exact_index_whose_form_matches() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute("CREATE INDEX horsies_test_step_idx ON horsies_tasks (queue_name, priority)")
+        .await;
+    let before = database.relation_oid("horsies_test_step_idx").await;
+    assert!(before.is_some());
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    assert_eq!(database.relation_oid("horsies_test_step_idx").await, before);
+    assert_eq!(
+        bookkeeping_rows(&database)
+            .await
+            .iter()
+            .map(|row| row.0)
+            .collect::<Vec<i64>>(),
+        vec![1000, 1001]
+    );
+    database.drop().await;
+}
+
+/// Python `TestExactIndexInstall::test_an_upgrade_drops_a_build_that_an_earlier_upgrade_left`:
+/// an invalid index under the name (an interrupted concurrent build) is
+/// built again, and the build and claim indexes that an interrupted
+/// replacement left are dropped.
+#[tokio::test]
+#[serial]
+async fn an_index_step_builds_an_invalid_index_again_and_drops_the_leftovers() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute(
+            "CREATE INDEX horsies_test_step_idx ON horsies_tasks (queue_name, priority); \
+             UPDATE pg_index SET indisvalid = FALSE \
+             WHERE indexrelid = 'horsies_test_step_idx'::regclass; \
+             CREATE INDEX horsies_test_step_idx_build ON horsies_tasks (queue_name); \
+             CREATE INDEX horsies_test_step_idx_claim ON horsies_tasks (priority);",
+        )
+        .await;
+    let invalid = database.relation_oid("horsies_test_step_idx").await;
+    assert_eq!(
+        database
+            .index_form("horsies_test_step_idx")
+            .await
+            .map(|form| form.1),
+        Some(false)
+    );
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    let (definition, valid) = database
+        .index_form("horsies_test_step_idx")
+        .await
+        .expect("the exact index exists");
+    assert!(valid);
+    assert!(definition.contains(STEP_EXACT_KEY), "{definition}");
+    assert_ne!(
+        database.relation_oid("horsies_test_step_idx").await,
+        invalid
+    );
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_build").await,
+        None
+    );
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_claim").await,
+        None
+    );
+    database.drop().await;
+}
+
+/// Python `TestExactIndexInstall::test_a_replaced_index_keeps_its_name_while_the_old_one_drops`:
+/// an index of the name with another form is replaced; each concurrent drop
+/// of the step finds an index of the declared form under the name. An event
+/// trigger records the form under the name at each `DROP INDEX`, through
+/// dblink, so the recording writes nothing in the transaction of the drop
+/// (`DROP INDEX CONCURRENTLY` must be its first action).
+#[tokio::test]
+#[serial]
+async fn a_replaced_index_keeps_its_name_while_the_old_one_drops() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute(
+            "CREATE INDEX horsies_test_step_idx ON horsies_tasks (queue_name); \
+             CREATE EXTENSION IF NOT EXISTS dblink; \
+             CREATE TABLE horsies_test_seen_at_drop (definition text NOT NULL);",
+        )
+        .await;
+    let before = database.relation_oid("horsies_test_step_idx").await;
+    let recorder = format!(
+        "CREATE FUNCTION horsies_test_record_drop() RETURNS event_trigger \
+         LANGUAGE plpgsql AS $$ \
+         BEGIN \
+             PERFORM dblink_exec({url}, format( \
+                 'INSERT INTO horsies_test_seen_at_drop VALUES (%L)', \
+                 coalesce(pg_get_indexdef(to_regclass('horsies_test_step_idx')), '<absent>'))); \
+         END $$; \
+         CREATE EVENT TRIGGER horsies_test_record_drop ON ddl_command_start \
+         WHEN TAG IN ('DROP INDEX') EXECUTE FUNCTION horsies_test_record_drop();",
+        url = sql_literal(database.database.url()),
+    );
+    database.execute(&recorder).await;
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    let seen: Vec<String> = database
+        .client()
+        .query("SELECT definition FROM horsies_test_seen_at_drop", &[])
+        .await
+        .expect("read the recorded forms")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(!seen.is_empty(), "the step dropped no index");
+    for definition in &seen {
+        assert!(definition.contains(STEP_EXACT_KEY), "{seen:?}");
+    }
+    let after = database.relation_oid("horsies_test_step_idx").await;
+    assert!(after.is_some());
+    assert_ne!(after, before);
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_build").await,
+        None
+    );
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_claim").await,
+        None
+    );
+    database.drop().await;
+}
+
+/// `text` as an SQL string literal.
+fn sql_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// Python `TestRetiredClaimIndexes::test_a_failed_activation_keeps_the_retired_claim_indexes`:
+/// a migration whose transaction fails keeps the indexes that it retires,
+/// and no bookkeeping row is written; the next apply drops them after its
+/// row commits.
+#[tokio::test]
+#[serial]
+async fn a_failed_migration_keeps_the_indexes_that_it_retires() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute("CREATE INDEX horsies_test_retired_idx ON horsies_tasks (enqueued_at)")
+        .await;
+
+    let failed = database
+        .apply_after_baseline(&step_chain(FAILING_STEP_SCRIPT))
+        .await;
+
+    assert!(
+        matches!(failed, Err(SchemaInstallError::Statement(_))),
+        "{failed:?}"
+    );
+    assert!(database
+        .relation_oid("horsies_test_retired_idx")
+        .await
+        .is_some());
+    assert_eq!(bookkeeping_rows(&database).await.len(), 1);
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    assert_eq!(
+        database.relation_oid("horsies_test_retired_idx").await,
+        None
+    );
+    assert_eq!(
+        database
+            .relation_oid("horsies_test_retired_idx_claim")
+            .await,
+        None
+    );
+    assert_eq!(bookkeeping_rows(&database).await.len(), 2);
+    database.drop().await;
+}
+
+/// A relation other than an index of the table holds the name of an exact
+/// index: the migration is refused, and nothing of it is written.
+#[tokio::test]
+#[serial]
+async fn an_index_name_held_by_another_relation_refuses_the_migration() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute("CREATE TABLE horsies_test_step_idx (id integer)")
+        .await;
+
+    let refused = database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(SchemaInstallError::Refused(
+                SchemaRefusal::IndexNameHeldElsewhere {
+                    version: 1001,
+                    index: "horsies_test_step_idx",
+                    table: "horsies_tasks",
+                }
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(bookkeeping_rows(&database).await.len(), 1);
     database.drop().await;
 }

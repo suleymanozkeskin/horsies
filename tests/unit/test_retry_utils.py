@@ -101,11 +101,18 @@ class TestReadStoredRetryPolicy:
 
     @pytest.mark.parametrize(
         'task_options',
-        [None, '', json.dumps({'timeout_ms': 5}), _options(None)],
-        ids=['no-options', 'empty-text', 'no-key', 'null'],
+        [None, json.dumps({'timeout_ms': 5}), _options(None)],
+        ids=['no-options', 'no-key', 'null'],
     )
     def test_no_policy(self, task_options: str | None) -> None:
         assert read_stored_retry_policy(task_options) == NoRetryPolicy()
+
+    def test_an_empty_text_does_not_parse(self) -> None:
+        """No writer stores an empty text: it is corrupt data, not "no
+        policy". The core's ``read_stored_options`` gives the same reason."""
+        assert read_stored_retry_policy('') == OptionsNotAnObject(
+            reason='stored task_options do not parse: JSON parse failed: the text is empty',
+        )
 
     def test_a_valid_policy_reads_as_retry_policy(self) -> None:
         assert read_stored_retry_policy(_options(_VALID_POLICY)) == RetryPolicy(

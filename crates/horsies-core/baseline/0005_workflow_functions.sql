@@ -39,7 +39,8 @@
 -- - CHILD_START (one per owed child start): workflow_id (the parent workflow), workflow_name (the name of the parent
 --   workflow, never NULL: the errors of a child that cannot start name the workflow by it; Python reads it in the
 --   node CAS as parent_workflow_name, core/workflows/engine.py:1014-1016), task_index (the sub-workflow node),
---   node_input, args_from (JSON text or NULL), sub_workflow_name, sub_definition_key, sub_workflow_params (GIVEN or
+--   node_input, args_from (the stored jsonb value as Python's driver gives it: the text of a string, the JSON text of
+--   any other value, NULL for NULL and null), sub_workflow_name, sub_definition_key, sub_workflow_params (GIVEN or
 --   NOT_GIVEN), parent_depth, root_workflow_id.
 -- - SOURCE (one per terminal dependency of a CHILD_START node): workflow_id, task_index (the CHILD_START node),
 --   source_task_index, source_node_id, source_status, source_task_name, source_definition_key, source_result (the
@@ -142,14 +143,15 @@ AS $$
     SELECT (horsies_task_error_envelope(p_error_code, p_message, p_data, NULL, NULL)::json -> 'err')::text
 $$;
 
--- p_text parsed as json, or NULL when it is NULL, empty, or not JSON. Used on cold paths only (completion, failure
--- policy, child completion): the parse runs in a subtransaction.
+-- p_text parsed as json, or NULL when it is NULL or not JSON. An empty text is not JSON: a caller that must tell it
+-- from NULL checks NULL first. Used on cold paths only (completion, failure policy, child completion): the parse runs
+-- in a subtransaction.
 -- Locks: none. Returns json or NULL. Python: loads_json (core/codec/json_io.py) at the decode sites it serves.
 CREATE FUNCTION horsies_workflow_json_or_null(p_text text) RETURNS json
     LANGUAGE plpgsql IMMUTABLE
 AS $$
 BEGIN
-    IF p_text IS NULL OR p_text = '' THEN
+    IF p_text IS NULL THEN
         RETURN NULL;
     END IF;
     RETURN p_text::json;
@@ -165,8 +167,9 @@ $$;
 -- - 'VALUE': a valid envelope with an empty err slot;
 -- - 'ERROR': a valid envelope whose err slot is an object with an error_code;
 -- - 'OUTPUTLESS': the outputless workflow envelope (__h_outputless_terminals__ true);
--- - 'ABSENT': NULL or empty text;
--- - 'UNREADABLE': anything else (not JSON, another shape, an err slot without an error_code).
+-- - 'ABSENT': NULL;
+-- - 'UNREADABLE': anything else (not JSON, an empty text included, another shape, an err slot without an error_code).
+--   No writer stores an empty text, so it is corrupt data, not "no result".
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_result_kind(p_text text) RETURNS text
     LANGUAGE plpgsql IMMUTABLE
@@ -175,7 +178,7 @@ DECLARE
     v_value json := horsies_workflow_json_or_null(p_text);
     v_keys text[];
 BEGIN
-    IF p_text IS NULL OR p_text = '' THEN
+    IF p_text IS NULL THEN
         RETURN 'ABSENT';
     END IF;
     IF v_value IS NULL OR json_typeof(v_value) <> 'object' THEN
@@ -243,7 +246,9 @@ $$;
 
 -- The cause of a stored result text that horsies_workflow_result_kind reads as 'UNREADABLE', in the words and the
 -- order of the checks of Python's _decode_err_only (core/workflows/engine.py:324-377), loads_json
--- (core/codec/json_io.py:97-137) and validate_task_result_envelope (core/codec/typed.py:1133-1180):
+-- (core/codec/json_io.py) and validate_task_result_envelope (core/codec/typed.py:1133-1180):
+-- 0. an empty text: 'Stored task result is not JSON: JSON parse failed: the text is empty' (the text of Python's
+--    EmptyJsonTextError);
 -- 1. text that the json input refuses: 'Stored task result is not JSON: JSON parse failed: <the database's text>';
 --    Python writes the text of its json module there, which the database cannot give;
 -- 2. a top-level object that repeats a key: 'Stored task result is not JSON: JSON parse failed: JSON object repeats
@@ -273,6 +278,9 @@ DECLARE
     v_missing text[];
     v_extra text[];
 BEGIN
+    IF p_result = '' THEN
+        RETURN 'Stored task result is not JSON: JSON parse failed: the text is empty';
+    END IF;
     BEGIN
         v_value := p_result::json;
     EXCEPTION
@@ -320,8 +328,9 @@ $$;
 -- The error of a stored node result, as the bare error object text, for the workflow error column. Python:
 -- _decode_err_only (core/workflows/engine.py:324-377) and _recovered_failure_result
 -- (core/workflows/phase2_recovery.py:233-292). Returns the err slot text unchanged for 'ERROR'; NULL for 'VALUE',
--- 'ABSENT' and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); for 'UNREADABLE', a
--- RESULT_DESERIALIZATION_ERROR object whose message is the cause (horsies_workflow_unreadable_result_cause).
+-- 'ABSENT' (NULL) and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); for 'UNREADABLE', an
+-- empty text included, a RESULT_DESERIALIZATION_ERROR object whose message is the cause
+-- (horsies_workflow_unreadable_result_cause).
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_err_slot(p_result text) RETURNS text
     LANGUAGE plpgsql IMMUTABLE
@@ -344,7 +353,9 @@ $$;
 -- context). Python: get_dependency_results (core/workflows/engine.py:2762-2853).
 -- - SKIPPED: UPSTREAM_SKIPPED with data {"dependency_index": <index>}.
 -- - A stored result: the text, copied.
--- - COMPLETED or FAILED with no stored result: RESULT_DESERIALIZATION_ERROR naming the source node.
+-- - COMPLETED or FAILED with a NULL or empty result: RESULT_DESERIALIZATION_ERROR naming the source node. No writer
+--   stores either; an empty text fails closed with the entry of a missing result, the one entry of the core's
+--   dependency_result and Python's _missing_result_entry.
 -- Locks: none. Returns the value text.
 CREATE FUNCTION horsies_workflow_source_value(
     p_status text, p_result text, p_task_index integer, p_node_id text, p_task_name text
@@ -372,20 +383,24 @@ $$;
 -- Internal helpers: task rows of task nodes
 ------------------------------------------------------------------------------------------------------------------------
 
--- The input of the task row of an ENQUEUED task node: the node's static input object with these members appended,
--- in this order, as text operations on the stored bytes (no JSON value is rebuilt):
--- 1. one member per args_from key, in the stored key order of the jsonb map, for each source that is terminal:
+-- The input of the task row of an ENQUEUED task node: the members of the node's static input with these members
+-- appended, in this order, as text operations on the stored bytes (no JSON value is rebuilt):
+-- 1. one member per args_from member (horsies_workflow_args_from_entries, in that order) whose index
+--    (horsies_workflow_args_from_index) names a source that is terminal:
 --    {"__h_taskresult_envelope__":true,"source_task_name":...,"source_definition_key":...,"inner":<value>}, where
---    <value> is horsies_workflow_source_value; a source that is not terminal (join any or quorum) gives no member;
+--    <value> is horsies_workflow_source_value; a source that is not terminal (join any or quorum), and an index that
+--    names no node, give no member;
 -- 2. "__h_workflow_ctx__" when the node has workflow_ctx_from: workflow_id, task_index, task_name, results_by_id,
 --    task_name_by_id and definition_key_by_id over the terminal context nodes, and summaries_by_id (the stored
 --    summary text as a JSON string) over the context sub-workflow nodes with a summary;
 -- 3. "__h_workflow_meta__": workflow_id, task_index, task_name.
 -- Python: _build_enqueued_task_params (core/workflows/engine.py:711-984) and _build_workflow_context_data
 -- (core/workflows/engine.py:1629-1721), which decode and encode each value again; here the stored text is copied.
--- Precondition (asserted): the static input is a JSON object text. The workflow start writes it; no statement
--- changes it. A key conflict between args_from and the static input is refused before this function runs
--- (horsies_workflow_promote).
+-- The static members are those of an object input. An input that reads as a value that is not an object gives none
+-- (Python reads it as {}); horsies_workflow_task_node_refusal refuses an empty input.
+-- Precondition: horsies_workflow_task_node_refusal gives no error for the node (horsies_workflow_promote failed every
+-- node that it refuses), so the input reads under loads_json, the args_from values are integers, and no args_from key
+-- is a static member. An input text that starts with '{' and does not end with '}' raises data_corrupted.
 -- Locks: none (reads source nodes under the caller's workflow lock). Returns the input text.
 CREATE FUNCTION horsies_workflow_task_input(p_node horsies_workflow_tasks) RETURNS text
     LANGUAGE plpgsql STABLE
@@ -394,27 +409,27 @@ AS $$
 DECLARE
     v_members text[] := ARRAY[]::text[];
     v_member text;
-    v_static text := rtrim(p_node.input, E' \t\n\r');
-    v_body text;
+    v_static text := btrim(p_node.input, E' \t\n\r');
+    v_body text := '';
 BEGIN
     IF p_node.args_from IS NOT NULL THEN
         SELECT coalesce(array_agg(
-            to_json(a.key)::text
+            to_json(a.entry_key)::text
             || ':{"__h_taskresult_envelope__":true,"source_task_name":' || to_json(s.task_name)::text
             || ',"source_definition_key":' || coalesce(to_json(s.sub_definition_key)::text, 'null')
             || ',"inner":' || horsies_workflow_source_value(s.status, s.result, s.task_index, s.node_id, s.task_name)
             || '}'
-            ORDER BY a.position
+            ORDER BY a.entry_position
         ), ARRAY[]::text[])
         INTO v_members
-        FROM jsonb_each(p_node.args_from) WITH ORDINALITY AS a(key, value, position)
+        FROM horsies_workflow_args_from_entries(p_node.args_from) AS a
         -- One point read per key on (workflow_id, task_index): LATERAL keeps the plan a parameterized index probe
         -- whatever the statistics say, so a large workflow is never read whole per minted node.
         CROSS JOIN LATERAL (
             SELECT src.task_name, src.sub_definition_key, src.status, src.result, src.task_index, src.node_id
             FROM horsies_workflow_tasks src
             WHERE src.workflow_id = p_node.workflow_id
-              AND src.task_index = (a.value #>> '{}')::integer
+              AND src.task_index = horsies_workflow_args_from_index(a.entry_value)
               AND src.status IN ('COMPLETED', 'FAILED', 'SKIPPED')
         ) AS s;
     END IF;
@@ -451,11 +466,13 @@ BEGIN
         || ',"task_name":' || to_json(p_node.task_name)::text || '}'
     );
 
-    IF left(ltrim(v_static, E' \t\n\r'), 1) <> '{' OR right(v_static, 1) <> '}' THEN
-        RAISE EXCEPTION 'workflow % node % input is not a JSON object text', p_node.workflow_id, p_node.task_index
-            USING ERRCODE = 'data_corrupted';
+    IF left(v_static, 1) = '{' THEN
+        IF right(v_static, 1) <> '}' THEN
+            RAISE EXCEPTION 'workflow % node % input starts an object and does not end it', p_node.workflow_id,
+                p_node.task_index USING ERRCODE = 'data_corrupted';
+        END IF;
+        v_body := btrim(substr(v_static, 2, length(v_static) - 2), E' \t\n\r');
     END IF;
-    v_body := btrim(substr(ltrim(v_static, E' \t\n\r'), 2, length(ltrim(v_static, E' \t\n\r')) - 2), E' \t\n\r');
     RETURN '{' || v_body || CASE WHEN v_body = '' THEN '' ELSE ',' END || array_to_string(v_members, ',') || '}';
 END;
 $$;
@@ -966,10 +983,10 @@ END;
 $$;
 
 -- The message with which the promotion fails a task node whose stored task options p_task_options do not read, as
--- Python's _build_enqueued_task_params writes it for node p_task_index, or NULL when they read (NULL and empty options
--- read as no options). The checks run in Python's order; the first refusal is the message:
--- 1. text that does not parse, or the JSON null (horsies_workflow_options_json): 'Corrupt task_options JSON for task
---    <index>';
+-- Python's _build_enqueued_task_params writes it for node p_task_index, or NULL when they read (NULL options read as
+-- no options). The checks run in Python's order; the first refusal is the message:
+-- 1. an empty text, text that does not parse, or the JSON null (horsies_workflow_options_json): 'Corrupt task_options
+--    JSON for task <index>'. A node without options stores NULL; no writer stores an empty text;
 -- 2. a value that is not an object: 'Invalid task_options payload for task <index>: expected object';
 -- 3. the retry_policy member (horsies_workflow_retry_policy_refusal): 'Invalid retry_policy for task <index>:
 --    <detail>';
@@ -983,10 +1000,13 @@ DECLARE
     v_options json;
     v_detail text;
 BEGIN
-    IF p_task_options IS NULL OR p_task_options = '' THEN
+    IF p_task_options IS NULL THEN
         RETURN NULL;
     END IF;
-    v_options := horsies_workflow_options_json(p_task_options);
+    -- horsies_workflow_options_json takes no empty text: empty options stay NULL here and are refused.
+    IF p_task_options <> '' THEN
+        v_options := horsies_workflow_options_json(p_task_options);
+    END IF;
     IF v_options IS NULL OR json_typeof(v_options) = 'null' THEN
         RETURN format('Corrupt task_options JSON for task %s', p_task_index);
     END IF;
@@ -1108,13 +1128,134 @@ BEGIN
 END;
 $$;
 
+-- The members of the stored args_from p_args_from of a node, in the order in which Python's workflow engine reads them
+-- from the value that its driver decodes (_build_enqueued_task_params, core/workflows/engine.py:845-866;
+-- enqueue_subworkflow_task, :1128-1160):
+-- - an object: its members, in the stored key order of the jsonb value;
+-- - a string other than "": the members of the object that its text holds under loads_json
+--   (horsies_workflow_options_json), in text order; none when the text holds another value or does not read
+--   (horsies_workflow_task_node_refusal refuses a text that does not read);
+-- - NULL, null, a boolean, a number, an array, "": none (Python reads no args_from from a value that is empty or
+--   false, and none from a value that is not an object). horsies_workflow_task_node_refusal refuses "" before.
+-- entry_value is the member value as json, so its literal tells an int from a float.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_args_from_entries(p_args_from jsonb)
+    RETURNS TABLE (entry_position bigint, entry_key text, entry_value json)
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT e.entry_position, e.entry_key, e.entry_value::json
+    FROM jsonb_each(CASE WHEN jsonb_typeof(p_args_from) = 'object' THEN p_args_from END)
+        WITH ORDINALITY AS e(entry_key, entry_value, entry_position)
+    UNION ALL
+    SELECT e.entry_position, e.entry_key, e.entry_value
+    FROM (
+        SELECT horsies_workflow_options_json(p_args_from #>> '{}') AS doc
+        WHERE jsonb_typeof(p_args_from) = 'string' AND (p_args_from #>> '{}') <> ''
+    ) AS parsed
+    CROSS JOIN LATERAL json_each(CASE WHEN json_typeof(parsed.doc) = 'object' THEN parsed.doc END)
+        WITH ORDINALITY AS e(entry_key, entry_value, entry_position)
+$$;
+
+-- The node index that an args_from member value p_value names: the value when it is a JSON integer in the integer
+-- range, else NULL. No node has an index outside that range, so such a member gets no source row and is left out,
+-- as Python leaves out an index with no dependency result (core/workflows/engine.py:871-872).
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_args_from_index(p_value json) RETURNS integer
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN horsies_workflow_json_type_name(p_value) = 'int' AND p_value::text ~ '^-?[0-9]{1,10}$' THEN
+            CASE
+                WHEN p_value::text::bigint BETWEEN -2147483648 AND 2147483647 THEN p_value::text::integer
+            END
+    END
+$$;
+
+-- The engine error with which the promotion fails the task node p_node, as Python's _build_enqueued_task_params
+-- (core/workflows/engine.py:790-870) refuses its stored data, or NULL in both fields when the node builds (and for a
+-- sub-workflow node, whose child build checks its own data). The checks run in Python's order; the first refusal is
+-- the error:
+-- 1. the stored task options (horsies_workflow_task_options_refusal): WORKER_SERIALIZATION_ERROR;
+-- 2. an input that is empty, that does not read under loads_json (horsies_workflow_options_json), or that reads as
+--    null: WORKER_SERIALIZATION_ERROR, 'Corrupt kwargs JSON for task <index>'. A node without params stores '{}';
+--    no writer stores an empty input;
+-- 3. an args_from string whose text is empty, does not read, or reads as null: WORKER_SERIALIZATION_ERROR,
+--    'Corrupt args_from JSON for task <index>'. A node without args_from stores NULL; no writer stores an empty
+--    string;
+-- 4. an args_from member (horsies_workflow_args_from_entries) whose value is not a JSON integer literal:
+--    WORKER_SERIALIZATION_ERROR, 'args_from has non-int values for task <index>'. true and false are refused, as
+--    Python's _validate_args_from_map (core/workflows/engine.py) refuses a bool;
+-- 5. the first args_from member, in the order of 4, whose key is also a member of an object input:
+--    WORKFLOW_ENQUEUE_FAILED, 'args_from key '<key>' conflicts with static kwarg (task <index>)' (the spec refuses
+--    the overlap when it is built; this check guards stored rows).
+-- An input that reads as a value that is not an object gives no static members (Python reads it as {}), so it
+-- conflicts with no key.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_task_node_refusal(
+    p_node horsies_workflow_tasks, OUT error_code text, OUT message text
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    v_node text := 'task ' || p_node.task_index;
+    v_input json;
+    v_args_from json;
+    v_static_keys text[] := ARRAY[]::text[];
+    v_key text;
+BEGIN
+    IF p_node.is_subworkflow THEN
+        RETURN;
+    END IF;
+    message := horsies_workflow_task_options_refusal(p_node.task_options, p_node.task_index);
+    IF message IS NOT NULL THEN
+        error_code := 'WORKER_SERIALIZATION_ERROR';
+        RETURN;
+    END IF;
+    -- horsies_workflow_options_json takes no empty text: an empty input stays NULL here and is refused.
+    IF p_node.input <> '' THEN
+        v_input := horsies_workflow_options_json(p_node.input);
+    END IF;
+    IF coalesce(json_typeof(v_input), 'null') = 'null' THEN
+        error_code := 'WORKER_SERIALIZATION_ERROR';
+        message := 'Corrupt kwargs JSON for ' || v_node;
+        RETURN;
+    END IF;
+    IF jsonb_typeof(p_node.args_from) = 'string' THEN
+        IF (p_node.args_from #>> '{}') <> '' THEN
+            v_args_from := horsies_workflow_options_json(p_node.args_from #>> '{}');
+        END IF;
+        IF coalesce(json_typeof(v_args_from), 'null') = 'null' THEN
+            error_code := 'WORKER_SERIALIZATION_ERROR';
+            message := 'Corrupt args_from JSON for ' || v_node;
+            RETURN;
+        END IF;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM horsies_workflow_args_from_entries(p_node.args_from) AS e
+        WHERE horsies_workflow_json_type_name(e.entry_value) <> 'int'
+    ) THEN
+        error_code := 'WORKER_SERIALIZATION_ERROR';
+        message := 'args_from has non-int values for ' || v_node;
+        RETURN;
+    END IF;
+    IF json_typeof(v_input) = 'object' THEN
+        v_static_keys := ARRAY(SELECT json_object_keys(v_input));
+    END IF;
+    SELECT e.entry_key INTO v_key
+    FROM horsies_workflow_args_from_entries(p_node.args_from) AS e
+    WHERE e.entry_key = ANY(v_static_keys)
+    ORDER BY e.entry_position
+    LIMIT 1;
+    IF v_key IS NOT NULL THEN
+        error_code := 'WORKFLOW_ENQUEUE_FAILED';
+        message := format('args_from key ''%s'' conflicts with static kwarg (%s)', v_key, v_node);
+    END IF;
+END;
+$$;
+
 -- The nodes among p_task_indexes (ENQUEUED, of p_workflow_id) whose task row or child cannot be built, with the
--- engine error of each, in index order. The first refusal of a node in Python's order:
--- - a task node whose stored task options do not read: WORKER_SERIALIZATION_ERROR with the message of
---   horsies_workflow_task_options_refusal (Python: _build_enqueued_task_params, core/workflows/engine.py:795-831);
--- - a task node with an args_from key that is also a member of its static input: WORKFLOW_ENQUEUE_FAILED
---   (Python: _build_enqueued_task_params, core/workflows/engine.py:867-872; the spec refuses the overlap when it is
---   built, this check guards stored rows);
+-- engine error of each, in index order:
+-- - a task node whose stored data Python refuses: the error of horsies_workflow_task_node_refusal;
 -- - a sub-workflow node of a workflow at depth 32: SUBWORKFLOW_DEPTH_LIMIT_REACHED (Python:
 --   enqueue_subworkflow_task, core/workflows/engine.py:1052-1066).
 -- data names the workflow and the node, as Python's _fail_enqueued_task (core/workflows/engine.py:514-555).
@@ -1125,46 +1266,28 @@ CREATE FUNCTION horsies_workflow_unbuildable_nodes(p_workflow_id uuid, p_task_in
 AS $$
     SELECT n.task_index,
            horsies_task_error_envelope(
-               CASE
-                   WHEN n.is_subworkflow THEN 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
-                   WHEN o.refusal IS NOT NULL THEN 'WORKER_SERIALIZATION_ERROR'
-                   ELSE 'WORKFLOW_ENQUEUE_FAILED'
-               END,
+               CASE WHEN n.is_subworkflow THEN 'SUBWORKFLOW_DEPTH_LIMIT_REACHED' ELSE r.error_code END,
                CASE
                    WHEN n.is_subworkflow THEN format(
                        'Subworkflow not started: the child workflow would have depth %s, and the limit is 32 '
                        '(workflow %s:%s)', w.depth + 1, w.name, n.task_index)
-                   WHEN o.refusal IS NOT NULL THEN o.refusal
-                   ELSE format(
-                       'args_from key %L conflicts with static kwarg (task %s)',
-                       (SELECT k FROM jsonb_object_keys(n.args_from) AS k
-                        WHERE n.input::jsonb ? k ORDER BY k LIMIT 1),
-                       n.task_index)
+                   ELSE r.message
                END,
                '{"workflow_id":' || to_json(p_workflow_id::text)::text || ',"task_index":' || n.task_index || '}',
                NULL, NULL
            )
     FROM horsies_workflow_tasks n
     JOIN horsies_workflows w ON w.id = n.workflow_id
-    -- OFFSET 0 keeps the subquery apart, so the options are read once per node.
+    -- OFFSET 0 keeps the subquery apart, so the stored data are read once per node.
     CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN NOT n.is_subworkflow THEN horsies_workflow_task_options_refusal(n.task_options, n.task_index)
-        END AS refusal
+        SELECT refusal.error_code, refusal.message
+        FROM horsies_workflow_task_node_refusal(n) AS refusal
         OFFSET 0
-    ) AS o
+    ) AS r
     WHERE n.workflow_id = p_workflow_id
       AND n.task_index = ANY(p_task_indexes)
       AND n.status = 'ENQUEUED'
-      AND (
-          (n.is_subworkflow AND w.depth >= 32)
-          OR o.refusal IS NOT NULL
-          OR (
-              NOT n.is_subworkflow
-              AND n.args_from IS NOT NULL
-              AND n.input::jsonb ?| ARRAY(SELECT jsonb_object_keys(n.args_from))
-          )
-      )
+      AND ((n.is_subworkflow AND w.depth >= 32) OR r.error_code IS NOT NULL)
     ORDER BY n.task_index
 $$;
 
@@ -1279,7 +1402,10 @@ END;
 $$;
 
 -- The owed child starts among p_task_indexes: one CHILD_START row per ENQUEUED sub-workflow node with no child, then
--- one SOURCE row per terminal dependency of each (the stored result and summary texts, copied).
+-- one SOURCE row per terminal dependency of each (the stored result and summary texts, copied). The args_from of a
+-- CHILD_START row is p_args_from #>> '{}': the text of a jsonb string, which the child build reads again as JSON
+-- (Python's engine gets a str from its driver for a jsonb string and reads it with loads_json,
+-- core/workflows/engine.py:1128-1141), and the JSON text of any other value.
 -- Locks: none. Returns CHILD_START and SOURCE rows. Python: the reads of enqueue_subworkflow_task before build_with
 -- (core/workflows/engine.py:1032-1232).
 CREATE FUNCTION horsies_workflow_child_start_rows(p_workflow_id uuid, p_task_indexes integer[])
@@ -1287,7 +1413,7 @@ CREATE FUNCTION horsies_workflow_child_start_rows(p_workflow_id uuid, p_task_ind
     LANGUAGE sql STABLE
 AS $$
     SELECT 'CHILD_START'::text, NULL::text, p_workflow_id, w.name::text, NULL::text, NULL::uuid, NULL::text,
-           n.task_index, n.input, n.args_from::text, n.sub_workflow_name::text, n.sub_definition_key::text,
+           n.task_index, n.input, n.args_from #>> '{}', n.sub_workflow_name::text, n.sub_definition_key::text,
            n.sub_workflow_params::text, w.depth, coalesce(w.root_workflow_id, w.id),
            NULL::integer, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
     FROM horsies_workflow_tasks n
@@ -1433,7 +1559,8 @@ $$;
 -- _stored_output_result (core/workflows/engine.py:3772-3868).
 -- - SKIPPED output node: WORKFLOW_OUTPUT_SKIPPED.
 -- - COMPLETED or FAILED with a stored result: that text, copied.
--- - COMPLETED or FAILED with a NULL or empty result: RESULT_DESERIALIZATION_ERROR.
+-- - COMPLETED or FAILED with a NULL or empty result: RESULT_DESERIALIZATION_ERROR with the text of a missing result.
+--   No writer stores either; an empty text fails closed here, as Python's _stored_output_result reads it.
 -- An absent output row, or an output node that is not terminal, is a defect (the start writes the row; the caller
 -- counted no live node): it raises with SQLSTATE XX001 (data_corrupted).
 -- Locks: none. Returns the result text.
@@ -1482,10 +1609,11 @@ $$;
 -- {"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{"results_by_id":...,"task_name_by_id":...,
 -- "definition_key_by_id":...},"err":null} over the terminal nodes (no node depends on them) that have a node_id.
 -- An entry is the stored envelope text, WORKFLOW_OUTPUT_SKIPPED for a SKIPPED node, or null for a result that is
--- absent or not an envelope. The terminal set is the node indexes minus the union of all dependency arrays, from two
--- array aggregates: no correlated probe per row. All stored results are parsed in one statement; only when one of
--- them is not JSON does each row get a parse of its own. Python: get_workflow_final_result, _terminal_entry,
--- _compute_terminal_indexes (core/workflows/engine.py:3712-3727, 3870-3988).
+-- absent (NULL) or not an envelope (an empty text included). The terminal set is the node indexes minus the union of
+-- all dependency arrays, from two array aggregates: no correlated probe per row. All stored results are parsed in one
+-- statement; only when one of them is not JSON (or is empty) does each row get a parse of its own. Python:
+-- get_workflow_final_result, _terminal_entry, _compute_terminal_indexes (core/workflows/engine.py:3712-3727,
+-- 3870-3988).
 -- Locks: none. Returns the envelope text.
 CREATE FUNCTION horsies_workflow_outputless_result(p_workflow_id uuid) RETURNS text
     LANGUAGE plpgsql STABLE
@@ -1510,7 +1638,7 @@ BEGIN
     BEGIN
         PERFORM count(n.result::json)
         FROM horsies_workflow_tasks n
-        WHERE n.workflow_id = p_workflow_id AND n.task_index = ANY(v_terminal) AND n.result <> '';
+        WHERE n.workflow_id = p_workflow_id AND n.task_index = ANY(v_terminal);
     EXCEPTION
         WHEN invalid_text_representation THEN
             v_all_json := FALSE;
@@ -1523,7 +1651,7 @@ BEGIN
                        format('Workflow %s is COMPLETED and its terminal node %L is SKIPPED', p_workflow_id, n.node_id),
                        horsies_workflow_output_error_data(p_workflow_id, n.node_id, n.task_index, n.task_name),
                        NULL, NULL)
-                   WHEN n.result IS NULL OR n.result = '' THEN 'null'
+                   WHEN n.result IS NULL THEN 'null'
                    WHEN v_all_json
                         AND json_typeof(n.result::json) = 'object'
                         AND json_typeof(n.result::json -> '__h_task_result__') = 'boolean'
@@ -1835,12 +1963,12 @@ $$;
 -- - COMPLETED child with a value envelope: COMPLETED, the child's text copied.
 -- - COMPLETED child with the outputless envelope: COMPLETED, {"__h_task_result__":true,"ok":null,"err":null}.
 -- - COMPLETED child with an error envelope: FAILED, the child's text copied.
--- - COMPLETED child with a result that is absent or not an envelope: FAILED, RESULT_DESERIALIZATION_ERROR naming the
---   child.
+-- - COMPLETED child with a result that is absent (NULL) or not an envelope (an empty text included): FAILED,
+--   RESULT_DESERIALIZATION_ERROR naming the child.
 -- - FAILED, CANCELLED or EXPIRED child: FAILED, SUBWORKFLOW_FAILED with sub_workflow_id and sub_workflow_summary.
 -- The summary: status, output (the ok value of a value envelope, else null), the node counts, error_summary (the
--- message of a stored error object, the first 200 characters of a stored error that is not JSON or is the JSON null,
--- else null).
+-- message of a stored error object, the first 200 characters of a stored error that is not JSON (an empty text
+-- included: no writer stores one) or is the JSON null, null for a NULL error, else null).
 -- failure_error: the error that the failure policy of the parent records for a FAILED node, as the bare error object
 -- text. For a FAILED, CANCELLED or EXPIRED child it is SUBWORKFLOW_FAILED with the message "Subworkflow <id> failed"
 -- and the same sub_workflow_id and summary (Python: the error of _ParentNodeFailed); for a FAILED node of a COMPLETED
@@ -1873,7 +2001,7 @@ BEGIN
     v_kind := horsies_workflow_result_kind(v_child.result);
     v_error := horsies_workflow_json_or_null(v_child.error);
     v_error_summary := CASE
-        WHEN v_child.error IS NULL OR v_child.error = '' THEN NULL
+        WHEN v_child.error IS NULL THEN NULL
         WHEN v_error IS NULL OR json_typeof(v_error) = 'null' THEN left(v_child.error, 200)
         WHEN json_typeof(v_error) = 'object' AND json_typeof(v_error -> 'message') = 'string'
             THEN v_error ->> 'message'

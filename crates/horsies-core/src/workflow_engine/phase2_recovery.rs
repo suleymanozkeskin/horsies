@@ -14,9 +14,7 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, first_row, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::TerminalizationKind;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::recovery_limit::{
@@ -210,7 +208,8 @@ pub enum Phase2Wake {
     NoWake,
 }
 
-/// One bounded pass over the phase-2 records.
+/// One bounded pass over the phase-2 records, with the children of the owed
+/// child starts built by `build`.
 ///
 /// - Discovery ([`DISCOVER_PENDING`]) and the count over the bound
 ///   ([`COUNT_OVER_ATTEMPT_BOUND`]) run on the main core pool of `broker`
@@ -233,29 +232,6 @@ pub enum Phase2Wake {
 ///   and to 3-1000);
 /// - [`WorkflowError::Broker`] when discovery or the count fails;
 /// - [`WorkflowError::StepContract`] for a row that does not decode.
-pub async fn drive_phase2_recovery(
-    broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
-    grace_ms: u64,
-    max_rows: i64,
-    quarantine_after_attempts: u32,
-    retention: &RetentionConfig,
-) -> Result<Phase2RecoverySummary, WorkflowError> {
-    drive_phase2_recovery_with(
-        broker,
-        ChildBuild::Registry {
-            registry,
-            retention,
-        },
-        grace_ms,
-        max_rows,
-        quarantine_after_attempts,
-    )
-    .await
-}
-
-/// [`drive_phase2_recovery`] with the children of the owed child starts
-/// built by `build`. Outcomes and errors as [`drive_phase2_recovery`].
 pub(crate) async fn drive_phase2_recovery_with(
     broker: &PostgresBroker,
     build: ChildBuild<'_>,
@@ -583,30 +559,27 @@ fn count_raise(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::retention::RetentionConfig;
     use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
     use crate::core::lifecycle::TerminalizationOutcome;
+    use crate::test_support::child_specs::TestChildSpecs;
     use crate::test_support::terminal_writes::{self, TerminalFailure};
     use serial_test::serial;
     use sqlx::PgPool;
 
-    /// One recovery pass with the given grace, cap and attempt bound, and an
-    /// empty registry.
+    /// One recovery pass with the given grace, cap and attempt bound, and no
+    /// child specs.
     async fn recovery_pass(
         pool: &PgPool,
         grace_ms: u64,
         max_rows: i64,
         attempt_bound: u32,
     ) -> Result<Phase2RecoverySummary, WorkflowError> {
-        drive_phase2_recovery(
+        drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             grace_ms,
             max_rows,
             attempt_bound,
-            &RetentionConfig::default(),
         )
         .await
     }
@@ -1204,15 +1177,12 @@ mod tests {
         .expect("age the phase-2 record");
         assert_eq!(kind, "FAIL_RUNNING");
 
-        let summary = drive_phase2_recovery(
+        let summary = drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             0,
             1,
             25,
-            &RetentionConfig::default(),
         )
         .await
         .expect("recovery pass");
@@ -1326,15 +1296,12 @@ mod tests {
         .expect("set the pending schema version");
         store_prior_attempts(&pool, task_id, 2, "SOURCE_VERSION_CONFLICT").await;
 
-        let summary = drive_phase2_recovery(
+        let summary = drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             0,
             1,
             3,
-            &RetentionConfig::default(),
         )
         .await
         .expect("recovery pass");
@@ -1444,6 +1411,17 @@ mod tests {
         .unwrap();
     }
 
+    /// The recovery source of a record.
+    async fn recovery_source(pool: &PgPool, task_id: Uuid) -> String {
+        sqlx::query_scalar(
+            "SELECT recovery_source FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the recovery source")
+    }
+
     /// The attempt count and failure class of a record.
     async fn record_attempts(pool: &PgPool, task_id: Uuid) -> (i32, Option<String>) {
         sqlx::query_as(
@@ -1498,8 +1476,10 @@ mod tests {
             "WORKFLOW_RECOVERY_LIMIT_REACHED"
         );
         assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("case")),
-            Some(&serde_json::json!("phase2_progression"))
+            error
+                .data_value()
+                .and_then(|data| data.get("case").cloned()),
+            Some(serde_json::json!("phase2_progression"))
         );
         let (source, attempts): (String, i32) = sqlx::query_as(
             "SELECT recovery_source, attempt_count
@@ -1552,6 +1532,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        let source_before = recovery_source(&pool, task_id).await;
         let failure = CandidateFailure::Error(WorkflowError::Validation("raised".to_owned()));
 
         let record = record_raise(&broker, task_id, 3, &failure)
@@ -1563,6 +1544,14 @@ mod tests {
             record_attempts(&pool, task_id).await,
             (2, Some("RAISED".to_owned()))
         );
+        assert_eq!(recovery_source(&pool, task_id).await, source_before);
+        let workflow_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the workflow");
+        assert_eq!(workflow_status, "PAUSED");
         cleanup_case(&pool, workflow_id, task_id).await;
     }
 
@@ -1922,15 +1911,12 @@ mod tests {
             .await
             .expect("age the phase-2 record");
 
-            let summary = drive_phase2_recovery(
+            let summary = drive_phase2_recovery_with(
                 &PostgresBroker::from_pool(pool.clone()),
-                &crate::core::WorkflowSpecRegistry::new(
-                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                ),
+                ChildBuild::Client(&TestChildSpecs::empty()),
                 0,
                 1,
                 25,
-                &RetentionConfig::default(),
             )
             .await
             .expect("recovery pass");

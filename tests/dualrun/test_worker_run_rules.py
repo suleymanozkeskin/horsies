@@ -10,16 +10,33 @@ from pydantic import SecretStr
 
 from horsies.core.models.broker import PostgresConfig
 from tests.dualrun.apps import whole_run_app
-from tests.dualrun.catalog import ATTEMPT_ARCHIVE, BASELINE_CATALOG
+from tests.dualrun.catalog import (
+    ATTEMPT_ARCHIVE,
+    BASELINE_CATALOG,
+    KILL_REPORT_MEASURES,
+    RESULT_ENVELOPE,
+)
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
-from tests.dualrun.rules import EachItem, Ignored, Index, JsonPath
+from tests.dualrun.rules import (
+    EachItem,
+    Ignored,
+    Index,
+    JsonPath,
+    Key,
+    TimeOrderBeforeRun,
+    TimeOrderOnly,
+    catalog_defects,
+)
 from tests.dualrun.worker_run import (
     ARCHIVE_PROCESS_ID_POSITIONS,
+    ARCHIVE_REPORT_POSITIONS,
     PROCESS_ID_COLUMNS,
+    RUN_WRITTEN_ORDER_COLUMNS,
     UNCOMPARED_TABLES,
     WHOLE_RUN_ATTEMPT_ARCHIVE,
     WHOLE_RUN_CATALOG,
+    WHOLE_RUN_RESULT_ENVELOPE,
     Absent,
     AttemptReport,
     Live,
@@ -40,7 +57,7 @@ from tests.dualrun.worker_run import (
 pytestmark = [pytest.mark.unit]
 
 
-def test_only_the_process_id_columns_change_rule() -> None:
+def test_only_the_whole_run_columns_change_rule() -> None:
     changed: set[tuple[str, str]] = set()
     for base, whole in zip(
         BASELINE_CATALOG.tables, WHOLE_RUN_CATALOG.tables, strict=True
@@ -52,30 +69,57 @@ def test_only_the_process_id_columns_change_rule() -> None:
         )
         for base_column, whole_column in zip(base.columns, whole.columns, strict=True):
             assert base_column.name == whole_column.name
-            if base_column != whole_column:
-                match base_column.rule == ATTEMPT_ARCHIVE:
-                    case True:
-                        assert whole_column.rule == WHOLE_RUN_ATTEMPT_ARCHIVE
-                    case False:
-                        assert isinstance(whole_column.rule, Ignored)
-                changed.add((base.name, base_column.name))
-    assert changed, 'the catalog has process id columns to ignore'
-    assert {column for _, column in changed} == PROCESS_ID_COLUMNS | {'attempt_snapshot'}
+            if base_column == whole_column:
+                continue
+            match base_column.rule:
+                case rule if rule == ATTEMPT_ARCHIVE:
+                    assert whole_column.rule == WHOLE_RUN_ATTEMPT_ARCHIVE
+                case rule if rule == RESULT_ENVELOPE:
+                    assert whole_column.rule == WHOLE_RUN_RESULT_ENVELOPE
+                case TimeOrderOnly():
+                    assert base_column.name in RUN_WRITTEN_ORDER_COLUMNS
+                    assert whole_column.rule == TimeOrderBeforeRun()
+                case _:
+                    assert base_column.name in PROCESS_ID_COLUMNS
+                    assert isinstance(whole_column.rule, Ignored)
+            changed.add((base.name, base_column.name))
+    assert {column for _, column in changed} == (
+        PROCESS_ID_COLUMNS
+        | RUN_WRITTEN_ORDER_COLUMNS
+        | {'attempt_snapshot', 'result_payload'}
+    )
+    assert {('horsies_tasks', 'enqueued_at'), ('horsies_task_history', 'enqueued_at')} <= changed
     assert not {table for table, _ in changed} & UNCOMPARED_TABLES
+    assert catalog_defects(WHOLE_RUN_CATALOG) == ()
 
 
-def test_the_attempt_archive_ignores_only_the_process_id_fields() -> None:
+def test_the_attempt_archive_adds_the_process_id_and_kill_report_fields() -> None:
     added = WHOLE_RUN_ATTEMPT_ARCHIVE.paths[len(ATTEMPT_ARCHIVE.paths):]
     assert WHOLE_RUN_ATTEMPT_ARCHIVE.paths[: len(ATTEMPT_ARCHIVE.paths)] == ATTEMPT_ARCHIVE.paths
     assert (WHOLE_RUN_ATTEMPT_ARCHIVE.storage, WHOLE_RUN_ATTEMPT_ARCHIVE.format) == (
         ATTEMPT_ARCHIVE.storage,
         ATTEMPT_ARCHIVE.format,
     )
-    assert [path.steps for path in added] == [
+    ignored = added[: len(ARCHIVE_PROCESS_ID_POSITIONS)]
+    reports = added[len(ARCHIVE_PROCESS_ID_POSITIONS) :]
+    assert [path.steps for path in ignored] == [
         (EachItem(), Index(position=position)) for position in ARCHIVE_PROCESS_ID_POSITIONS
     ]
-    assert all(
-        isinstance(path, JsonPath) and isinstance(path.rule, Ignored) for path in added
+    assert all(isinstance(path.rule, Ignored) for path in ignored)
+    assert list(reports) == [
+        JsonPath(steps=(EachItem(), Index(position=position)), rule=KILL_REPORT_MEASURES)
+        for position in ARCHIVE_REPORT_POSITIONS
+    ]
+
+
+def test_the_result_envelope_adds_only_the_kill_report_of_its_error_message() -> None:
+    assert (WHOLE_RUN_RESULT_ENVELOPE.storage, WHOLE_RUN_RESULT_ENVELOPE.format) == (
+        RESULT_ENVELOPE.storage,
+        RESULT_ENVELOPE.format,
+    )
+    assert WHOLE_RUN_RESULT_ENVELOPE.paths == (
+        *RESULT_ENVELOPE.paths,
+        JsonPath(steps=(Key(name='err'), Key(name='message')), rule=KILL_REPORT_MEASURES),
     )
 
 

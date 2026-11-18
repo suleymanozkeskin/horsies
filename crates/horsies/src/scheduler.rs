@@ -271,9 +271,6 @@ fn oversized_input(app: &Horsies, schedule: &TaskSchedule, size: usize) -> Optio
 }
 
 /// The error of a start that the core refused or that failed. Pure.
-///
-/// Panics: on the refusals of the app-config start (`InvalidScheduleConfig`,
-/// `NotPrepared`, `PayloadTooLarge`), which a manifest start never gives.
 fn start_error(error: &SchedulerStartError) -> SchedulerRunError {
     match error {
         SchedulerStartError::UnknownTimezone { schedule, .. }
@@ -286,11 +283,6 @@ fn start_error(error: &SchedulerStartError) -> SchedulerRunError {
             message: error.to_string(),
             retryable: cause.is_retryable(),
         },
-        SchedulerStartError::InvalidScheduleConfig(_)
-        | SchedulerStartError::NotPrepared { .. }
-        | SchedulerStartError::PayloadTooLarge { .. } => {
-            panic!("a manifest start gave a refusal of the app-config start: {error}")
-        }
     }
 }
 
@@ -330,23 +322,36 @@ mod tests {
         Ok(input.count + input.options.step)
     }
 
-    fn schedule(name: &str, task_name: &str, input: serde_json::Value) -> TaskSchedule {
-        TaskSchedule {
-            name: name.to_owned(),
-            task_name: task_name.to_owned(),
-            pattern: SchedulePattern::Interval(IntervalSchedule {
+    #[derive(Debug, Serialize, Deserialize)]
+    struct WideInput {
+        n: u128,
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn wide_task(input: WideInput) -> Result<u128, TaskError<std::convert::Infallible>> {
+        Ok(input.n)
+    }
+
+    /// A schedule of `task_name` every 30 seconds, with no input.
+    fn schedule_without_input(name: &str, task_name: &str) -> TaskSchedule {
+        TaskSchedule::new(
+            name,
+            task_name,
+            SchedulePattern::Interval(IntervalSchedule {
                 seconds: Some(30),
                 minutes: None,
                 hours: None,
                 days: None,
             }),
-            input,
-            queue_name: None,
-            enabled: true,
-            timezone: "UTC".to_owned(),
-            catch_up_missed: false,
-            max_catch_up_runs: 100,
-        }
+        )
+    }
+
+    /// A schedule of `task_name` every 30 seconds with the input `input`,
+    /// written by the builder.
+    fn schedule(name: &str, task_name: &str, input: &serde_json::Value) -> TaskSchedule {
+        schedule_without_input(name, task_name)
+            .input(input)
+            .unwrap()
     }
 
     fn app_with(schedules: Vec<TaskSchedule>, enabled: bool) -> Horsies {
@@ -372,7 +377,7 @@ mod tests {
 
     #[test]
     fn a_schedule_whose_input_reads_back_passes() {
-        let app = app_with(vec![schedule("every", "count", json!({"count": 5}))], true);
+        let app = app_with(vec![schedule("every", "count", &json!({"count": 5}))], true);
         assert!(messages(&app).is_empty());
         assert!(app.scheduler().is_ok());
     }
@@ -382,7 +387,7 @@ mod tests {
     #[test]
     fn an_input_of_another_type_is_refused_before_the_start() {
         let app = app_with(
-            vec![schedule("every", "count", json!({"count": "five"}))],
+            vec![schedule("every", "count", &json!({"count": "five"}))],
             true,
         );
         let texts = messages(&app);
@@ -403,7 +408,7 @@ mod tests {
     #[test]
     fn an_input_member_that_the_type_does_not_read_is_refused() {
         let app = app_with(
-            vec![schedule("every", "count", json!({"count": 5, "cuont": 6}))],
+            vec![schedule("every", "count", &json!({"count": 5, "cuont": 6}))],
             true,
         );
         let schedule = app.config().schedule.clone().unwrap();
@@ -421,7 +426,7 @@ mod tests {
             vec![schedule(
                 "every",
                 "step",
-                json!({"count": 5, "options": {"stpe": 2}}),
+                &json!({"count": 5, "options": {"stpe": 2}}),
             )],
             true,
         );
@@ -438,18 +443,74 @@ mod tests {
         );
     }
 
+    /// #1892: a schedule input of `u128::MAX`, written by the builder from
+    /// the task's input type, keeps every digit and reads back with that
+    /// type: the check passes, and the slot's text decodes to `u128::MAX`.
+    #[test]
+    fn an_input_of_u128_max_reads_back_as_the_task_s_input() {
+        let wide = schedule_without_input("wide", "wide")
+            .input(&WideInput { n: u128::MAX })
+            .unwrap();
+        let mut app = app_with(vec![wide], true);
+        app.register("wide", crate::blocking_task_fn!(wide_task, WideInput))
+            .unwrap();
+        assert!(messages(&app).is_empty());
+        let schedule = app.config().schedule.clone().unwrap();
+        let text = schedule_input_text(&schedule.schedules[0]);
+        assert_eq!(text, r#"{"n":340282366920938463463374607431768211455}"#);
+        let read: WideInput = crate::task::body::decode_input(text.as_bytes()).unwrap();
+        assert_eq!(read.n, u128::MAX);
+    }
+
     #[test]
     fn an_unregistered_task_names_the_registered_ones() {
-        let app = app_with(vec![schedule("every", "missing", json!(null))], true);
+        let app = app_with(vec![schedule_without_input("every", "missing")], true);
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals[0].code, Some(ErrorCode::TaskNotRegistered));
         assert!(refusals[0].notes.iter().any(|note| note.contains("count")));
+        let text = refusals[0].to_string();
+        assert!(text.contains("schedule 'every'"), "{text}");
+        assert!(text.contains("task 'missing'"), "{text}");
+    }
+
+    /// A schedule on a queue that the app does not admit is refused before
+    /// any connection, with the schedule and the queue named.
+    #[test]
+    fn a_schedule_on_a_queue_that_the_app_does_not_admit_names_the_schedule_and_the_queue() {
+        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        config.queue_mode = crate::QueueMode::Custom;
+        config.custom_queues = Some(vec![crate::CustomQueueConfig {
+            name: "fast".to_owned(),
+            priority: 1,
+            max_concurrency: Some(10),
+        }]);
+        let mut on_unknown = schedule("bad_queue_job", "count", &json!({"count": 5}));
+        on_unknown.queue_name = Some("nonexistent_queue".to_owned());
+        config.schedule = Some(ScheduleConfig {
+            enabled: true,
+            schedules: vec![on_unknown],
+            ..ScheduleConfig::default()
+        });
+        let mut app = Horsies::new(config).unwrap();
+        app.register_with_queue(
+            "count",
+            crate::blocking_task_fn!(count_task, CountInput),
+            "fast",
+        )
+        .unwrap();
+        let schedule = app.config().schedule.clone().unwrap();
+        let refusals = app.schedule_refusals(&schedule);
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].code, Some(ErrorCode::ConfigInvalidSchedule));
+        let text = refusals[0].to_string();
+        assert!(text.contains("bad_queue_job"), "{text}");
+        assert!(text.contains("nonexistent_queue"), "{text}");
     }
 
     #[test]
     fn a_disabled_schedule_is_not_checked() {
-        let mut disabled = schedule("off", "missing", json!(null));
+        let mut disabled = schedule_without_input("off", "missing");
         disabled.enabled = false;
         let app = app_with(vec![disabled], true);
         assert!(messages(&app).is_empty());
@@ -464,7 +525,7 @@ mod tests {
         };
         config.schedule = Some(ScheduleConfig {
             enabled: true,
-            schedules: vec![schedule("every", "count", json!({"count": 5}))],
+            schedules: vec![schedule("every", "count", &json!({"count": 5}))],
             ..ScheduleConfig::default()
         });
         let mut app = Horsies::new(config).unwrap();

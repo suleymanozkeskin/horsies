@@ -28,7 +28,6 @@ use crate::core::history::heartbeats::partitioning::{
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::core::history::names::HEARTBEAT_CLASS_KEY;
 use crate::core::history::outcomes::LeafCreation;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 
 /// Far enough back that no configured heartbeat horizon (2 to 48 hours)
 /// still counts the leaf as live (Python `_MINIMUM_AGE`).
@@ -155,13 +154,11 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
         "setup failed: the overdue leaf was not created"
     );
     let cancel = CancellationToken::new();
+    // The reaper's broker has no sqlx connection: the drop runs on the core
+    // pools.
     let reaper = spawn_reaper(
-        Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
-        pool.clone(),
-        pool.clone(),
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        Arc::new(crate::test_support::broker_with_closed_sqlx_pools(&pool).await),
+        crate::test_support::child_specs::no_child_specs(),
         maintenance_only_recovery(),
         RetentionConfig::default(),
         new_reaper_health(),

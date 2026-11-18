@@ -222,42 +222,23 @@ def _terminal_outcome_code(status: _TerminalErrorStatus) -> OutcomeCode:
             assert_never(unreachable)
 
 
-def _completed_without_stored_result(
-    workflow_id: str, stored_form: Literal['NULL', 'empty'],
-) -> TaskResult[Any, TaskError]:
+def _completed_without_stored_result(workflow_id: str) -> TaskResult[Any, TaskError]:
     """``RESULT_DESERIALIZATION_ERROR`` for a ``COMPLETED`` workflow row whose
-    result column is NULL or empty.
+    result column is NULL.
 
     The library writes a result in the same statement that sets
     ``COMPLETED``: the output node's stored result, an error envelope for an
     output node with no result, the outputless envelope, or the JSON text
-    ``null`` when that envelope does not serialize. So a NULL or empty result
-    is stored data that does not parse, not a success.
+    ``null`` when that envelope does not serialize. So a NULL result is
+    stored data that does not parse, not a success.
     """
     return TaskResult(
         err=TaskError(
             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
             message=(
                 f'Workflow {workflow_id} is COMPLETED and its stored result '
-                f'is {stored_form}'
+                'is NULL'
             ),
-            data={'workflow_id': workflow_id},
-        ),
-    )
-
-
-def _empty_stored_error(workflow_id: str) -> TaskResult[Any, TaskError]:
-    """``RESULT_DESERIALIZATION_ERROR`` for an empty stored workflow error.
-
-    No library writer stores an empty error, so it is stored data that does
-    not parse. A NULL error is not: a cancel does not write the error, and
-    the failure finalize keeps the earlier error, which can be NULL.
-    """
-    logger.warning('Workflow %s error payload is empty', workflow_id)
-    return TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-            message='Workflow error payload is empty',
             data={'workflow_id': workflow_id},
         ),
     )
@@ -266,15 +247,16 @@ def _empty_stored_error(workflow_id: str) -> TaskResult[Any, TaskError]:
 def _decode_stored_workflow_error(
     workflow_id: str, status: _TerminalErrorStatus, stored_error: str,
 ) -> TaskResult[Any, TaskError]:
-    """Decode a stored workflow error that is not NULL and not empty.
+    """Decode a stored workflow error that is not NULL.
 
     Outcomes:
         - An error object that decodes: that ``TaskError``.
         - The plain expiry text that 0.5.0 and 0.5.1 stored for an
           ``EXPIRED`` workflow: ``OutcomeCode.WORKFLOW_EXPIRED``.
-        - Text that is not JSON, JSON that is not an object, or an object
-          that does not decode: ``RESULT_DESERIALIZATION_ERROR``, with the
-          cause in the message.
+        - Text that is not JSON (an empty text included: no library writer
+          stores one), JSON that is not an object, or an object that does
+          not decode: ``RESULT_DESERIALIZATION_ERROR``, with the cause in the
+          message.
 
     Raises:
         Exception: a defect in the decode. Only ``StrictJsonError`` and
@@ -373,9 +355,9 @@ def _ended_workflow_error(
 
     Outcomes:
         - A NULL stored error (no stored error): the ``OutcomeCode`` of
-          ``status``.
-        - An empty stored error: ``RESULT_DESERIALIZATION_ERROR``.
-        - Any other stored error: the outcome of
+          ``status``. A cancel does not write the error, and the failure
+          finalize keeps the earlier error, which can be NULL.
+        - Any other stored error, an empty text included: the outcome of
           ``_decode_stored_workflow_error``.
     """
     match stored_error:
@@ -386,8 +368,6 @@ def _ended_workflow_error(
                     message=f'Workflow {status.value.lower()}',
                 ),
             )
-        case '':
-            return _empty_stored_error(workflow_id)
         case stored:
             return _decode_stored_workflow_error(workflow_id, status, stored)
 
@@ -465,6 +445,45 @@ def _decode_per_task_envelope(
                 data={'node_id': node_id, 'task_name': task_name},
             ),
         )
+
+
+def _stored_node_result(
+    stored: str | None,
+    *,
+    app: Any | None,
+    task_name: str,
+    node_id: str,
+    sub_definition_key: str | None,
+) -> TaskResult[Any, TaskError] | None:
+    """The ``result`` of one node of ``tasks()``, from its stored result
+    text. Pure apart from the type lookups of the decode.
+
+    Outcomes:
+        - NULL: ``None``. A node with no result stores NULL.
+        - A text that is not JSON, an empty text included (no writer stores
+          one): ``RESULT_DESERIALIZATION_ERROR`` naming the node and the
+          cause.
+        - JSON: the outcome of ``_decode_per_task_envelope``.
+    """
+    match stored:
+        case None:
+            return None
+        case text:
+            loads_r = loads_json(text)
+            if is_err(loads_r):
+                return TaskResult(
+                    err=TaskError(
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Result JSON corrupt for node {node_id}: {loads_r.err_value}',
+                    ),
+                )
+            return _decode_per_task_envelope(
+                loads_r.ok_value,
+                app=app,
+                task_name=task_name,
+                node_id=node_id,
+                sub_definition_key=sub_definition_key,
+            )
 
 
 def _decode_workflow_envelope(
@@ -976,17 +995,16 @@ class WorkflowHandle(Generic[OutT]):
         apart from the type lookups of the decode.
 
         Outcomes:
-            - A NULL or empty stored result: ``RESULT_DESERIALIZATION_ERROR``.
-              The library always stores a result with ``COMPLETED``.
-            - A stored result that is not JSON: ``RESULT_DESERIALIZATION_ERROR``.
+            - A NULL stored result: ``RESULT_DESERIALIZATION_ERROR``. The
+              library always stores a result with ``COMPLETED``.
+            - A stored result that is not JSON, an empty text included:
+              ``RESULT_DESERIALIZATION_ERROR``.
             - A stored result that is JSON: the outcome of
               ``_decode_workflow_envelope``.
         """
         match stored_result:
             case None:
-                return _completed_without_stored_result(self.workflow_id, 'NULL')
-            case '':
-                return _completed_without_stored_result(self.workflow_id, 'empty')
+                return _completed_without_stored_result(self.workflow_id)
             case stored:
                 loads_r = loads_json(stored)
                 if is_err(loads_r):
@@ -1218,6 +1236,13 @@ class WorkflowHandle(Generic[OutT]):
 
         ``Ok([])``: the workflow exists and has no node.
         ``Err(HandleWorkflowNotFound)``: no workflow has this id.
+        ``Err(HandleStoredDataInvalid)``: a stored sub-workflow summary does
+        not read, an empty text included. A node without a summary stores
+        NULL and has ``sub_workflow_summary=None``.
+
+        A node without a result stores NULL and has ``result=None``. A stored
+        result that does not read, an empty text included, gives that node a
+        ``result`` with ``RESULT_DESERIALIZATION_ERROR``.
         """
         return self._sync_call(self.tasks_async, 'tasks')
 
@@ -1264,50 +1289,42 @@ class WorkflowHandle(Generic[OutT]):
             # The column is nullable; every spec assigns a node id, and the
             # read before the switch used the stored value as it is.
             node_id = cast(str, row.node_id)
-            task_result_value: TaskResult[Any, TaskError] | None = None
-            if row.result_json:
-                loads_r = loads_json(row.result_json)
-                if is_err(loads_r):
-                    task_result_value = TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                            message=f'Result JSON corrupt: {loads_r.err_value}',
-                        ),
-                    )
-                else:
-                    task_result_value = _decode_per_task_envelope(
-                        loads_r.ok_value,
-                        app=self.broker.app,
-                        task_name=row.task_name,
-                        node_id=node_id,
-                        sub_definition_key=(
-                            row.sub_definition_key if row.is_subworkflow else None
-                        ),
-                    )
+            task_result_value = _stored_node_result(
+                row.result_json,
+                app=self.broker.app,
+                task_name=row.task_name,
+                node_id=node_id,
+                sub_definition_key=(
+                    row.sub_definition_key if row.is_subworkflow else None
+                ),
+            )
 
-            summary: SubWorkflowSummary[Any] | None = None
-            if row.sub_workflow_summary_json:
-                summary_loads_r = loads_json(row.sub_workflow_summary_json)
-                if is_err(summary_loads_r):
-                    return Err(HandleStoredDataInvalid(
-                        message=(
-                            f'sub_workflow_summary JSON corrupt for node '
-                            f'{row.node_id}: {summary_loads_r.err_value}'
-                        ),
-                        workflow_id=self.workflow_id,
-                        exception=summary_loads_r.err_value,
-                    ))
-                try:
-                    summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
-                except ValueError as summary_exc:
-                    return Err(HandleStoredDataInvalid(
-                        message=(
-                            f'sub_workflow_summary invalid for node '
-                            f'{row.node_id}: {summary_exc}'
-                        ),
-                        workflow_id=self.workflow_id,
-                        exception=summary_exc,
-                    ))
+            summary: SubWorkflowSummary[Any] | None
+            match row.sub_workflow_summary_json:
+                case None:
+                    summary = None
+                case summary_json:
+                    summary_loads_r = loads_json(summary_json)
+                    if is_err(summary_loads_r):
+                        return Err(HandleStoredDataInvalid(
+                            message=(
+                                f'sub_workflow_summary JSON corrupt for node '
+                                f'{row.node_id}: {summary_loads_r.err_value}'
+                            ),
+                            workflow_id=self.workflow_id,
+                            exception=summary_loads_r.err_value,
+                        ))
+                    try:
+                        summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
+                    except ValueError as summary_exc:
+                        return Err(HandleStoredDataInvalid(
+                            message=(
+                                f'sub_workflow_summary invalid for node '
+                                f'{row.node_id}: {summary_exc}'
+                            ),
+                            workflow_id=self.workflow_id,
+                            exception=summary_exc,
+                        ))
 
             out.append(WorkflowTaskInfo(
                 node_id=row.node_id,

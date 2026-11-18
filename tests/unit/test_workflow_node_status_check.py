@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import horsies._core as core
-from horsies.core.models.workflow.enums import WorkflowTaskStatus
+from horsies.core.models.workflow.enums import WorkflowTaskStatus, stored_node_status
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_ok
 from tests.baseline_sql import baseline_sql
@@ -41,6 +41,22 @@ class TestCheckMatchesEnum:
         assert len(lists) == 1, lists
         expected = frozenset(status.value for status in WorkflowTaskStatus)
         assert _quoted_values(lists[0]) == expected
+
+
+class TestStoredNodeStatus:
+    def test_the_refusal_names_the_check_of_the_baseline(self) -> None:
+        assert 'CONSTRAINT horsies_workflow_tasks_status_known CHECK' in baseline_sql()
+
+        with pytest.raises(AssertionError) as raised:
+            stored_node_status(
+                workflow_id=WORKFLOW_ID, node_id='node-9', stored='BOGUS',
+            )
+
+        assert str(raised.value) == (
+            f"workflow {WORKFLOW_ID} node node-9 stores status 'BOGUS', which is "
+            'not a WorkflowTaskStatus member; the CHECK '
+            'horsies_workflow_tasks_status_known must forbid it'
+        )
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:

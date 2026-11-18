@@ -148,6 +148,19 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
 )
 
 
+_CORE_STATEMENT_BOUND: Final = (
+    'asserts the statement bound of the core start (shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S, '
+    'then the cancel request); the reference start sends no bound and waits for the row lock'
+)
+_CORE_STOP_STATEMENT: Final = (
+    "waits for a backend that runs the core's horsies_workflow_task_stop_before_start; the "
+    'reference stop before start runs horsies_abandon_owned_node in its own transaction'
+)
+_CORE_RESUME_FAILURE: Final = (
+    'asserts the failure class that the core resume gives a database error '
+    '(CoreOperationFailed); the reference resume gives the psycopg error'
+)
+
 WORKFLOW_ENGINE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
     CoreOnlyTest(
         node_id=(
@@ -166,6 +179,76 @@ WORKFLOW_ENGINE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
             'tests/integration/test_worker_finalize_workflow_phase.py::test_a_failed_phase_two_is_a_phase2_error'
         ),
         reason='injects the phase-2 fault on the core path; the reference phase 2 does not take it',
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_pause_abandon_after_resume.py::test_child_starts_a_task_resumed_before_its_abandon'
+        ),
+        reason=(
+            'commits the resume inside CoreChildHandle.stop_workflow_task_before_start; the '
+            'reference stop before start does not call it, so no resume comes before its abandon'
+        ),
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_shared_lifecycle_writes.py::test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound'
+        ),
+        reason=_CORE_STATEMENT_BOUND,
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_thread_lifecycle_writes.py::test_a_refusal_whose_update_waits_on_a_row_lock_ends_at_its_bound'
+        ),
+        reason=_CORE_STATEMENT_BOUND,
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_thread_lifecycle_writes.py::test_the_running_update_of_a_refusal_ends_at_the_bound_of_the_core'
+        ),
+        reason=_CORE_STATEMENT_BOUND,
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_thread_lifecycle_writes.py::test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row_claimed'
+        ),
+        reason=(
+            'a start of another seat holds the one connection of the core pool of the child '
+            '(child_core_handle_for); the reference start takes a connection of the sync '
+            'pool of the child, so the seat does not wait for it'
+        ),
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_task_lock_order.py::test_an_isolated_abandon_waits_for_the_workflow_without_task_locks'
+        ),
+        reason=_CORE_STOP_STATEMENT,
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_task_lock_order.py::test_a_shared_async_abandon_waits_for_the_workflow_without_task_locks'
+        ),
+        reason=_CORE_STOP_STATEMENT,
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_workflow_handle.py::TestResumeCommitSplit::test_recovery_db_error_returns_resume_recovery_failed'
+        ),
+        reason=_CORE_RESUME_FAILURE,
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_workflow_handle.py::TestResumeCommitSplit::test_db_error_before_the_commit_returns_db_operation_failed'
+        ),
+        reason=_CORE_RESUME_FAILURE,
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_workflow_handle.py::TestListenerFallbackContract::test_handle_get_async_propagates_programming_error'
+        ),
+        reason=(
+            'injects the TypeError into CoreHandle.wait_workflow_result_async; the reference '
+            'wait does not call it'
+        ),
     ),
 )
 """The tests of this module that run once, on the core (``CoreOnlyTest``)."""

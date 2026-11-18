@@ -19,8 +19,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use horsies_core::core::codec::from_json_str;
+use horsies_core::core::codec::{check_json_text, from_json_str, object_members};
+use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
+use horsies_core::JsonText;
 use horsies_core::{
     process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperationError,
     HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode, OutcomeCode, PostgresBroker,
@@ -28,6 +30,7 @@ use horsies_core::{
     UserCode, WaitLimit, WorkflowEnd, WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
+use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::dependency::OutputlessResults;
@@ -69,6 +72,11 @@ pub enum WorkflowReadError {
     /// Nothing was read.
     #[error("{message}")]
     WaitInsideTask { message: String },
+    /// `ASYNC_CONTEXT`: a blocking read on a thread that runs a tokio
+    /// runtime; its wait would stall the runtime. Nothing was read; the
+    /// async form reads.
+    #[error("{message}")]
+    AsyncContext { message: String },
     /// `BROKER_ERROR`: the database or the connection failed, with the
     /// handle code; `retryable` is the classification of the cause.
     #[error("the read failed ({code}): {message}")]
@@ -90,6 +98,7 @@ impl WorkflowReadError {
                 OperationalErrorCode::ResultDeserializationError.into()
             }
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
+            Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
             Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
         }
     }
@@ -103,11 +112,13 @@ impl WorkflowReadError {
                 workflow_id: error.workflow_id,
                 cause: error.message,
             },
+            HandleErrorCode::AsyncContext => Self::AsyncContext {
+                message: error.message,
+            },
             code @ (HandleErrorCode::DbOperationFailed
             | HandleErrorCode::ResumeRecoveryFailed
             | HandleErrorCode::LoopRunnerFailed
-            | HandleErrorCode::EventLoopLimit
-            | HandleErrorCode::AsyncContext) => Self::Database {
+            | HandleErrorCode::EventLoopLimit) => Self::Database {
                 code,
                 message: error.message,
                 retryable: error.retryable,
@@ -117,10 +128,11 @@ impl WorkflowReadError {
 }
 
 /// The stored result of one node, read with no type: its outcome with the
-/// value as JSON and the user codes as text, or why it does not read.
+/// value as its stored text and the user codes as text, or why it does not
+/// read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeResult {
-    Outcome(TaskOutcome<serde_json::Value, UserCode>),
+    Outcome(TaskOutcome<JsonText, UserCode>),
     /// The stored text does not read as a result envelope.
     Unreadable {
         cause: String,
@@ -252,7 +264,10 @@ impl<T> WorkflowHandle<T> {
             .await?
         {
             NodesRead::WorkflowAbsent => Err(self.not_found()),
-            NodesRead::Nodes(nodes) => nodes.into_iter().map(|node| self.node_info(node)).collect(),
+            NodesRead::Nodes(nodes) => nodes
+                .into_iter()
+                .map(|node| node_info(self.workflow_id, node))
+                .collect(),
         }
     }
 
@@ -329,48 +344,60 @@ impl<T> WorkflowHandle<T> {
             cause: horsies_core::FailureCause::PreconditionFailed,
         }
     }
+}
 
-    fn stored_data_invalid(&self, message: String) -> HandleOperationError {
-        HandleOperationError {
-            code: HandleErrorCode::StoredDataInvalid,
-            message,
-            retryable: false,
-            workflow_id: self.workflow_id,
-            cause: horsies_core::FailureCause::ContractViolation,
-        }
+/// `STORED_DATA_INVALID` of `workflow_id`, not retryable.
+fn stored_data_invalid(workflow_id: Uuid, message: String) -> HandleOperationError {
+    HandleOperationError {
+        code: HandleErrorCode::StoredDataInvalid,
+        message,
+        retryable: false,
+        workflow_id,
+        cause: horsies_core::FailureCause::ContractViolation,
     }
+}
 
-    fn node_info(&self, node: StoredNode) -> HandleResult<WorkflowNodeInfo> {
-        let status = serde_json::from_value::<WorkflowTaskStatus>(serde_json::Value::String(
-            node.status.clone(),
-        ))
-        .map_err(|_| {
-            self.stored_data_invalid(format!(
+/// One stored node of `workflow_id`, read (Python `tasks`). Pure.
+///
+/// Errors: `STORED_DATA_INVALID` for a stored status outside the node
+/// statuses, and for a stored sub-workflow summary that does not read. An
+/// empty summary text does not read: a node without a summary stores NULL.
+fn node_info(workflow_id: Uuid, node: StoredNode) -> HandleResult<WorkflowNodeInfo> {
+    let status = serde_json::from_value::<WorkflowTaskStatus>(serde_json::Value::String(
+        node.status.clone(),
+    ))
+    .map_err(|_| {
+        stored_data_invalid(
+            workflow_id,
+            format!(
                 "node {} has the stored status {:?}, which is not a node status",
                 node.task_index, node.status
-            ))
-        })?;
-        let sub_workflow_summary = match node.sub_workflow_summary.as_deref() {
-            None => None,
-            Some(text) => Some(stored_summary(text).map_err(|cause| {
-                self.stored_data_invalid(format!(
+            ),
+        )
+    })?;
+    let sub_workflow_summary = match node.sub_workflow_summary.as_deref() {
+        None => None,
+        Some(text) => Some(stored_summary(text).map_err(|cause| {
+            stored_data_invalid(
+                workflow_id,
+                format!(
                     "node {} has a stored sub-workflow summary that does not read: {cause}",
                     node.task_index
-                ))
-            })?),
-        };
-        Ok(WorkflowNodeInfo {
-            node_id: node.node_id,
-            index: node.task_index,
-            name: node.task_name,
-            status,
-            result: node.result.as_deref().map(node_result),
-            started_at: node.started_at,
-            completed_at: node.completed_at,
-            sub_workflow_id: node.sub_workflow_id,
-            sub_workflow_summary,
-        })
-    }
+                ),
+            )
+        })?),
+    };
+    Ok(WorkflowNodeInfo {
+        node_id: node.node_id,
+        index: node.task_index,
+        name: node.task_name,
+        status,
+        result: node.result.as_deref().map(node_result),
+        started_at: node.started_at,
+        completed_at: node.completed_at,
+        sub_workflow_id: node.sub_workflow_id,
+        sub_workflow_summary,
+    })
 }
 
 impl<T> WorkflowHandle<T>
@@ -470,15 +497,20 @@ where
 {
     let unreadable =
         |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
-    let value: serde_json::Value = from_json_str(text)
+    check_json_text(text)
         .map_err(|error| unreadable(format!("the result is not JSON: {error}")))?;
-    let wire_outputless =
-        value.get(OUTPUTLESS_TERMINALS_KEY) == Some(&serde_json::Value::Bool(true));
+    // The text is strict JSON: it reads as members only when it is an object.
+    let envelope = object_members(text).ok();
+    let wire_outputless = envelope
+        .as_deref()
+        .and_then(|members| member(members, OUTPUTLESS_TERMINALS_KEY))
+        .is_some_and(|marker| marker.get() == "true");
     let handle_outputless = TypeId::of::<T>() == TypeId::of::<OutputlessResults>();
-    match (wire_outputless, handle_outputless) {
-        (false, false) => envelope_outcome(workflow_id, text),
-        (true, true) => outputless_outcome(workflow_id, value),
-        (wire, handle) => Err(unreadable(format!(
+    match (wire_outputless, envelope, handle_outputless) {
+        (false, _, false) => envelope_outcome(workflow_id, text),
+        (true, Some(envelope), true) => outputless_outcome(workflow_id, &envelope),
+        (true, None, _) => unreachable!("an outputless marker is a member of an object"),
+        (wire, _, handle) => Err(unreadable(format!(
             "outputless/typed envelope mismatch: wire_outputless={wire}, \
              handle_outputless={handle}; the workflow definition changed between the start and \
              the read, or the handle has another output type"
@@ -511,46 +543,53 @@ where
 }
 
 /// The outcome of the outputless envelope of a COMPLETED workflow: its
-/// error, or the outcome of each node in its `results_by_id`. A node entry
-/// that is `null` or does not read is a `RESULT_DESERIALIZATION_ERROR`
-/// outcome naming the node; the other entries stay readable (Python's
-/// handle). Pure.
+/// error, or the outcome of each node in its `results_by_id` (Python's
+/// handle). `results_by_id`, `task_name_by_id` and `definition_key_by_id`
+/// are objects when present; a missing one is empty. A node entry that is
+/// `null`, has no task name, or does not read is a
+/// `RESULT_DESERIALIZATION_ERROR` outcome with the node in its message and
+/// in `data.node_id`; the other entries stay readable. The envelope is read
+/// as the texts of its members, so each value keeps its stored text. Pure.
 fn outputless_outcome<T>(
     workflow_id: Uuid,
-    value: serde_json::Value,
+    envelope: &[(String, &RawValue)],
 ) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError>
 where
     T: 'static,
 {
     let unreadable =
         |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
-    let serde_json::Value::Object(mut envelope) = value else {
-        return Err(unreadable(
-            "the outputless result is not an object".to_owned(),
-        ));
-    };
-    if envelope.get("__h_task_result__") != Some(&serde_json::Value::Bool(true)) {
+    if member(envelope, "__h_task_result__").map(RawValue::get) != Some("true") {
         return Err(unreadable(format!(
             "Workflow {workflow_id} result missing __h_task_result__ envelope marker"
         )));
     }
-    if let Some(error) = envelope.remove("err").filter(|slot| !slot.is_null()) {
-        return stored_error(workflow_id, &error.to_string()).map(TaskOutcome::Failed);
+    if let Some(error) = member(envelope, "err").filter(|slot| slot.get() != "null") {
+        return stored_error(workflow_id, error.get()).map(TaskOutcome::Failed);
     }
-    let Some(serde_json::Value::Object(mut ok)) = envelope.remove("ok") else {
+    let Some(ok) = member(envelope, "ok").and_then(|slot| object_members(slot.get()).ok()) else {
         return Err(unreadable(
             "Outputless workflow envelope ok slot malformed".to_owned(),
         ));
     };
-    let Some(serde_json::Value::Object(entries)) = ok.remove("results_by_id") else {
+    let maps = (
+        map_members(&ok, "results_by_id"),
+        map_members(&ok, "task_name_by_id"),
+        map_members(&ok, "definition_key_by_id"),
+    );
+    let (Some(entries), Some(task_names), Some(_definition_keys)) = maps else {
         return Err(unreadable(
-            "Outputless workflow envelope missing or malformed results_by_id".to_owned(),
+            "Outputless workflow envelope missing or malformed results_by_id / \
+             task_name_by_id / definition_key_by_id"
+                .to_owned(),
         ));
     };
     let by_node_id = entries
         .into_iter()
         .map(|(node_id, entry)| {
-            let outcome = outputless_entry(workflow_id, &node_id, entry);
+            let named =
+                member(&task_names, &node_id).is_some_and(|name| name.get().starts_with('"'));
+            let outcome = outputless_entry(workflow_id, &node_id, entry, named);
             (node_id, outcome)
         })
         .collect();
@@ -561,21 +600,47 @@ where
     }
 }
 
-/// The outcome of one entry of an outputless result. Pure.
+/// The text of the member `key`, or `None` when the object has no such
+/// member. Pure.
+fn member<'a>(members: &[(String, &'a RawValue)], key: &str) -> Option<&'a RawValue> {
+    members
+        .iter()
+        .find(|(name, _value)| name.as_str() == key)
+        .map(|(_name, value)| *value)
+}
+
+/// The members of the object member `key` of `members`: empty when the
+/// member is missing, `None` when it is not an object. Pure.
+fn map_members<'a>(
+    members: &[(String, &'a RawValue)],
+    key: &str,
+) -> Option<Vec<(String, &'a RawValue)>> {
+    match member(members, key) {
+        None => Some(Vec::new()),
+        Some(map) => object_members(map.get()).ok(),
+    }
+}
+
+/// The outcome of one entry of an outputless result; `named` tells whether
+/// `task_name_by_id` names its task. The value keeps its stored text. Pure.
 fn outputless_entry(
     workflow_id: Uuid,
     node_id: &str,
-    entry: serde_json::Value,
-) -> TaskOutcome<serde_json::Value, UserCode> {
+    entry: &RawValue,
+    named: bool,
+) -> TaskOutcome<JsonText, UserCode> {
     let missing = |cause: String| {
-        TaskOutcome::Failed(TaskError::library(
-            OperationalErrorCode::ResultDeserializationError,
-            format!("Outputless workflow {workflow_id} node {node_id:?} {cause}"),
-        ))
+        TaskOutcome::Failed(
+            TaskError::library(
+                OperationalErrorCode::ResultDeserializationError,
+                format!("Outputless workflow {workflow_id} node {node_id:?} {cause}"),
+            )
+            .with_data(serde_json::json!({ "node_id": node_id })),
+        )
     };
-    match entry {
-        serde_json::Value::Null => missing("missing payload".to_owned()),
-        entry => serde_json::from_value::<TaskOutcome<serde_json::Value, UserCode>>(entry)
+    match (entry.get(), named) {
+        ("null", _) | (_, false) => missing("missing payload or task name".to_owned()),
+        (entry, true) => serde_json::from_str::<TaskOutcome<JsonText, UserCode>>(entry)
             .unwrap_or_else(|error| {
                 missing(format!("does not read: {}", value_free_decode_text(&error)))
             }),
@@ -583,32 +648,33 @@ fn outputless_entry(
 }
 
 /// The stored error of a workflow, read with user codes as text (Python
-/// `_decode_stored_workflow_error`). Pure.
+/// `_decode_stored_workflow_error`). Its `data` keeps the stored text. Pure.
 fn stored_error(workflow_id: Uuid, text: &str) -> Result<TaskError<UserCode>, WorkflowReadError> {
     let unreadable =
         |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
-    let value: serde_json::Value = from_json_str(text)
-        .map_err(|error| unreadable(format!("Workflow error payload corrupt: {error}")))?;
-    let stored = match value {
-        value @ serde_json::Value::Object(_) => horsies_core::TaskError::from_stored_value(value)
-            .map_err(|refused| {
-            unreadable(format!(
+    let stored =
+        horsies_core::TaskError::from_stored_text(text).map_err(|refused| match refused {
+            StoredErrorRefused::NotJson(error) => {
+                unreadable(format!("Workflow error payload corrupt: {error}"))
+            }
+            StoredErrorRefused::NotAnObject => {
+                unreadable("Workflow error payload is not a JSON object".to_owned())
+            }
+            refused @ (StoredErrorRefused::UnknownKey(_)
+            | StoredErrorRefused::MissingField(_)
+            | StoredErrorRefused::FieldInvalid { .. }
+            | StoredErrorRefused::UserValue { .. }) => unreadable(format!(
                 "Workflow error payload validation failed: {refused}"
-            ))
-        })?,
-        _ => {
-            return Err(unreadable(
-                "Workflow error payload is not a JSON object".to_owned(),
-            ))
-        }
-    };
+            )),
+        })?;
     TaskError::<UserCode>::from_stored(stored)
         .map_err(|cause| WorkflowReadError::UnknownUserCode { workflow_id, cause })
 }
 
-/// The stored result of a node, read with no type. Pure.
+/// The stored result of a node, read with no type: the value keeps its
+/// stored text. Pure.
 fn node_result(text: &str) -> NodeResult {
-    match from_json_str::<TaskResult<serde_json::Value>>(text) {
+    match from_json_str::<TaskResult<JsonText>>(text) {
         Err(error) => NodeResult::Unreadable {
             cause: error.to_string(),
         },
@@ -622,10 +688,9 @@ fn node_result(text: &str) -> NodeResult {
     }
 }
 
-/// A stored sub-workflow summary. Pure.
+/// A stored sub-workflow summary, its output kept as its stored text. Pure.
 fn stored_summary(text: &str) -> Result<SubWorkflowSummary, String> {
-    let value: serde_json::Value = from_json_str(text).map_err(|error| error.to_string())?;
-    SubWorkflowSummary::from_stored_value(&value).map_err(|refused| refused.to_string())
+    SubWorkflowSummary::from_stored_text(text).map_err(|refused| refused.to_string())
 }
 
 /// The code of an ended status with no stored error (Python

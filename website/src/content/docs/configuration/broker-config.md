@@ -66,7 +66,7 @@ Rules:
 - Workers require `session_database_url` when `pgbouncer_transaction_mode` is on.
 - The two URLs must be different in transaction-pool mode.
 - Worker startup checks session behavior before partition maintenance starts.
-- Syce requires the session URL for real-time updates.
+- The web UI event stream listens on the session URL for real-time updates.
 - PgBouncer-only worker deployment is unsupported.
 - Horsies does not infer PgBouncer mode from port numbers.
 
