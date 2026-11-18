@@ -65,11 +65,6 @@ _FROZEN_DUMPS: Final = Counter(
 
 _FROZEN_JSONB_COLUMNS: Final = frozenset(
     {
-        ('python/horsies/core/models/task_pg.py', 'queue_priorities'),
-        ('python/horsies/core/models/task_pg.py', 'queue_max_concurrency'),
-        ('python/horsies/core/models/task_pg.py', 'recovery_config'),
-        ('python/horsies/core/models/task_pg.py', 'slots_down'),
-        ('python/horsies/core/models/task_pg.py', 'class_capacity'),
         ('python/horsies/core/models/workflow_pg.py', 'success_policy'),
         ('python/horsies/core/models/workflow_pg.py', 'args_from'),
     }
