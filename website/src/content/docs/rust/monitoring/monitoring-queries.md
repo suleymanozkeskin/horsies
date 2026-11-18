@@ -138,8 +138,8 @@ The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-c
 | `NotFound` | `TaskNotFound` | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | `TaskNotCancellable` | The task is terminal, or RUNNING without `include_running`; `current_status` is the status that the cancel found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | `TaskIsWorkflowTask` | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | `DbOperationFailed` | The connect or the statement failed: nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
-| `StoredDataInvalid` | `StoredDataInvalid` | Stored data does not parse. Nothing changed. Not retryable |
+| `DbOperationFailed { retryable, cause, .. }` | `DbOperationFailed` | The connect or the statement failed; `cause` is the `BrokerError`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
+| `StoredDataInvalid { cause, .. }` | `StoredDataInvalid` | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed. Not retryable |
 
 `TaskActionErrorCode::EventLoopLimit` is a code of the Python client only; no variant has it.
 
