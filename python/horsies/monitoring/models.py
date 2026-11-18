@@ -20,7 +20,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from horsies.core.history.reads.detail import TaskAbsenceReason
+from horsies._catalog.history import TaskAbsenceReason
 from horsies.core.models.tasks import Execution
 
 

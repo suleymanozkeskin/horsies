@@ -25,7 +25,6 @@ import horsies._catalog.task_send
 import horsies._catalog.workflow_handle
 import horsies._catalog.workflow_start
 from horsies.core.brokers import result_types
-from horsies.core.history.reads import detail
 from horsies.core.models import task_send_types, tasks
 from horsies.core.models.workflow import enums, handle_types
 from horsies.core.types import status
@@ -201,7 +200,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
         ('PENDING', 'READY', 'ENQUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED'),
     ),
     (
-        detail.TaskAbsenceReason,
+        horsies.TaskAbsenceReason,
         horsies._catalog.history.TaskAbsenceReason,
         ('PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED'),
     ),

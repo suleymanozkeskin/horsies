@@ -69,9 +69,7 @@ from ..errors import HistoryContractError
 from ..periods import parse_retention_period, period_class_key
 from horsies.core.types.result import Err, Ok
 from ..identity.keys import validate_reservation_window
-from ..reads.detail import (
-    TaskAbsenceReason,
-)
+from horsies._catalog.history import TaskAbsenceReason
 
 
 @dataclass(frozen=True, slots=True)
