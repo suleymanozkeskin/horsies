@@ -712,6 +712,84 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
     remove_workflow(&pool, workflow_id).await;
 }
 
+/// Python `tests/integration/test_worker_finalize_after.py::test_task_expired_workflow_task_advances_workflow_without_reaper`:
+/// the child expired the claimed task of node 0 before it started; node 1
+/// waits for node 0. The worker writes no task row and replays phase 2
+/// alone, with no recovery: node 0 fails with the `TASK_EXPIRED` result,
+/// node 1 is skipped, and the workflow (`on_error` `fail`) fails.
+#[tokio::test]
+#[serial]
+async fn an_expired_workflow_task_fails_its_node_skips_its_dependent_and_fails_the_workflow() {
+    let pool = migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) =
+        seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE).await;
+    let workflow_id = seed_workflow(&pool, task_id, &queue, "ENQUEUED").await;
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+             queue_name, priority, dependencies, allow_failed_deps, join_type, max_retries,
+             execution, retention_class_key, status, task_id, is_subworkflow, created_at,
+             started_at
+         ) VALUES ('NONE', $1, $2, 1, 'dependent', $3, '{}', $4, 100,
+                   '{0}', FALSE, 'all', 0, 'ISOLATED',
+                   'forever', 'PENDING', NULL, FALSE, NOW(), NULL)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(TASK_NAME)
+    .bind(&queue)
+    .execute(&pool)
+    .await
+    .expect("seed the dependent node");
+    let expired = PostgresBroker::from_pool(pool.clone())
+        .expire_claimed_task_before_start(
+            task_id,
+            WORKER,
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
+        )
+        .await
+        .expect("the expiry that the child writes");
+    assert_eq!(expired, PrestartExpiry::Expired);
+
+    let settled = writer(&pool)
+        .settle(
+            &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
+            stopped(StopReason::TaskExpired),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NothingOwed);
+    let nodes: Vec<(i32, String, Option<String>)> = sqlx::query_as(
+        "SELECT task_index, status::text, result FROM horsies_workflow_tasks
+         WHERE workflow_id = $1 ORDER BY task_index",
+    )
+    .bind(workflow_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read the nodes");
+    let [(0, first_status, first_result), (1, second_status, _)] = nodes.as_slice() else {
+        panic!("expected nodes 0 and 1, got {nodes:?}");
+    };
+    assert_eq!(first_status, "FAILED");
+    assert!(
+        first_result
+            .as_deref()
+            .is_some_and(|result| result.contains("TASK_EXPIRED")),
+        "{first_result:?}"
+    );
+    assert_eq!(second_status, "SKIPPED");
+    let workflow_status: String =
+        sqlx::query_scalar("SELECT status::text FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the workflow");
+    assert_eq!(workflow_status, "FAILED");
+    remove_task(&pool, task_id).await;
+    remove_workflow(&pool, workflow_id).await;
+}
+
 /// Python `TestSuccess::test_plain_task_completion_fuses_and_wakes_capacity`:
 /// the success of a plain task owes nothing after its write, so it ends in
 /// the fused write (`COMPLETE_FUSED`), which sends one capacity wake on the

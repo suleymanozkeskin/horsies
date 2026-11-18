@@ -233,9 +233,11 @@ async fn remove_task(pool: &PgPool, task_id: Uuid) {
     }
 }
 
-/// Python `test_child_loss_exit_unknown.py::TestLossWithTheExitSeen::test_crash_recovery_writes_the_row`:
+/// Python `test_child_loss_exit_unknown.py::TestLossWithTheExitSeen::test_crash_recovery_writes_the_row`
+/// and `tests/integration/test_worker_finalize_after.py::test_child_lost_marks_non_retryable_running_task_failed`:
 /// the crash path of a loss whose exit was seen fails the row with
-/// `WORKER_CRASHED`.
+/// `WORKER_CRASHED`. The live row is gone, and the history row keeps the
+/// claimant and the process that ran the task as provenance.
 #[tokio::test]
 #[serial]
 async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
@@ -268,9 +270,20 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
         .await;
 
     assert_eq!(settled, Settlement::Written);
+    let live: Option<i64> = sqlx::query_scalar("SELECT 1::bigint FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read the live row");
+    assert_eq!(live, None);
     let history = history_row(&pool, task_id).await;
     assert_eq!(history["status"], "FAILED");
     assert_eq!(history["error_code"], "WORKER_CRASHED");
+    assert_eq!(history["last_claimed_worker_id"], WORKER_ID);
+    assert!(!history["started_at"].is_null(), "{history}");
+    assert_eq!(history["last_worker_hostname"], "slots-host");
+    assert_eq!(history["last_worker_pid"], 4242);
+    assert_eq!(history["last_worker_process_name"], "slots-process");
     remove_task(&pool, task_id).await;
 }
 
