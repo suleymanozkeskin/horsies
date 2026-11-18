@@ -344,17 +344,22 @@ pub(super) fn send(frames: &[ChildFrame]) -> String {
     format!(r#"printf '{}' >&"$0"; "#, child_frames_text(frames))
 }
 
-/// Read the init frame and answer ready.
-pub(super) fn boot(init: &InitFrame) -> String {
+/// Read the init frame by its header and drop it. A slot sends the init
+/// frame of its pool with the process name of the slot
+/// (`booting::init_for_slot`), so the length of the frame depends on the
+/// slot.
+pub(crate) fn take_init() -> String {
+    read_frame()
+}
+
+/// Read the init frame that a slot sends for `_template`, by its header, and
+/// answer ready.
+pub(super) fn boot(_template: &InitFrame) -> String {
     let ready = ChildFrame::Ready(ReadyFrame {
         pid: ProcessId::new(1).unwrap(),
         rss: RssReading::Unreadable,
     });
-    format!(
-        "{}{}",
-        take(&ParentFrame::Init(init.clone())),
-        send(&[ready])
-    )
+    format!("{}{}", take_init(), send(&[ready]))
 }
 
 /// Read the stop frame and exit 0.
@@ -517,12 +522,13 @@ pub(super) fn boot_failed(cause: ReportedBootCause, error_name: &str, detail: &s
     })
 }
 
-/// Read the init frame, report `failure` in place of the ready frame, and
-/// exit with the boot-failed code.
-pub(super) fn fail_boot(init: &InitFrame, failure: &ChildFrame) -> String {
+/// Read the init frame that a slot sends for `_template`, by its header,
+/// report `failure` in place of the ready frame, and exit with the
+/// boot-failed code.
+pub(super) fn fail_boot(_template: &InitFrame, failure: &ChildFrame) -> String {
     format!(
         "{}{}exit 75",
-        take(&ParentFrame::Init(init.clone())),
+        take_init(),
         send(std::slice::from_ref(failure))
     )
 }

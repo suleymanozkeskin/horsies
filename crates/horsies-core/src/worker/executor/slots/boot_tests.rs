@@ -7,17 +7,19 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::{Duration, Instant};
 
 use super::booting::{
-    attempt_failed_line, back_in_service_line, outside_kill_line, slot_down_line, DownRecord,
+    attempt_failed_line, back_in_service_line, init_for_slot, outside_kill_line, slot_down_line,
+    DownRecord,
 };
 use super::scripted::{
     answer_of, answer_runs, boot, boot_failed, ended, fail_boot, idle_child, input,
-    isolated_config, isolated_init, reported, result_frame, serving, shell, short_of_descriptors,
-    start_isolated, submit_isolated, take, task, ticket, tickets, until, TestDir,
-    SPAWNER_STOP_WAIT, STATE_WAIT,
+    isolated_config, isolated_init, reported, result_frame, serving, shared_async_init,
+    shared_thread_init, shell, short_of_descriptors, start_isolated, submit_isolated, take_init,
+    task, ticket, tickets, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
+use crate::worker::children::CHILD_PROCESS_NAME;
 use crate::worker::executor::protocol::{
-    IsolatedWork, ParentFrame, ReportedBootCause, ShortageErrno,
+    InitFrame, IsolatedWork, ReportedBootCause, ShortageErrno,
 };
 use crate::worker::executor::supervisor::{
     BootFailure, BootFailureCause, ChildCommand, ChildExit, LossCause, ReapedExit, Spawner,
@@ -45,10 +47,6 @@ fn exhausted(failure: PoolFailure) -> BootFailure {
         }
         other => panic!("expected the boot attempts to run out, got {other:?}"),
     }
-}
-
-fn take_init() -> String {
-    take(&ParentFrame::Init(isolated_init()))
 }
 
 const EMFILE_DETAIL: &str = "OSError: [Errno 24] Too many open files";
@@ -618,5 +616,48 @@ fn the_outside_kill_line_names_the_slot_and_the_kills_in_a_row() {
     assert_eq!(
         outside_kill_line(2, 4),
         "Replacement child on slot 2 was killed during boot, 4 in a row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Child names
+// ---------------------------------------------------------------------------
+
+/// The init frame of `template` with the process name of the worker.
+fn named_worker_child(template: InitFrame) -> InitFrame {
+    InitFrame {
+        process_name: CHILD_PROCESS_NAME.to_owned(),
+        ..template
+    }
+}
+
+/// Python `_Slot.init_for` and `_SharedSlot.init_for`: a slot sends the init
+/// frame of its pool with the name of the slot, so a Python child's
+/// `multiprocessing.current_process().name` is `horsies-child-<slot>`, and
+/// `horsies-child-shared-<slot>` or `horsies-child-thread-<slot>` for a
+/// shared child. The slot is the board index. Only the name changes.
+#[test]
+fn each_slot_names_its_child_in_the_init_frame() {
+    let isolated = named_worker_child(isolated_init());
+    let shared_async = named_worker_child(shared_async_init(2));
+    let shared_thread = named_worker_child(shared_thread_init(2));
+
+    let first = init_for_slot(&isolated, 0);
+    assert_eq!(first.process_name, "horsies-child-0");
+    assert_eq!(
+        InitFrame {
+            process_name: CHILD_PROCESS_NAME.to_owned(),
+            ..first
+        },
+        isolated
+    );
+    assert_eq!(init_for_slot(&isolated, 1).process_name, "horsies-child-1");
+    assert_eq!(
+        init_for_slot(&shared_async, 2).process_name,
+        "horsies-child-shared-2"
+    );
+    assert_eq!(
+        init_for_slot(&shared_thread, 3).process_name,
+        "horsies-child-thread-3"
     );
 }
