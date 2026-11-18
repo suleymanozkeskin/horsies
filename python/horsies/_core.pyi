@@ -10,6 +10,7 @@ from typing import Literal, final
 from horsies._catalog.broker_errors import BrokerInvalidInput, BrokerInvalidJsonPayload, BrokerListenerDisabled, BrokerOperationFailed
 from horsies._catalog.monitoring_errors import MonitoringQueryCoreError, TaskActionCoreError
 from horsies._catalog.workflow_handle_errors import HandleDbOperationFailed, HandleResumeRecoveryFailed, HandleStoredDataInvalid
+from horsies._catalog.workflow_start_errors import WorkflowStartEnqueueFailed, WorkflowStartIdConflict
 
 
 class CoreError(Exception):
@@ -225,13 +226,13 @@ class CoreHandle:
         on the callback thread for each sub-workflow child that an operation builds. A second
         registration raises RuntimeError. Starts nothing.
         """
-    def start_workflow(self, request: WorkflowStartRequest) -> WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed:
+    def start_workflow(self, request: WorkflowStartRequest) -> WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed:
         """Start one workflow. Writes; a caller that leaves does not stop it. The children of its
         sub-workflow roots come from the child spec source. A build that raised (KeyboardInterrupt,
         SystemExit, or an Exception such as SerializationError) rolls the start back and raises it
         again. With no child spec source it raises RuntimeError.
         """
-    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed]:
+    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed]:
         """The awaitable form of the method above."""
     def resume_workflow(self, workflow_id: uuid.UUID) -> WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed:
         """Resume one workflow tree. Writes; a caller that leaves does not stop it. The child starts
@@ -2235,15 +2236,6 @@ class WorkflowExists:
 
 
 @final
-class WorkflowIdTaken:
-    """A workflow with this id exists under another name. Nothing was written."""
-    @property
-    def workflow_id(self) -> uuid.UUID: ...
-    @property
-    def existing_name(self) -> str: ...
-
-
-@final
 class NodeFinishRequest:
     """One frozen phase 2. Another facts or wake value raises ValueError."""
     def __init__(self, *, task_id: uuid.UUID, facts: Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN'], wake: Literal['SEND', 'NONE']) -> None: ...
@@ -2452,22 +2444,6 @@ class WorkflowNotPaused:
     """The workflow exists and is not PAUSED. Nothing was written."""
     @property
     def workflow_id(self) -> uuid.UUID: ...
-
-
-@final
-class WorkflowStartFailed:
-    """The connect, the schema install, the client family check, the statement or an owed
-    child start failed, or a child build did not run. Nothing committed, or the commit
-    outcome is unknown: a resend with the same id then finds the workflow.
-    """
-    @property
-    def workflow_id(self) -> uuid.UUID: ...
-    @property
-    def message(self) -> str: ...
-    @property
-    def retryable(self) -> bool: ...
-    @property
-    def exception(self) -> CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed: ...
 
 
 @final

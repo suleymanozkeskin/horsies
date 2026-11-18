@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use horsies_core::{FailureCause, WorkflowStartError};
+use horsies_core::{StartRefusalCause, WorkflowStartError};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
@@ -202,7 +202,7 @@ where
                 message: error.to_string(),
                 workflow_name: self.name.to_owned(),
                 workflow_id,
-                cause: FailureCause::PreconditionFailed,
+                cause: StartRefusalCause::Check,
             })?;
         self.starter.start(&spec, workflow_id).await
     }
@@ -429,7 +429,7 @@ fn not_registered(name: &str, method: &str, workflow_id: Uuid) -> WorkflowStartE
         ),
         workflow_name: name.to_owned(),
         workflow_id,
-        cause: FailureCause::PreconditionFailed,
+        cause: StartRefusalCause::Check,
     }
 }
 

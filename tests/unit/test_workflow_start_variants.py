@@ -28,6 +28,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartRetryable,
     WorkflowStartValidationFailed,
 )
+from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
 
@@ -59,7 +60,7 @@ def _variant_id(error: WorkflowStartError) -> str:
 
 class TestVariantCatalog:
     def test_each_code_names_exactly_one_variant(self) -> None:
-        codes = [variant.code for variant in get_args(WorkflowStartError.__value__)]
+        codes = [variant.code for variant in union_members(WorkflowStartError)]
 
         assert len(codes) == len(set(codes))
         assert set(codes) == set(WorkflowStartErrorCode)
@@ -67,7 +68,7 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
-        assert built == set(get_args(WorkflowStartError.__value__))
+        assert built == set(union_members(WorkflowStartError))
 
     def test_the_retryable_variants_carry_a_start_id(self) -> None:
         assert set(get_args(WorkflowStartRetryable.__value__)) == {

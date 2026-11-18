@@ -45,12 +45,10 @@ if TYPE_CHECKING:
     from horsies._core import (
         WorkflowAbsent,
         WorkflowExists,
-        WorkflowIdTaken,
         WorkflowNotPaused,
         WorkflowNotRunning,
         WorkflowPaused,
         WorkflowResumed,
-        WorkflowStartFailed,
         WorkflowStarted,
         WorkflowStartRequest,
     )
@@ -312,17 +310,24 @@ def _start_answer(
     broker: 'PostgresBroker',
     wf_id: str,
     workflow_key: uuid.UUID,
-    outcome: WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed,
+    outcome: (
+        WorkflowStarted
+        | WorkflowExists
+        | WorkflowStartIdConflict
+        | WorkflowStartEnqueueFailed
+    ),
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """The answer of ``start_workflow`` and ``start_workflow_async`` for the
-    core's start record. Pure apart from the WARNING log of an existing
-    workflow and the type lookups of the handle's output type. The handle
-    holds ``workflow_key``, the UUID that the start sent; the errors carry
-    ``wf_id`` as given."""
+    core's answer. Pure apart from the WARNING log of an existing workflow
+    and the type lookups of the handle's output type. The handle holds
+    ``workflow_key``, the UUID that the start sent.
+
+    A refused or failed start is the generated class that the core built
+    (``WorkflowStartIdConflict``, ``WorkflowStartEnqueueFailed``), returned
+    as it is: its ``workflow_id`` is the canonical text of ``workflow_key``,
+    and ``wf_id`` as given when the caller gave that text."""
     from horsies._core import (
         WorkflowExists,
-        WorkflowIdTaken,
-        WorkflowStartFailed,
         WorkflowStarted,
     )
 
@@ -331,25 +336,8 @@ def _start_answer(
             pass
         case WorkflowExists():
             logger.warning(f'Workflow {wf_id} already exists, returning existing handle')
-        case WorkflowIdTaken(existing_name=existing_name):
-            return Err(WorkflowStartIdConflict(
-                message=(
-                    f"workflow_id '{wf_id}' already exists for workflow "
-                    f"name '{existing_name}', cannot start workflow "
-                    f"name '{spec.name}' with the same id"
-                ),
-                workflow_name=spec.name,
-                workflow_id=wf_id,
-                existing_workflow_name=existing_name,
-            ))
-        case WorkflowStartFailed(message=message, retryable=retryable, exception=exception):
-            return Err(WorkflowStartEnqueueFailed(
-                message=message,
-                retryable=retryable,
-                workflow_name=spec.name,
-                workflow_id=wf_id,
-                exception=exception,
-            ))
+        case WorkflowStartIdConflict() | WorkflowStartEnqueueFailed():
+            return Err(outcome)
         case _ as unreachable:
             assert_never(unreachable)
 
