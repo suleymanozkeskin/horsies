@@ -26,7 +26,7 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.reference.worker_parent.worker import preload, preload_main, slots
+from tests.dualrun.reference.worker_parent.worker import preload, slots
 from horsies.core.worker import preload_main as kept_preload_main
 from horsies.core.models.worker_profile import ResolvedPool
 from tests.dualrun.reference.worker_parent.worker.child_protocol import (
@@ -921,25 +921,25 @@ def _cli_exit_literals() -> set[int]:
 class TestChildExitCodes:
     def test_every_named_exit_code_is_distinct(self) -> None:
         """A forked child can exit through ``preload_main`` before the
-        reparent and through ``child_main`` after it, and the worker process
-        exits with its own code when its runner heartbeats fail closed. A
-        reader tells the cause from the code, so no two causes share one,
-        and none is a code the CLI exits with."""
-        from tests.dualrun.reference.worker_parent.worker import child_main, runner_heartbeat
-        from tests.dualrun.reference.worker_parent.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+        reparent and through ``child_main`` after it, each with a code of the
+        generated protocol module. A reader tells the cause from the code, so
+        no two causes share one, and none is a code the CLI exits with. The
+        codes of the worker process itself (runner heartbeats lost, liveness
+        lock lost) are core values; core tests keep them apart from these and
+        from the CLI codes."""
+        from horsies.core.worker.child_frames import PROTOCOL_NUMBERS
 
         codes = {
-            name: value
-            for module in (child_main, preload_main, runner_heartbeat)
-            for name, value in vars(module).items()
-            if name.endswith('_EXIT_CODE') and isinstance(value, int)
+            name: getattr(PROTOCOL_NUMBERS, name)
+            for name in dir(type(PROTOCOL_NUMBERS))
+            if name.endswith('_exit_code')
         }
-        codes['CHILD_HOOK_FAILURE_EXIT_CODE'] = CHILD_HOOK_FAILURE_EXIT_CODE
         cli_codes = _cli_exit_literals()
 
-        assert 'REPARENT_FAILED_EXIT_CODE' in codes
-        assert 'STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE' in codes
-        assert 'RUNNER_HEARTBEAT_LOST_EXIT_CODE' in codes
+        assert codes['reparent_failed_exit_code'] == REPARENT_FAILED_EXIT_CODE
+        assert 'stopped_with_executor_threads_exit_code' in codes
+        assert 'child_hook_failed_exit_code' in codes
+        assert all(isinstance(value, int) for value in codes.values()), codes
         assert {0, 1, 2} <= cli_codes
         assert len(set(codes.values())) == len(codes), codes
         assert not set(codes.values()) & cli_codes, (codes, cli_codes)
