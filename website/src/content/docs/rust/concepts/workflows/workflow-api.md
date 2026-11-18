@@ -307,7 +307,7 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 
 ### HandleOperationError
 
-`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `HandleOperationError` with `code`, `message`, `retryable` and `workflow_id`:
+`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `HandleOperationError`, an enum with one variant per state: `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`), `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and `AsyncContext`. Every variant has `message` and `workflow_id`; the methods `code()`, `message()`, `retryable()`, `workflow_id()` and `failure_cause()` read them. `retryable()` is `false` for every variant but `DbOperationFailed`:
 
 | `HandleErrorCode` | Returned by |
 |-------------------|-------------|
