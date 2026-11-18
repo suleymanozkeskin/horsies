@@ -8,8 +8,11 @@ use horsies_core::{BrokerError, BrokerErrorCode, BrokerOperationError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
+
 /// An expected failure of a broker operation: the catalog code, the cause
-/// and whether a repeat of the same call can succeed.
+/// and whether a repeat of the same call can succeed. `exception` is the
+/// cause as a `CoreFailure` leaf class, with the operation as its subject.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerFailure {
@@ -17,26 +20,35 @@ pub struct BrokerFailure {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+    pub exception: FailureException,
 }
 
 impl BrokerFailure {
-    /// The failure `code` of an operation that met `error`: a failed
-    /// connect, or a failure of a broker call that returns `BrokerError`.
-    pub fn from_broker_error(code: BrokerErrorCode, error: &BrokerError) -> Self {
+    /// The failure `code` of the operation `subject` that met `error`: a
+    /// failed connect, or a failure of a broker call that returns
+    /// `BrokerError`.
+    pub fn from_broker_error(
+        subject: &'static str,
+        code: BrokerErrorCode,
+        error: &BrokerError,
+    ) -> Self {
         Self {
             code: code.to_string(),
             message: error.to_string(),
             retryable: error.is_retryable(),
+            exception: FailureException::of(subject, error),
         }
     }
-}
 
-impl From<BrokerOperationError> for BrokerFailure {
-    fn from(error: BrokerOperationError) -> Self {
+    /// The failure of the operation `subject` that a broker call answered
+    /// with `error`.
+    pub fn of_operation_error(subject: &'static str, error: BrokerOperationError) -> Self {
+        let exception = FailureException::of_operation_error(subject, &error);
         Self {
             code: error.code.to_string(),
             message: error.message,
             retryable: error.retryable,
+            exception,
         }
     }
 }

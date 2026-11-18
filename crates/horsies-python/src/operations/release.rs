@@ -17,6 +17,7 @@ use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use super::arguments::utc_instant;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// One frozen release. A value that the Python client should have refused
@@ -145,13 +146,19 @@ pub struct ReleaseFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `release_claims`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed release.
+const SUBJECT: &str = "release_claims";
 
 impl ReleaseFailed {
     fn from_broker_error(error: &BrokerError) -> Self {
         Self {
             message: error.to_string(),
             retryable: error.is_retryable(),
+            exception: FailureException::of(SUBJECT, error),
         }
     }
 }

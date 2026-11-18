@@ -27,6 +27,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::operations::arguments::utc_instant;
 
@@ -47,7 +48,13 @@ pub struct MonitoringFailed {
     /// The cause, with the read that failed.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the read as its subject (for example
+    /// `task list query`).
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed detail read.
+const DETAIL_SUBJECT: &str = "task detail query";
 
 /// Neither the live table nor the history holds the task.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -423,24 +430,27 @@ fn sort_direction(value: &str) -> Result<SortDirection, String> {
         .ok_or_else(|| format!("sort_dir: {value:?} is not 'asc' or 'desc'"))
 }
 
-/// The record of a read failure that the core reports.
-pub fn read_failed(error: MonitoringQueryError) -> MonitoringFailed {
+/// The record of a failure of the read `operation` that the core reports.
+pub fn read_failed(operation: &'static str, error: MonitoringQueryError) -> MonitoringFailed {
+    let exception = FailureException::of(operation, &error);
     MonitoringFailed {
         code: error.code.wire_value().to_owned(),
         message: error.message,
         retryable: error.retryable,
+        exception,
     }
 }
 
 /// The record of a failed connect of the handle's broker: no statement ran.
 /// The message names the read, as the core's read failures do.
-pub fn connect_failed(operation: &str, error: &BrokerError) -> MonitoringFailed {
+pub fn connect_failed(operation: &'static str, error: &BrokerError) -> MonitoringFailed {
     MonitoringFailed {
         code: MonitoringQueryErrorCode::DbOperationFailed
             .wire_value()
             .to_owned(),
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
+        exception: FailureException::of(operation, error),
     }
 }
 
@@ -475,7 +485,7 @@ where
     };
     match read(broker).await {
         Ok(encoded) => ReadOutcome::Json(model_json(model, encoded)),
-        Err(error) => ReadOutcome::Failed(read_failed(error)),
+        Err(error) => ReadOutcome::Failed(read_failed(operation, error)),
     }
 }
 
@@ -614,7 +624,7 @@ pub async fn list_tasks_operation(
     };
     match list_tasks(&broker, &query).await {
         Ok(page) => ReadOutcome::Json(model_json("TaskListPage", serde_json::to_string(&page))),
-        Err(error) => ReadOutcome::Failed(read_failed(error)),
+        Err(error) => ReadOutcome::Failed(read_failed(operation, error)),
     }
 }
 
@@ -630,7 +640,7 @@ pub async fn task_facets_operation(
     };
     match task_facets(&broker, &query).await {
         Ok(facets) => ReadOutcome::Json(model_json("Facets", serde_json::to_string(&facets))),
-        Err(error) => ReadOutcome::Failed(read_failed(error)),
+        Err(error) => ReadOutcome::Failed(read_failed(operation, error)),
     }
 }
 
@@ -644,16 +654,15 @@ fn detail_outcome(read: Result<TaskDetailRead, MonitoringQueryError>) -> DetailO
             task_id: absent.task_id,
             reason: absent.reason.wire_value().to_owned(),
         }),
-        Err(error) => DetailOutcome::Failed(read_failed(error)),
+        Err(error) => DetailOutcome::Failed(read_failed(DETAIL_SUBJECT, error)),
     }
 }
 
 /// One task with its attempts, or the reason it is absent.
 pub async fn task_detail_operation(connection: BrokerConnection, task_id: Uuid) -> DetailOutcome {
-    let operation = "task detail query";
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return DetailOutcome::Failed(connect_failed(operation, &error)),
+        Err(error) => return DetailOutcome::Failed(connect_failed(DETAIL_SUBJECT, &error)),
     };
     detail_outcome(get_task_detail(&broker, task_id).await)
 }

@@ -17,6 +17,7 @@ use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use crate::child_spec::PythonChildSpecSource;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// One frozen phase 2. `facts`: `NO_DEPENDENTS`,
@@ -90,7 +91,15 @@ pub struct NodeFinishFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `finish_workflow_node`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed phase 2.
+const NODE_FINISH_SUBJECT: &str = "finish_workflow_node";
+
+/// The subject of the exception of a stopped parent advance.
+const PARENT_ADVANCE_SUBJECT: &str = "advance_workflow_parents";
 
 /// Every parent advance committed.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -115,6 +124,8 @@ pub struct ParentAdvanceStoppedRecord {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `advance_workflow_parents`.
+    pub exception: FailureException,
 }
 
 /// The outcome of one phase 2.
@@ -179,6 +190,7 @@ fn node_finish_outcome(
             task_id,
             message: format!("phase 2 of workflow task {task_id} failed: {error}"),
             retryable: error.is_retryable(),
+            exception: FailureException::of(NODE_FINISH_SUBJECT, &error),
         }),
     }
 }
@@ -201,6 +213,7 @@ fn parent_advance_outcome(
                 stopped.failed_child_workflow_id, stopped.error
             ),
             retryable: stopped.error.is_retryable(),
+            exception: FailureException::of(PARENT_ADVANCE_SUBJECT, &stopped.error),
         }),
     }
 }
@@ -221,6 +234,7 @@ pub async fn finish_workflow_node_operation(
                 task_id,
                 message: format!("phase 2 of workflow task {task_id} failed: {error}"),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(NODE_FINISH_SUBJECT, &error),
             })
         }
     };
@@ -249,6 +263,7 @@ pub async fn advance_workflow_parents_operation(
                 still_owed: child_workflow_ids,
                 message: format!("parent advance of child workflow {first} failed: {error}"),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(PARENT_ADVANCE_SUBJECT, &error),
             });
         }
     };

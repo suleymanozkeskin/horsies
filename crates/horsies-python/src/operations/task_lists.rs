@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyInt, PyList};
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
@@ -132,12 +133,14 @@ pub fn stale_threshold(
 }
 
 /// The failure of a list whose broker did not connect: no statement ran.
-/// The message names the read, as the core's read failures do.
-pub(crate) fn connect_failed(operation: &str, error: &BrokerError) -> BrokerFailure {
+/// The message names the read, as the core's read failures do; the read is
+/// the subject of the exception.
+pub(crate) fn connect_failed(operation: &'static str, error: &BrokerError) -> BrokerFailure {
     BrokerFailure {
         code: BrokerErrorCode::MonitoringQueryFailed.to_string(),
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
+        exception: FailureException::of(operation, error),
     }
 }
 
@@ -153,7 +156,9 @@ pub async fn stale_tasks_operation(
     };
     match broker.get_stale_tasks(threshold.minutes()).await {
         Ok(list) => TaskListOutcome::Listed(list),
-        Err(error) => TaskListOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => {
+            TaskListOutcome::Failed(BrokerFailure::of_operation_error("get_stale_tasks", error))
+        }
     }
 }
 
@@ -167,7 +172,10 @@ pub async fn expired_tasks_operation(
     };
     match broker.get_expired_tasks().await {
         Ok(list) => TaskListOutcome::Listed(list),
-        Err(error) => TaskListOutcome::Failed(BrokerFailure::from(error)),
+        Err(error) => TaskListOutcome::Failed(BrokerFailure::of_operation_error(
+            "get_expired_tasks",
+            error,
+        )),
     }
 }
 

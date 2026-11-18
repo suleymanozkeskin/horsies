@@ -17,6 +17,7 @@ use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use super::arguments::utc_instant;
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// One frozen start check. `started` holds each started claim as (task id,
@@ -72,7 +73,12 @@ pub struct QueueStartsFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `count_queue_starts`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed count_queue_starts.
+const SUBJECT: &str = "count_queue_starts";
 
 /// The outcome of one start check.
 pub enum QueueStartsOutcome {
@@ -97,6 +103,7 @@ fn failed(error: &BrokerError) -> QueueStartsOutcome {
     QueueStartsOutcome::Failed(QueueStartsFailed {
         message: error.to_string(),
         retryable: error.is_retryable(),
+        exception: FailureException::of(SUBJECT, error),
     })
 }
 

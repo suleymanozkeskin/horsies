@@ -28,6 +28,20 @@ pub struct StubException {
     pub name: &'static str,
     pub base: &'static str,
     pub doc: &'static str,
+    pub body: ExceptionBody,
+}
+
+/// What an exception class declares besides its base and its doc.
+#[derive(Clone, Copy, Debug)]
+pub enum ExceptionBody {
+    /// A class whose facts are in `args` (PyO3 `create_exception!`).
+    ArgsOnly,
+    /// A class with named read-only attributes, and a constructor when
+    /// Python can build it.
+    Attributes {
+        constructor: Constructor,
+        properties: &'static [StubProperty],
+    },
 }
 
 /// How a parameter is passed.
@@ -976,61 +990,150 @@ const HANDLE_METHODS: [StubFunction; HANDLE_METHOD_COUNT] = {
     methods
 };
 
+/// The parameters of `CoreServerError`.
+const CORE_SERVER_ERROR_PARAMETERS: &[StubParameter] = &[
+    positional("subject", "str"),
+    positional("sqlstate", "str"),
+    positional("message", "str"),
+    positional("retryable", "bool"),
+];
+
+/// The parameters of `CoreContractViolation`.
+const SUBJECT_MESSAGE_PARAMETERS: &[StubParameter] =
+    &[positional("subject", "str"), positional("message", "str")];
+
+/// The parameters of `CoreConnectionError` and `CorePreconditionFailed`.
+const SUBJECT_MESSAGE_RETRYABLE_PARAMETERS: &[StubParameter] = &[
+    positional("subject", "str"),
+    positional("message", "str"),
+    positional("retryable", "bool"),
+];
+
+/// The type of the `exception` of a failure record: the leaf class of the
+/// cause of the failure.
+const CORE_FAILURE_EXCEPTION: &str =
+    "CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed";
+
 const EXCEPTIONS: &[StubException] = &[
     StubException {
         name: "CoreError",
         base: "Exception",
         doc: "Base of the errors raised at the core boundary.",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "ForkedAfterCoreStart",
         base: "CoreError",
         doc: "This process was forked without exec after the core started in its parent.\n\nargs: (core_pid, this_pid, advice).",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "CoreStopped",
         base: "CoreError",
         doc: "A core background task panicked, so the core is stopped in this process.\n\nargs: (subject, cause) of the first panic.",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "CoreStartFailed",
         base: "CoreError",
         doc: "The core runtime or its log forwarder could not start. args: (cause,).",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "CoreCallTimedOut",
         base: "CoreError",
         doc: "A blocking call did not end within its bound.\n\nargs: (subject, bound_seconds, state_after); state_after is 'no_change'\nfor a read and 'outcome_unknown' for a write.",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "TooManyPendingCalls",
         base: "CoreError",
         doc: "The event loop already has the most core calls in flight. args: (subject, bound).",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "CoreDefect",
         base: "BaseException",
         doc: "The client sent a value that the core refuses: a defect of the client.",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "ManifestRefused",
         base: "CoreDefect",
         doc: "The core refused a manifest. args: (field_path, cause).",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "PanicRuleFixed",
         base: "CoreDefect",
         doc: "The panic rule of this process was set to another rule before, or fixed when the core\nstarted. args: (current_rule,).",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "NotMainThread",
         base: "CoreDefect",
         doc: "A run form was called off the main thread, where Python runs signal handlers.\n\nThe run did not start. args: (subject,).",
+        body: ExceptionBody::ArgsOnly,
     },
     StubException {
         name: "PanicException",
         base: "BaseException",
         doc: "Rust code called from Python panicked.",
+        body: ExceptionBody::ArgsOnly,
+    },
+    StubException {
+        name: "CoreFailure",
+        base: "Exception",
+        doc: "Base of the causes of a failed core operation. subject is the operation, for example\n'release_claims'; message says what failed and why. No constructor.",
+        body: ExceptionBody::Attributes {
+            constructor: Constructor::NoConstructor,
+            properties: &[property("subject", "str"), property("message", "str")],
+        },
+    },
+    StubException {
+        name: "CoreDatabaseError",
+        base: "CoreFailure",
+        doc: "Base of the database failures: the server answered with an error, or did not answer.\nretryable: the cause may clear, so a repeat of the operation can succeed. No constructor.",
+        body: ExceptionBody::Attributes {
+            constructor: Constructor::NoConstructor,
+            properties: &[property("retryable", "bool")],
+        },
+    },
+    StubException {
+        name: "CoreServerError",
+        base: "CoreDatabaseError",
+        doc: "The server answered with an error: sqlstate is its five-character SQLSTATE, message\nthe server's primary message.",
+        body: ExceptionBody::Attributes {
+            constructor: Constructor::Parameters(CORE_SERVER_ERROR_PARAMETERS),
+            properties: &[property("sqlstate", "str")],
+        },
+    },
+    StubException {
+        name: "CoreConnectionError",
+        base: "CoreDatabaseError",
+        doc: "The operation got no answer from the server: a connect or a checkout that failed or\ntimed out, a lost connection, or a reply that did not come within its bound.",
+        body: ExceptionBody::Attributes {
+            constructor: Constructor::Parameters(SUBJECT_MESSAGE_RETRYABLE_PARAMETERS),
+            properties: &[],
+        },
+    },
+    StubException {
+        name: "CoreContractViolation",
+        base: "CoreFailure",
+        doc: "A row, a stored value or a result broke the contract that the core reads it with. Not\nretryable: the same call meets it again.",
+        body: ExceptionBody::Attributes {
+            constructor: Constructor::Parameters(SUBJECT_MESSAGE_PARAMETERS),
+            properties: &[],
+        },
+    },
+    StubException {
+        name: "CorePreconditionFailed",
+        base: "CoreFailure",
+        doc: "A precondition of the operation does not hold: the settings, the database's client\nfamily or schema, an argument, a row that the call names, a key or a lock that another\ncommand holds, a usable transaction, or a client that can build a child spec now.\nretryable: the precondition may come to hold without a change by the caller.",
+        body: ExceptionBody::Attributes {
+            constructor: Constructor::Parameters(SUBJECT_MESSAGE_RETRYABLE_PARAMETERS),
+            properties: &[property("retryable", "bool")],
+        },
     },
 ];
 
@@ -1126,6 +1229,7 @@ const RECORD_CLASSES: &[StubClass] = &[
             },
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -1250,6 +1354,7 @@ const RECORD_CLASSES: &[StubClass] = &[
             property("task_id", "uuid.UUID"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -1393,6 +1498,7 @@ const RECORD_CLASSES: &[StubClass] = &[
             property("requeued_before", "int"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -1414,7 +1520,7 @@ const RECORD_CLASSES: &[StubClass] = &[
         name: "StaleRunningScanFailed",
         doc: "The stale RUNNING pass did not run: a threshold out of range, a failed connect or family\ncheck, or a failed scan. Nothing was written.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -1439,6 +1545,7 @@ const RECORD_CLASSES: &[StubClass] = &[
             property("expired_before", "int"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -1457,14 +1564,14 @@ const RECORD_CLASSES: &[StubClass] = &[
         name: "OrphanAuditLockBusy",
         doc: "Another sweep holds the orphan cursor: the page was refused at once (SQLSTATE 55P03)\nand wrote nothing.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
         name: "OrphanAuditFailed",
         doc: "The orphan page did not commit: a failed connect, family check or statement, or a page\noutside the function's contract. After a lost COMMIT reply its outcome is unknown.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -1535,6 +1642,7 @@ const RECORD_CLASSES: &[StubClass] = &[
             property("task_id", "uuid.UUID"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -1647,21 +1755,21 @@ const RECORD_CLASSES: &[StubClass] = &[
         name: "BatchNotSent",
         doc: "No row of the batch changed, and the statement was not sent: the pools, the client\nfamily check or the checkout failed.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
         name: "BatchRefused",
         doc: "No row of the batch changed: the server refused the statement. One row can be the cause.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
         name: "BatchCommitUnknown",
         doc: "The reply of the batch statement was lost: each row may have committed or not.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str")],
+        properties: &[property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -1713,7 +1821,7 @@ const RECORD_CLASSES: &[StubClass] = &[
         name: "ClaimPassFailed",
         doc: "The claim pass failed. It wrote nothing, or it committed and its reply was lost; claimed\nrows then return to the queue when their lease expires.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -1727,7 +1835,7 @@ const RECORD_CLASSES: &[StubClass] = &[
         name: "QueueStartsFailed",
         doc: "The count failed. It wrote nothing.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -1859,7 +1967,7 @@ const RECORD_CLASSES: &[StubClass] = &[
         name: "ReleaseFailed",
         doc: "The release failed. The statement wrote nothing, or it committed and its reply was lost.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -1916,6 +2024,7 @@ const RECORD_CLASSES: &[StubClass] = &[
             property("task_id", "uuid.UUID"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2090,6 +2199,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
             },
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2519,6 +2629,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2537,6 +2648,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("deleted_before", "int"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2551,7 +2663,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         name: "PausedExpiryFailed",
         doc: "The paused expiry call failed. The candidates before a failed one are expired; a\nstatement whose reply was lost may have committed.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -2773,6 +2885,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("task_id", "uuid.UUID"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2792,6 +2905,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("still_owed", "list[uuid.UUID]"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2819,7 +2933,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         name: "Phase2RecoveryFailed",
         doc: "The pass failed before it recovered a record: the client family check, the discovery or\nthe count. Nothing was recovered.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -2862,6 +2976,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("report", "RecoveryPassRecord"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2886,7 +3001,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         name: "SettleFailed",
         doc: "The settle failed: the client family check, a statement, or rows outside the function's\ncontract (not retryable). The statements before the failed one stay committed.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -2910,6 +3025,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         properties: &[
             property("workflow_id", "uuid.UUID"),
             property("message", "str"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2921,6 +3037,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("workflow_id", "uuid.UUID"),
             property("message", "str"),
             property("retryable", "bool"),
+            property("exception", CORE_FAILURE_EXCEPTION),
         ],
         methods: &[],
     },
@@ -2985,7 +3102,7 @@ const HISTORY_CLASSES: &[StubClass] = &[
         name: "CoverageFailed",
         doc: "The pass has no outcome: the connect, the client family check, a probe, the coverage\ngate, the class registration or the final publication failed, or a row broke its\nfunction's contract.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -3006,7 +3123,7 @@ const HISTORY_CLASSES: &[StubClass] = &[
         name: "PruneFailed",
         doc: "The pass has no report: the connect, the client family check or the candidate read\nfailed, or a candidate row broke its function's contract. Nothing was detached or dropped.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str"), property("retryable", "bool")],
+        properties: &[property("message", "str"), property("retryable", "bool"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -3090,7 +3207,7 @@ const HISTORY_CLASSES: &[StubClass] = &[
         name: "RerunClientFamilyMismatch",
         doc: "The database records the other client family, or none (stored is None). Nothing\nwritten. message names both.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("stored", "Literal['PYTHON', 'RUST'] | None"), property("message", "str")],
+        properties: &[property("stored", "Literal['PYTHON', 'RUST'] | None"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {

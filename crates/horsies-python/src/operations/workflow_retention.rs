@@ -10,10 +10,11 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use horsies_core::{BrokerError, WorkflowRetentionFailed, WorkflowRetentionPass};
+use horsies_core::{BrokerError, FailureCause, WorkflowRetentionFailed, WorkflowRetentionPass};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The pass ended: a batch deleted no workflow, or the budget passed after
@@ -35,7 +36,12 @@ pub struct WorkflowDeleteFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `delete_expired_workflows`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed pass.
+const SUBJECT: &str = "delete_expired_workflows";
 
 /// The outcome of one workflow retention pass.
 pub enum WorkflowRetentionOutcome {
@@ -80,6 +86,7 @@ fn failed_before_start(error: &BrokerError) -> WorkflowRetentionOutcome {
         deleted_before: 0,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        exception: FailureException::of(SUBJECT, error),
     })
 }
 
@@ -91,6 +98,7 @@ fn pass_outcome(pass: Result<u64, WorkflowRetentionFailed>) -> WorkflowRetention
             deleted_before: failed.deleted_before,
             message: failed.error.to_string(),
             retryable: failed.error.is_retryable(),
+            exception: FailureException::of(SUBJECT, &failed.error),
         }),
     }
 }
@@ -108,6 +116,12 @@ pub async fn delete_expired_workflows_operation(
         Err(message) => {
             return WorkflowRetentionOutcome::Failed(WorkflowDeleteFailed {
                 deleted_before: 0,
+                exception: FailureException::new(
+                    SUBJECT,
+                    message.clone(),
+                    false,
+                    FailureCause::PreconditionFailed,
+                ),
                 message,
                 retryable: false,
             })
