@@ -1,7 +1,9 @@
-"""The pair rules of the integration dual-run (``PAIR_RULES``), over raw
-snapshots normalized by ``NOTIFIED_CATALOG``. For each rule, the difference
-that the run timing makes passes, and a difference in the fact of the rule
-still fails. No database."""
+"""The pair rules of the integration dual-run (``PAIR_RULES``) and the
+decided differences (``DECIDED_DIFFERENCES``), over raw snapshots normalized
+by ``NOTIFIED_CATALOG``. For each rule, the difference that the run timing
+makes passes, and a difference in the fact of the rule still fails. For each
+decided difference, the difference that the decision explains is reported as
+decided, and any other difference still fails. No database."""
 
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from tests.dualrun.catalog import (
 from tests.dualrun.cells import RawRow, RawSnapshot, RawTable
 from tests.dualrun.compare import render_diff
 from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
+from tests.dualrun.operations.lifecycle import LIFECYCLE_DECIDED_DIFFERENCES
 from tests.dualrun.operations.plugin import PAIR_RULES
 from tests.dualrun.operations.table import (
     PairCompare,
@@ -33,8 +36,10 @@ from tests.dualrun.operations.table import (
     WholeSnapshot,
 )
 from tests.dualrun.pair_outcomes import (
+    DecidedDifferenceSeen,
     DualRunMismatch,
     PairEqual,
+    PairJudgement,
     ReferenceCaptured,
     judge_pair,
 )
@@ -871,3 +876,224 @@ def test_the_round_rule_fails_a_phase2_row_whose_move_neither_side_writes() -> N
 
     assert "horsies_workflow_phase2_pending [task_id=task#1]: terminalization_kind: " \
         "reference 'written by the mover of the round', candidate 'COMPLETE_FUSED'" in lines
+
+
+# ---- The decided difference of the finalize batcher close ----
+
+(CLOSE,) = LIFECYCLE_DECIDED_DIFFERENCES
+BATCH_WORKER: Final = 'batch-worker'
+RECEIVED: Final = 4
+"""Two batches of two rows that the writes had received at the close."""
+UNSENT: Final = 2
+"""Rows that no write received."""
+
+
+def _batch_task(task: str, run: datetime, position: int, changes: Row) -> Row:
+    """A RUNNING task of the batch test; its position sets its send time."""
+    sent = _text(run - timedelta(seconds=10) + timedelta(milliseconds=position))
+    at = _text(run)
+    return {
+        'id': task,
+        'task_name': 'round_trip_task',
+        'queue_name': 'round_trip_queue',
+        'priority': '100',
+        'input': '{}',
+        'execution': 'ISOLATED',
+        'retention_class_key': 'standard_30d',
+        'sent_at': sent,
+        'created_at': at,
+        'command_fingerprint_version': '1',
+        'command_fingerprint': 'one-fingerprint',
+        'status': 'RUNNING',
+        'enqueued_at': sent,
+        'claimed_at': at,
+        'claimed_by_worker_id': BATCH_WORKER,
+        'started_at': at,
+        'retry_count': '0',
+        'max_retries': '0',
+        'is_workflow_task': 'false',
+        'updated_at': at,
+        'retain_rerun_input': 'false',
+        **changes,
+    }
+
+
+def _committed_row(task: str, run: datetime, position: int, status: str) -> Row:
+    """The history row of a received row that its write committed after the close."""
+    sent = _text(run - timedelta(seconds=10) + timedelta(milliseconds=position))
+    at = _text(run)
+    return {
+        'tableoid': f'horsies_task_history_standard_30d_{run:%Y_%m_%d}',
+        'task_id': task,
+        'task_name': 'round_trip_task',
+        'queue_name': 'round_trip_queue',
+        'priority': '100',
+        'command_fingerprint_version': '1',
+        'command_fingerprint': 'one-fingerprint',
+        'retention_class_key': 'standard_30d',
+        'is_workflow_task': 'false',
+        'sent_at': sent,
+        'created_at': at,
+        'enqueued_at': sent,
+        'claimed_at': at,
+        'started_at': at,
+        'terminal_at': _text(run + timedelta(seconds=1)),
+        'status': status,
+        'terminalization_kind': 'COMPLETE_FUSED',
+        'retry_count': '0',
+        'max_retries': '0',
+        'last_claimed_worker_id': BATCH_WORKER,
+        'history_schema_version': '1',
+        'attempt_archive_version': '1',
+        'rerun_input_disposition': 'DECLINED_BY_POLICY',
+    }
+
+
+def _closed_batcher(
+    run: datetime,
+    prefix: str,
+    committed: int,
+    *,
+    history_status: str = 'COMPLETED',
+    events_of_a_commit: Sequence[str] = MOVE_EVENTS,
+    live_changes: Mapping[int, Row] | None = None,
+    extra: Mapping[str, Sequence[Row]] | None = None,
+) -> NormalizedSnapshot:
+    """The batch test after the close: the first ``committed`` received rows
+    are in history with the events of their move; every other row is RUNNING."""
+    tasks = [f'{prefix}-task-{position}' for position in range(RECEIVED + UNSENT)]
+    live = [
+        _batch_task(task, run, position, (live_changes or {}).get(position, {}))
+        for position, task in enumerate(tasks)
+        if position >= committed
+    ]
+    history = [
+        _committed_row(task, run, position, history_status)
+        for position, task in enumerate(tasks[:committed])
+    ]
+    events = [(channel, task) for task in tasks[:committed] for channel in events_of_a_commit]
+    return _snapshot(
+        run, {'horsies_tasks': live, HISTORY_TABLE: history, **(extra or {})}, events
+    )
+
+
+def _judgement(
+    reference: NormalizedSnapshot, candidate: NormalizedSnapshot, compare: PairCompare
+) -> PairJudgement:
+    return judge_pair(
+        ReferenceCaptured(snapshot=reference, window=_window(RUN_A)),
+        candidate,
+        _window(RUN_B),
+        compare,
+    )
+
+
+def test_without_the_decision_the_commit_of_the_received_rows_differs() -> None:
+    lines = _judge(
+        _closed_batcher(RUN_A, 'a', 0), _closed_batcher(RUN_B, 'b', RECEIVED), WholeSnapshot()
+    )
+
+    assert len(lines) == 4 * RECEIVED, lines
+    assert lines[0].startswith('horsies_tasks [id=task#3]: row only in the reference: ')
+
+
+@pytest.mark.parametrize('committed', [1, RECEIVED])
+def test_the_decided_difference_reports_the_commit_of_received_rows_as_decided(
+    committed: int,
+) -> None:
+    reference = _closed_batcher(RUN_A, 'a', 0)
+    candidate = _closed_batcher(RUN_B, 'b', committed)
+
+    match _judgement(reference, candidate, CLOSE):
+        case DecidedDifferenceSeen(diff=diff, decided=decided):
+            assert decided == CLOSE
+            assert len(diff.entries) == 4 * committed
+        case other:
+            raise AssertionError(f'expected the decided difference, got {other}')
+
+
+def test_the_decided_difference_is_equal_when_no_received_row_committed() -> None:
+    assert (
+        _judgement(_closed_batcher(RUN_A, 'a', 0), _closed_batcher(RUN_B, 'b', 0), CLOSE)
+        == PairEqual()
+    )
+
+
+@pytest.mark.parametrize(
+    'candidate',
+    [
+        pytest.param(
+            lambda: _closed_batcher(RUN_B, 'b', RECEIVED, history_status='FAILED'),
+            id='committed-as-failed',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(RUN_B, 'b', RECEIVED, events_of_a_commit=('task_done',)),
+            id='commit-without-its-status-event',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B, 'b', RECEIVED, events_of_a_commit=(*MOVE_EVENTS, 'task_new')
+            ),
+            id='commit-with-another-event',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B, 'b', RECEIVED, events_of_a_commit=(*MOVE_EVENTS, 'task_done')
+            ),
+            id='commit-with-two-done-events',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B,
+                'b',
+                RECEIVED,
+                live_changes={RECEIVED: {'claimed_by_worker_id': 'other-worker'}},
+            ),
+            id='unsent-row-of-another-worker',
+        ),
+        pytest.param(
+            lambda: _closed_batcher(
+                RUN_B,
+                'b',
+                RECEIVED,
+                extra={'horsies_task_attempts': [{'task_id': 'b-task-0', 'attempt': '1'}]},
+            ),
+            id='row-in-another-table',
+        ),
+    ],
+)
+def test_the_decided_difference_fails_a_difference_that_it_does_not_explain(
+    candidate: Callable[[], NormalizedSnapshot],
+) -> None:
+    match _judgement(_closed_batcher(RUN_A, 'a', 0), candidate(), CLOSE):
+        case DualRunMismatch(diff=diff):
+            assert diff.entries
+        case other:
+            raise AssertionError(f'expected a mismatch, got {other}')
+
+
+def test_the_decided_difference_fails_a_received_row_that_left_without_a_commit() -> None:
+    """Four rows left the live table, and only three committed."""
+    reference = _closed_batcher(RUN_A, 'a', 0)
+    tasks = [f'b-task-{position}' for position in range(RECEIVED + UNSENT)]
+    candidate = _snapshot(
+        RUN_B,
+        {
+            'horsies_tasks': [
+                _batch_task(task, RUN_B, position, {})
+                for position, task in enumerate(tasks)
+                if position >= RECEIVED
+            ],
+            HISTORY_TABLE: [
+                _committed_row(task, RUN_B, position, 'COMPLETED')
+                for position, task in enumerate(tasks[: RECEIVED - 1])
+            ],
+        },
+        [(channel, task) for task in tasks[: RECEIVED - 1] for channel in MOVE_EVENTS],
+    )
+
+    match _judgement(reference, candidate, CLOSE):
+        case DualRunMismatch():
+            pass
+        case other:
+            raise AssertionError(f'expected a mismatch, got {other}')

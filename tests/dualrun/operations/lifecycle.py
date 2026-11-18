@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from typing import Final
 
-from tests.dualrun.operations.table import CoreOnlyTest, DualRunOperation, PoolMode
+from tests.dualrun.operations.table import (
+    CoreOnlyTest,
+    DecidedDifference,
+    DecidedFact,
+    DualRunOperation,
+    PoolMode,
+)
 
 LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     DualRunOperation(
@@ -192,3 +198,23 @@ LIFECYCLE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
     ),
 )
 """The tests of this module that run once, on the core (``CoreOnlyTest``)."""
+
+LIFECYCLE_DECIDED_DIFFERENCES: Final[tuple[DecidedDifference, ...]] = (
+    DecidedDifference(
+        node_id=(
+            'tests/integration/test_finalize_batch.py::'
+            'test_rows_that_a_stop_left_unsent_stay_running'
+        ),
+        fact=DecidedFact.RECEIVED_WRITE_RUNS_TO_ITS_END,
+        decision=(
+            '#1486, the close of the finalize batcher (built in #1607): rows that no '
+            'write received stay RUNNING; rows in flight at the close have an unknown '
+            'outcome and may commit; the close report names the two sets, and the '
+            'test asserts that split'
+        ),
+    ),
+)
+"""The tests of this module whose pairs can differ by a decided behaviour
+difference (``DecidedDifference``). The test asserts each row that no write
+received RUNNING with no history row, in both runs; the pair reports the
+commit of the received rows as decided."""

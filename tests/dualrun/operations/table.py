@@ -161,12 +161,42 @@ class PairRule:
     reason: str
 
 
+class DecidedFact(Enum):
+    """A behaviour difference between the Python reference and the core that
+    the owner decided. The value states the difference."""
+
+    RECEIVED_WRITE_RUNS_TO_ITS_END = (
+        'a finalize write that the core had received when the close of the '
+        'finalize batcher timed out runs to its end, so its rows can commit after '
+        'the close; the reference cancels the write and its rows stay RUNNING'
+    )
+    """In the snapshot: a received row is RUNNING in the reference, and in the
+    core run it can be COMPLETED in history with the ``task_done`` and
+    ``horsies_task_status`` events of its move."""
+
+
+@dataclass(frozen=True, slots=True)
+class DecidedDifference:
+    """The pair of one integration test can differ by a behaviour difference
+    that the owner decided (``fact``); ``decision`` names the decision.
+
+    The pair compares the whole snapshot, and nothing is normalized. A
+    difference whose every entry ``fact`` explains is reported as decided:
+    the core case is an expected failure that names the fact, the decision
+    and the difference. A difference with any other entry fails the pair as
+    ``DualRunMismatch``. ``node_id`` is the pytest id without parameters."""
+
+    node_id: str
+    fact: DecidedFact
+    decision: str
+
+
 @dataclass(frozen=True, slots=True)
 class WholeSnapshot:
     """The pair compares every captured value by its column rule."""
 
 
-type PairCompare = WholeSnapshot | PairRule
+type PairCompare = WholeSnapshot | PairRule | DecidedDifference
 """How the pair of one test compares its two snapshots."""
 
 
