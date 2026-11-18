@@ -10,7 +10,6 @@
 //! from recovery case 1.6).
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -21,6 +20,7 @@ use super::support::{
 use crate::broker::PostgresBroker;
 use crate::core::TaskResult;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
 
@@ -38,7 +38,7 @@ fn child_result() -> String {
 /// A RUNNING parent whose node 0 is a RUNNING sub-workflow node of a child
 /// that is COMPLETED with [`child_result`] as its output. Returns the parent
 /// and the child.
-async fn seed_parent_of_a_completed_child(pool: &PgPool) -> (Uuid, Uuid) {
+async fn seed_parent_of_a_completed_child(pool: &TestPool) -> (Uuid, Uuid) {
     let parent = seed_workflow(pool, &WorkflowSeed::running()).await;
     let child = seed_workflow(
         pool,
@@ -57,7 +57,7 @@ async fn seed_parent_of_a_completed_child(pool: &PgPool) -> (Uuid, Uuid) {
 }
 
 /// (status of node 0, status of the workflow) of `workflow_id`.
-async fn statuses(pool: &PgPool, workflow_id: Uuid) -> (String, String) {
+async fn statuses(pool: &TestPool, workflow_id: Uuid) -> (String, String) {
     (
         node(pool, workflow_id, 0).await.status,
         workflow_status(pool, workflow_id).await,
@@ -169,7 +169,7 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
     .await;
 
     let report = recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
+        &crate::broker::PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         RECOVERY_FAILURE_LIMIT,
     )
@@ -243,7 +243,7 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
     .await;
 
     run_phase2(
-        &PostgresBroker::from_pool(db.pool.clone(), crate::ClientFamily::Rust),
+        &PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
         &TestChildSpecs::empty(),
         Phase2Work {
             task_id: child_task,
@@ -257,12 +257,12 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
 
     assert_eq!(workflow_status(&db.pool, child).await, "COMPLETED");
     assert_eq!(statuses(&db.pool, parent).await, completed_twice());
-    let parent_writes: i64 = sqlx::query_scalar("SELECT last_value FROM port_test_parent_writes")
+    let parent_writes: i64 = sql::query_scalar("SELECT last_value FROM port_test_parent_writes")
         .fetch_one(&db.pool)
         .await
         .expect("read the parent write count");
     assert_eq!(parent_writes, 2, "the refused write and its retry");
-    let records: i64 = sqlx::query_scalar(
+    let records: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(child_task)

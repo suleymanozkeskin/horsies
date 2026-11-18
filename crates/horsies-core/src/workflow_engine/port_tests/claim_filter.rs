@@ -7,9 +7,9 @@
 //! (`PostgresBroker::filter_non_runnable_workflow_tasks`) returns the ids it
 //! filtered out. Each test leaves claimed rows, so it uses its own database.
 
+use crate::test_support::sql::{self, TestPool};
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -20,8 +20,8 @@ use super::support::{
 /// A claimed task of a sent command (not a workflow task) that no node
 /// links: a fingerprinted row of `default`, held by [`WORKER`] for one
 /// more minute. Returns its claim generation.
-async fn seed_plain_claimed_task(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
-    sqlx::query_scalar(
+async fn seed_plain_claimed_task(pool: &TestPool, task_id: Uuid) -> DateTime<Utc> {
+    sql::query_scalar(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -52,7 +52,7 @@ async fn seed_plain_claimed_task(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> 
 /// that [`WORKER`] claimed. Returns the workflow, the task and its claim
 /// generation.
 async fn seed_claimed_node(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_status: &'static str,
     node_status: &'static str,
 ) -> (Uuid, Uuid, DateTime<Utc>) {
@@ -70,8 +70,8 @@ async fn seed_claimed_node(
 }
 
 /// The status of a task's live row, or `None` when it has none.
-async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
@@ -201,7 +201,7 @@ async fn another_workers_claim_in_a_paused_or_cancelled_workflow_is_left_alone()
     for workflow_status in ["PAUSED", "CANCELLED"] {
         let (workflow_id, task_id, claimed_at) =
             seed_claimed_node(&db.pool, workflow_status, "ENQUEUED").await;
-        sqlx::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
+        sql::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
             .bind(task_id)
             .bind(OTHER_WORKER)
             .execute(&db.pool)

@@ -19,7 +19,6 @@
 use std::sync::Arc;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -31,6 +30,7 @@ use crate::broker::workflow_start::ClientStartOutcome;
 use crate::broker::PostgresBroker;
 use crate::core::{AnyNode, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 
 /// The round trips of a step in autocommit.
 const ONE_STATEMENT: u32 = 1;
@@ -133,7 +133,7 @@ async fn finalize_counted(
 /// statements, the second for the counted run. Both are set up before
 /// either runs, so the counted run follows the first with no wait.
 async fn two_running_node_a(
-    pool: &PgPool,
+    pool: &TestPool,
     child_specs: &TestChildSpecs,
     shape: Shape,
 ) -> [(Uuid, RunningNodeTask); 2] {
@@ -149,7 +149,7 @@ async fn two_running_node_a(
 /// steady state: one run on a new [`CountedBroker`], then the counted run.
 /// Returns the workflow of the counted run and its round trips.
 async fn measure_node_a(
-    pool: &PgPool,
+    pool: &TestPool,
     shape: Shape,
     report: NodeReport,
 ) -> (Uuid, FinalizeRoundTrips) {
@@ -195,8 +195,8 @@ async fn start_on(
 }
 
 /// The statuses of the nodes of `workflow_id`, by index.
-async fn node_statuses(pool: &PgPool, workflow_id: Uuid) -> Vec<String> {
-    sqlx::query_scalar(
+async fn node_statuses(pool: &TestPool, workflow_id: Uuid) -> Vec<String> {
+    sql::query_scalar(
         "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
     )
     .bind(workflow_id)

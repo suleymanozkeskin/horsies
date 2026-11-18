@@ -8,7 +8,6 @@
 //! listener on its channel hears only the test's own notifications.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -18,6 +17,7 @@ use super::support::{
 use crate::broker::workflow_phase2::NodeFinishForm;
 use crate::broker::PostgresBroker;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::TestPool;
 use crate::workflow_engine::engine::{on_workflow_task_complete_with, WorkflowTaskCompletion};
 use crate::workflow_engine::steps::{node_finish_alone, Dependents, NodeFinishDisposition};
 
@@ -31,7 +31,7 @@ const COMPLETION_CHANNEL: &str = "task_queue_port_completion_branch_q";
 /// when `with_dependent`, node 1 PENDING after node 0. Phase 1 of the task
 /// has run, so phase 2 is owed. Returns (workflow, task).
 async fn seed_owed_phase_two(
-    pool: &PgPool,
+    pool: &TestPool,
     status: &'static str,
     with_dependent: bool,
 ) -> (Uuid, Uuid) {
@@ -69,7 +69,7 @@ async fn phase_two_under_a_paused_workflow_writes_the_node_and_promotes_nothing(
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "PAUSED", true).await;
 
     let completion = on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         task_id,
         &TestChildSpecs::empty(),
     )
@@ -102,7 +102,7 @@ async fn a_node_finish_that_reads_no_dependents_still_completes_its_workflow() {
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "RUNNING", false).await;
 
     let finished = node_finish_alone(
-        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         task_id,
         false,
         Dependents::NoneToRead,
@@ -129,7 +129,7 @@ async fn a_node_finish_that_reads_no_dependents_still_completes_its_workflow() {
 #[serial]
 async fn the_form_of_a_node_finish_decides_whether_the_dependents_are_read() {
     let pool = shared_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let (unread_workflow, unread_task) = seed_owed_phase_two(&pool, "RUNNING", true).await;
     let (read_workflow, read_task) = seed_owed_phase_two(&pool, "RUNNING", true).await;
 
@@ -181,7 +181,7 @@ async fn the_phase_two_of_on_workflow_task_complete_sends_no_capacity_wake() {
     let mut listener = Notifications::listen(&pool, &[COMPLETION_CHANNEL]).await;
 
     let completion = on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         task_id,
         &TestChildSpecs::empty(),
     )

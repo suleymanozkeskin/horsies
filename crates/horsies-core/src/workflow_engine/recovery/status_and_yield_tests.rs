@@ -10,11 +10,10 @@
 use std::collections::HashSet;
 
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 
 use super::*;
 use crate::core::WorkflowTaskStatus;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::TestDatabase;
 
 /// Connections of the pool on the owned database.
@@ -63,9 +62,9 @@ fn every_node_status() -> Vec<(WorkflowTaskStatus, &'static str)> {
 }
 
 /// A database that the test owns, from the installed test template.
-async fn owned_database() -> (TestDatabase, PgPool) {
+async fn owned_database() -> (TestDatabase, TestPool) {
     let database = TestDatabase::create().await;
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .max_connections(TEST_POOL_CONNECTIONS)
         .connect(database.url())
         .await
@@ -74,9 +73,9 @@ async fn owned_database() -> (TestDatabase, PgPool) {
 }
 
 /// A RUNNING top-level workflow.
-async fn seed_running_workflow(pool: &PgPool) -> Uuid {
+async fn seed_running_workflow(pool: &TestPool) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -93,13 +92,13 @@ async fn seed_running_workflow(pool: &PgPool) -> Uuid {
 
 /// A task node `node_<index>` in `status` with `dependencies`.
 async fn seed_node(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_index: i32,
     dependencies: &[i32],
     status: &str,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -130,7 +129,7 @@ struct StatusWorkflows {
     single: Uuid,
 }
 
-async fn seed_status_workflows(pool: &PgPool) -> Vec<StatusWorkflows> {
+async fn seed_status_workflows(pool: &TestPool) -> Vec<StatusWorkflows> {
     let mut seeded = Vec::new();
     for (status, text) in every_node_status() {
         let waiting = seed_running_workflow(pool).await;
@@ -172,24 +171,24 @@ async fn the_recovery_discovery_treats_each_node_status_by_the_enum() {
         .flat_map(|workflows| [workflows.waiting, workflows.single])
         .collect();
 
-    let global_case0: Vec<StuckPendingRow> = sqlx::query_as(GLOBAL_CASE0_STUCK_PENDING_SQL)
+    let global_case0: Vec<StuckPendingRow> = sql::query_as(GLOBAL_CASE0_STUCK_PENDING_SQL)
         .bind(DISCOVERY_ROW_LIMIT)
         .fetch_all(&pool)
         .await
         .expect("global case 0");
-    let tree_case0: Vec<StuckPendingRow> = sqlx::query_as(TREE_CASE0_STUCK_PENDING_SQL)
+    let tree_case0: Vec<StuckPendingRow> = sql::query_as(TREE_CASE0_STUCK_PENDING_SQL)
         .bind(&every_workflow)
         .bind(DISCOVERY_ROW_LIMIT)
         .fetch_all(&pool)
         .await
         .expect("tree case 0");
-    let tree_completion: Vec<StuckWorkflowRow> = sqlx::query_as(TREE_CASE2_3_STUCK_WORKFLOW_SQL)
+    let tree_completion: Vec<StuckWorkflowRow> = sql::query_as(TREE_CASE2_3_STUCK_WORKFLOW_SQL)
         .bind(&every_workflow)
         .bind(DISCOVERY_ROW_LIMIT)
         .fetch_all(&pool)
         .await
         .expect("tree completion candidates");
-    let audit: Option<GlobalWorkflowAuditRow> = sqlx::query_as(GLOBAL_WORKFLOW_AUDIT_SQL)
+    let audit: Option<GlobalWorkflowAuditRow> = sql::query_as(GLOBAL_WORKFLOW_AUDIT_SQL)
         .bind(AUDIT_PAGE_ROWS)
         .bind(Uuid::new_v4())
         .bind(GLOBAL_WORKFLOW_AUDIT_CLAIM_TTL_MS)
@@ -241,8 +240,8 @@ async fn the_recovery_discovery_treats_each_node_status_by_the_enum() {
 #[tokio::test]
 #[serial]
 async fn the_nonterminal_node_index_holds_exactly_the_nonterminal_statuses() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let predicate: String = sqlx::query_scalar(
+    let pool = crate::test_support::migrated_pool().await;
+    let predicate: String = sql::query_scalar(
         "SELECT pg_get_expr(i.indpred, i.indrelid)
          FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
          WHERE c.relname = $1",
@@ -256,7 +255,7 @@ async fn the_nonterminal_node_index_holds_exactly_the_nonterminal_statuses() {
     );
 
     for (status, text) in every_node_status() {
-        let covered: bool = sqlx::query_scalar(&evaluation)
+        let covered: bool = sql::query_scalar(&evaluation)
             .bind(text)
             .fetch_one(&pool)
             .await
@@ -312,7 +311,7 @@ async fn the_completion_yield_is_the_share_of_scanned_workflows_that_are_candida
     let mut report = RecoveryReport::default();
 
     let pass = audit_end_states(
-        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         &crate::test_support::child_specs::TestChildSpecs::empty(),
         AUDIT_PAGE_ROWS,
         &mut report,
@@ -339,7 +338,7 @@ async fn an_audit_page_that_scanned_no_workflow_has_no_completion_yield() {
     let mut report = RecoveryReport::default();
 
     let pass = audit_end_states(
-        &PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         &crate::test_support::child_specs::TestChildSpecs::empty(),
         AUDIT_PAGE_ROWS,
         &mut report,

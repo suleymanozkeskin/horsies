@@ -627,6 +627,7 @@ mod wait_tests {
     use super::*;
     use crate::broker::postgres::PostgresBroker;
     use crate::core::{OutcomeCode, TaskError};
+    use crate::test_support::sql;
     use serial_test::serial;
     use std::sync::Arc;
 
@@ -637,16 +638,16 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn many_concurrent_result_waits_share_one_listener() {
-        let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
+            pool.url(),
             &crate::test_support::migrated_database_url().await,
             crate::ClientFamily::Rust,
         ));
-        let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4();
 
         // A RUNNING workflow that never completes.
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index, definition_key, depth,
                 root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -667,7 +668,7 @@ mod wait_tests {
         });
         let results = futures::future::join_all(waits).await;
 
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -684,8 +685,8 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn a_wait_with_no_timeout_returns_not_found_for_a_missing_workflow() {
-        let broker = PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
+        let broker = PostgresBroker::from_test_url(
+            crate::test_support::migrated_pool().await.url(),
             crate::ClientFamily::Rust,
         );
         broker.ensure_schema_initialized().await.expect("schema");
@@ -705,13 +706,13 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn the_wait_returns_immediately_for_a_paused_workflow() {
-        let broker = Arc::new(PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            crate::test_support::migrated_pool().await.url(),
             crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, definition_key, depth,
                  root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -720,7 +721,7 @@ mod wait_tests {
         )
         .bind(workflow_id)
         .bind(format!("test.p7.paused-get.{workflow_id}"))
-        .execute(broker.pool())
+        .execute(&crate::test_support::migrated_pool().await)
         .await
         .expect("seed paused workflow");
 
@@ -735,9 +736,9 @@ mod wait_tests {
             WorkflowWait::Ended(WorkflowEnd::Paused)
         );
 
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
-            .execute(broker.pool())
+            .execute(&crate::test_support::migrated_pool().await)
             .await
             .expect("cleanup paused workflow");
     }
@@ -745,8 +746,8 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn the_wait_returns_a_structured_expiry_error_as_stored() {
-        let broker = Arc::new(PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            crate::test_support::migrated_pool().await.url(),
             crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
@@ -764,7 +765,7 @@ mod wait_tests {
             kind: crate::core::TaskErrorKind::Plain,
         };
         let stored = serde_json::to_string(&persisted).unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, error, definition_key, depth,
                  root_workflow_id, sent_at, created_at, started_at,
@@ -775,7 +776,7 @@ mod wait_tests {
         .bind(workflow_id)
         .bind(&stored)
         .bind(format!("test.p7.expired-get.{workflow_id}"))
-        .execute(broker.pool())
+        .execute(&crate::test_support::migrated_pool().await)
         .await
         .expect("seed expired workflow");
 
@@ -794,9 +795,9 @@ mod wait_tests {
         assert_eq!(error.message, persisted.message);
         assert_eq!(error.data, persisted.data);
 
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
-            .execute(broker.pool())
+            .execute(&crate::test_support::migrated_pool().await)
             .await
             .expect("cleanup expired workflow");
     }
@@ -806,13 +807,13 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn the_wait_returns_a_malformed_expiry_error_as_stored() {
-        let broker = Arc::new(PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            crate::test_support::migrated_pool().await.url(),
             crate::ClientFamily::Rust,
         ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, error, definition_key, depth,
                  root_workflow_id, sent_at, created_at, started_at,
@@ -822,7 +823,7 @@ mod wait_tests {
         )
         .bind(workflow_id)
         .bind(format!("test.p7.expired-corrupt-get.{workflow_id}"))
-        .execute(broker.pool())
+        .execute(&crate::test_support::migrated_pool().await)
         .await
         .expect("seed malformed expired workflow");
 
@@ -837,9 +838,9 @@ mod wait_tests {
             })
         );
 
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
-            .execute(broker.pool())
+            .execute(&crate::test_support::migrated_pool().await)
             .await
             .expect("cleanup malformed expired workflow");
     }

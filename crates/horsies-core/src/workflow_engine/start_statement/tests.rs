@@ -11,6 +11,7 @@ use crate::broker::workflow_start::ClientStartOutcome;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{SuccessCase, SuccessPolicy};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql;
 
 const CHILD_KEY: &str = "tests.start_statement.child.v1";
 /// The key of a child whose one root is a sub-workflow node of [`CHILD_KEY`].
@@ -651,9 +652,9 @@ fn a_build_that_the_client_did_not_run_refuses_the_start() {
 #[tokio::test]
 #[serial]
 async fn the_start_writes_the_tree_in_one_statement() {
-    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(
-        pool.clone(),
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
         crate::ClientFamily::Rust,
     ));
     let workflow_id = Uuid::new_v4();
@@ -672,7 +673,7 @@ async fn the_start_writes_the_tree_in_one_statement() {
         .expect("start");
     assert_eq!(started, ClientStartOutcome::Started);
 
-    let (node_status, child_id): (String, Option<Uuid>) = sqlx::query_as(
+    let (node_status, child_id): (String, Option<Uuid>) = sql::query_as(
         "SELECT status, sub_workflow_id FROM horsies_workflow_tasks
          WHERE workflow_id = $1 AND task_index = 0",
     )
@@ -682,7 +683,7 @@ async fn the_start_writes_the_tree_in_one_statement() {
     .expect("parent node");
     assert_eq!(node_status, "RUNNING");
     let child_id = child_id.expect("the sub-workflow node links its child");
-    let (child_status, parent_id, depth): (String, Option<Uuid>, i32) = sqlx::query_as(
+    let (child_status, parent_id, depth): (String, Option<Uuid>, i32) = sql::query_as(
         "SELECT status, parent_workflow_id, depth FROM horsies_workflows WHERE id = $1",
     )
     .bind(child_id)
@@ -693,7 +694,7 @@ async fn the_start_writes_the_tree_in_one_statement() {
         (child_status.as_str(), parent_id, depth),
         ("RUNNING", Some(workflow_id), 1)
     );
-    let (child_node_status, task_status): (String, String) = sqlx::query_as(
+    let (child_node_status, task_status): (String, String) = sql::query_as(
         "SELECT n.status, t.status FROM horsies_workflow_tasks n
          JOIN horsies_tasks t ON t.id = n.task_id
          WHERE n.workflow_id = $1 AND n.task_index = 0",

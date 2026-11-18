@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -18,6 +17,7 @@ use crate::core::{
     AnyNode, HorsiesError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec, WorkflowStatus,
 };
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 /// A child with one task node that is its output (Python `StartChildWorkflow`).
@@ -75,7 +75,7 @@ fn dynamic_node(
 /// Finishes node 0 of the child that node `task_index` of `parent_id` started,
 /// and returns the child id (Python `_complete_child_workflow`).
 async fn complete_child(
-    pool: &PgPool,
+    pool: &TestPool,
     parent_id: Uuid,
     task_index: i32,
     outcome: &TaskResult<serde_json::Value>,
@@ -86,8 +86,8 @@ async fn complete_child(
     child_id
 }
 
-async fn children_of(pool: &PgPool, parent_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
+async fn children_of(pool: &TestPool, parent_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
         .bind(parent_id)
         .fetch_one(pool)
         .await
@@ -122,7 +122,7 @@ async fn a_dependency_completion_starts_the_child_and_links_it() {
         Option<Uuid>,
         Option<i32>,
         Option<chrono::DateTime<chrono::Utc>>,
-    ) = sqlx::query_as(
+    ) = sql::query_as(
         "SELECT parent_workflow_id, parent_task_index, sent_at FROM horsies_workflows WHERE id = $1",
     )
     .bind(child_id)
@@ -151,7 +151,7 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         let parent_id = start(&pool, &parent, &child_specs).await;
         let child_id = child_of(&pool, parent_id, 0).await;
         let preserved = serde_json::to_string(&ok(serde_json::json!(11))).expect("encode");
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_tasks
              SET status = 'COMPLETED', result = $2,
                  completed_at = TIMESTAMPTZ '2026-01-01 00:00:00+00'
@@ -179,7 +179,7 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
             ),
             _ => None,
         };
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflows
              SET status = $2, result = $3, error = $4, completed_at = NOW()
              WHERE id = $1",
@@ -285,23 +285,23 @@ fn nesting_level(input: &str) -> Result<i64, TestBuildRefused> {
         })
 }
 
-async fn workflows_at_depth(pool: &PgPool, depth: i32) -> Vec<Uuid> {
-    sqlx::query_scalar("SELECT id FROM horsies_workflows WHERE depth = $1")
+async fn workflows_at_depth(pool: &TestPool, depth: i32) -> Vec<Uuid> {
+    sql::query_scalar("SELECT id FROM horsies_workflows WHERE depth = $1")
         .bind(depth)
         .fetch_all(pool)
         .await
         .expect("read the workflows at a depth")
 }
 
-async fn deeper_workflow_count(pool: &PgPool, depth: i32) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE depth > $1")
+async fn deeper_workflow_count(pool: &TestPool, depth: i32) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE depth > $1")
         .bind(depth)
         .fetch_one(pool)
         .await
         .expect("count the deeper workflows")
 }
 
-async fn failed_node_code(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> Option<String> {
+async fn failed_node_code(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> Option<String> {
     let failed = node(pool, workflow_id, task_index).await;
     assert_eq!(failed.status, "FAILED");
     code(&stored_result_error(
@@ -962,7 +962,7 @@ async fn a_child_whose_root_task_has_a_deadline_starts_with_the_deadline_merged(
 
     let child_id = child_of(&pool, parent_id, 1).await;
     let (options, task_deadline): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
-        sqlx::query_as(
+        sql::query_as(
             "SELECT wt.task_options, t.good_until
              FROM horsies_workflow_tasks wt JOIN horsies_tasks t ON t.id = wt.task_id
              WHERE wt.workflow_id = $1 AND wt.task_index = 0",
