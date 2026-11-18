@@ -817,3 +817,35 @@ async fn the_completion_of_a_child_owes_its_parent_advance_and_a_root_owes_none(
         }
     }
 }
+
+/// `TestOnChildWorkflowComplete::test_not_a_child_workflow_returns`: the
+/// parent advance of a workflow that has no parent writes nothing:
+/// `horsies_workflow_child_finish` answers `NOT_A_CHILD`, and the driver of
+/// the advances ends without an error.
+#[tokio::test]
+#[serial]
+async fn a_parent_advance_of_a_workflow_with_no_parent_is_not_a_child() {
+    let pool = shared_pool().await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
+    let root = seed_workflow(&pool, &WorkflowSeed::running().status("COMPLETED")).await;
+    seed_node(
+        &pool,
+        &NodeSeed::task(root, 0, "COMPLETED").result(done.clone()),
+    )
+    .await;
+
+    let disposition: String = sqlx::query_scalar(
+        "SELECT disposition FROM horsies_workflow_child_finish($1) WHERE row_kind = 'OUTCOME'",
+    )
+    .bind(root)
+    .fetch_one(&pool)
+    .await
+    .expect("the child finish of a root");
+    advance_parent_of(&pool, root, &TestChildSpecs::empty()).await;
+
+    assert_eq!(disposition, "NOT_A_CHILD");
+    assert_eq!(workflow(&pool, root).await.status, "COMPLETED");
+    let row = node(&pool, root, 0).await;
+    assert_eq!(row.status, "COMPLETED");
+    assert_eq!(row.result, Some(done));
+}

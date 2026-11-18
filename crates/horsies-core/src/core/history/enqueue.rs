@@ -452,6 +452,36 @@ mod tests {
         ));
     }
 
+    /// Python `test_broker_postgres.py::TestEnqueueAsync::test_empty_task_options_text_is_refused`:
+    /// an empty options text is not JSON and is not "no options": the send
+    /// refuses it before any statement.
+    #[test]
+    fn an_empty_task_options_text_is_refused() {
+        let error = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{}",
+            None,
+            None,
+            Some(""),
+            None,
+            false,
+            None,
+        )
+        .expect_err("an empty options text must not reach storage");
+        assert!(
+            matches!(
+                error,
+                EnqueuePreparationError::StrictJson {
+                    field: SendPart::TaskOptions,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
     #[test]
     fn null_and_empty_object_inputs_fingerprint_differently() {
         let null_input = prepare_enqueue_facts(

@@ -389,6 +389,18 @@ mod tests {
         );
     }
 
+    /// Python `test_broker_postgres.py::TestPingWorkers::test_refused_request_field_gives_text_and_cause_without_value`:
+    /// a target that is not text is refused with the name of the field and
+    /// the type of the value, never the value, before anything connects.
+    #[test]
+    fn a_refused_target_names_the_field_and_not_the_value() {
+        let (code, message) = refusal("{'secret': 'ping-marker-41d0'}", "1", "None");
+        assert_eq!(code, "INVALID_INPUT");
+        assert!(message.contains("target_worker_id"), "{message}");
+        assert!(message.contains("not dict"), "{message}");
+        assert!(!message.contains("ping-marker-41d0"), "{message}");
+    }
+
     /// Python's order: the window and the reply count first, then the
     /// listener, then the target. No connect runs for any of them.
     #[test]

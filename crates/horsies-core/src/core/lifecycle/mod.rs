@@ -474,4 +474,54 @@ pub(crate) mod tests {
             }
         }
     }
+
+    /// The ownership that a fence compares.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FenceKind {
+        /// The worker, not the claim generation.
+        Worker,
+        /// The worker and the claim generation of one task.
+        WorkerAndGeneration,
+        /// The worker and the claim generation of each task of a batch.
+        WorkerAndGenerationPerTask,
+        /// No ownership predicate.
+        NoFence,
+    }
+
+    fn fence_kind(command: &TerminalizationCommand) -> FenceKind {
+        match command.fence() {
+            Some(TerminalFence::WorkerOwned(_)) => FenceKind::Worker,
+            Some(TerminalFence::OwnedClaim(_)) => FenceKind::WorkerAndGeneration,
+            Some(TerminalFence::OwnedClaimBatch(_)) => FenceKind::WorkerAndGenerationPerTask,
+            None => FenceKind::NoFence,
+        }
+    }
+
+    /// Python `test_lifecycle_operations.py::TestEachCommandCarriesTheFenceOfItsWriter::test_the_fence_type_is_the_writer_fence`:
+    /// per command, not per set, the fence is the ownership that its writer
+    /// compares (the `fence` of each writer of `tests/lifecycle_matrix.py`).
+    /// The failed attempt and the success of a workflow task have writers of
+    /// their own, whose commands hold an `OwnedClaim` by type
+    /// (`FinishFailedAttempt`, `FinishWorkflowSuccess`).
+    #[test]
+    fn each_command_carries_the_fence_of_its_writer() {
+        let expected = [
+            ("CompleteTaskFused", FenceKind::WorkerAndGeneration),
+            ("ExpireOwnedClaim", FenceKind::Worker),
+            ("ExpirePendingTasks", FenceKind::NoFence),
+            ("CancelOwnedOrphan", FenceKind::WorkerAndGeneration),
+            ("CancelOrphanedTasks", FenceKind::NoFence),
+            ("AbandonOwnedNode", FenceKind::WorkerAndGeneration),
+            ("AbandonOwnedNodes", FenceKind::WorkerAndGenerationPerTask),
+            ("AbandonNodesOfPausedWorkflows", FenceKind::NoFence),
+            ("CancelOwnedNode", FenceKind::WorkerAndGeneration),
+            ("CancelOwnedNodes", FenceKind::WorkerAndGenerationPerTask),
+            ("CancelNodesOfCancelledWorkflow", FenceKind::NoFence),
+        ];
+        let actual: Vec<(&'static str, FenceKind)> = sample_commands()
+            .iter()
+            .map(|(variant, command)| (*variant, fence_kind(command)))
+            .collect();
+        assert_eq!(actual, expected);
+    }
 }

@@ -26,7 +26,6 @@ from horsies.core.brokers.postgres import (
     PostgresBroker,
     _async_context_err,
     _loop_limit_err,
-    _loop_runner_err,
     _operation_failed,
     _wait_inside_task_err,
 )
@@ -42,6 +41,7 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import LoopRunnerError, in_running_event_loop
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
+from tests.dualrun.reference.enqueue_caller import _loop_runner_err
 from tests.dualrun.reference.install_caller import ensure_initialized
 
 
