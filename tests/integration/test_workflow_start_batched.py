@@ -295,7 +295,6 @@ class TestStartPauseGate:
         app: Horsies,
         broker: PostgresBroker,
         session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """on_error=PAUSE + a failing slow root (subworkflow whose
         definition cannot be loaded) + fast TaskNode roots: the slow
@@ -334,12 +333,18 @@ class TestStartPauseGate:
             definition_key=f'pause-gate-{uuid.uuid4().hex[:6]}',
         )
 
-        # Force the slow root's failure: the child definition cannot load.
-        monkeypatch.setattr(
-            child_build_mod, '_load_definition', lambda key: None,
-        )
+        # Force the slow root's failure: the child definition cannot load
+        # during the start. The patch has its own scope, so the resume below
+        # loads the definition again.
+        def no_definition(
+            sub_definition_key: str | None,
+        ) -> type[WorkflowDefinition[Any]] | None:
+            _ = sub_definition_key
+            return None
 
-        result = await start_workflow_async(spec, broker)
+        with pytest.MonkeyPatch.context() as unloadable:
+            unloadable.setattr(child_build_mod, '_load_definition', no_definition)
+            result = await start_workflow_async(spec, broker)
         assert not is_err(result), result
         wf_id = result.ok_value.workflow_id
 
@@ -377,7 +382,6 @@ class TestStartPauseGate:
         ).scalar()
         assert n_tasks == 0
 
-        monkeypatch.undo()
         from horsies.core.workflows.lifecycle import resume_workflow
 
         resume_r = await resume_workflow(broker, wf_id)
