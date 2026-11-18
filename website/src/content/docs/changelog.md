@@ -823,6 +823,18 @@ unless it starts with "Added".
   `AsyncContext`; each has `message` and `workflow_id`. The fields become
   the methods `code()`, `message()`, `retryable()`, `workflow_id()` and
   `failure_cause()`.
+- **`MonitoringQueryError` and `TaskActionError` are enums with one
+  variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
+  `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,
+  each with `message` and `source`; the fields become the methods
+  `code()`, `message()`, `retryable()`, `error_source()` and
+  `failure_cause()`. `TaskActionError`: `NotFound`, `NotCancellable` and
+  `WorkflowTask` (each with `current_status`, a `TaskStatus`, not an
+  `Option`), `DbOperationFailed` (with `retryable` and `cause`) and
+  `StoredDataInvalid`; each has `message` and `task_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `task_id()` and
+  `failure_cause()`. Python's `EVENT_LOOP_LIMIT` classes are not
+  variants: no Rust call gives them.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

@@ -414,11 +414,11 @@ async fn an_unknown_status_of_the_backing_history_row_is_a_contract_violation() 
         .expect_err("an unknown status is refused");
 
     assert_eq!(
-        error.code,
+        error.code(),
         MonitoringQueryErrorCode::HistoryContractViolation
     );
-    assert!(!error.retryable);
-    assert!(error.message.contains("NOT_KNOWN"), "{}", error.message);
+    assert!(!error.retryable());
+    assert!(error.message().contains("NOT_KNOWN"), "{}", error.message());
     database.drop().await;
 }
 
