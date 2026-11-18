@@ -49,7 +49,7 @@ use crate::workflow_engine::child_spec::ChildSpecs;
 
 pub(crate) mod owner_gone;
 
-pub(crate) use owner_gone::{owner_gone_step, UnheldOwners};
+pub(crate) use owner_gone::{forget_ended_workers, owner_gone_step, UnheldOwners};
 
 #[cfg(test)]
 mod p7_maintenance_tests {
@@ -1090,8 +1090,8 @@ async fn end_gate(gate: Transaction<'_>) {
 
 /// Run one reaper pass: the owner-gone step, then Python's order:
 /// stale-CLAIMED requeue, orphan audit, stale-RUNNING recovery, PENDING
-/// expiry, workflow recovery, then periodic retention cleanup and partition
-/// maintenance.
+/// expiry, workflow recovery, then periodic retention cleanup (with the
+/// liveness rows of ended workers) and partition maintenance.
 async fn run_reaper_pass(
     broker: &PostgresBroker,
     child_specs: &ChildSpecs,
@@ -1364,9 +1364,27 @@ async fn run_reaper_pass(
         }
     });
 
-    // Retention cleanup (runs every retention_sweep_interval_s).
+    // Retention cleanup (runs every retention_sweep_interval_s), then the
+    // liveness rows of ended workers, on the main core pool with the reserve.
     if tokio::time::Instant::now() >= *next_retention_cleanup {
         run_retention_cleanup(broker, retention).await;
+        let forgotten = match broker.core_pools_for_write() {
+            Ok((open, _write)) => forget_ended_workers(open.main(), broker.statement_log()).await,
+            Err(error) => Err(error),
+        };
+        match forgotten {
+            Ok(0) => {}
+            Ok(count) => {
+                tracing::info!(count, "reaper deleted the liveness rows of ended workers");
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "Reaper failed to delete the liveness rows of ended workers and runs it again \
+                     at the next retention sweep: {error}",
+                );
+            }
+        }
         *next_retention_cleanup =
             tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
     }

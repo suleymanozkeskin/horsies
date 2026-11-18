@@ -67,7 +67,9 @@ Failed writes are logged at the first failure of a run, then at most once per 60
 
 Each worker process holds a session advisory lock on one connection of its own to the session URL (`session_database_url`, else `database_url`). The key comes from the worker id, which is new at each process start. The worker takes the lock before its first claim and holds it until its stop ends. The server releases the lock when the session of the process ends: when the process exits or is killed, its operating system closes the connection.
 
-The worker confirms the lock every 5 seconds. After a lost connection, it opens a new one and takes the lock again. When the lock is not held for 60 seconds:
+Each acquisition of the lock writes a new generation for the worker id, in the same transaction, to the table `horsies_worker_liveness`. The worker counts the lock as held again only after that transaction committed.
+
+The worker confirms the lock every 5 seconds. After a lost connection, it opens a new one and takes the lock again. A lock that another session of the worker still holds, because the server has not yet ended the lost session, counts as held. After a lock statement of the worker failed or did not end, such a lock does not count until the worker takes the lock itself: the session of that statement can hold the lock with no generation. When the lock is not held for 60 seconds:
 
 - With `auto_fail_stale_running=True` (the default) and a task held, the worker fails closed: it kills every child that holds a task and exits with code 79 at once, with no drain. A supervisor restarts it.
 - With no task held, no task is at risk. The worker logs it, runs on, and keeps taking the lock again. A task that it starts before the lock is held again makes it fail closed.
@@ -75,7 +77,15 @@ The worker confirms the lock every 5 seconds. After a lost connection, it opens 
 
 A worker that is alive but stalled, for example a process paused by `SIGSTOP`, keeps its connection and so keeps its lock.
 
-Each reaper pass reads the owners of CLAIMED and RUNNING rows whose lock no session holds. The read takes no lock. An owner is gone when two passes of one reaper find its lock free at least 75 seconds apart (60 seconds and a margin of 15 seconds), and no pass between them finds it held. The reaper then recovers the rows that the gone worker claimed before the first of the two passes:
+Each reaper pass reads the owners of CLAIMED and RUNNING rows whose lock no session holds, each with the generation of its last acquisition. The read takes no lock. An owner is gone when all of these are true:
+
+- Two passes of one reaper find its lock free at least 75 seconds apart (60 seconds and a margin of 15 seconds), both at the same generation.
+- No pass of that reaper between them finds the lock held, or finds another generation.
+- A read of the generation after the second pass still finds that generation.
+
+A worker that takes its lock again between two passes writes a new generation, so the reaper never counts two losses of the lock, with a hold between them, as one loss. An owner with no recorded generation is not judged gone by this rule: the heartbeat thresholds apply to its rows. At each retention sweep (`retention_sweep_interval_s`), the reaper deletes the generation rows of workers that own no CLAIMED or RUNNING row and whose lock no session holds.
+
+The reaper then recovers the rows that the gone worker claimed before the first of the two passes:
 
 - Its RUNNING rows, with `auto_fail_stale_running=True`, as [Stale RUNNING Recovery](#stale-running-recovery) states, whatever their heartbeats and their `finalizing_at`. The `WORKER_CRASHED` error names the time from which the lock was free.
 - Its CLAIMED rows, with `auto_requeue_stale_claimed=True`, back to PENDING as [Stale CLAIMED → PENDING](#stale-claimed--pending) states, whatever their heartbeats.
@@ -297,7 +307,7 @@ With `auto_fail_stale_running` on, a worker that cannot write runner heartbeats 
 
 Raise `running_stale_threshold_ms`, for example to 600,000 (10 minutes).
 
-The [liveness lock](#worker-liveness-lock) does not recover the tasks of a paused worker: it keeps its lock. It can recover the tasks of a live worker in one case: the connection of the lock breaks, the worker takes the lock again, the new connection breaks too, and two passes of one reaper 75 seconds or more apart each fall in one of the two losses, with no pass of that reaper in the time between. The worker fails closed only when one loss lasts 60 seconds, so it does not stop in this case.
+The [liveness lock](#worker-liveness-lock) does not recover the tasks of a paused worker: it keeps its lock. With `auto_fail_stale_running=True`, it does not recover the tasks of a live worker either. A worker whose lock is not held for 60 seconds ends before a reaper can judge it gone. A worker that takes its lock again writes a new generation, so two losses of its lock do not count as one.
 
 ### Worker Exits With Code 79
 

@@ -8,12 +8,18 @@
 //!   worker id is a new UUIDv4 at each process start, so a restarted worker
 //!   never holds the key of its earlier process.
 //! - The worker takes the lock before its first claim and holds it until the
-//!   end of its stop, after every task ended. The holder probes the
-//!   connection every [`LIVENESS_PROBE_INTERVAL`] with the listener's
-//!   statement bound, and opens it again after a loss with the listener's
-//!   reconnect backoff. A lock that another session holds counts as held:
-//!   only this worker uses the key, so that session is an earlier session of
-//!   this worker that the server has not ended yet.
+//!   end of its stop, after every task ended. Each acquisition writes a new
+//!   generation for the worker id in the same transaction
+//!   (`horsies_take_worker_liveness`), and the worker counts it only after
+//!   that transaction committed. The holder probes the connection every
+//!   [`LIVENESS_PROBE_INTERVAL`] with the listener's statement bound, and
+//!   opens it again after a loss with the listener's reconnect backoff.
+//! - A lock that another session holds counts as held: only this worker
+//!   uses the key, so that session is an earlier session of this worker
+//!   that the server has not ended yet. After a lock statement that failed
+//!   or did not end, that session may hold the lock with no committed
+//!   generation, so such a lock counts as held only once this worker took
+//!   the lock again itself (`DroppedSessions`).
 //! - A watchdog on its own OS thread reads the time since the start of the
 //!   last statement that confirmed the lock. Past [`LIVENESS_REGAIN_BOUND`],
 //!   with stale running recovery on and a task held, the worker fails closed
@@ -23,9 +29,11 @@
 //!   on and keeps taking the lock again; a task that it starts while the
 //!   lock is still not held makes it fail closed at the next watch.
 //! - Peers judge an owner gone when two reaper reads at least
-//!   [`OWNER_GONE_SPAN`] apart find its lock free
-//!   ([`crate::worker::recovery`]). A worker that is alive but stalled keeps
-//!   its connection, so it keeps its lock and is never judged gone.
+//!   [`OWNER_GONE_SPAN`] apart find its lock free at one generation
+//!   ([`crate::worker::recovery`]). Each hold that the worker counts commits
+//!   a generation while it lasts, so a regain between the two reads changes
+//!   the generation. A worker that is alive but stalled keeps its
+//!   connection, so it keeps its lock and is never judged gone.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -76,8 +84,18 @@ const UNCONFIRMED_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 const WATCH_THREAD_NAME: &str = "horsies-liveness-watch";
 
-/// The lock statement: one text parameter, the worker id.
-const LIVENESS_LOCK_SQL: &str = "SELECT pg_try_advisory_lock(horsies_worker_liveness_key($1))";
+/// The lock statement: one text parameter, the worker id. It takes the lock
+/// with no wait and, when it took it, writes a new generation in the same
+/// transaction; it answers whether it took the lock. An answer means that
+/// the transaction committed: the driver returns the row after the server
+/// reported the end of the statement's transaction.
+const LIVENESS_LOCK_SQL: &str = "SELECT horsies_take_worker_liveness($1)";
+
+/// The cause that the watchdog names while another session holds the lock
+/// and a lock statement of this worker failed since its last acquisition.
+const UNRECORDED_HOLDER_CAUSE: &str = "another session holds the lock, and a lock statement of \
+     this worker failed since it last took the lock, so that session may hold it with no recorded \
+     generation";
 
 /// What the worker does when its lock is not confirmed past its regain
 /// bound.
@@ -174,6 +192,66 @@ impl LivenessStartError {
                 Transience::Transient => true,
                 Transience::Permanent => false,
             },
+        }
+    }
+}
+
+/// Whether a session that this worker opened earlier may hold the lock with
+/// no committed generation. A peer can miss such a hold between two reads
+/// that see one generation, so an answer "held by another session" confirms
+/// the lock only when every such session recorded its acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DroppedSessions {
+    /// Every session of this worker that may hold the lock committed the
+    /// generation of its acquisition.
+    Recorded,
+    /// A lock statement of this worker failed or did not end since its last
+    /// acquisition: its session may hold the lock with no committed
+    /// generation until the server ends that session.
+    MayHoldUnrecorded,
+}
+
+/// What one answer of the lock statement means for the hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TakeVerdict {
+    /// The answer confirms the lock.
+    Confirms,
+    /// Another session holds the lock, and it may hold it with no recorded
+    /// generation: the answer confirms nothing.
+    Unconfirmed,
+}
+
+impl DroppedSessions {
+    /// The state after the lock statement answered `take`, and what the
+    /// answer means. Pure.
+    ///
+    /// - `Taken`: this session took the lock and its generation committed;
+    ///   no other session holds the lock, so no earlier session does.
+    /// - `HeldElsewhere`: an earlier session of this worker holds the lock.
+    ///   It confirms the lock only when that session recorded its
+    ///   acquisition.
+    fn after_answer(self, take: LockTake) -> (DroppedSessions, TakeVerdict) {
+        match (take, self) {
+            (LockTake::Taken, _) => (DroppedSessions::Recorded, TakeVerdict::Confirms),
+            (LockTake::HeldElsewhere, DroppedSessions::Recorded) => {
+                (DroppedSessions::Recorded, TakeVerdict::Confirms)
+            }
+            (LockTake::HeldElsewhere, DroppedSessions::MayHoldUnrecorded) => {
+                (DroppedSessions::MayHoldUnrecorded, TakeVerdict::Unconfirmed)
+            }
+        }
+    }
+
+    /// The state after a lock statement (an opening or a new attempt on a
+    /// session) failed. A failed connection opened no session; any other
+    /// failure may have left its session with the lock and no committed
+    /// generation. Pure.
+    fn after_failed_take(self, failure: &SessionLockFailure) -> DroppedSessions {
+        match failure {
+            SessionLockFailure::Connect(_) => self,
+            SessionLockFailure::Statement { .. }
+            | SessionLockFailure::TimedOut { .. }
+            | SessionLockFailure::Answer(_) => DroppedSessions::MayHoldUnrecorded,
         }
     }
 }
@@ -299,6 +377,12 @@ pub(crate) async fn start_liveness_lock(
     let (session, take) = LockSession::open(&plan, LIVENESS_LOCK_SQL, worker_id.to_owned())
         .await
         .map_err(LivenessStartError::Lock)?;
+    // An earlier start of this process may have left a session that holds
+    // the lock: until this worker takes the lock itself, a lock held
+    // elsewhere confirms nothing. The start counts as the first
+    // confirmation in both cases: the worker claims no row before the start
+    // returns, so every peer read that returns this worker comes after it.
+    let (dropped, _start_verdict) = DroppedSessions::MayHoldUnrecorded.after_answer(take);
     let shared = SharedConfirmation::new(started);
     let (watch_stop, stop_received) = std::sync::mpsc::channel::<()>();
     let context = WatchContext {
@@ -331,6 +415,7 @@ pub(crate) async fn start_liveness_lock(
             },
             session,
             take,
+            dropped,
             released_sender,
         )
         .with_current_subscriber(),
@@ -407,33 +492,37 @@ async fn hold_then_release(
     holder: Holder,
     session: LockSession,
     take: LockTake,
+    dropped: DroppedSessions,
     released: oneshot::Sender<()>,
 ) {
-    hold(&holder, session, take).await;
+    hold(&holder, session, take, dropped).await;
     // The receiver is gone when the stop no longer waits.
     let _reported = released.send(());
 }
 
 /// Hold the lock: probe the session; after a loss, open a new one with the
 /// reconnect backoff, until the stop. Each session is closed when it is
-/// dropped.
-async fn hold(holder: &Holder, first: LockSession, first_take: LockTake) {
+/// dropped. `dropped` starts as the state of the first session's answer.
+async fn hold(holder: &Holder, first: LockSession, first_take: LockTake, dropped: DroppedSessions) {
     let mut held = Some((first, first_take));
+    let mut dropped = dropped;
     let mut delay = SESSION_LOCK_RECONNECT_FIRST;
     loop {
         match held.take() {
-            Some((mut session, take)) => match hold_session(holder, &mut session, take).await {
-                HoldEnd::Stopped => return,
-                HoldEnd::Lost(cause) => {
-                    tracing::warn!(
-                        worker_id = %holder.worker_id,
-                        %cause,
-                        "the worker liveness lock was lost: {cause}; taking it again",
-                    );
-                    holder.shared.lose(cause);
-                    delay = SESSION_LOCK_RECONNECT_FIRST;
+            Some((mut session, take)) => {
+                match hold_session(holder, &mut session, take, &mut dropped).await {
+                    HoldEnd::Stopped => return,
+                    HoldEnd::Lost(cause) => {
+                        tracing::warn!(
+                            worker_id = %holder.worker_id,
+                            %cause,
+                            "the worker liveness lock was lost: {cause}; taking it again",
+                        );
+                        holder.shared.lose(cause);
+                        delay = SESSION_LOCK_RECONNECT_FIRST;
+                    }
                 }
-            },
+            }
             None => {
                 tokio::select! {
                     () = holder.cancel.cancelled() => return,
@@ -450,15 +539,25 @@ async fn hold(holder: &Holder, first: LockSession, first_take: LockTake) {
                 };
                 match opened {
                     Ok((session, take)) => {
-                        holder.shared.confirm(started);
-                        tracing::info!(
-                            worker_id = %holder.worker_id,
-                            held = ?take,
-                            "the worker liveness lock is held again",
-                        );
+                        let (next, verdict) = dropped.after_answer(take);
+                        dropped = next;
+                        match verdict {
+                            TakeVerdict::Confirms => {
+                                holder.shared.confirm(started);
+                                tracing::info!(
+                                    worker_id = %holder.worker_id,
+                                    held = ?take,
+                                    "the worker liveness lock is held again",
+                                );
+                            }
+                            TakeVerdict::Unconfirmed => {
+                                holder.shared.lose(UNRECORDED_HOLDER_CAUSE.to_owned());
+                            }
+                        }
                         held = Some((session, take));
                     }
                     Err(failure) => {
+                        dropped = dropped.after_failed_take(&failure);
                         holder.shared.lose(failure.to_string());
                         delay = delay.saturating_mul(2).min(SESSION_LOCK_RECONNECT_LIMIT);
                     }
@@ -470,8 +569,13 @@ async fn hold(holder: &Holder, first: LockSession, first_take: LockTake) {
 
 /// Hold one session: every probe interval of the rule, confirm the lock
 /// (a probe while this session holds it; the lock statement again while an
-/// earlier session holds it), until the stop or a loss.
-async fn hold_session(holder: &Holder, session: &mut LockSession, take: LockTake) -> HoldEnd {
+/// earlier session holds it, read by `dropped`), until the stop or a loss.
+async fn hold_session(
+    holder: &Holder,
+    session: &mut LockSession,
+    take: LockTake,
+    dropped: &mut DroppedSessions,
+) -> HoldEnd {
     let mut take = take;
     loop {
         tokio::select! {
@@ -480,16 +584,28 @@ async fn hold_session(holder: &Holder, session: &mut LockSession, take: LockTake
             () = tokio::time::sleep(holder.probe_interval) => {}
         }
         let started = Instant::now();
-        let confirmed = match take {
-            LockTake::Taken => session.probe().await.map(|()| LockTake::Taken),
-            LockTake::HeldElsewhere => session.take().await,
-        };
-        match confirmed {
-            Ok(now_held) => {
-                holder.shared.confirm(started);
-                take = now_held;
-            }
-            Err(failure) => return HoldEnd::Lost(failure.to_string()),
+        match take {
+            LockTake::Taken => match session.probe().await {
+                Ok(()) => holder.shared.confirm(started),
+                Err(failure) => return HoldEnd::Lost(failure.to_string()),
+            },
+            LockTake::HeldElsewhere => match session.take().await {
+                Ok(now_held) => {
+                    let (next, verdict) = dropped.after_answer(now_held);
+                    *dropped = next;
+                    match verdict {
+                        TakeVerdict::Confirms => holder.shared.confirm(started),
+                        TakeVerdict::Unconfirmed => {
+                            holder.shared.lose(UNRECORDED_HOLDER_CAUSE.to_owned());
+                        }
+                    }
+                    take = now_held;
+                }
+                Err(failure) => {
+                    *dropped = dropped.after_failed_take(&failure);
+                    return HoldEnd::Lost(failure.to_string());
+                }
+            },
         }
     }
 }
