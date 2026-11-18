@@ -6,8 +6,8 @@ Enters at ``app.check(live=True)``, whose worker connection step is the
 core's check (``CoreHandle.check_worker_connections``): it reads
 ``max_connections`` and the reserved slots from the server, and the test
 asserts on the ``HRS-219`` error. The core's worker opens one listener
-connection; the session pool is counted only when the session URL differs
-(it does not here).
+connection and one liveness lock connection; the session pool is counted only
+when the session URL differs (it does not here).
 """
 
 from __future__ import annotations
@@ -98,6 +98,7 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
         parent_pool
         + 1
         + 1
+        + 1
         + 1 * isolated_pool
         + async_children * per_async_child
         + thread_pool
@@ -110,7 +111,8 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
     )
     assert errors[0].notes[0] == (
         f'parent pool max_size {parent_pool} + listener 1 + runner heartbeat 1 '
-        f'+ 1 isolated children x isolated.pool max_size {isolated_pool} + {async_children} '
+        f'+ liveness lock 1 + 1 isolated children x isolated.pool max_size {isolated_pool} '
+        f'+ {async_children} '
         f'shared async children x shared_async.pool max_size {per_async_child} '
         f'+ 1 shared thread children x shared_thread.pool max_size '
         f'{thread_pool} = {total}'
@@ -154,10 +156,11 @@ async def test_the_parent_pool_of_the_profile_is_counted_against_the_server(
     errors = await asyncio.to_thread(app.check, live=True)
 
     isolated_pool = DEFAULT_ISOLATED_POOL_CONNECTIONS
-    total = parent_pool + 1 + 1 + 1 * isolated_pool
+    total = parent_pool + 1 + 1 + 1 + 1 * isolated_pool
     assert total > usable
     assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
     assert errors[0].notes[0] == (
         f'parent pool max_size {parent_pool} + listener 1 + runner heartbeat 1 '
-        f'+ 1 isolated children x isolated.pool max_size {isolated_pool} = {total}'
+        f'+ liveness lock 1 + 1 isolated children x isolated.pool max_size {isolated_pool} '
+        f'= {total}'
     )

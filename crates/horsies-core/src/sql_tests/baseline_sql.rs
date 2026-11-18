@@ -44,7 +44,7 @@ const EXPECTED_TABLES: [&str; 22] = [
     "horsies_workflows",
 ];
 
-const EXPECTED_FUNCTIONS: [&str; 162] = [
+const EXPECTED_FUNCTIONS: [&str; 164] = [
     // 0001_tables.sql: the UUIDv7 helper and the trigger functions.
     "horsies_uuidv7",
     "horsies_notify_task_changes",
@@ -95,6 +95,8 @@ const EXPECTED_FUNCTIONS: [&str; 162] = [
     "horsies_requeue_stale_claims",
     "horsies_stale_running_scan",
     "horsies_start_attempt",
+    "horsies_unheld_worker_owners",
+    "horsies_worker_liveness_key",
     // 0005_workflow_functions.sql.
     "horsies_task_error_envelope",
     "horsies_task_error_object",

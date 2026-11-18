@@ -125,7 +125,7 @@ const COMPLETE_SQL: &str =
 const FAIL_SQL: &str = "SELECT outcome FROM horsies_finish_failed_attempt(
     $1::uuid, 'w1', $2::timestamptz, 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)";
 const FAIL_STALE_SQL: &str = "SELECT outcome FROM horsies_finish_stale_attempt(
-    $1::uuid, 60000, 60000, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')";
+    $1::uuid, 'BEAT_AGE', 60000, 60000, NULL, NULL, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')";
 
 const BATCH_SUCCESS_SQL: &str = "SELECT string_agg(outcome, ',' ORDER BY ordinality)
     FROM horsies_complete_tasks_fused(

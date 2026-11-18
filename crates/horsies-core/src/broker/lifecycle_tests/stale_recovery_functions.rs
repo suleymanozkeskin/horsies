@@ -28,7 +28,7 @@ use crate::broker::expiry_and_orphans::expire_pending_pass;
 use crate::broker::pools::{core_pool_for_test_pool, unpinged_single_connection_core_pool};
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claims, scan_stale_running, FinishStaleAttempt,
-    RecoveryBatch, StaleRetry, StaleRunningThresholds, ThresholdMs,
+    RecoveryBatch, StaleEvidence, StaleRetry, StaleRunningThresholds, ThresholdMs,
 };
 use crate::core::lifecycle::outcomes::GuardEvidence;
 use crate::core::lifecycle::{
@@ -88,7 +88,7 @@ async fn stale_task_with(
 fn finish(task_id: Uuid, retry: StaleRetry) -> FinishStaleAttempt {
     FinishStaleAttempt {
         task_id,
-        thresholds: thresholds(),
+        evidence: StaleEvidence::BeatAge(thresholds()),
         retry,
         result_json: r#"{"err":"crashed"}"#.to_owned(),
         error_code: "WORKER_CRASHED".to_owned(),

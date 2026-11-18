@@ -1,8 +1,9 @@
 //! Exit codes of child processes: part of the protocol. The supervisor reads
 //! them to name how a child ended; the Python child and the Rust child host
-//! exit with them. Code 77 belongs to the worker process itself
-//! ([`crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE`]); no
-//! child uses it.
+//! exit with them. Codes 77 and 79 belong to the worker process itself
+//! ([`crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE`],
+//! [`crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE`]); no child uses
+//! them.
 
 /// The parent is gone: the socket reached EOF, or the parent-death check
 /// found another parent.

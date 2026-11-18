@@ -51,8 +51,8 @@ _FAIL_RUNNING_TASK_SQL: Final = text(
 
 _FAIL_STALE_TASK_SQL: Final = text(
     'SELECT outcome FROM horsies_finish_stale_attempt('
-    'CAST(:task_id AS uuid), CAST(:stale_after_ms AS INTEGER), '
-    'CAST(:finalizing_stale_after_ms AS INTEGER), '
+    "CAST(:task_id AS uuid), 'BEAT_AGE', CAST(:stale_after_ms AS INTEGER), "
+    'CAST(:finalizing_stale_after_ms AS INTEGER), NULL, NULL, '
     "'NONE', NULL, NULL, :result, :error_code, :failed_reason, "
     ':failed_reason, :failed_reason)'
 )

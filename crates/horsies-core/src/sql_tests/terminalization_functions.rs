@@ -215,7 +215,7 @@ const STALE_ATTEMPT_SQL: &str = "
            observed_status, observed_worker_id, observed_claimed_at,
            guard_kind, observed_guard
     FROM horsies_finish_stale_attempt(
-        CAST($1 AS uuid), CAST($2 AS INTEGER), CAST($3 AS INTEGER),
+        CAST($1 AS uuid), 'BEAT_AGE', CAST($2 AS INTEGER), CAST($3 AS INTEGER), NULL, NULL,
         'NONE', NULL, NULL,
         $4, $5, $6, $6, $6
     )

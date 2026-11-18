@@ -1,6 +1,9 @@
 //! The stale recovery statements of the reaper, one statement each on a core
 //! pool (`crates/horsies-core/baseline/0004_lifecycle_functions.sql`):
 //!
+//! - `horsies_unheld_worker_owners`: the liveness read of one pass, the
+//!   owners of CLAIMED and RUNNING rows whose liveness lock no session holds.
+//!   It takes no lock.
 //! - `horsies_stale_running_scan`: the candidates of one stale RUNNING pass,
 //!   with the facts that the retry decision and the crash result need. It
 //!   takes no lock; each candidate is judged again under its locks.
@@ -10,6 +13,11 @@
 //!   nothing.
 //! - `horsies_requeue_stale_claims`: one bounded batch of CLAIMED rows whose
 //!   claimer stopped beating, back to PENDING.
+//!
+//! The last three take the evidence of their judgement (`StaleEvidence`):
+//! the beat age (`BEAT_AGE`, Python's rule), or a gone owner (`OWNER_GONE`):
+//! a worker whose liveness lock was free in two reads far enough apart
+//! (`GoneOwner`).
 //!
 //! Each statement runs alone on its connection in autocommit and is checked
 //! out as reserved work ([`CheckoutClass::Reserved`]): the reaper's pass runs
@@ -125,29 +133,49 @@ impl StaleRunningPass {
     }
 }
 
-/// `horsies_stale_running_scan`. Parameters in order: stale threshold,
-/// finalizing threshold (ms), batch size.
+/// The evidence `BEAT_AGE` of the recovery functions.
+const BEAT_AGE: &str = "BEAT_AGE";
+
+/// The evidence `OWNER_GONE` of the recovery functions.
+const OWNER_GONE: &str = "OWNER_GONE";
+
+/// `horsies_unheld_worker_owners`. Parameter: batch size.
+static UNHELD_WORKER_OWNERS: TypedStatement = TypedStatement::new(
+    "unheld_worker_owners",
+    "SELECT * FROM horsies_unheld_worker_owners($1)",
+    &[ParameterType::Int4],
+);
+
+/// `horsies_stale_running_scan`. Parameters in order: evidence, stale
+/// threshold, finalizing threshold (ms), owner, claim bound, batch size.
 static STALE_RUNNING_SCAN: TypedStatement = TypedStatement::new(
     "stale_running_scan",
-    "SELECT * FROM horsies_stale_running_scan($1, $2, $3)",
+    "SELECT * FROM horsies_stale_running_scan($1, $2, $3, $4, $5, $6)",
     &[
+        ParameterType::Text,
         ParameterType::Int4,
         ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Timestamptz,
         ParameterType::Int4,
     ],
 );
 
-/// `horsies_finish_stale_attempt`. Parameters in order: task id, stale
-/// threshold, finalizing threshold (ms), retry kind, expected retry count,
-/// retry delay in seconds, result, error code, failed reason, attempt
-/// message, attempt reason.
+/// `horsies_finish_stale_attempt`. Parameters in order: task id, evidence,
+/// stale threshold, finalizing threshold (ms), owner, claim generation of the
+/// owner, retry kind, expected retry count, retry delay in seconds, result,
+/// error code, failed reason, attempt message, attempt reason.
 static FINISH_STALE_ATTEMPT: TypedStatement = TypedStatement::new(
     "finish_stale_attempt",
-    "SELECT * FROM horsies_finish_stale_attempt($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    "SELECT * FROM horsies_finish_stale_attempt(\
+     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
     &[
         ParameterType::Uuid,
+        ParameterType::Text,
         ParameterType::Int4,
         ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Timestamptz,
         ParameterType::Text,
         ParameterType::Int4,
         ParameterType::Float8,
@@ -159,12 +187,18 @@ static FINISH_STALE_ATTEMPT: TypedStatement = TypedStatement::new(
     ],
 );
 
-/// `horsies_requeue_stale_claims`. Parameters in order: stale threshold
-/// (ms), batch size.
+/// `horsies_requeue_stale_claims`. Parameters in order: evidence, stale
+/// threshold (ms), owner, claim bound, batch size.
 static REQUEUE_STALE_CLAIMS: TypedStatement = TypedStatement::new(
     "requeue_stale_claims",
-    "SELECT horsies_requeue_stale_claims($1, $2) AS requeued",
-    &[ParameterType::Int4, ParameterType::Int4],
+    "SELECT horsies_requeue_stale_claims($1, $2, $3, $4, $5) AS requeued",
+    &[
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Timestamptz,
+        ParameterType::Int4,
+    ],
 );
 
 /// The wake of a retried row's queue. Parameters: channel, payload.
@@ -209,11 +243,80 @@ pub(crate) enum StaleRetry {
     },
 }
 
+/// A worker that the reaper judged gone: its liveness lock was free in two
+/// reads at least the gone span apart, and no read between them found it
+/// held ([`crate::worker::liveness::OWNER_GONE_SPAN`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoneOwner {
+    pub(crate) worker_id: String,
+    /// The database time of the first of those reads. Only rows that the
+    /// owner claimed before it are recovered by this evidence.
+    pub(crate) unheld_since: DateTime<Utc>,
+}
+
+/// One claim of a gone owner: the owner and the claim generation of one
+/// RUNNING row, as the scan read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnerClaim {
+    pub(crate) worker_id: String,
+    pub(crate) claimed_at: DateTime<Utc>,
+}
+
+/// What a stale RUNNING recovery judges its row by (`p_evidence`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StaleEvidence {
+    /// `BEAT_AGE`: the runner stopped beating, by the two thresholds.
+    BeatAge(StaleRunningThresholds),
+    /// `OWNER_GONE`: the owner is gone. The row must still be RUNNING under
+    /// this claim.
+    OwnerGone(OwnerClaim),
+}
+
+/// One candidate of a gone owner: the facts of the scan, and the claim
+/// generation that the recovery fences on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoneOwnerCandidate {
+    pub(crate) facts: StaleCandidate,
+    pub(crate) claimed_at: DateTime<Utc>,
+}
+
+/// One owner of the liveness read: a worker id, and the database time of
+/// the read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnheldOwner {
+    pub(crate) worker_id: String,
+    pub(crate) read_at: DateTime<Utc>,
+}
+
+/// Whether the liveness read returned every unheld owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerListReach {
+    /// Fewer owners than the batch: every unheld owner is in the list.
+    Complete,
+    /// A full batch: owners after the last one, in worker id order, can be
+    /// unheld too.
+    Cut,
+}
+
+/// The liveness read of one pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnheldOwnerRead {
+    /// In worker id order (byte order, the C collation of the read).
+    pub(crate) owners: Vec<UnheldOwner>,
+    pub(crate) reach: OwnerListReach,
+}
+
+/// Owners that one liveness read returns at most.
+pub(crate) const UNHELD_OWNER_BATCH: RecoveryBatch = match RecoveryBatch::new(1_000) {
+    Some(batch) => batch,
+    None => panic!("1000 owners is a recovery batch"),
+};
+
 /// The recovery of one stale RUNNING candidate, for one statement.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FinishStaleAttempt {
     pub(crate) task_id: Uuid,
-    pub(crate) thresholds: StaleRunningThresholds,
+    pub(crate) evidence: StaleEvidence,
     pub(crate) retry: StaleRetry,
     /// The terminal result, the task's error code and failed reason: written
     /// when the failure applies.
@@ -225,7 +328,41 @@ pub(crate) struct FinishStaleAttempt {
     pub(crate) attempt_reason: String,
 }
 
-/// Read the candidates of one stale RUNNING pass: at most `batch` rows.
+/// The liveness read of one pass: at most `batch` owners of CLAIMED and
+/// RUNNING rows whose liveness lock no session holds, in worker id order.
+///
+/// One statement on `pool`, checked out as reserved work. Reads only; it
+/// takes no lock.
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] for a row
+/// that does not have the read's columns.
+pub(crate) async fn read_unheld_owners(
+    pool: &CorePool,
+    log: StatementLog,
+    batch: RecoveryBatch,
+) -> Result<UnheldOwnerRead, BrokerError> {
+    let statement = &UNHELD_WORKER_OWNERS;
+    let batch_size = batch.get();
+    let bound = statement.bind().value(&batch_size).finish();
+    let rows = run_reserved(pool, log, &bound).await?;
+    let owners = read_rows(&rows, statement, unheld_owner)?;
+    let full = usize::try_from(batch_size).is_ok_and(|limit| owners.len() >= limit);
+    let reach = match full {
+        true => OwnerListReach::Cut,
+        false => OwnerListReach::Complete,
+    };
+    Ok(UnheldOwnerRead { owners, reach })
+}
+
+fn unheld_owner(row: &Row, statement: &TypedStatement) -> Result<UnheldOwner, RowDecodeError> {
+    Ok(UnheldOwner {
+        worker_id: column(row, statement, "worker_id")?,
+        read_at: column(row, statement, "db_now")?,
+    })
+}
+
+/// Read the candidates of one stale RUNNING pass by the beat age
+/// (`BEAT_AGE`): at most `batch` rows.
 ///
 /// One statement on `pool`, checked out as reserved work. Reads only.
 ///
@@ -238,19 +375,63 @@ pub(crate) async fn scan_stale_running(
     batch: RecoveryBatch,
 ) -> Result<Vec<StaleCandidate>, BrokerError> {
     let statement = &STALE_RUNNING_SCAN;
-    let (stale_after, finalizing_stale_after, batch_size) = (
-        thresholds.stale_after.get(),
-        thresholds.finalizing_stale_after.get(),
-        batch.get(),
-    );
+    let stale_after = Some(thresholds.stale_after.get());
+    let finalizing_stale_after = Some(thresholds.finalizing_stale_after.get());
+    let owner: Option<&str> = None;
+    let claimed_before: Option<DateTime<Utc>> = None;
+    let batch_size = batch.get();
     let bound = statement
         .bind()
+        .value(&BEAT_AGE)
         .value(&stale_after)
         .value(&finalizing_stale_after)
+        .value(&owner)
+        .value(&claimed_before)
         .value(&batch_size)
         .finish();
     let rows = run_reserved(pool, log, &bound).await?;
     Ok(read_rows(&rows, statement, stale_candidate)?)
+}
+
+/// Read the RUNNING rows of a gone owner (`OWNER_GONE`): at most `batch`
+/// started rows that the owner claimed before it was first read unheld.
+///
+/// One statement on `pool`, checked out as reserved work. Reads only.
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] for a row
+/// that does not have the scan's columns.
+pub(crate) async fn scan_gone_owner_running(
+    pool: &CorePool,
+    log: StatementLog,
+    owner: &GoneOwner,
+    batch: RecoveryBatch,
+) -> Result<Vec<GoneOwnerCandidate>, BrokerError> {
+    let statement = &STALE_RUNNING_SCAN;
+    let no_threshold: Option<i32> = None;
+    let owner_id = Some(owner.worker_id.as_str());
+    let claimed_before = Some(owner.unheld_since);
+    let batch_size = batch.get();
+    let bound = statement
+        .bind()
+        .value(&OWNER_GONE)
+        .value(&no_threshold)
+        .value(&no_threshold)
+        .value(&owner_id)
+        .value(&claimed_before)
+        .value(&batch_size)
+        .finish();
+    let rows = run_reserved(pool, log, &bound).await?;
+    Ok(read_rows(&rows, statement, gone_owner_candidate)?)
+}
+
+fn gone_owner_candidate(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<GoneOwnerCandidate, RowDecodeError> {
+    Ok(GoneOwnerCandidate {
+        facts: stale_candidate(row, statement)?,
+        claimed_at: column(row, statement, "claimed_at")?,
+    })
 }
 
 fn stale_candidate(
@@ -276,7 +457,8 @@ fn stale_candidate(
 ///
 /// One statement on `pool`, checked out as reserved work. Under the task
 /// advisory lock and the row lock it judges the row again on one capture of
-/// the row, its latest runner beat and the database clock. It writes the
+/// the row, its latest runner beat and the database clock: by the beat age,
+/// or (a gone owner) by the owner and the claim generation. It writes the
 /// FAILED attempt row (`will_retry` set for a retry) and either the retry
 /// (PENDING, every claim and run field cleared, the execution class kept)
 /// or the move to history (`FAIL_STALE`, no capacity wake). A refusal
@@ -302,13 +484,36 @@ pub(crate) async fn finish_stale_attempt(
             delay_seconds,
         } => ("RETRY", Some(expected_retry_count), Some(delay_seconds)),
     };
-    let stale_after = command.thresholds.stale_after.get();
-    let finalizing_stale_after = command.thresholds.finalizing_stale_after.get();
+    let (evidence, stale_after, finalizing_stale_after, owner, owner_claimed_at): (
+        &str,
+        Option<i32>,
+        Option<i32>,
+        Option<&str>,
+        Option<DateTime<Utc>>,
+    ) = match &command.evidence {
+        StaleEvidence::BeatAge(thresholds) => (
+            BEAT_AGE,
+            Some(thresholds.stale_after.get()),
+            Some(thresholds.finalizing_stale_after.get()),
+            None,
+            None,
+        ),
+        StaleEvidence::OwnerGone(claim) => (
+            OWNER_GONE,
+            None,
+            None,
+            Some(claim.worker_id.as_str()),
+            Some(claim.claimed_at),
+        ),
+    };
     let bound = statement
         .bind()
         .value(&command.task_id)
+        .value(&evidence)
         .value(&stale_after)
         .value(&finalizing_stale_after)
+        .value(&owner)
+        .value(&owner_claimed_at)
         .value(&retry_kind)
         .value(&expected_retry_count)
         .value(&delay_seconds)
@@ -355,6 +560,17 @@ pub(crate) async fn wake_retried_queue(
     Ok(())
 }
 
+/// What one requeue batch judges a CLAIMED row by (`p_evidence`).
+#[derive(Debug, Clone, Copy)]
+enum RequeueEvidence<'a> {
+    /// `BEAT_AGE`: no claimer beat within the threshold, and claimed longer
+    /// ago than it.
+    BeatAge(ThresholdMs),
+    /// `OWNER_GONE`: claimed by the gone owner before it was first read
+    /// unheld.
+    OwnerGone(&'a GoneOwner),
+}
+
 /// Requeue one bounded batch of stale CLAIMED rows: at most `batch` rows
 /// whose claim is older than `stale_after` and whose claimer sent no beat
 /// within it go back to PENDING with every claim and run field cleared. A
@@ -374,11 +590,57 @@ pub(crate) async fn requeue_stale_claims(
     stale_after: ThresholdMs,
     batch: RecoveryBatch,
 ) -> Result<u32, BrokerError> {
+    requeue_batch(pool, log, RequeueEvidence::BeatAge(stale_after), batch).await
+}
+
+/// Requeue one bounded batch of the CLAIMED rows of a gone owner: at most
+/// `batch` rows that the owner claimed before it was first read unheld go
+/// back to PENDING with every claim and run field cleared, whatever their
+/// beats. A workflow task whose node is not runnable stays; a row that
+/// another transaction holds is skipped. Sends no queue wake.
+///
+/// One statement on `pool`, checked out as reserved work; it commits alone.
+/// Returns the number of rows requeued.
+///
+/// Errors: as [`requeue_stale_claims`].
+pub(crate) async fn requeue_gone_owner_claims(
+    pool: &CorePool,
+    log: StatementLog,
+    owner: &GoneOwner,
+    batch: RecoveryBatch,
+) -> Result<u32, BrokerError> {
+    requeue_batch(pool, log, RequeueEvidence::OwnerGone(owner), batch).await
+}
+
+/// One `horsies_requeue_stale_claims` batch with `evidence`.
+async fn requeue_batch(
+    pool: &CorePool,
+    log: StatementLog,
+    evidence: RequeueEvidence<'_>,
+    batch: RecoveryBatch,
+) -> Result<u32, BrokerError> {
     let statement = &REQUEUE_STALE_CLAIMS;
-    let (stale_after_ms, batch_size) = (stale_after.get(), batch.get());
+    let (kind, stale_after_ms, owner, claimed_before): (
+        &str,
+        Option<i32>,
+        Option<&str>,
+        Option<DateTime<Utc>>,
+    ) = match evidence {
+        RequeueEvidence::BeatAge(stale_after) => (BEAT_AGE, Some(stale_after.get()), None, None),
+        RequeueEvidence::OwnerGone(owner) => (
+            OWNER_GONE,
+            None,
+            Some(owner.worker_id.as_str()),
+            Some(owner.unheld_since),
+        ),
+    };
+    let batch_size = batch.get();
     let bound = statement
         .bind()
+        .value(&kind)
         .value(&stale_after_ms)
+        .value(&owner)
+        .value(&claimed_before)
         .value(&batch_size)
         .finish();
     let row = one_row(run_reserved(pool, log, &bound).await?, statement)?;
@@ -445,6 +707,28 @@ pub(crate) async fn requeue_stale_claimed_pass(
         full_batch,
         STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
         || requeue_stale_claims(pool, log, stale_after, STALE_CLAIMED_REQUEUE_BATCH),
+    )
+    .await
+}
+
+/// One requeue pass over the CLAIMED rows of a gone owner on `pool`:
+/// [`requeue_gone_owner_claims`] in batches of
+/// [`STALE_CLAIMED_REQUEUE_BATCH`] rows until a batch is short, and at most
+/// [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches. Each batch commits
+/// alone. Logs nothing.
+///
+/// Errors: [`StaleClaimsRequeueFailed`] with the rows of the batches before
+/// the failed one.
+pub(crate) async fn requeue_gone_owner_pass(
+    pool: &CorePool,
+    log: StatementLog,
+    owner: &GoneOwner,
+) -> Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed> {
+    let full_batch = STALE_CLAIMED_REQUEUE_BATCH.get().unsigned_abs();
+    requeue_pass_with(
+        full_batch,
+        STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+        || requeue_gone_owner_claims(pool, log, owner, STALE_CLAIMED_REQUEUE_BATCH),
     )
     .await
 }

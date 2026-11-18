@@ -111,7 +111,7 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
 
     let outcome: (String, String) = sqlx::query_as(
         "SELECT outcome, guard_kind FROM horsies_finish_stale_attempt(
-            $1, 300000, 300000, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'test', 'test', 'test'
+            $1, 'BEAT_AGE', 300000, 300000, NULL, NULL, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'test', 'test', 'test'
          )",
     )
     .bind(id)

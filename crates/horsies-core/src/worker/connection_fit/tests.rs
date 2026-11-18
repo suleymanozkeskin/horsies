@@ -168,17 +168,19 @@ fn the_formula_names_each_mode_and_the_one_listener_connection() {
     let parent = profile.resolved_parent_pool().get();
     let async_pool = shared_async_pool_of(&profile);
     let thread_pool = shared_thread_pool_of(&profile);
-    let total = u64::from(parent) + 1 + 1 + 2 + 3 * u64::from(async_pool) + u64::from(thread_pool);
+    let total =
+        u64::from(parent) + 1 + 1 + 1 + 2 + 3 * u64::from(async_pool) + u64::from(thread_pool);
 
     let need = worker_connection_need(&profile, &direct());
 
     assert_eq!(need.listener, 1);
     assert_eq!(need.runner_heartbeat, 1);
+    assert_eq!(need.liveness_lock, 1);
     assert_eq!(need.total(), total);
     assert_eq!(
         need.formula(),
         format!(
-            "parent pool max_size {parent} + listener 1 + runner heartbeat 1 \
+            "parent pool max_size {parent} + listener 1 + runner heartbeat 1 + liveness lock 1 \
              + 2 isolated children x isolated.pool max_size 1 \
              + 3 shared async children x shared_async.pool max_size {async_pool} \
              + 1 shared thread children x shared_thread.pool max_size {thread_pool} = {total}"
@@ -206,9 +208,9 @@ fn a_mode_without_children_has_no_term() {
     assert_eq!(
         need.formula(),
         format!(
-            "parent pool max_size {parent} + listener 1 + runner heartbeat 1 \
+            "parent pool max_size {parent} + listener 1 + runner heartbeat 1 + liveness lock 1 \
              + 1 isolated children x isolated.pool max_size 1 = {}",
-            u64::from(parent) + 3
+            u64::from(parent) + 4
         )
     );
 }
@@ -236,8 +238,9 @@ fn a_separate_session_url_adds_a_session_pool_sized_as_the_worker_pool() {
         need.formula(),
         format!(
             "parent pool max_size {parent} + session pool max_size {parent} + listener 1 \
-             + runner heartbeat 1 + 1 isolated children x isolated.pool max_size 1 = {}",
-            2 * u64::from(parent) + 3
+             + runner heartbeat 1 + liveness lock 1 + 1 isolated children x isolated.pool \
+             max_size 1 = {}",
+            2 * u64::from(parent) + 4
         )
     );
     assert_eq!(
@@ -522,6 +525,7 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
         + 1
         + 1
         + 1
+        + 1
         + u64::from(async_children) * u64::from(per_async_child)
         + u64::from(thread_pool);
     assert!(total > u64::from(usable));
@@ -541,7 +545,7 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
         vec![
             format!(
                 "parent pool max_size {parent_pool} + listener 1 + runner heartbeat 1 \
-                 + 1 isolated children x isolated.pool max_size 1 \
+                 + liveness lock 1 + 1 isolated children x isolated.pool max_size 1 \
                  + {async_children} shared async children x shared_async.pool max_size \
                  {per_async_child} + 1 shared thread children x shared_thread.pool max_size \
                  {thread_pool} = {total}"
@@ -583,7 +587,7 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
 
     let errors = check_worker_connections(&config, &broker).await;
 
-    let total = u64::from(parent_pool) + 1 + 1 + 1;
+    let total = u64::from(parent_pool) + 1 + 1 + 1 + 1;
     assert!(total > u64::from(usable));
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
@@ -594,7 +598,7 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
         Some(
             format!(
                 "parent pool max_size {parent_pool} + listener 1 + runner heartbeat 1 \
-                 + 1 isolated children x isolated.pool max_size 1 = {total}"
+                 + liveness lock 1 + 1 isolated children x isolated.pool max_size 1 = {total}"
             )
             .as_str()
         )
@@ -614,8 +618,8 @@ fn with_application_name(url: &str, application_name: &str) -> String {
 /// A `session_database_url` that differs from `database_url` adds the
 /// session pool that the core's worker broker opens on it, sized as the
 /// worker pool, to the sum against the server. The worker pool, the
-/// listener, the runner heartbeat and one isolated child fill the usable
-/// slots exactly, so the profile fits with no separate session URL and does
+/// listener, the runner heartbeat, the liveness lock and one isolated child
+/// fill the usable slots exactly, so the profile fits with no separate session URL and does
 /// not fit with one. The check reads the limit through `broker` and connects
 /// nothing on the session URL. Python counts no session pool
 /// (`python/horsies/core/worker/profile_fit.py`, `worker_connection_need`).
@@ -624,9 +628,9 @@ fn with_application_name(url: &str, application_name: &str) -> String {
 async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
     let usable = usable_slots_of_the_test_server().await;
     let set_parent_pool = usable
-        .checked_sub(3)
+        .checked_sub(4)
         .filter(|connections| (1..=MAX_CHILD_POOL_CONNECTIONS).contains(connections))
-        .expect("the test server has from 4 to 1003 usable slots");
+        .expect("the test server has from 5 to 1004 usable slots");
     let profile = WorkerProfile {
         isolated: isolated(1),
         pool: ParentPool {
@@ -635,7 +639,7 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
         ..WorkerProfile::default()
     };
     let parent = u64::from(profile.resolved_parent_pool().get());
-    let without_session_pool = parent + 1 + 1 + 1;
+    let without_session_pool = parent + 1 + 1 + 1 + 1;
     let total = without_session_pool + parent;
     assert_eq!(without_session_pool, u64::from(usable));
     assert!(total > u64::from(usable));
@@ -667,8 +671,8 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
         Some(
             format!(
                 "parent pool max_size {parent} + session pool max_size {parent} + listener 1 \
-                 + runner heartbeat 1 + 1 isolated children x isolated.pool max_size 1 \
-                 = {total}"
+                 + runner heartbeat 1 + liveness lock 1 + 1 isolated children x isolated.pool \
+                 max_size 1 = {total}"
             )
             .as_str()
         )
@@ -686,7 +690,8 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
 // logs the fit of its profile, and starts in every case.
 
 /// `test_a_profile_above_the_limit_warns_and_the_worker_starts`, with the
-/// core's one listener connection: 5 + 1 + 1 + 20 = 27 against 26 usable.
+/// core's one listener connection and its liveness lock: 5 + 1 + 1 + 1 + 20
+/// = 28 against 26 usable.
 #[test]
 fn a_profile_above_the_limit_is_one_warning_with_the_formula_and_the_help() {
     let profile = isolated_only(20);
@@ -698,7 +703,7 @@ fn a_profile_above_the_limit_is_one_warning_with_the_formula_and_the_help() {
     assert_eq!(record.level, BootLogLevel::Warning);
     assert!(
         record.message.starts_with(
-            "Worker profile 'default': one worker opens up to 27 Postgres connections itself, \
+            "Worker profile 'default': one worker opens up to 28 Postgres connections itself, \
              not counting task code; the server has 26 usable slots"
         ),
         "{}",
@@ -707,7 +712,7 @@ fn a_profile_above_the_limit_is_one_warning_with_the_formula_and_the_help() {
     assert!(
         record
             .message
-            .contains("20 isolated children x isolated.task_send_pool 2 = 40 more, 67 in all"),
+            .contains("20 isolated children x isolated.task_send_pool 2 = 40 more, 68 in all"),
         "{}",
         record.message
     );
@@ -974,10 +979,10 @@ fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
 }
 
 /// `test_parent_pool_listener_heartbeat_and_child_pools`: 8 isolated
-/// children need the worker pool floor, the listener, the runner heartbeat
-/// and the pool of each child: 5 + 1 + 1 + 8 = 15.
+/// children need the worker pool floor, the listener, the runner heartbeat,
+/// the liveness lock and the pool of each child: 5 + 1 + 1 + 1 + 8 = 16.
 #[test]
-fn the_need_is_the_worker_pool_the_listener_the_heartbeat_and_each_child_pool() {
+fn the_need_is_the_worker_pool_the_listener_the_heartbeat_the_lock_and_each_child_pool() {
     let need = worker_connection_need(&isolated_only(8), &direct());
 
     assert_eq!(
@@ -987,6 +992,7 @@ fn the_need_is_the_worker_pool_the_listener_the_heartbeat_and_each_child_pool() 
             session_pool: SessionPoolTerm::SharedWithWorkerPool,
             listener: LISTENER_CONNECTIONS_PER_WORKER,
             runner_heartbeat: RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
+            liveness_lock: LIVENESS_LOCK_CONNECTIONS_PER_WORKER,
             child_pools: vec![ModePools {
                 mode: ChildMode::Isolated,
                 children: 8,
@@ -997,7 +1003,8 @@ fn the_need_is_the_worker_pool_the_listener_the_heartbeat_and_each_child_pool() 
     );
     assert_eq!(LISTENER_CONNECTIONS_PER_WORKER, 1);
     assert_eq!(RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER, 1);
-    assert_eq!(need.total(), 15);
+    assert_eq!(LIVENESS_LOCK_CONNECTIONS_PER_WORKER, 1);
+    assert_eq!(need.total(), 16);
 }
 
 /// `test_task_sends_add_the_task_send_pool_of_each_kind`: each kind counts
@@ -1135,6 +1142,7 @@ fn each_mode_counts_its_own_resolved_pool_max() {
         u64::from(need.parent_pool)
             + 1
             + 1
+            + 1
             + 2
             + 3 * u64::from(async_pool)
             + 4 * u64::from(thread_pool)
@@ -1170,7 +1178,7 @@ fn a_set_child_pool_size_is_counted_as_set() {
         ]
     );
     let parent_pool = u64::from(parent_pool_connections(2 + 200 + 3).get());
-    assert_eq!(need.total(), parent_pool + 1 + 1 + 2 * 5 + 7 + 3);
+    assert_eq!(need.total(), parent_pool + 1 + 1 + 1 + 2 * 5 + 7 + 3);
 }
 
 /// `test_the_parent_pool_derived_from_the_seats_is_counted`: one shared
@@ -1187,7 +1195,7 @@ fn the_worker_pool_derived_from_the_seats_is_counted() {
     assert_eq!(need.parent_pool, 20);
     assert_eq!(
         need.total(),
-        20 + 1 + 1 + u64::from(shared_async_pool_connections(seats(1000)).get())
+        20 + 1 + 1 + 1 + u64::from(shared_async_pool_connections(seats(1000)).get())
     );
     assert!(
         need.formula()
@@ -1211,7 +1219,7 @@ fn a_set_worker_pool_is_counted_as_set() {
     assert_eq!(need.parent_pool, 40);
     assert_eq!(
         need.total(),
-        40 + 1 + 1 + u64::from(shared_async_pool_connections(seats(1000)).get())
+        40 + 1 + 1 + 1 + u64::from(shared_async_pool_connections(seats(1000)).get())
     );
 }
 

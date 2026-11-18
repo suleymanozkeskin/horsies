@@ -390,6 +390,7 @@ Direct Postgres budget for one worker is approximately:
 pool max_size (the pool of the worker process)
   + 2 listener/session connections
   + 1 runner heartbeat connection (the worker process writes the beats)
+  + 1 liveness lock connection (on the session URL)
   + isolated children * isolated.pool max_size
   + shared async children * shared_async.pool max_size
   + shared thread children * shared_thread.pool max_size
@@ -405,7 +406,8 @@ slots and reports `HRS-219`; the error states the task-send term with one
 sending loop per child. A worker logs the same comparison at boot, as a
 warning when it is above the usable slots.
 Nothing is compared with `pgbouncer_transaction_mode=True`; then each worker
-opens the sum above less the 2 listener connections as clients of the pooler,
+opens the sum above less the 2 listener connections and the liveness lock
+connection as clients of the pooler,
 and PgBouncer `max_client_conn` must hold the sum over workers.
 
 Child DB connections are lazy by default (`min_size=0` in each pool). A child
@@ -708,6 +710,7 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 ### What the reaper does
 
 Runs on `check_interval_ms` cadence:
+0. Workers whose liveness lock no session holds: when two passes of one reaper find the lock of a worker free at least 75 s apart (no pass between them finds it held), its RUNNING tasks are recovered as in 2 (if enabled) and its CLAIMED tasks requeued as in 1 (if enabled), whatever their heartbeats.
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
 2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` suppresses this recovery.
 3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old worker_state rows (`worker_state_retention_hours`) and terminal workflow rows with their workflow task rows (`terminal_record_retention_hours`). Heartbeat rows and terminal task records are not deleted here; partition maintenance drops their expired partitions every `partition_maintenance_interval_s` seconds (default 15 min). Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
@@ -715,6 +718,8 @@ Runs on `check_interval_ms` cadence:
 **Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes only the first one, in the RUNNING transaction. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
 
 **Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. The half counts from when the last heartbeat landed. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
+
+**Liveness lock:** each worker process holds a session advisory lock on one connection to the session URL, from before its first claim to the end of its stop, and confirms it every 5 s. A process that ends releases it, so the reaper recovers the tasks of a killed worker in about 1.5 to 2 minutes instead of `running_stale_threshold_ms`. With `auto_fail_stale_running=True`, a worker that holds a task and whose lock is not held for 60 s kills every child that holds a task and exits with code 79 at once. A paused worker keeps its connection and its lock.
 
 
 ## RetentionConfig

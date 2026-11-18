@@ -307,8 +307,9 @@ written in Rust, on a new baseline schema.
   (`CoreHandle.check_worker_connections`, the rule of the Python and Rust
   clients) on the handle of the connectivity phase; the live check opens no
   SQLAlchemy engine. The count is that of the core's worker: its listener
-  opens one connection (before: 2), and a `session_database_url` that
-  differs from `database_url` adds a session pool of the parent pool's size.
+  opens one connection (before: 2), its liveness lock one more, and a
+  `session_database_url` that differs from `database_url` adds a session pool
+  of the parent pool's size.
   The errors keep `CHECK_WORKER_CONNECTIONS` (`HRS-219`) and their texts; a
   limit that is not read, or a core that cannot run the call, is one error
   with the cause as its note, as before.
@@ -341,6 +342,28 @@ written in Rust, on a new baseline schema.
   handler, adds one stdout handler per process, as SQLAlchemy's `echo` does
   for `sqlalchemy.engine.Engine`. The Rust client logs the same events on the
   `tracing` target `horsies.sql`.
+
+- **A worker holds a liveness lock; the tasks of an ended worker are
+  recovered in about 1.5 to 2 minutes.** Each worker process holds a session
+  advisory lock (key `hashtextextended('horsies-worker-liveness:' ||
+  worker_id, 0)`) on one connection of its own to the session URL, from
+  before its first claim to the end of its stop. When two reaper passes find
+  the lock of a worker free at least 75 seconds apart, with no pass between
+  them that finds it held, the reaper recovers that worker's RUNNING tasks
+  (`WORKER_CRASHED`, with a retry when the retry policy allows it) and
+  returns its CLAIMED tasks to PENDING, whatever their heartbeats; before,
+  they waited for `running_stale_threshold_ms` (default 300 s) and
+  `claimed_stale_threshold_ms`. Only rows that the worker claimed before the
+  first of the two passes are recovered this way, and each statement checks
+  under the row lock that the row is still that worker's claim. A worker
+  that holds a task and whose lock is not held for 60 seconds kills every
+  child that holds a task and exits with the new code 79 (with
+  `auto_fail_stale_running=True`). The lock adds one connection per worker:
+  `check(live=True)`, `HRS-219` and the boot log count it as `liveness lock
+  1`. The baseline functions `horsies_stale_running_scan`,
+  `horsies_finish_stale_attempt` and `horsies_requeue_stale_claims` take an
+  evidence argument (`BEAT_AGE` or `OWNER_GONE`); `horsies_unheld_worker_owners`
+  and `horsies_worker_liveness_key` are new.
 
 ### Fixed
 

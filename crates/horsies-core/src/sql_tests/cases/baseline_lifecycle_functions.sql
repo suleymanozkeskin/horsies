@@ -1227,7 +1227,7 @@ INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid
 SELECT lc_expect(
     'stale scan: the silent rows, not the beaten or finalizing ones',
     (SELECT string_agg(right(task_id::text, 4), ',' ORDER BY task_id)
-     FROM horsies_stale_running_scan(60000, 600000, 100)
+     FROM horsies_stale_running_scan('BEAT_AGE', 60000, 600000, NULL, NULL, 100)
      WHERE task_id::text LIKE '%300_'),
     '3001,3002,3005'
 );
@@ -1235,25 +1235,25 @@ SELECT lc_expect(
     'stale scan: the facts of a candidate',
     (SELECT concat_ws('|', retry_count, max_retries, claimed_by_worker_id, worker_pid, worker_hostname,
         worker_process_name, started_at = now() - interval '10 minutes', db_now >= now())
-     FROM horsies_stale_running_scan(60000, 600000, 100) WHERE task_id = '00000000-0000-7000-8000-000000003001'),
+     FROM horsies_stale_running_scan('BEAT_AGE', 60000, 600000, NULL, NULL, 100) WHERE task_id = '00000000-0000-7000-8000-000000003001'),
     '1|3|w1|7|host-a|worker-7|t|t'
 );
 SELECT lc_expect(
     'stale scan: the batch bound',
-    (SELECT count(*)::text FROM horsies_stale_running_scan(60000, 600000, 2)),
+    (SELECT count(*)::text FROM horsies_stale_running_scan('BEAT_AGE', 60000, 600000, NULL, NULL, 2)),
     '2'
 );
-SELECT lc_expect_sqlstate('stale scan: a batch of 0', $q$SELECT * FROM horsies_stale_running_scan(1, 1, 0)$q$, '22023');
-SELECT lc_expect_sqlstate('stale scan: a batch over 10000', $q$SELECT * FROM horsies_stale_running_scan(1, 1, 10001)$q$,
+SELECT lc_expect_sqlstate('stale scan: a batch of 0', $q$SELECT * FROM horsies_stale_running_scan('BEAT_AGE', 1, 1, NULL, NULL, 0)$q$, '22023');
+SELECT lc_expect_sqlstate('stale scan: a batch over 10000', $q$SELECT * FROM horsies_stale_running_scan('BEAT_AGE', 1, 1, NULL, NULL, 10001)$q$,
     '22023');
-SELECT lc_expect_sqlstate('stale scan: a negative threshold', $q$SELECT * FROM horsies_stale_running_scan(-1, 1, 10)$q$,
+SELECT lc_expect_sqlstate('stale scan: a negative threshold', $q$SELECT * FROM horsies_stale_running_scan('BEAT_AGE', -1, 1, NULL, NULL, 10)$q$,
     '22023');
 
 SELECT lc_expect(
     'stale attempt: no retry fails the task',
     (SELECT concat_ws('|', outcome, terminalization_kind, retry_disposition, observed_worker_id)
      FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003001', 60000, 600000, 'NONE', NULL, NULL,
+        '00000000-0000-7000-8000-000000003001', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'Worker process crashed', 'crash message', 'crash reason')),
     'APPLIED|FAIL_STALE|NOT_REQUESTED|w1'
 );
@@ -1266,7 +1266,7 @@ SELECT lc_expect(
 SELECT lc_expect(
     'stale attempt: a replay is already applied',
     (SELECT outcome FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003001', 60000, 600000, 'NONE', NULL, NULL,
+        '00000000-0000-7000-8000-000000003001', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'ALREADY_APPLIED'
 );
@@ -1274,7 +1274,7 @@ SELECT lc_expect(
     'stale attempt: a crash retry by policy',
     (SELECT concat_ws('|', outcome, retry_count, next_retry_at > now() + interval '4 seconds', queue_name)
      FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003002', 60000, 600000, 'RETRY', 1, 5.0,
+        '00000000-0000-7000-8000-000000003002', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'RETRY', 1, 5.0,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'crash message', 'crash reason')),
     'RETRY_SCHEDULED|2|t|q_stale'
 );
@@ -1293,14 +1293,14 @@ SELECT lc_expect(
     (SELECT concat_ws('|', outcome, guard_kind, (observed_guard::jsonb ->> 'stale_after_ms'),
         (observed_guard::jsonb ? 'last_heartbeat_at'))
      FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003003', 60000, 600000, 'NONE', NULL, NULL,
+        '00000000-0000-7000-8000-000000003003', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'SOURCE_STATE_CONFLICT|STALENESS|60000|t'
 );
 SELECT lc_expect(
     'stale attempt: a recent finalizing marker is not stale',
     (SELECT outcome || ':' || guard_kind FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003004', 60000, 600000, 'NONE', NULL, NULL,
+        '00000000-0000-7000-8000-000000003004', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'SOURCE_STATE_CONFLICT:STALENESS'
 );
@@ -1308,7 +1308,7 @@ SELECT lc_expect(
     'stale attempt: a retry from another retry count is refused',
     (SELECT outcome || ':' || guard_kind || ':' || (observed_guard::jsonb ->> 'retry_count')
      FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003005', 60000, 600000, 'RETRY', 0, 5.0,
+        '00000000-0000-7000-8000-000000003005', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'RETRY', 0, 5.0,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'SOURCE_STATE_CONFLICT:RETRY_COUNT:1'
 );
@@ -1326,7 +1326,7 @@ UPDATE horsies_tasks SET good_until = now() + interval '2 seconds' WHERE id = '0
 SELECT lc_expect(
     'stale attempt: a crash retry at or after the deadline fails the task',
     (SELECT outcome || ':' || retry_disposition FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003005', 60000, 600000, 'RETRY', 1, 5.0,
+        '00000000-0000-7000-8000-000000003005', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'RETRY', 1, 5.0,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'APPLIED:PAST_DEADLINE'
 );
@@ -1334,13 +1334,13 @@ SELECT lc_task('00000000-0000-7000-8000-000000003006', 'CLAIMED');
 SELECT lc_expect(
     'stale attempt: a row that is not RUNNING',
     (SELECT outcome || ':' || observed_status FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003006', 0, 0, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+        '00000000-0000-7000-8000-000000003006', 'BEAT_AGE', 0, 0, NULL, NULL, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'SOURCE_STATE_CONFLICT:CLAIMED'
 );
 SELECT lc_expect(
     'stale attempt: an absent task',
     (SELECT outcome FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-0000000030ff', 0, 0, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+        '00000000-0000-7000-8000-0000000030ff', 'BEAT_AGE', 0, 0, NULL, NULL, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'TASK_ABSENT'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000003007', 'RUNNING', 'w1', TRUE);
@@ -1350,20 +1350,20 @@ SELECT lc_node('00000000-0000-7000-8000-000000003f07', '00000000-0000-7000-8000-
 SELECT lc_expect(
     'stale attempt: a workflow task owes phase 2 and reports its dependents',
     (SELECT concat_ws('|', outcome, is_workflow_task, node_has_dependents) FROM horsies_finish_stale_attempt(
-        '00000000-0000-7000-8000-000000003007', 60000, 600000, 'NONE', NULL, NULL,
+        '00000000-0000-7000-8000-000000003007', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
         '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
     'APPLIED|t|f'
 );
 SELECT lc_expect_sqlstate('stale attempt: NONE with a delay', $q$SELECT * FROM horsies_finish_stale_attempt(
-    gen_random_uuid(), 0, 0, 'NONE', NULL, 1.0, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
+    gen_random_uuid(), 'BEAT_AGE', 0, 0, NULL, NULL, 'NONE', NULL, 1.0, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
 SELECT lc_expect_sqlstate('stale attempt: RETRY without a count', $q$SELECT * FROM horsies_finish_stale_attempt(
-    gen_random_uuid(), 0, 0, 'RETRY', NULL, 1.0, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
+    gen_random_uuid(), 'BEAT_AGE', 0, 0, NULL, NULL, 'RETRY', NULL, 1.0, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
 SELECT lc_expect_sqlstate('stale attempt: a negative threshold', $q$SELECT * FROM horsies_finish_stale_attempt(
-    gen_random_uuid(), -1, 0, 'NONE', NULL, NULL, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
+    gen_random_uuid(), 'BEAT_AGE', -1, 0, NULL, NULL, 'NONE', NULL, NULL, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
 SELECT lc_expect_sqlstate('stale attempt: a NULL error code', $q$SELECT * FROM horsies_finish_stale_attempt(
-    gen_random_uuid(), 0, 0, 'NONE', NULL, NULL, '{}', NULL, 'r', 'm', 'r')$q$, '22023');
+    gen_random_uuid(), 'BEAT_AGE', 0, 0, NULL, NULL, 'NONE', NULL, NULL, '{}', NULL, 'r', 'm', 'r')$q$, '22023');
 SELECT lc_expect_sqlstate('stale attempt: a NULL result', $q$SELECT * FROM horsies_finish_stale_attempt(
-    gen_random_uuid(), 0, 0, 'NONE', NULL, NULL, NULL, 'E', 'r', 'm', 'r')$q$, '23502');
+    gen_random_uuid(), 'BEAT_AGE', 0, 0, NULL, NULL, 'NONE', NULL, NULL, NULL, 'E', 'r', 'm', 'r')$q$, '23502');
 
 ------------------------------------------------------------------------------------------------------------------------
 -- horsies_requeue_stale_claims
@@ -1392,12 +1392,12 @@ INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid
 -- Every row outside this case is out of reach: the other CLAIMED rows are younger than 5 minutes.
 SELECT lc_expect(
     'requeue: the batch bound',
-    horsies_requeue_stale_claims(300000, 2)::text,
+    horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 2)::text,
     '2'
 );
 SELECT lc_expect(
     'requeue: the next batch takes the rest, then a short batch ends the pass',
-    horsies_requeue_stale_claims(300000, 10)::text || ',' || horsies_requeue_stale_claims(300000, 10)::text,
+    horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 10)::text || ',' || horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 10)::text,
     '2,0'
 );
 SELECT lc_expect(
@@ -1413,8 +1413,202 @@ SELECT lc_expect(
      FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000004001'),
     '9'
 );
-SELECT lc_expect_sqlstate('requeue: a batch of 0', $q$SELECT horsies_requeue_stale_claims(1, 0)$q$, '22023');
-SELECT lc_expect_sqlstate('requeue: a negative threshold', $q$SELECT horsies_requeue_stale_claims(-1, 1)$q$, '22023');
+SELECT lc_expect_sqlstate('requeue: a batch of 0', $q$SELECT horsies_requeue_stale_claims('BEAT_AGE', 1, NULL, NULL, 0)$q$, '22023');
+SELECT lc_expect_sqlstate('requeue: a negative threshold', $q$SELECT horsies_requeue_stale_claims('BEAT_AGE', -1, NULL, NULL, 1)$q$, '22023');
+
+------------------------------------------------------------------------------------------------------------------------
+-- Owner gone: horsies_worker_liveness_key, horsies_unheld_worker_owners and the evidence OWNER_GONE
+------------------------------------------------------------------------------------------------------------------------
+
+SELECT lc_expect(
+    'liveness key: hashtextextended of the prefixed worker id; NULL for no id',
+    (horsies_worker_liveness_key('L-key') = hashtextextended('horsies-worker-liveness:L-key', 0))::text
+        || ':' || (horsies_worker_liveness_key(NULL) IS NULL)::text,
+    'true:true'
+);
+
+-- Owners L-a to L-e sort before the w owners of the other cases (C collation). L-a holds its lock in this session.
+-- d001: RUNNING of L-a. d002, d009: CLAIMED of L-b, d009 with a fresh claimer beat. d010: CLAIMED of L-b, claimed
+-- at now(). d011: an orphan workflow task of L-b. d003: RUNNING of L-c, with a fresh runner beat and a fresh
+-- finalizing marker. d004: CLAIMED of L-c. d006: RUNNING of L-c, claimed at now(). d008: RUNNING of L-c, for the
+-- retry. d005: PENDING with a stray owner L-d. d007, d012: RUNNING and CLAIMED of L-e.
+SELECT lc_task('00000000-0000-7000-8000-00000000d001', 'RUNNING', 'L-a');
+SELECT lc_task('00000000-0000-7000-8000-00000000d002', 'CLAIMED', 'L-b');
+SELECT lc_task('00000000-0000-7000-8000-00000000d009', 'CLAIMED', 'L-b');
+SELECT lc_task('00000000-0000-7000-8000-00000000d010', 'CLAIMED', 'L-b');
+SELECT lc_task('00000000-0000-7000-8000-00000000d011', 'CLAIMED', 'L-b', TRUE);
+SELECT lc_task('00000000-0000-7000-8000-00000000d003', 'RUNNING', 'L-c');
+SELECT lc_task('00000000-0000-7000-8000-00000000d004', 'CLAIMED', 'L-c');
+SELECT lc_task('00000000-0000-7000-8000-00000000d006', 'RUNNING', 'L-c');
+SELECT lc_task('00000000-0000-7000-8000-00000000d008', 'RUNNING', 'L-c');
+SELECT lc_task('00000000-0000-7000-8000-00000000d005', 'PENDING');
+SELECT lc_task('00000000-0000-7000-8000-00000000d007', 'RUNNING', 'L-e');
+SELECT lc_task('00000000-0000-7000-8000-00000000d012', 'CLAIMED', 'L-e');
+UPDATE horsies_tasks SET claimed_by_worker_id = 'L-d' WHERE id = '00000000-0000-7000-8000-00000000d005';
+UPDATE horsies_tasks SET claimed_at = now()
+WHERE id IN ('00000000-0000-7000-8000-00000000d010', '00000000-0000-7000-8000-00000000d006');
+UPDATE horsies_tasks SET finalizing_at = now(), finalizing_by_worker_id = 'L-c'
+WHERE id = '00000000-0000-7000-8000-00000000d003';
+INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid) VALUES
+    ('00000000-0000-7000-8000-00000000d003', 'L-c', 'runner', now(), 'host-a', 7),
+    ('00000000-0000-7000-8000-00000000d009', 'L-b', 'claimer', now(), 'host-a', 7);
+SELECT pg_advisory_lock(horsies_worker_liveness_key('L-a'));
+
+SELECT lc_expect(
+    'unheld owners: each owner of CLAIMED and RUNNING rows whose lock no session holds, once',
+    (SELECT string_agg(worker_id, ',' ORDER BY worker_id COLLATE "C") FROM horsies_unheld_worker_owners(10000)
+     WHERE worker_id LIKE 'L-%'),
+    'L-b,L-c,L-e'
+);
+SELECT lc_expect(
+    'unheld owners: the batch bound takes the first owners in worker id order',
+    (SELECT string_agg(worker_id, ',') FROM horsies_unheld_worker_owners(2)),
+    'L-b,L-c'
+);
+SELECT lc_expect(
+    'unheld owners: db_now is the clock of the read',
+    (SELECT bool_and(db_now >= now())::text FROM horsies_unheld_worker_owners(10000)),
+    'true'
+);
+SELECT lc_expect_sqlstate('unheld owners: a batch of 0', $q$SELECT * FROM horsies_unheld_worker_owners(0)$q$,
+    '22023');
+SELECT lc_expect_sqlstate('unheld owners: a batch over 10000',
+    $q$SELECT * FROM horsies_unheld_worker_owners(10001)$q$, '22023');
+SELECT pg_advisory_unlock(horsies_worker_liveness_key('L-a'));
+SELECT lc_expect(
+    'unheld owners: a released lock leaves its owner unheld',
+    (SELECT string_agg(worker_id, ',' ORDER BY worker_id COLLATE "C") FROM horsies_unheld_worker_owners(10000)
+     WHERE worker_id LIKE 'L-%'),
+    'L-a,L-b,L-c,L-e'
+);
+
+SELECT lc_expect(
+    'stale scan OWNER_GONE: the started rows of the owner claimed before the bound, whatever their beats',
+    (SELECT string_agg(right(task_id::text, 4) || ':' || (claimed_at = now() - interval '1 second')::text, ','
+                       ORDER BY task_id)
+     FROM horsies_stale_running_scan('OWNER_GONE', NULL, NULL, 'L-c', now(), 100)),
+    'd003:true,d008:true'
+);
+SELECT lc_expect(
+    'stale scan OWNER_GONE: the batch bound',
+    (SELECT count(*)::text FROM horsies_stale_running_scan('OWNER_GONE', NULL, NULL, 'L-c', now(), 1)),
+    '1'
+);
+SELECT lc_expect_sqlstate('stale scan: OWNER_GONE with a threshold',
+    $q$SELECT * FROM horsies_stale_running_scan('OWNER_GONE', 1, NULL, 'L-c', now(), 10)$q$, '22023');
+SELECT lc_expect_sqlstate('stale scan: OWNER_GONE with no claim bound',
+    $q$SELECT * FROM horsies_stale_running_scan('OWNER_GONE', NULL, NULL, 'L-c', NULL, 10)$q$, '22023');
+SELECT lc_expect_sqlstate('stale scan: BEAT_AGE with an owner',
+    $q$SELECT * FROM horsies_stale_running_scan('BEAT_AGE', 1, 1, 'L-c', NULL, 10)$q$, '22023');
+SELECT lc_expect_sqlstate('stale scan: an unknown evidence',
+    $q$SELECT * FROM horsies_stale_running_scan('HUNCH', 1, 1, NULL, NULL, 10)$q$, '22023');
+SELECT lc_expect_sqlstate('stale scan: no evidence',
+    $q$SELECT * FROM horsies_stale_running_scan(NULL, 1, 1, NULL, NULL, 10)$q$, '22023');
+
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: another claim generation is a lost claim',
+    (SELECT concat_ws('|', outcome, observed_worker_id) FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-00000000d003', 'OWNER_GONE', NULL, NULL, 'L-c', now() - interval '2 seconds',
+        'NONE', NULL, NULL, '{"err":"gone"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+    'LOST_CLAIM|L-c'
+);
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: another owner is a lost claim',
+    (SELECT concat_ws('|', outcome, observed_worker_id) FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-00000000d003', 'OWNER_GONE', NULL, NULL, 'L-b', now() - interval '1 second',
+        'NONE', NULL, NULL, '{"err":"gone"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+    'LOST_CLAIM|L-c'
+);
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: a CLAIMED row of the owner is not RUNNING',
+    (SELECT outcome || ':' || observed_status FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-00000000d004', 'OWNER_GONE', NULL, NULL, 'L-c', now() - interval '1 second',
+        'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+    'SOURCE_STATE_CONFLICT:CLAIMED'
+);
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: an absent task',
+    (SELECT outcome FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-00000000d0ff', 'OWNER_GONE', NULL, NULL, 'L-c', now() - interval '1 second',
+        'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+    'TASK_ABSENT'
+);
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: the row of the owner fails, whatever its beat and its finalizing marker',
+    (SELECT concat_ws('|', outcome, terminalization_kind, retry_disposition, observed_worker_id)
+     FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-00000000d003', 'OWNER_GONE', NULL, NULL, 'L-c', now() - interval '1 second',
+        'NONE', NULL, NULL, '{"err":"gone"}', 'WORKER_CRASHED', 'Worker process gone', 'gone message',
+        'gone reason')),
+    'APPLIED|FAIL_STALE|NOT_REQUESTED|L-c'
+);
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: the history row and the attempt',
+    (SELECT concat_ws('|', h.status, h.terminalization_kind, h.error_code, h.final_failed_reason)
+     FROM horsies_task_history h WHERE h.task_id = '00000000-0000-7000-8000-00000000d003'),
+    'FAILED|FAIL_STALE|WORKER_CRASHED|Worker process gone'
+);
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: a crash retry by policy',
+    (SELECT concat_ws('|', outcome, retry_count, queue_name) FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-00000000d008', 'OWNER_GONE', NULL, NULL, 'L-c', now() - interval '1 second',
+        'RETRY', 0, 0.0, '{"err":"gone"}', 'WORKER_CRASHED', 'r', 'gone message', 'gone reason')),
+    'RETRY_SCHEDULED|1|q_lc'
+);
+SELECT lc_expect(
+    'stale attempt OWNER_GONE: the retried row and its FAILED attempt',
+    (SELECT concat_ws('|', t.status, num_nulls(t.claimed_at, t.claimed_by_worker_id, t.started_at), a.attempt,
+        a.outcome, a.will_retry, a.error_message, a.failed_reason, a.worker_id)
+     FROM horsies_tasks t JOIN horsies_task_attempts a ON a.task_id = t.id
+     WHERE t.id = '00000000-0000-7000-8000-00000000d008'),
+    'PENDING|3|1|FAILED|t|gone message|gone reason|L-c'
+);
+SELECT lc_expect_sqlstate('stale attempt: OWNER_GONE with thresholds', $q$SELECT * FROM horsies_finish_stale_attempt(
+    gen_random_uuid(), 'OWNER_GONE', 0, 0, 'L-c', now(), 'NONE', NULL, NULL, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
+SELECT lc_expect_sqlstate('stale attempt: OWNER_GONE with no claim generation',
+    $q$SELECT * FROM horsies_finish_stale_attempt(
+    gen_random_uuid(), 'OWNER_GONE', NULL, NULL, 'L-c', NULL, 'NONE', NULL, NULL, '{}', 'E', 'r', 'm', 'r')$q$,
+    '22023');
+SELECT lc_expect_sqlstate('stale attempt: BEAT_AGE with an owner', $q$SELECT * FROM horsies_finish_stale_attempt(
+    gen_random_uuid(), 'BEAT_AGE', 0, 0, 'L-c', NULL, 'NONE', NULL, NULL, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
+SELECT lc_expect_sqlstate('stale attempt: an unknown evidence', $q$SELECT * FROM horsies_finish_stale_attempt(
+    gen_random_uuid(), 'HUNCH', 0, 0, NULL, NULL, 'NONE', NULL, NULL, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
+SELECT lc_expect_sqlstate('stale attempt: no evidence', $q$SELECT * FROM horsies_finish_stale_attempt(
+    gen_random_uuid(), NULL, 0, 0, NULL, NULL, 'NONE', NULL, NULL, '{}', 'E', 'r', 'm', 'r')$q$, '22023');
+
+SELECT lc_expect(
+    'requeue OWNER_GONE: the batch bound, the rest, then a short batch',
+    horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 1)::text || ','
+        || horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 10)::text || ','
+        || horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 10)::text,
+    '1,1,0'
+);
+SELECT lc_expect(
+    'requeue OWNER_GONE: the claims of the owner before the bound go back, whatever their beats; a later claim, an '
+        || 'orphan and the claim of another owner stay',
+    (SELECT string_agg(right(id::text, 4) || ':' || status, ',' ORDER BY id) FROM horsies_tasks
+     WHERE id IN ('00000000-0000-7000-8000-00000000d002', '00000000-0000-7000-8000-00000000d009',
+                  '00000000-0000-7000-8000-00000000d010', '00000000-0000-7000-8000-00000000d011',
+                  '00000000-0000-7000-8000-00000000d012')),
+    'd002:PENDING,d009:PENDING,d010:CLAIMED,d011:CLAIMED,d012:CLAIMED'
+);
+SELECT lc_expect(
+    'requeue OWNER_GONE: a requeued row has every claim and run field cleared',
+    (SELECT num_nulls(claimed_at, claimed_by_worker_id, claim_expires_at, started_at, worker_pid, worker_hostname,
+                      worker_process_name, finalizing_at, finalizing_by_worker_id)::text
+     FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000d002'),
+    '9'
+);
+SELECT lc_expect_sqlstate('requeue: OWNER_GONE with a threshold',
+    $q$SELECT horsies_requeue_stale_claims('OWNER_GONE', 1, 'L-b', now(), 1)$q$, '22023');
+SELECT lc_expect_sqlstate('requeue: OWNER_GONE with no claim bound',
+    $q$SELECT horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', NULL, 1)$q$, '22023');
+SELECT lc_expect_sqlstate('requeue: BEAT_AGE with an owner',
+    $q$SELECT horsies_requeue_stale_claims('BEAT_AGE', 1, 'L-b', NULL, 1)$q$, '22023');
+SELECT lc_expect_sqlstate('requeue: an unknown evidence',
+    $q$SELECT horsies_requeue_stale_claims('HUNCH', 1, NULL, NULL, 1)$q$, '22023');
+SELECT lc_expect_sqlstate('requeue: no evidence',
+    $q$SELECT horsies_requeue_stale_claims(NULL, 1, NULL, NULL, 1)$q$, '22023');
 
 ------------------------------------------------------------------------------------------------------------------------
 -- horsies_release_claims

@@ -810,7 +810,8 @@ _STILL_WAITING = object()
 # (tests/dualrun/reference/requeue_caller.py).
 REQUEUE_STALE_CLAIMS_SQL = text("""
     SELECT horsies_requeue_stale_claims(
-        CAST(:stale_after_ms AS INTEGER), CAST(:batch_size AS INTEGER)
+        'BEAT_AGE', CAST(:stale_after_ms AS INTEGER), NULL, NULL,
+        CAST(:batch_size AS INTEGER)
     )
 """)
 
