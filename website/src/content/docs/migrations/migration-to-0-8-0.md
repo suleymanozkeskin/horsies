@@ -211,7 +211,7 @@ To fix it, restart the process. The core does not start again in the same proces
 | `ClassCapacityNotRecorded`; `ClassCapacity` was `ClassBudgets \| ClassCapacityNotRecorded` | Removed. `ClassCapacity` is `ClassBudgets` | Remove the match arm |
 | `ClassesNotRecorded`, `horsies.monitoring.ClassesNotRecordedInfo`, and the `not_recorded` fields of `ClassCoverage`, `ClassReport` and `ClassReportInfo` | Removed. Each worker snapshot of the baseline schema records these facts | Remove the reads |
 | `SchemaState.CUTOVER_REQUIRED` | Removed. `SchemaState.ZERO_X` names a 0.x database | Match `ZERO_X` |
-| `OperationalErrorCode` | One more member: `WORKFLOW_START_INCOMPLETE`. Recovery fails a RUNNING workflow that has no node rows with this code | Add the case to an exhaustive `match` |
+| `OperationalErrorCode` | One more member: `WORKFLOW_START_INCOMPLETE`. Recovery fails a RUNNING workflow that has no node rows with this code. `TaskError` refuses `'WORKFLOW_START_INCOMPLETE'` as a user code | Add the case to an exhaustive `match`. Rename a user code with this name |
 | `TaskSendPayload.args_json`, `kwargs_json` and `enqueue_sha` | Removed. `TaskSendPayload.input_json` holds the keyword arguments as one JSON object, or `None` for none | Read `input_json` |
 | `PostgresBroker.enqueue()` and `enqueue_async()` with `args_json`, `kwargs_json` and `enqueue_sha` | `input_json` replaces the three. `sent_at` and `send_kind` are required. An `input_json` that is not a JSON object or null, or that repeats a key, gets `INVALID_INPUT` | Give `input_json`, `sent_at` and `send_kind` |
 | `PostgresBroker.prepare_send_command()` with `kwargs_json` | Takes `input_json` | Give `input_json` |
