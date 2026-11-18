@@ -617,7 +617,9 @@ async fn the_limit_bounds_case_1_5() {
         code(&error).as_deref(),
         Some("WORKFLOW_RECOVERY_LIMIT_REACHED")
     );
-    let data = error.data.expect("the limit error carries its facts");
+    let data = error
+        .data_value()
+        .expect("the limit error carries its facts");
     assert_eq!(data["case"], "ready_subworkflow_not_started");
     assert_eq!(data["task_index"], 0);
     db.drop().await;

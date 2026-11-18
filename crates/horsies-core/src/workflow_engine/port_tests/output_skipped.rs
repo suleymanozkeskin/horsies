@@ -165,7 +165,7 @@ async fn a_skipped_output_gives_the_named_outcome() {
     let error = error_of(&got);
     assert_eq!(code(error).as_deref(), Some("WORKFLOW_OUTPUT_SKIPPED"));
     assert_eq!(
-        error.data,
+        error.data_value(),
         Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "output_node_id": "node_1",
@@ -416,7 +416,7 @@ async fn a_parent_success_case_is_not_met_and_get_names_the_cause() {
     let error = error_of(&got);
     assert_eq!(code(error).as_deref(), Some("WORKFLOW_OUTPUT_SKIPPED"));
     assert_eq!(
-        error.data.as_ref().map(|data| data["workflow_id"].clone()),
+        error.data_value().map(|data| data["workflow_id"].clone()),
         Some(serde_json::json!(child_id.to_string()))
     );
 }
@@ -564,7 +564,7 @@ async fn two_levels_with_a_mid_case_keep_the_named_outcome() {
     let error = error_of(&got);
     assert_eq!(code(error).as_deref(), Some("WORKFLOW_OUTPUT_SKIPPED"));
     assert_eq!(
-        error.data.as_ref().map(|data| data["workflow_id"].clone()),
+        error.data_value().map(|data| data["workflow_id"].clone()),
         Some(serde_json::json!(child_id.to_string()))
     );
 }
@@ -730,7 +730,7 @@ async fn a_required_unreadable_node_reports_the_cause_at_get() {
         let error = error_of(&got);
         assert_eq!(code(error).as_deref(), Some("RESULT_DESERIALIZATION_ERROR"));
         assert_eq!(
-            error.data.as_ref().map(|data| data["workflow_id"].clone()),
+            error.data_value().map(|data| data["workflow_id"].clone()),
             Some(serde_json::json!(child_id.to_string()))
         );
     }

@@ -273,7 +273,7 @@ The result of a sub-workflow node is the result of its child: the child's output
 | Field | Type |
 |-------|------|
 | `status` | `WorkflowStatus`: `Completed`, `Failed`, `Cancelled` or `Expired` |
-| `output` | `Option<serde_json::Value>`: set only when the child is COMPLETED and stored an ok value |
+| `output` | `Option<JsonText>`: the child's output as its stored text, set only when the child is COMPLETED and stored an ok value. `get()` gives the text, `decode::<T>()` the value |
 | `total_tasks`, `completed_tasks`, `failed_tasks`, `skipped_tasks` | `i32` |
 | `error_summary` | `Option<String>`: the message of the child's stored error |
 

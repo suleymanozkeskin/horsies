@@ -204,7 +204,9 @@ pub fn worker_failure_write(
         false => detail.to_owned(),
     };
     let mut error = TaskError::builtin(OperationalErrorCode::BrokerError, message.clone());
-    error.data = Some(serde_json::json!({ "task_id": task.task_id.to_string() }));
+    error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &serde_json::json!({ "task_id": task.task_id.to_string() }),
+    ));
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),
@@ -235,10 +237,12 @@ pub fn killed_child_write(
 ) -> FinishFailedAttempt {
     let code_text = code.value();
     let mut error = TaskError::builtin(code, message.clone());
-    error.data = Some(serde_json::json!({
-        "task_id": task.task_id.to_string(),
-        "worker_id": worker_id,
-    }));
+    error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &serde_json::json!({
+            "task_id": task.task_id.to_string(),
+            "worker_id": worker_id,
+        }),
+    ));
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),
@@ -301,7 +305,9 @@ pub fn timeout_write(
     let code_text = code.value();
     let message = format!("Task exceeded timeout_ms={}", timeout.get());
     let mut error = TaskError::builtin(code, message.clone());
-    error.data = Some(timeout_data(task.task_id, timeout, cancel));
+    error.data = Some(crate::core::codec::JsonText::of_engine_value(
+        &timeout_data(task.task_id, timeout, cancel),
+    ));
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),

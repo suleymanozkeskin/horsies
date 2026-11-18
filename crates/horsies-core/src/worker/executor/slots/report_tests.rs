@@ -96,7 +96,7 @@ fn a_worker_failure_records_its_detail_as_the_result_and_the_reason() {
             assert_eq!(error.error_code.to_string(), "BROKER_ERROR");
             assert_eq!(error.message.as_deref(), Some("pool died"));
             assert_eq!(
-                error.data,
+                error.data_value(),
                 Some(serde_json::json!({ "task_id": claimed.task_id.to_string() }))
             );
         }

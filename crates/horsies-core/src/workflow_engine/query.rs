@@ -750,10 +750,12 @@ mod wait_tests {
             error_code: OutcomeCode::WorkflowExpired.into(),
             message: Some("paused_workflow_auto_cancel_after elapsed: 3600 seconds".to_owned()),
             exception: None,
-            data: Some(serde_json::json!({
-                "policy": "paused_workflow_auto_cancel_after",
-                "older_than_seconds": 3600.0,
-            })),
+            data: Some(crate::core::codec::JsonText::of_engine_value(
+                &serde_json::json!({
+                    "policy": "paused_workflow_auto_cancel_after",
+                    "older_than_seconds": 3600.0,
+                }),
+            )),
             kind: crate::core::TaskErrorKind::Plain,
         };
         let stored = serde_json::to_string(&persisted).unwrap();

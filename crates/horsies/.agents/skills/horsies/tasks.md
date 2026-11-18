@@ -131,7 +131,7 @@ name of a built-in code or of the reserved code `WORKFLOW_STOPPED`.
 | `.code()` | `&TaskErrorCode<E>`: `Library(BuiltInTaskCode)` or `User(E)` |
 | `.code().text()` | The stored code text |
 | `.message()` | `Option<&str>` |
-| `.data()` | `Option<&serde_json::Value>`, as stored |
+| `.data()` | `Option<&JsonText>`: the stored text; `decode::<T>()` reads it, an integer of any width with all its digits |
 | `.exception()` | `Option<&ExceptionRecord>`: set by the library for a panic of the body |
 | `.sub_workflow()` | `Option<&SubWorkflowFailure>`: the failed child of a sub-workflow node |
 
@@ -271,11 +271,10 @@ use horsies::{BuiltInTaskCode, OutcomeCode, TaskError, TaskErrorCode, UserErrorC
 
 fn cancel_end<E: UserErrorCode>(error: &TaskError<E>) -> Option<String> {
     match error.code() {
-        TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout)) => error
-            .data()
-            .and_then(|data| data.get("cancel_end"))
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
+        TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout)) => {
+            let data: serde_json::Value = error.data()?.decode().ok()?;
+            data.get("cancel_end")?.as_str().map(str::to_owned)
+        }
         _ => None,
     }
 }

@@ -787,7 +787,10 @@ async def _build_enqueued_task_params(
     row stores.
     Failure means THIS node fails (callers fold into
     ``_fail_enqueued_task``); the only statements issued here are the
-    workflow_ctx reads for ctx nodes.
+    workflow_ctx reads for ctx nodes. NULL task options and NULL
+    ``args_from`` are none; an empty stored text (options, input or
+    ``args_from``) is corrupt data and fails the node, as a text that does
+    not parse does.
 
     Raises:
         SerializationError: the kwargs that this function built do not
@@ -798,7 +801,7 @@ async def _build_enqueued_task_params(
     max_retries = 0
     execution = Execution.ISOLATED
     good_until_str: str | None = None
-    if task_options_str:
+    if task_options_str is not None:
         options_data = _deser_json(task_options_str, 'task_options')
         if options_data is None:
             return Err(_EnqueueBuildError(
@@ -842,7 +845,7 @@ async def _build_enqueued_task_params(
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
     raw_kwargs = _deser_json(node_input, 'workflow task kwargs')
-    if raw_kwargs is None and node_input:
+    if raw_kwargs is None:
         return Err(_EnqueueBuildError(
                 f'Corrupt kwargs JSON for task {task_index}',
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
@@ -850,7 +853,7 @@ async def _build_enqueued_task_params(
     kwargs: dict[str, Any] = raw_kwargs if isinstance(raw_kwargs, dict) else {}
 
     # Inject args_from: map kwarg_name -> TaskResult from dependency
-    if args_from:
+    if args_from is not None:
         args_from_raw = args_from
         # args_from is stored as JSONB, may come back as dict directly
         if isinstance(args_from_raw, str):
@@ -1101,7 +1104,7 @@ async def enqueue_subworkflow_task(
 
     # 3. Parse static kwargs and merge args_from
     raw_kwargs = _deser_json(node_input, 'subworkflow kwargs')
-    if raw_kwargs is None and node_input:
+    if raw_kwargs is None:
         await _fail_enqueued_task(
             session,
             workflow_id,
@@ -1133,7 +1136,7 @@ async def enqueue_subworkflow_task(
         )
         return None
 
-    if args_from_raw:
+    if args_from_raw is not None:
         # args_from is stored as JSONB, may come back as dict directly
         if isinstance(args_from_raw, str):
             args_from_map = _deser_json(args_from_raw, 'subworkflow args_from')
@@ -3038,7 +3041,9 @@ async def on_subworkflow_complete(
     child_output = _parse_child_output(child_result_json)
 
     error_summary: str | None = None
-    if child_error:
+    if child_error is not None:
+        # An empty text does not parse: its summary is its text, as for any
+        # other stored error that is not JSON.
         error_data = _deser_json(child_error, 'child error')
         if isinstance(error_data, dict):
             msg = error_data.get('message')
@@ -3244,7 +3249,7 @@ async def get_workflow_failure_error(
             {'wf_id': workflow_id},
         )
         row = result.fetchone()
-        if row and row.result:
+        if row is not None and row.result is not None:
             # Failed-task path needs only the err slot — TaskError has a
             # fixed schema so decode without ok_type via _decode_err_only.
             err_tr = _decode_err_only(row.result)
@@ -3270,7 +3275,7 @@ async def get_workflow_failure_error(
             {'wf_id': workflow_id, 'required': list(all_required)},
         )
         row = result.fetchone()
-        if row and row.result:
+        if row is not None and row.result is not None:
             # Failed-required-task path needs only the err slot (TaskError
             # has a fixed schema; ok_type not needed).
             err_tr = _decode_err_only(row.result)
@@ -3569,7 +3574,7 @@ def _terminal_entry(workflow_id: str, node_id: str, row: Any) -> Json:
                 output_row=row,
             ),
         )
-    if not row.result:
+    if row.result is None:
         return None
     deser = _deser_json(row.result, 'terminal task result json')
     if isinstance(deser, dict) and deser.get('__h_task_result__') is True:

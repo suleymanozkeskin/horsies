@@ -143,14 +143,15 @@ AS $$
     SELECT (horsies_task_error_envelope(p_error_code, p_message, p_data, NULL, NULL)::json -> 'err')::text
 $$;
 
--- p_text parsed as json, or NULL when it is NULL, empty, or not JSON. Used on cold paths only (completion, failure
--- policy, child completion): the parse runs in a subtransaction.
+-- p_text parsed as json, or NULL when it is NULL or not JSON. An empty text is not JSON: a caller that must tell it
+-- from NULL checks NULL first. Used on cold paths only (completion, failure policy, child completion): the parse runs
+-- in a subtransaction.
 -- Locks: none. Returns json or NULL. Python: loads_json (core/codec/json_io.py) at the decode sites it serves.
 CREATE FUNCTION horsies_workflow_json_or_null(p_text text) RETURNS json
     LANGUAGE plpgsql IMMUTABLE
 AS $$
 BEGIN
-    IF p_text IS NULL OR p_text = '' THEN
+    IF p_text IS NULL THEN
         RETURN NULL;
     END IF;
     RETURN p_text::json;
@@ -166,8 +167,9 @@ $$;
 -- - 'VALUE': a valid envelope with an empty err slot;
 -- - 'ERROR': a valid envelope whose err slot is an object with an error_code;
 -- - 'OUTPUTLESS': the outputless workflow envelope (__h_outputless_terminals__ true);
--- - 'ABSENT': NULL or empty text;
--- - 'UNREADABLE': anything else (not JSON, another shape, an err slot without an error_code).
+-- - 'ABSENT': NULL;
+-- - 'UNREADABLE': anything else (not JSON, an empty text included, another shape, an err slot without an error_code).
+--   No writer stores an empty text, so it is corrupt data, not "no result".
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_result_kind(p_text text) RETURNS text
     LANGUAGE plpgsql IMMUTABLE
@@ -176,7 +178,7 @@ DECLARE
     v_value json := horsies_workflow_json_or_null(p_text);
     v_keys text[];
 BEGIN
-    IF p_text IS NULL OR p_text = '' THEN
+    IF p_text IS NULL THEN
         RETURN 'ABSENT';
     END IF;
     IF v_value IS NULL OR json_typeof(v_value) <> 'object' THEN
@@ -244,7 +246,9 @@ $$;
 
 -- The cause of a stored result text that horsies_workflow_result_kind reads as 'UNREADABLE', in the words and the
 -- order of the checks of Python's _decode_err_only (core/workflows/engine.py:324-377), loads_json
--- (core/codec/json_io.py:97-137) and validate_task_result_envelope (core/codec/typed.py:1133-1180):
+-- (core/codec/json_io.py) and validate_task_result_envelope (core/codec/typed.py:1133-1180):
+-- 0. an empty text: 'Stored task result is not JSON: JSON parse failed: the text is empty' (the text of Python's
+--    EmptyJsonTextError);
 -- 1. text that the json input refuses: 'Stored task result is not JSON: JSON parse failed: <the database's text>';
 --    Python writes the text of its json module there, which the database cannot give;
 -- 2. a top-level object that repeats a key: 'Stored task result is not JSON: JSON parse failed: JSON object repeats
@@ -274,6 +278,9 @@ DECLARE
     v_missing text[];
     v_extra text[];
 BEGIN
+    IF p_result = '' THEN
+        RETURN 'Stored task result is not JSON: JSON parse failed: the text is empty';
+    END IF;
     BEGIN
         v_value := p_result::json;
     EXCEPTION
@@ -321,8 +328,9 @@ $$;
 -- The error of a stored node result, as the bare error object text, for the workflow error column. Python:
 -- _decode_err_only (core/workflows/engine.py:324-377) and _recovered_failure_result
 -- (core/workflows/phase2_recovery.py:233-292). Returns the err slot text unchanged for 'ERROR'; NULL for 'VALUE',
--- 'ABSENT' and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); for 'UNREADABLE', a
--- RESULT_DESERIALIZATION_ERROR object whose message is the cause (horsies_workflow_unreadable_result_cause).
+-- 'ABSENT' (NULL) and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); for 'UNREADABLE', an
+-- empty text included, a RESULT_DESERIALIZATION_ERROR object whose message is the cause
+-- (horsies_workflow_unreadable_result_cause).
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_err_slot(p_result text) RETURNS text
     LANGUAGE plpgsql IMMUTABLE
@@ -345,7 +353,9 @@ $$;
 -- context). Python: get_dependency_results (core/workflows/engine.py:2762-2853).
 -- - SKIPPED: UPSTREAM_SKIPPED with data {"dependency_index": <index>}.
 -- - A stored result: the text, copied.
--- - COMPLETED or FAILED with no stored result: RESULT_DESERIALIZATION_ERROR naming the source node.
+-- - COMPLETED or FAILED with a NULL or empty result: RESULT_DESERIALIZATION_ERROR naming the source node. No writer
+--   stores either; an empty text fails closed with the entry of a missing result, the one entry of the core's
+--   dependency_result and Python's _missing_result_entry.
 -- Locks: none. Returns the value text.
 CREATE FUNCTION horsies_workflow_source_value(
     p_status text, p_result text, p_task_index integer, p_node_id text, p_task_name text
@@ -973,10 +983,10 @@ END;
 $$;
 
 -- The message with which the promotion fails a task node whose stored task options p_task_options do not read, as
--- Python's _build_enqueued_task_params writes it for node p_task_index, or NULL when they read (NULL and empty options
--- read as no options). The checks run in Python's order; the first refusal is the message:
--- 1. text that does not parse, or the JSON null (horsies_workflow_options_json): 'Corrupt task_options JSON for task
---    <index>';
+-- Python's _build_enqueued_task_params writes it for node p_task_index, or NULL when they read (NULL options read as
+-- no options). The checks run in Python's order; the first refusal is the message:
+-- 1. an empty text, text that does not parse, or the JSON null (horsies_workflow_options_json): 'Corrupt task_options
+--    JSON for task <index>'. A node without options stores NULL; no writer stores an empty text;
 -- 2. a value that is not an object: 'Invalid task_options payload for task <index>: expected object';
 -- 3. the retry_policy member (horsies_workflow_retry_policy_refusal): 'Invalid retry_policy for task <index>:
 --    <detail>';
@@ -990,10 +1000,13 @@ DECLARE
     v_options json;
     v_detail text;
 BEGIN
-    IF p_task_options IS NULL OR p_task_options = '' THEN
+    IF p_task_options IS NULL THEN
         RETURN NULL;
     END IF;
-    v_options := horsies_workflow_options_json(p_task_options);
+    -- horsies_workflow_options_json takes no empty text: empty options stay NULL here and are refused.
+    IF p_task_options <> '' THEN
+        v_options := horsies_workflow_options_json(p_task_options);
+    END IF;
     IF v_options IS NULL OR json_typeof(v_options) = 'null' THEN
         RETURN format('Corrupt task_options JSON for task %s', p_task_index);
     END IF;
@@ -1546,7 +1559,8 @@ $$;
 -- _stored_output_result (core/workflows/engine.py:3772-3868).
 -- - SKIPPED output node: WORKFLOW_OUTPUT_SKIPPED.
 -- - COMPLETED or FAILED with a stored result: that text, copied.
--- - COMPLETED or FAILED with a NULL or empty result: RESULT_DESERIALIZATION_ERROR.
+-- - COMPLETED or FAILED with a NULL or empty result: RESULT_DESERIALIZATION_ERROR with the text of a missing result.
+--   No writer stores either; an empty text fails closed here, as Python's _stored_output_result reads it.
 -- An absent output row, or an output node that is not terminal, is a defect (the start writes the row; the caller
 -- counted no live node): it raises with SQLSTATE XX001 (data_corrupted).
 -- Locks: none. Returns the result text.
@@ -1595,10 +1609,11 @@ $$;
 -- {"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{"results_by_id":...,"task_name_by_id":...,
 -- "definition_key_by_id":...},"err":null} over the terminal nodes (no node depends on them) that have a node_id.
 -- An entry is the stored envelope text, WORKFLOW_OUTPUT_SKIPPED for a SKIPPED node, or null for a result that is
--- absent or not an envelope. The terminal set is the node indexes minus the union of all dependency arrays, from two
--- array aggregates: no correlated probe per row. All stored results are parsed in one statement; only when one of
--- them is not JSON does each row get a parse of its own. Python: get_workflow_final_result, _terminal_entry,
--- _compute_terminal_indexes (core/workflows/engine.py:3712-3727, 3870-3988).
+-- absent (NULL) or not an envelope (an empty text included). The terminal set is the node indexes minus the union of
+-- all dependency arrays, from two array aggregates: no correlated probe per row. All stored results are parsed in one
+-- statement; only when one of them is not JSON (or is empty) does each row get a parse of its own. Python:
+-- get_workflow_final_result, _terminal_entry, _compute_terminal_indexes (core/workflows/engine.py:3712-3727,
+-- 3870-3988).
 -- Locks: none. Returns the envelope text.
 CREATE FUNCTION horsies_workflow_outputless_result(p_workflow_id uuid) RETURNS text
     LANGUAGE plpgsql STABLE
@@ -1623,7 +1638,7 @@ BEGIN
     BEGIN
         PERFORM count(n.result::json)
         FROM horsies_workflow_tasks n
-        WHERE n.workflow_id = p_workflow_id AND n.task_index = ANY(v_terminal) AND n.result <> '';
+        WHERE n.workflow_id = p_workflow_id AND n.task_index = ANY(v_terminal);
     EXCEPTION
         WHEN invalid_text_representation THEN
             v_all_json := FALSE;
@@ -1636,7 +1651,7 @@ BEGIN
                        format('Workflow %s is COMPLETED and its terminal node %L is SKIPPED', p_workflow_id, n.node_id),
                        horsies_workflow_output_error_data(p_workflow_id, n.node_id, n.task_index, n.task_name),
                        NULL, NULL)
-                   WHEN n.result IS NULL OR n.result = '' THEN 'null'
+                   WHEN n.result IS NULL THEN 'null'
                    WHEN v_all_json
                         AND json_typeof(n.result::json) = 'object'
                         AND json_typeof(n.result::json -> '__h_task_result__') = 'boolean'
@@ -1948,12 +1963,12 @@ $$;
 -- - COMPLETED child with a value envelope: COMPLETED, the child's text copied.
 -- - COMPLETED child with the outputless envelope: COMPLETED, {"__h_task_result__":true,"ok":null,"err":null}.
 -- - COMPLETED child with an error envelope: FAILED, the child's text copied.
--- - COMPLETED child with a result that is absent or not an envelope: FAILED, RESULT_DESERIALIZATION_ERROR naming the
---   child.
+-- - COMPLETED child with a result that is absent (NULL) or not an envelope (an empty text included): FAILED,
+--   RESULT_DESERIALIZATION_ERROR naming the child.
 -- - FAILED, CANCELLED or EXPIRED child: FAILED, SUBWORKFLOW_FAILED with sub_workflow_id and sub_workflow_summary.
 -- The summary: status, output (the ok value of a value envelope, else null), the node counts, error_summary (the
--- message of a stored error object, the first 200 characters of a stored error that is not JSON or is the JSON null,
--- else null).
+-- message of a stored error object, the first 200 characters of a stored error that is not JSON (an empty text
+-- included: no writer stores one) or is the JSON null, null for a NULL error, else null).
 -- failure_error: the error that the failure policy of the parent records for a FAILED node, as the bare error object
 -- text. For a FAILED, CANCELLED or EXPIRED child it is SUBWORKFLOW_FAILED with the message "Subworkflow <id> failed"
 -- and the same sub_workflow_id and summary (Python: the error of _ParentNodeFailed); for a FAILED node of a COMPLETED
@@ -1986,7 +2001,7 @@ BEGIN
     v_kind := horsies_workflow_result_kind(v_child.result);
     v_error := horsies_workflow_json_or_null(v_child.error);
     v_error_summary := CASE
-        WHEN v_child.error IS NULL OR v_child.error = '' THEN NULL
+        WHEN v_child.error IS NULL THEN NULL
         WHEN v_error IS NULL OR json_typeof(v_error) = 'null' THEN left(v_child.error, 200)
         WHEN json_typeof(v_error) = 'object' AND json_typeof(v_error -> 'message') = 'string'
             THEN v_error ->> 'message'

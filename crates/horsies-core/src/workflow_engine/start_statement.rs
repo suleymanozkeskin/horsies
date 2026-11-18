@@ -550,10 +550,12 @@ const NO_STATIC_MEMBERS: &str = "{}";
 /// `core/workflows/child_build.py`). Pure.
 fn child_input_error(request: &ChildSpecRequest, message: String) -> TaskError {
     TaskError {
-        data: Some(serde_json::json!({
-            "workflow_id": request.parent_workflow_id.to_string(),
-            "task_index": request.task_index,
-        })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({
+                "workflow_id": request.parent_workflow_id.to_string(),
+                "task_index": request.task_index,
+            }),
+        )),
         ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
     }
 }
@@ -625,10 +627,12 @@ pub fn params_refused_error(
         ),
     };
     TaskError {
-        data: Some(serde_json::json!({
-            "workflow_id": workflow_id.to_string(),
-            "task_index": task_index,
-        })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "task_index": task_index,
+            }),
+        )),
         ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
     }
 }
@@ -684,10 +688,12 @@ fn child_build_failure(
     failure: &str,
 ) -> TaskError {
     TaskError {
-        data: Some(serde_json::json!({
-            "workflow_id": workflow_id.to_string(),
-            "task_index": task_index,
-        })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "task_index": task_index,
+            }),
+        )),
         ..TaskError::builtin(
             OperationalErrorCode::WorkflowEnqueueFailed,
             format!("Subworkflow build failed: {failure} (workflow {workflow_name}:{task_index})"),
@@ -724,7 +730,9 @@ pub fn subworkflow_load_failed_error(
     definition_key: Option<&str>,
 ) -> TaskError {
     TaskError {
-        data: Some(serde_json::json!({ "definition_key": definition_key })),
+        data: Some(crate::core::codec::JsonText::of_engine_value(
+            &serde_json::json!({ "definition_key": definition_key }),
+        )),
         ..TaskError::builtin(
             OperationalErrorCode::SubworkflowLoadFailed,
             format!(

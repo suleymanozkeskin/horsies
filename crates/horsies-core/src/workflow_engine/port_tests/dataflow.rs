@@ -144,7 +144,10 @@ async fn a_skipped_dependency_is_injected_as_upstream_skipped_with_its_index() {
     let injected = args_from_inner(&input, "input_result");
     let error = error_of(&injected);
     assert_eq!(code(error).as_deref(), Some("UPSTREAM_SKIPPED"));
-    assert_eq!(error.data, Some(serde_json::json!({"dependency_index": 1})));
+    assert_eq!(
+        error.data_value(),
+        Some(serde_json::json!({"dependency_index": 1}))
+    );
 }
 
 /// `TestArgsFromInjection.test_partial_args_from_only_mapped_deps_injected`
@@ -295,7 +298,10 @@ async fn a_skipped_context_dependency_reads_as_upstream_skipped_with_its_index()
     let entry = ctx_result(&input, "node_1");
     let error = error_of(&entry);
     assert_eq!(code(error).as_deref(), Some("UPSTREAM_SKIPPED"));
-    assert_eq!(error.data, Some(serde_json::json!({"dependency_index": 1})));
+    assert_eq!(
+        error.data_value(),
+        Some(serde_json::json!({"dependency_index": 1}))
+    );
 }
 
 /// `TestWorkflowCtx.test_ctx_failed_dep_returns_original_error`

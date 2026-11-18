@@ -447,12 +447,12 @@ fn envelope_refused_cause(refused: &TaskResultTextRefused) -> String {
             format!("the text breaks the strict rule: {rule}")
         }
         TaskResultTextRefused::Undecodable(error) => value_free_decode_text(error),
-        TaskResultTextRefused::ErrorSlotUndecodable(error) => unreadable_cause(error),
         TaskResultTextRefused::ErrorRefused(StoredErrorRefused::FieldInvalid { field, .. }) => {
             format!("field {field} of a stored task error does not parse")
         }
         TaskResultTextRefused::ErrorRefused(
-            StoredErrorRefused::NotAnObject
+            StoredErrorRefused::NotJson(_)
+            | StoredErrorRefused::NotAnObject
             | StoredErrorRefused::UnknownKey(_)
             | StoredErrorRefused::MissingField(_)
             | StoredErrorRefused::UserValue { .. },
@@ -603,7 +603,12 @@ mod tests {
             panic!("a cancelled task is a failed outcome");
         };
         assert_eq!(error.code().text(), "TASK_CANCELLED");
-        assert_eq!(error.data(), Some(&json!({"task_id": task().to_string()})));
+        assert_eq!(
+            error
+                .data()
+                .map(|data| data.decode::<serde_json::Value>().unwrap()),
+            Some(json!({"task_id": task().to_string()}))
+        );
         // A result stored for a cancelled task is not read.
         let Ok(TaskOutcome::Failed(stored)) = outcome(record(
             TaskStatus::Cancelled,

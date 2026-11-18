@@ -511,7 +511,10 @@ fn serialization_error<V>(message: String) -> StoredTaskError {
         error_code: horsies_core::TaskErrorCode::from(
             OperationalErrorCode::WorkerSerializationError,
         ),
-        data: Some(serde_json::Value::Object(data)),
+        data: Some(
+            horsies_core::JsonText::of(&serde_json::Value::Object(data))
+                .expect("an object of two text members writes as strict JSON"),
+        ),
         message: Some(message),
         kind: TaskErrorKind::Plain,
     }
@@ -845,7 +848,7 @@ mod tests {
         );
         assert!(message.contains("Order"), "{message}");
         assert!(!text_of(&error).contains(MARKER));
-        let data = error.data.unwrap();
+        let data: serde_json::Value = error.data.unwrap().decode().unwrap();
         assert!(data["expected_type"].as_str().unwrap().contains("Order"));
         assert_eq!(data["validation_error"].as_str(), Some(message.as_str()));
     }
@@ -1012,10 +1015,8 @@ mod tests {
                     .clone()
                     .unwrap()
                     .contains("does not read back"));
-                assert_eq!(
-                    error.data.as_ref().unwrap()["expected_type"],
-                    std::any::type_name::<TextNumber>()
-                );
+                let data: serde_json::Value = error.data.as_ref().unwrap().decode().unwrap();
+                assert_eq!(data["expected_type"], std::any::type_name::<TextNumber>());
                 assert!(!text_of(&error).contains(MARKER));
             }
         }

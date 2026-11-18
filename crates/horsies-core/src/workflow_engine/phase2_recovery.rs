@@ -1465,8 +1465,10 @@ mod tests {
             "WORKFLOW_RECOVERY_LIMIT_REACHED"
         );
         assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("case")),
-            Some(&serde_json::json!("phase2_progression"))
+            error
+                .data_value()
+                .and_then(|data| data.get("case").cloned()),
+            Some(serde_json::json!("phase2_progression"))
         );
         let (source, attempts): (String, i32) = sqlx::query_as(
             "SELECT recovery_source, attempt_count

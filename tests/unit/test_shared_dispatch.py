@@ -224,6 +224,15 @@ REFUSED_SHARED_ROWS = [
         ),
         id='no-options',
     ),
+    # The grace read refuses an empty text as corrupt data, not as no options.
+    pytest.param(
+        '',
+        TaskTimeout(ms=2000),
+        OptionsUnreadable(
+            reason='stored task_options do not parse: JSON parse failed: the text is empty',
+        ),
+        id='empty-options-text',
+    ),
 ]
 
 
