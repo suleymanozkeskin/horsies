@@ -273,7 +273,7 @@ pub struct CrashRecoveryWrites {
 /// [`killed_child_write`]s, with `message` on the first send and with
 /// `Retry after future-stage finalize error: <message>` on each send after
 /// a database error (Python `_finalize_child_loss` and
-/// `_retry_finalize_future`, `python/horsies/core/worker/finalize.py:1942-1987`).
+/// `_retry_finalize_future`, `python/horsies/core/worker/finalize.py:1942-1985`).
 /// Pure.
 pub fn crash_recovery_writes(
     task: &ClaimedTask,
