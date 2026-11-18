@@ -56,7 +56,7 @@ from tests.dualrun.coverage import (
 )
 from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
 from tests.dualrun.rules import SnapshotCatalog, TableRules
-from tests.dualrun.values import RunWindow
+from tests.dualrun.values import RunWindow, RunWindowInvalid
 
 TABLE_ROW_LIMIT: Final = 10_000
 """Most rows the capture reads from one table; a table with more fails the capture."""
@@ -641,12 +641,15 @@ def capture_with_notifications(
     connection: Connection,
     notifications: tuple[Notification, ...],
     window: RunWindow,
+    *,
+    row_limit: int = TABLE_ROW_LIMIT,
 ) -> Result[NormalizedSnapshot, CaptureError]:
-    """The snapshot of the baseline tables (``read_raw_snapshot``) and of
-    ``notifications`` as the ``NOTIFICATIONS`` table, normalized by
-    ``NOTIFIED_CATALOG``. A notification on a channel without a payload rule
-    is a defect of the caller (asserted)."""
-    match read_raw_snapshot(connection, BASELINE_CATALOG):
+    """The snapshot of the baseline tables (``read_raw_snapshot``, at most
+    ``row_limit`` rows per table) and of ``notifications`` as the
+    ``NOTIFICATIONS`` table, normalized by ``NOTIFIED_CATALOG``. A
+    notification on a channel without a payload rule is a defect of the
+    caller (asserted)."""
+    match read_raw_snapshot(connection, BASELINE_CATALOG, row_limit=row_limit):
         case Err(error):
             return Err(error)
         case Ok(raw):
@@ -663,3 +666,52 @@ def capture_with_notifications(
         NOTIFIED_CATALOG,
         window,
     )
+
+
+# ---- Capture failures ----
+
+CaptureFailure = ClockReadFailed | RunWindowInvalid | NotificationError | CaptureError
+"""Every way the capture after a passing body can fail: the run end clock
+read, the run window, the notification read, the snapshot read and its
+normalization."""
+
+
+def _raised(cause: psycopg.Error) -> str:
+    return f'{type(cause).__name__}: {cause}'
+
+
+def render_capture_failure(error: CaptureFailure) -> str:
+    """The subject and the cause of a capture failure, in one line. Pure."""
+    match error:
+        case ClockReadFailed(cause=cause):
+            return f'the run end clock read raised {_raised(cause)}'
+        case RunWindowInvalid(start=start, end=end, fault=fault):
+            return f'the run window from {start.isoformat()} to {end.isoformat()}: {fault.value}'
+        case NotificationReadFailed(cause=cause):
+            return f'the notification read raised {_raised(cause)}'
+        case NotificationMarkerMissing(wait=wait):
+            return f'the notification marker did not arrive within {wait}'
+        case NotificationLimitExceeded(limit=limit):
+            return f'the run sent more than {limit} notifications'
+        case CaptureStatementFailed(cause=cause):
+            return f'a capture statement raised {_raised(cause)}'
+        case CaptureBlocked(lock_timeout=lock_timeout):
+            return f'a table lock was held longer than {lock_timeout} (an open transaction of the test)'
+        case SchemaColumnLimitExceeded(limit=limit):
+            return f'the schema has more than {limit} horsies_ columns'
+        case CatalogCoverageGap(gaps=gaps):
+            return f'the live schema and the snapshot catalog differ: {gaps}'
+        case TableRowLimitExceeded(table=table, limit=limit):
+            return f'{table}: more than {limit} rows'
+        case UnreadableTime(table=table, column=column, text=text, cause=cause):
+            return f'{table}.{column}: the clock text {text!r} does not parse: {cause}'
+        case UnanchoredTime(table=table, column=column, anchor=anchor, reason=reason):
+            return f'{table}.{column}: no offset from {anchor}: {reason.value}'
+        case UnreadableJson(table=table, column=column, cause=cause):
+            return f'{table}.{column}: {cause}'
+        case UnsupportedStoredFormat(
+            table=table, column=column, version_column=version_column, found=found
+        ):
+            return f'{table}.{column}: {version_column} is {found}, a format the rule does not read'
+        case UnreadableBytes(table=table, column=column):
+            return f'{table}.{column}: the cell is not the hex text of a bytea value'
