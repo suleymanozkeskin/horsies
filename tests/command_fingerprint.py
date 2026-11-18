@@ -1,49 +1,35 @@
-"""Command fingerprint, version 1.
+"""Python mirror of the core's version-1 command fingerprint, for seeding tests only.
 
-The fingerprint decides replay versus conflict for keyed enqueue: the same
-scoped key with the same fingerprint returns the committed request, a
-different fingerprint is a typed conflict. Every field that changes what
-the request asks for participates — including the effective
-`retain_rerun_input` snapshot, because accepting a replay that requests a
-different value would silently change the request's retained-input promise
-while returning the original identity.
+The core computes the fingerprint of every send
+(``EnqueueCommandV1``, ``crates/horsies-core/src/core/history/identity/fingerprint.rs``)
+and pins its digests. Tests that insert a task row with test-side SQL use
+this mirror to store the fingerprint that a send of the same values stores.
 
-The digest is SHA-256 over a canonical compact JSON array whose element
-order is part of version 1. Adding, removing, or reordering a field is
-version 2, never an in-place change: stored fingerprints are compared
-byte-for-byte forever.
+The digest is SHA-256 over a compact JSON array whose element order is part
+of version 1: the version, the task name, the queue name, the priority, the
+positional and keyword input texts, ``good_until`` as
+``YYYY-MM-DDTHH:MM:SS.ffffff+00:00`` in UTC, the enqueue delay, the task
+options text, the retention class key, ``retain_rerun_input``, and the rerun
+source and root ids.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final
-
-from horsies.core.codec.json_io import dumps_canonical_json
-
 
 COMMAND_FINGERPRINT_VERSION: Final = 1
 
 
 @dataclass(frozen=True, slots=True)
 class EnqueueCommandV1:
-    """The version-1 fingerprint projection of one enqueue request.
+    """The version-1 fingerprint projection of one send.
 
-    Serialized inputs travel as their canonical JSON strings — the
-    fingerprint covers the bytes the request actually carries, not a
-    re-serialization. A send stores its input in the one ``input`` column,
-    so it passes the stored ``input`` text as ``input_json``: the
-    fingerprint is then a function of the stored row. ``input_json`` takes
-    the element of the keyword arguments of version 1, so the digest of a
-    stored row does not change.
-
-    ``positional_args_json`` takes the element of the positional arguments
-    of version 1. A task takes keyword arguments only, so every send passes
-    ``None``. (In 0.6 and 0.7 a workflow node passed its stored args text,
-    ``'[]'`` for a node that those versions wrote.) The field keeps its
-    place in the array, so no version-1 digest changes.
+    A send stores its input in the one ``input`` column and passes that text
+    as ``input_json``; ``positional_args_json`` is ``None`` for every send.
     """
 
     task_name: str
@@ -78,7 +64,7 @@ class EnqueueCommandV1:
     @property
     def fingerprint(self) -> bytes:
         """The 32-byte version-1 command fingerprint."""
-        canonical = dumps_canonical_json(
+        canonical = json.dumps(
             [
                 COMMAND_FINGERPRINT_VERSION,
                 self.task_name,
@@ -93,7 +79,10 @@ class EnqueueCommandV1:
                 self.retain_rerun_input,
                 self.rerun_of_task_id,
                 self.rerun_root_task_id,
-            ]
+            ],
+            ensure_ascii=False,
+            separators=(',', ':'),
+            allow_nan=False,
         ).encode()
         return hashlib.sha256(canonical).digest()
 

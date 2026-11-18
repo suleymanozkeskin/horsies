@@ -44,10 +44,10 @@ class SerializationError(Exception):
 
 
 class EmptyJsonTextError(SerializationError):
-    """The text or payload to read is empty. An empty text is not JSON.
+    """The text to read is empty. An empty text is not JSON.
 
-    ``loads_json`` and ``loads_json_bytes`` return it. It is a
-    ``SerializationError``, so a caller that handles that type handles it too.
+    ``loads_json`` returns it. It is a ``SerializationError``, so a caller
+    that handles that type handles it too.
     """
 
 
@@ -90,26 +90,6 @@ def dumps_json(value: object) -> SerdeResult[str]:
             f'serialized value is not valid UTF-8 (lone surrogate?): {exc}'
         ))
     return Ok(encoded)
-
-
-def dumps_canonical_json(value: object) -> str:
-    """Serialize a JSON-native value to its one canonical text.
-
-    Compact separators, sorted keys, no ASCII escaping. Callers store or hash
-    this text, so equal content always gives equal text.
-
-    Callers pass values that ``loads_json`` parsed or that the library built,
-    so a non-finite float is a code defect: ``allow_nan=False`` raises
-    ``ValueError``, and no caller handles it. Unlike ``dumps_json`` this does
-    not walk the value first.
-    """
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(',', ':'),
-        sort_keys=True,
-        allow_nan=False,
-    )
 
 
 def loads_json(s: str) -> SerdeResult[Json]:
@@ -156,26 +136,6 @@ def loads_json(s: str) -> SerdeResult[Json]:
     except (json.JSONDecodeError, ValueError) as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
     return Ok(parsed)
-
-
-def loads_json_bytes(payload: bytes) -> SerdeResult[Json]:
-    """Deserialize a stored payload whose codec declares UTF-8 JSON.
-
-    The bytes are decoded as UTF-8, then read by ``loads_json``, so empty
-    bytes are ``Err(EmptyJsonTextError)`` as an empty text is. Bytes that are
-    not UTF-8 are an Err: ``json.loads`` on bytes detects UTF-16 and UTF-32
-    and skips a byte order mark, so it accepts formats that the codec does
-    not declare.
-
-    The error text names a byte offset, not a byte: the payload is task input.
-    """
-    try:
-        text = payload.decode('utf-8')
-    except UnicodeDecodeError as exc:
-        return Err(SerializationError(
-            f'JSON parse failed: payload is not UTF-8 at byte {exc.start}'
-        ))
-    return loads_json(text)
 
 
 def validate_core_model_json[T](adapter: TypeAdapter[T], text: str) -> T:

@@ -285,13 +285,13 @@ before you upgrade a 0.7 deployment.
   `stale_threshold_minutes` that is not an `int` from 0 to 525,600 is
   `INVALID_INPUT` before any statement; 0.7 ran the read with any value.
 
-- **A JSON object that repeats a key is refused.** `loads_json` and
-  `loads_json_bytes` refuse it at any depth; at enqueue it is
-  `INVALID_INPUT` and nothing is written. 0.7 kept the last value.
+- **A JSON object that repeats a key is refused.** `loads_json` refuses
+  it at any depth; at enqueue it is `INVALID_INPUT` and nothing is written.
+  0.7 kept the last value.
 
 - **Breaking: `loads_json` refuses an empty text and takes no `None`.** An
-  empty text is not JSON: `loads_json('')` and `loads_json_bytes(b'')` are
-  `Err(EmptyJsonTextError)`, a `SerializationError` with the text
+  empty text is not JSON: `loads_json('')` is `Err(EmptyJsonTextError)`, a
+  `SerializationError` with the text
   `JSON parse failed: the text is empty`. 0.7 read `''` and `None` as the
   JSON value `null`. A caller with a nullable value checks `None` before the
   call. A send whose kwargs text or task options text is empty gets
@@ -692,7 +692,13 @@ before you upgrade a 0.7 deployment.
   `del app.tasks[name]`, which raises `NotRegistered` for a name that is not
   registered), `WF_TASK_TERMINAL_VALUES` of `horsies.core.models.workflow`
   (use `WORKFLOW_TASK_TERMINAL_STATES`), and `BANNER` and `format_banner`
-  of `horsies.core.banner`. The package `horsies` exports none of them.
+  of `horsies.core.banner`. From `horsies.core.codec.json_io`:
+  `loads_json_bytes` and `dumps_canonical_json`. The enqueue statement
+  helpers of `horsies.core.brokers.enqueue_task` (everything but
+  `SendKind`), the command fingerprint module
+  `horsies.core.history.identity.fingerprint` and `ScopedIdempotencyKey` of
+  `horsies.core.history.identity.keys`: the core runs the send. The package
+  `horsies` exports none of them.
 
 ### Rust client (crate `horsies`)
 

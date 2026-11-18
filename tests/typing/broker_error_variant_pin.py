@@ -43,7 +43,7 @@ from horsies import (
     TaskSendPayload,
     broker_error_cause,
 )
-from horsies.core.brokers.enqueue_task import Inserted, SendKind, enqueue_result
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import (
     PostgresBroker,
     _async_context_err,  # pyright: ignore[reportPrivateUsage]
@@ -185,13 +185,10 @@ def enqueue_helpers_return_their_subsets() -> None:
     stored_input: Result[str, BrokerInvalidInput] = _parse_enqueue_input(
         'report', None,
     )
-    answered: Result[
-        UUID, BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict
-    ] = enqueue_result(Inserted(), task_id=TASK_ID, task_name='report')
     async_context: Err[BrokerAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
     )
-    _ = (stored_input, answered, async_context)
+    _ = (stored_input, async_context)
 
 
 def send_mapping_refuses_the_operation_error(
