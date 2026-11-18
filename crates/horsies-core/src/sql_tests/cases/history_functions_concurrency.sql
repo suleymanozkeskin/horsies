@@ -576,12 +576,12 @@ SELECT fixture_check(
     $q$) AS t(outcome text)) = 'DROPPED'
 );
 SELECT fixture_check(
-    'after drop: a move into the dropped leaf raises 23514 and the task stays live',
+    'after drop: a move into the dropped leaf raises 55H01 (history leaf missing) and the task stays live',
     (SELECT states FROM dblink('a', $q$
         SELECT fixture_sqlstate(format('SELECT fixture_move_at(%L, %L)',
                    (SELECT id FROM fixture_ids WHERE name = 'during_row'), '2021-02-04 10:00:00+00'))
             || '/' || fixture_place('during_row')
-    $q$) AS t(states text)) = '23514/live'
+    $q$) AS t(states text)) = '55H01/live'
 );
 SELECT fixture_check(
     'after drop: a later move at the database clock succeeds',

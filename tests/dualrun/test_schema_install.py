@@ -8,7 +8,9 @@ through the broker's ``CoreHandle``.
 
 Each side starts from the harness's database (the baseline migration with
 the PYTHON family row, and no published history readers), changes it in the
-seed, and installs with a new broker. The cases:
+seed, and installs with a new broker. An install that is not refused ends
+with the startup coverage pass of the default retention config, on both
+sides, so the snapshots hold the same leaves. The cases:
 
 - the baseline without readers: the install publishes them;
 - the baseline without the family row: the install records PYTHON;

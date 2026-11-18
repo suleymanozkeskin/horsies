@@ -494,10 +494,36 @@ SELECT fixture_expect_error(
     'P0002'
 );
 SELECT fixture_expect_error(
-    'move refuses: a row that no history leaf takes',
+    'move refuses: a row that no history leaf takes (55H01, history leaf missing)',
     format($q$SELECT fixture_move(%L, 'FAILED', 'FAIL_RUNNING', now(), '{}', 'E', 'r')$q$,
            (SELECT id FROM ids WHERE name = 'refused_class')),
-    '23514'
+    '55H01'
+);
+
+-- The SQLSTATE, the message and the DETAIL of a refused statement, or 'succeeded'.
+CREATE FUNCTION fixture_refusal_text(p_sql text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    v_state text;
+    v_message text;
+    v_detail text;
+BEGIN
+    BEGIN
+        EXECUTE p_sql;
+    EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_message = MESSAGE_TEXT,
+            v_detail = PG_EXCEPTION_DETAIL;
+        RETURN v_state || ' ' || v_message || ' / ' || v_detail;
+    END;
+    RETURN 'succeeded';
+END
+$$;
+SELECT fixture_check(
+    'move refuses: the leaf refusal names the class, the missing UTC day and the missing class partition',
+    fixture_refusal_text(format(
+        $q$SELECT fixture_move(%L, 'FAILED', 'FAIL_RUNNING', '2026-03-04 23:30:00-05', '{}', 'E', 'r')$q$,
+        (SELECT id FROM ids WHERE name = 'refused_class')))
+    = '55H01 no task-history leaf of class standard_9d covers [2026-03-05T00:00:00Z, 2026-03-06T00:00:00Z) / '
+      'the class partition horsies_task_history_standard_9d does not exist: the class is not registered'
 );
 
 -- A row the caller did not lock: a copy taken before the live row changed.
@@ -718,12 +744,12 @@ SELECT fixture_expect_error(
     'P0001'
 );
 SELECT fixture_expect_error(
-    'batch refuses: a row that no history leaf takes',
+    'batch refuses: a row that no history leaf takes (55H01, history leaf missing)',
     format($q$SELECT horsies_move_tasks_to_history(ARRAY[%L, %L]::uuid[], 'EXPIRED', 'EXPIRE_PENDING', now(),
            '{}', 'E', NULL)$q$,
            (SELECT id FROM ids WHERE name = 'batch_refused'),
            (SELECT id FROM ids WHERE name = 'refused_class')),
-    '23514'
+    '55H01'
 );
 INSERT INTO horsies_task_history_clock_exceptions (task_id, retention_class_key, terminal_at)
 VALUES ((SELECT id FROM ids WHERE name = 'batch_refused_no_node'), 'forever', now() - interval '1 day');

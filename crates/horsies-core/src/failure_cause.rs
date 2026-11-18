@@ -265,6 +265,7 @@ impl BrokerError {
     /// The cause of a broker error. Pure.
     ///
     /// - A statement or a driver error: by its outcome and SQLSTATE.
+    /// - A failed coverage pass of the schema install: by its history error.
     /// - A lost connection or a stopped listener: [`FailureCause::Connection`].
     /// - Stored data or rows that break their reader: [`FailureCause::ContractViolation`].
     /// - Refused settings, a database of another family or schema, a send
@@ -274,6 +275,7 @@ impl BrokerError {
         match self {
             Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::Statement(failure) => failure.failure_cause(),
+            Self::InstallCoverage(error) => error.failure_cause(),
             Self::ConnectionFailed(_) | Self::ListenerClosed => FailureCause::Connection,
             Self::Serialization(_)
             | Self::InvalidStatus(_)

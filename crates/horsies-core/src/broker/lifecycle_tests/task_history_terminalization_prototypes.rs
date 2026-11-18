@@ -35,6 +35,7 @@ use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization::terminalize_in_tx;
 use crate::broker::workflow_stop_before_start::{stop_before_start, OrphanSelfHeal};
 use crate::core::history::archive::attempts::{encode_attempt_snapshot, AttemptRecord};
+use crate::core::history::errors::HISTORY_LEAF_MISSING_SQLSTATE;
 use crate::core::lifecycle::{
     BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
     WorkflowSuccessOutcome,
@@ -688,7 +689,9 @@ async fn missing_workflow_link_rolls_back_the_move() {
 
 /// Python `test_missing_history_leaf_rolls_back_fused_attempt_and_live_delete`:
 /// with no history leaf for the row's retention class, the fused completion
-/// fails, and its attempt and its live delete roll back with it.
+/// fails with the named refusal (55H01, retryable), which names the class
+/// and the missing UTC day, and its attempt and its live delete roll back
+/// with it.
 #[tokio::test]
 #[serial]
 async fn missing_history_leaf_rolls_back_fused_attempt_and_live_delete() {
@@ -703,9 +706,26 @@ async fn missing_history_leaf_rolls_back_fused_attempt_and_live_delete() {
     .await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = server_refusal(terminalize(&pool, &fused(task_id)).await);
+    let failed = terminalize(&pool, &fused(task_id)).await;
+    assert!(
+        matches!(&failed, Err(error) if error.is_retryable()),
+        "{failed:?}"
+    );
+    let refused = server_refusal(failed);
 
-    assert_eq!(refused.code().code(), "23514", "{refused}");
+    assert_server_refusal(
+        &refused,
+        HISTORY_LEAF_MISSING_SQLSTATE,
+        "no task-history leaf of class standard_1777d covers [",
+    );
+    assert_eq!(
+        refused.detail(),
+        Some(
+            "the class partition horsies_task_history_standard_1777d does not exist: \
+             the class is not registered"
+        ),
+        "{refused}"
+    );
     assert_eq!(live_row(&pool, task_id).await, before);
     assert!(live_attempts(&pool, task_id).await.is_empty());
     assert_eq!(history_row(&pool, task_id).await, None);

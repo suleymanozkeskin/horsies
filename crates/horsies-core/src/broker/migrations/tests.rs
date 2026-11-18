@@ -1331,7 +1331,9 @@ async fn an_observe_only_broker_runs_no_schema_statement() {
 
 /// Python `test_broker_postgres.py::TestEnsureSchemaInitialized::test_ensure_schema_initialized_returns_ok_on_success`:
 /// on a database that holds the chain and this client's family, the install
-/// of a broker returns `Ok`, again on a second call, and writes nothing.
+/// of a broker returns `Ok`, again on a second call, and applies no
+/// migration: the bookkeeping rows keep their install times. (The install's
+/// coverage pass writes leaves; `partition_maintenance` tests it.)
 #[tokio::test]
 #[serial]
 async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing() {

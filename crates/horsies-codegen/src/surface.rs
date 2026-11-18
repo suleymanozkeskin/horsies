@@ -619,7 +619,7 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         name: "install_schema",
         parameters: &[],
         returns: TypeText::Plain(INSTALL_OUTCOME),
-        doc: "Apply the embedded migrations and check the schema version, once per handle. Writes.",
+        doc: "Apply the embedded migrations, check the schema version, then run the startup coverage\npass that creates the history leaves of the current UTC day and the lookahead, once per\nhandle. Writes.",
     },
     StubFunction {
         name: "install_schema_async",

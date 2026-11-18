@@ -1,7 +1,9 @@
 //! Schema install and schema status.
 //!
-//! - Install applies the embedded migrations once per handle and checks the
-//!   version; a handle built with `OBSERVE_ONLY` runs nothing.
+//! - Install applies the embedded migrations once per handle, checks the
+//!   version and runs the startup coverage pass of the handle's request
+//!   (`PostgresBroker::ensure_schema_initialized`); a handle built with
+//!   `OBSERVE_ONLY` runs nothing.
 //! - Status is the web schema gate's read: the version that the last
 //!   successful migration reached, against the version this core expects. A
 //!   database that cannot be read answers `UNKNOWN`, as the gate does.
@@ -81,8 +83,9 @@ impl<'py> IntoPyObject<'py> for InstallOutcome {
     }
 }
 
-/// Install the schema through the handle's broker. Writes. The broker keeps
-/// a success, so a second install on the same handle runs nothing.
+/// Install the schema through the handle's broker: the migrations, then the
+/// startup coverage pass. Writes. The broker keeps a success, so a second
+/// install on the same handle runs nothing.
 pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
     match connection.schema_mode() {
         SchemaMode::ObserveOnly | SchemaMode::AssumeInitialized => {

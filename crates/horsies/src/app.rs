@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::ProducerManifest;
-use horsies_core::{ClientFamily, NamedChildStartHook, PoolProfile, RegisteredTask, TaskRegistry};
+use horsies_core::{
+    ClientFamily, CoverageRequest, NamedChildStartHook, PoolProfile, RegisteredTask, TaskRegistry,
+};
 
 pub use horsies_core::manifest::SchemaMode;
 
@@ -96,12 +98,19 @@ impl Horsies {
 
     /// An app whose handle has the schema mode `mode`. `ObserveOnly` and
     /// `AssumeInitialized` never run schema DDL (monitoring tools); the
-    /// second also uses no listener.
+    /// second also uses no listener. The schema install of a
+    /// `MigrateAndValidate` handle ends with the coverage pass of the
+    /// config's retention ([`CoverageRequest::of_retention`]): the history
+    /// leaves of every class that the app's sends can stamp exist for the
+    /// current UTC day and the lookahead, with or without a worker.
     pub fn with_schema_mode(config: AppConfig, mode: SchemaMode) -> Result<Self, HorsiesError> {
         validate_config(&config)?;
         let manifest = producer_manifest(&config.broker, mode)
             .map_err(|refused| refused.to_horsies_error())?;
-        let handle = CoreHandle::new(manifest, PoolProfile::Producer, ClientFamily::Rust);
+        let install_coverage = CoverageRequest::of_retention(&config.retention)
+            .map_err(|refused| HorsiesError::new(format!("invalid retention config: {refused}")))?;
+        let handle = CoreHandle::new(manifest, PoolProfile::Producer, ClientFamily::Rust)
+            .with_install_coverage(install_coverage);
         Ok(Self::from_parts(config, Arc::new(handle)))
     }
 
@@ -497,6 +506,24 @@ mod tests {
 
     #[derive(Debug, PartialEq)]
     struct Settings(u32);
+
+    /// The app's handle installs with the coverage request of the app's
+    /// retention config: a declared period is among its classes.
+    #[test]
+    fn the_handle_installs_with_the_coverage_of_the_retention_config() {
+        let mut declared = config();
+        declared.retention.retention_periods = vec![chrono::Duration::days(7)];
+        let app = Horsies::new(declared.clone()).unwrap();
+
+        assert_eq!(
+            app.handle().install_coverage(),
+            &CoverageRequest::of_retention(&declared.retention).unwrap()
+        );
+        assert_ne!(
+            app.handle().install_coverage(),
+            &CoverageRequest::of_retention(&config().retention).unwrap()
+        );
+    }
 
     #[test]
     fn a_new_app_is_a_producer_with_no_task() {
