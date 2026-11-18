@@ -470,10 +470,29 @@ async fn pausing_proxied_pool(
     let proxy = SqlStatementProxy::start_with_pause(database.url(), 0, Some(pause.clone())).await;
     let pool = TestPoolOptions::new()
         .max_connections(1)
-        .connect(&sql::with_endpoint(database.url(), "127.0.0.1", proxy.port))
+        .connect(&with_tls_disabled(&sql::with_endpoint(
+            database.url(),
+            "127.0.0.1",
+            proxy.port,
+        )))
         .await
         .expect("connect through pausing SQL statement proxy");
     (proxy, pool, pause)
+}
+
+/// `url` with `sslmode=disable` in place of any `sslmode` pair it holds.
+/// The pause reads the server's bytes as tagged messages from the first
+/// byte (`BackendReadyParser`); the one-byte answer to a TLS request is not
+/// such a message, so a connection through the pausing proxy, and every
+/// pool built from its URL, must not ask for TLS. Pure.
+fn with_tls_disabled(url: &str) -> String {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let mut pairs: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && !pair.starts_with("sslmode="))
+        .collect();
+    pairs.push("sslmode=disable");
+    format!("{base}?{}", pairs.join("&"))
 }
 
 /// Sets the session time zone of a proxied core connection.
