@@ -33,9 +33,9 @@ use std::future::Future;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, wait_inside_task_message, BrokerError, FailureCause, HandleErrorCode,
-    HandleOperation, HandleOperationError, HandleResult, ProcessRole, UserCode, WorkflowError,
-    WorkflowStartError, WorkflowStatus,
+    process_role, wait_inside_task_message, BrokerError, HandleErrorCode, HandleOperation,
+    HandleOperationError, HandleResult, ProcessRole, UserCode, WorkflowError, WorkflowStartError,
+    WorkflowStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -81,7 +81,12 @@ fn block_start<H>(
             retryable: true,
             workflow_name: names.workflow_name.to_owned(),
             workflow_id,
-            cause: FailureCause::PreconditionFailed,
+            cause: WorkflowError::Broker(BrokerError::ProcessRuntime(
+                ProcessRuntimeRefusal::StartFailed {
+                    cause: failed.cause,
+                    os_error: failed.os_error,
+                },
+            )),
         }),
     }
 }

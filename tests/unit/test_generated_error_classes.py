@@ -1,7 +1,7 @@
 """The error classes generated from horsies-core keep the public shape.
 
 `horsies-codegen` renders the classes of the broker, workflow handle,
-monitoring query, task action and task send catalogs into
+monitoring query, task action, task send and workflow start catalogs into
 `horsies._catalog` from the core's records (`horsies_core::error_catalog`),
 with the payload record of a send and the retention class key. The old
 modules re-export them. This test pins, for each class, that the public
@@ -28,6 +28,7 @@ from horsies._catalog import (
     retention_class,
     task_send_errors,
     workflow_handle_errors,
+    workflow_start_errors,
 )
 from horsies._catalog.error_detail import NoCause as GeneratedNoCause
 from horsies.core.brokers import result_types
@@ -38,6 +39,7 @@ from horsies.core.lifecycle import outcomes
 from horsies.core.models import task_send_types
 from horsies.core.models.workflow import handle_types
 from horsies.core.types import error_detail
+from horsies.core.workflows import start_types
 from horsies.monitoring import errors, task_actions
 
 pytestmark = [pytest.mark.unit]
@@ -76,6 +78,10 @@ SHAPES: Final[tuple[ClassShape, ...]] = (
     ClassShape(task_actions.TaskActionWorkflowTask, monitoring_errors.TaskActionWorkflowTask, (('message', False), ('task_id', True), ('current_status', True),), 'TASK_IS_WORKFLOW_TASK', never_retryable=True),
     ClassShape(task_actions.TaskActionDbOperationFailed, monitoring_errors.TaskActionDbOperationFailed, (('message', False), ('retryable', True), ('task_id', True), ('exception', False),), 'DB_OPERATION_FAILED', never_retryable=False),
     ClassShape(task_actions.TaskActionStoredDataInvalid, monitoring_errors.TaskActionStoredDataInvalid, (('message', False), ('task_id', True), ('exception', False),), 'STORED_DATA_INVALID', never_retryable=True),
+    ClassShape(start_types.WorkflowStartValidationFailed, workflow_start_errors.WorkflowStartValidationFailed, (('message', False), ('workflow_name', True), ('workflow_id', True), ('exception', False),), 'VALIDATION_FAILED', never_retryable=True),
+    ClassShape(start_types.WorkflowStartIdConflict, workflow_start_errors.WorkflowStartIdConflict, (('message', False), ('workflow_name', True), ('workflow_id', True), ('existing_workflow_name', True),), 'WORKFLOW_ID_CONFLICT', never_retryable=True),
+    ClassShape(start_types.WorkflowStartEnqueueFailed, workflow_start_errors.WorkflowStartEnqueueFailed, (('message', False), ('retryable', True), ('workflow_name', True), ('workflow_id', True), ('exception', False),), 'ENQUEUE_FAILED', never_retryable=False),
+    ClassShape(start_types.WorkflowStartAsyncContext, workflow_start_errors.WorkflowStartAsyncContext, (('message', False), ('workflow_name', True), ('workflow_id', True),), 'ASYNC_CONTEXT', never_retryable=True),
 )
 
 
@@ -176,6 +182,10 @@ def test_each_public_union_is_the_generated_union_and_its_client_only_classes() 
     assert handle_types.HandleOperationError.__value__ is workflow_handle_errors.HandleCoreError
     assert errors.MonitoringQueryError.__value__ is monitoring_errors.MonitoringQueryCoreError
     assert task_actions.TaskActionError.__value__ is monitoring_errors.TaskActionCoreError
+    assert start_types.WorkflowStartError.__value__ == (
+        workflow_start_errors.WorkflowStartCoreError
+        | start_types.WorkflowStartBrokerNotConfigured
+    )
 
 
 class SendClassShape(NamedTuple):

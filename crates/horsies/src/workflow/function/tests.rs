@@ -225,7 +225,7 @@ async fn a_retry_of_an_error_that_is_not_enqueue_failed_is_refused() {
         message: "earlier".to_owned(),
         workflow_name: "daily".to_owned(),
         workflow_id: Uuid::nil(),
-        cause: horsies_core::FailureCause::PreconditionFailed,
+        cause: horsies_core::StartRefusalCause::Check,
     };
     let refused = function.retry_start(&error).await.unwrap_err();
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);

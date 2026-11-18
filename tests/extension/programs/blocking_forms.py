@@ -37,6 +37,10 @@ from horsies.core.models.workflow.handle_types import (
     HandleStoredDataInvalid,
 )
 from horsies.core.types.result import Err, Ok
+from horsies.core.workflows.start_types import (
+    WorkflowStartEnqueueFailed,
+    WorkflowStartIdConflict,
+)
 from horsies.core.workflows.spec_data import workflow_spec_json
 from horsies.core.workflows.start_tree import top_node_rows
 from tests.extension.programs.report import JsonValue, Report, run_case
@@ -112,7 +116,7 @@ def describe(outcome: object) -> JsonValue:
             return [name, status, error_json is None]
         case core.WorkflowCompletedRead(result_json=result_json):
             return [name, result_json]
-        case core.WorkflowIdTaken(existing_name=existing_name):
+        case WorkflowStartIdConflict(existing_workflow_name=existing_name):
             return [name, existing_name]
         case core.WorkflowNodesRead(nodes=nodes):
             return [name, [[node.node_id, node.task_index, node.status] for node in nodes]]
@@ -124,7 +128,7 @@ def describe(outcome: object) -> JsonValue:
             | HandleResumeRecoveryFailed()
         ):
             return [name, outcome.code.value, outcome.retryable]
-        case core.WorkflowStartFailed(retryable=retryable):
+        case WorkflowStartEnqueueFailed(retryable=retryable):
             return [name, retryable]
         case (
             BrokerOperationFailed()

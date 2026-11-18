@@ -171,6 +171,25 @@ before you upgrade a 0.7 deployment.
   returned `DB_OPERATION_FAILED` from each call. The `workflow_id` of the
   handle error classes stays a `str`, the canonical text of the UUID.
 
+- **The workflow start classes are generated from the core, and the core
+  builds the error classes of a start.** The four classes of the core's
+  start catalog (`WorkflowStartValidationFailed`, `WorkflowStartIdConflict`,
+  `WorkflowStartEnqueueFailed`, `WorkflowStartAsyncContext`) are rendered
+  into `horsies._catalog.workflow_start_errors` from the core's records.
+  Their names, fields and docs do not change, and
+  `horsies.core.workflows.start_types` re-exports them.
+  `WorkflowStartError` is the generated union `WorkflowStartCoreError` plus
+  `WorkflowStartBrokerNotConfigured`, which only the Python client
+  produces. A start whose id belongs to another workflow name, and a start
+  that failed, return the `WorkflowStartIdConflict` or
+  `WorkflowStartEnqueueFailed` that the core builds, with the same
+  messages. The records `WorkflowIdTaken` and `WorkflowStartFailed` of
+  `horsies._core` are removed. The `workflow_id` of these two classes and
+  the id in the conflict message are the canonical text of the UUID. The
+  `exception` of a failed schema install is the core's class of the cause
+  with the cause's own text; the message keeps `Schema initialization
+  failed: <cause>`.
+
 - **The core builds the error classes of the broker.** A failed ping,
   task info read, result read, worker state read, class read, task list
   or schema install returns the `BrokerOperationFailed`,
@@ -1147,6 +1166,13 @@ unless it starts with "Added".
   `HandleOperation::ResultFor` variant holds the `node_id`. A blocking form
   whose process runtime did not start has the cause
   `BrokerError::ProcessRuntime` (new).
+- **`WorkflowStartError` carries typed causes.** `ValidationFailed` has
+  `cause: StartRefusalCause` (new: `Error(WorkflowError)` for a refusal of
+  the engine, `Check` for a refusal that a check found), and
+  `EnqueueFailed` has `cause: WorkflowError` (a failed connect or schema
+  install is `WorkflowError::Broker`). `WorkflowStartError` is no longer
+  `Clone`. A blocking start whose process runtime did not start has the
+  cause `BrokerError::ProcessRuntime`.
 - **`BrokerOperationError` carries typed causes.** `OperationFailed` has
   `cause: BrokerOperationSource` (new: `Broker(BrokerError)`,
   `ClassRead(ClassReadRefused)`, `Snapshot(WorkerStateUnreadable)`,
