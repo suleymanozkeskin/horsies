@@ -47,9 +47,6 @@ from horsies._core import (
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
-    StaleRunningRecovered,
-    StaleRunningScanFailed,
-    StaleRunningScanFull,
     TooManyPendingCalls,
     OrphanAuditFailed,
     OrphanAuditLockBusy,
@@ -932,115 +929,6 @@ class TestPingWorkers:
 
 
 @pytest.mark.unit
-class TestMarkStaleTasksAsFailed:
-    """mark_stale_tasks_as_failed maps the record of one core pass to its result."""
-
-    @staticmethod
-    def _handle(answer: object) -> MagicMock:
-        """A core handle whose stale RUNNING pass answers ``answer``: a
-        record, or an exception that the call raises."""
-        handle = MagicMock()
-        match answer:
-            case BaseException():
-                handle.mark_stale_running_async = AsyncMock(side_effect=answer)
-            case _:
-                handle.mark_stale_running_async = AsyncMock(return_value=answer)
-        return handle
-
-    @pytest.mark.asyncio
-    async def test_a_pass_returns_the_recovered_count(self) -> None:
-        broker = _make_broker()
-        broker._core_handle = self._handle(
-            MagicMock(spec=StaleRunningRecovered, recovered=3),
-        )
-
-        result = await broker.mark_stale_tasks_as_failed(
-            stale_threshold_ms=300_000,
-            finalizing_stale_threshold_ms=60_000,
-        )
-
-        assert result == Ok(3)
-        broker._core_handle.mark_stale_running_async.assert_awaited_once_with(
-            300_000, 60_000,
-        )
-
-    @pytest.mark.asyncio
-    async def test_a_full_scan_batch_warns_that_the_rest_waits(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        broker = _make_broker()
-        broker._core_handle = self._handle(
-            MagicMock(spec=StaleRunningScanFull, recovered=7, scan_batch=1000),
-        )
-
-        with caplog.at_level('WARNING', logger='horsies.broker'):
-            result = await broker.mark_stale_tasks_as_failed()
-
-        assert result == Ok(7)
-        assert 'read a full scan batch of 1000 candidates' in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_a_failed_scan_is_cleanup_failed(self) -> None:
-        broker = _make_broker()
-        broker._core_handle = self._handle(
-            MagicMock(
-                spec=StaleRunningScanFailed,
-                message='stale scan: connection lost',
-                retryable=True,
-                exception=_CONNECTION_LOST,
-            ),
-        )
-
-        result = await broker.mark_stale_tasks_as_failed()
-
-        assert is_err(result)
-        failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
-        assert failed.retryable is True
-        assert failed.message == 'mark_stale_tasks_as_failed failed: stale scan: connection lost'
-        assert failed.exception is _CONNECTION_LOST
-
-    @pytest.mark.asyncio
-    async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
-        broker = _make_broker()
-        error = TooManyPendingCalls('CoreHandle.mark_stale_running_async', 65_536)
-        broker._core_handle = self._handle(error)
-
-        result = await broker.mark_stale_tasks_as_failed()
-
-        assert is_err(result)
-        failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
-        assert failed.retryable is True
-        assert failed.exception is error
-
-    @pytest.mark.parametrize(
-        ('stale_ms', 'finalizing_ms'),
-        [(SIGNED_64_BIT_MAX + 1, 60_000), (60_000, SIGNED_64_BIT_MIN - 1)],
-        ids=['stale', 'finalizing'],
-    )
-    @pytest.mark.asyncio
-    async def test_a_threshold_past_64_bits_is_refused_before_the_core(
-        self, stale_ms: int, finalizing_ms: int,
-    ) -> None:
-        broker = _make_broker()
-        broker._core_handle = self._handle(MagicMock(spec=StaleRunningRecovered, recovered=0))
-
-        result = await broker.mark_stale_tasks_as_failed(
-            stale_threshold_ms=stale_ms,
-            finalizing_stale_threshold_ms=finalizing_ms,
-        )
-
-        assert is_err(result)
-        failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
-        assert failed.retryable is False
-        assert isinstance(failed.exception, OverflowError)
-        broker._core_handle.mark_stale_running_async.assert_not_awaited()
-
-
-@pytest.mark.unit
 class TestExpirePendingTasks:
     """expire_pending_tasks maps the record of one core pass to its result."""
 
@@ -1150,18 +1038,6 @@ class TestTerminateOrphanedWorkflowTasks:
             cancelled=candidates_returned,
         )
 
-    @pytest.mark.parametrize('cancelled', [0, 3])
-    @pytest.mark.asyncio
-    async def test_terminate_returns_the_cancelled_count_of_one_page(
-        self, cancelled: int,
-    ) -> None:
-        broker = _make_broker()
-        broker._core_handle = self._handle(self._page(cancelled, cancelled))
-
-        result = await broker.terminate_orphaned_workflow_tasks()
-
-        assert result == Ok(cancelled)
-        broker._core_handle.audit_orphaned_workflow_tasks_async.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_audit_reports_cursor_metrics(self) -> None:
@@ -1228,7 +1104,7 @@ class TestTerminateOrphanedWorkflowTasks:
         error = TooManyPendingCalls('CoreHandle.audit_orphaned_workflow_tasks_async', 65_536)
         broker._core_handle = self._handle(error)
 
-        result = await broker.terminate_orphaned_workflow_tasks()
+        result = await broker.audit_orphaned_workflow_tasks()
 
         assert is_err(result)
         failed = result.err_value

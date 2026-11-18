@@ -5387,6 +5387,72 @@ mod enqueue_task_options_tests {
         }
     }
 
+    /// A send command holds the values that a send of the same texts binds:
+    /// the input, the options, the execution class, the retry limit, the
+    /// retention class, the rerun-input posture and the version-1
+    /// fingerprint, for the default and the `forever` retention and for both
+    /// postures.
+    #[test]
+    fn a_send_command_holds_the_values_that_a_send_of_its_texts_binds() {
+        let options = policy(4, "")
+            .replace("\"ISOLATED\"", "\"SHARED_ASYNC\"")
+            .replace("\"cancel_grace_ms\": null", "\"cancel_grace_ms\": 5000");
+        assert!(options.contains("\"cancel_grace_ms\": 5000"), "{options}");
+        for (retention, retain_rerun_input) in [
+            (EnqueueRetention::Default, false),
+            (EnqueueRetention::Forever, true),
+        ] {
+            let command = SendCommand::prepare(
+                "tasks.report",
+                "default",
+                100,
+                r#"{"value":1}"#,
+                Some(options.as_str()),
+                retention,
+                retain_rerun_input,
+            )
+            .expect("the send command builds");
+            let send = CheckedSend::check(
+                "tasks.report",
+                r#"{"value":1}"#,
+                "default",
+                100,
+                None,
+                None,
+                None,
+                Some(options.as_str()),
+                Some(Uuid::from_u128(7)),
+                None,
+                None,
+                retention,
+                retain_rerun_input,
+            )
+            .expect("the send is checked");
+
+            assert_eq!(
+                command,
+                SendCommand {
+                    task_name: send.task_name.to_owned(),
+                    queue_name: send.queue_name.to_owned(),
+                    priority: send.priority,
+                    stored_input: send.input.to_owned(),
+                    task_options: send.task_options.map(str::to_owned),
+                    execution: send.facts.execution,
+                    max_retries: send.max_retries,
+                    retention_class_key: send.facts.retention_class_key.clone(),
+                    retain_rerun_input: send.facts.retain_rerun_input,
+                    fingerprint_version: send.facts.command_fingerprint_version,
+                    fingerprint: send.facts.command_fingerprint.to_vec(),
+                },
+                "{retention:?}"
+            );
+            assert_eq!(
+                (command.execution, command.max_retries),
+                (crate::core::task::execution::Execution::SharedAsync, 4)
+            );
+        }
+    }
+
     /// A send command and a send read the options with the strict rule
     /// before the retry limit, so both refuse an empty text with the strict
     /// read's error, not with the retry limit's.

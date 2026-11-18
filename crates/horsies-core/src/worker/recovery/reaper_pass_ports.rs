@@ -19,6 +19,7 @@ use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::BrokerError;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::{CapturedEvent, LogCapture};
 
 /// The policy that retries a crash, as Python's test stores it, with the
 /// limit `max_retries` and a fixed 60 s interval per retry.
@@ -491,6 +492,98 @@ async fn a_stale_pass_fails_each_stale_row_and_counts_it() {
         assert_eq!((status.as_str(), kind.as_str()), ("FAILED", "FAIL_STALE"));
     }
     core.close();
+}
+
+/// A row whose finalizing marker is older than the finalizing threshold is
+/// stale: the pass fails it with `WORKER_CRASHED`, and its live row, with
+/// the marker, moves to history.
+#[tokio::test]
+#[serial]
+async fn a_stale_pass_fails_a_row_whose_finalizing_marker_is_past_its_threshold() {
+    let pool = migrated_pool().await;
+    let core = core_pool_for_test_pool(&pool);
+    let finalizing = seed_task(&pool, &Seed::stale_running()).await;
+    set_finalizing(&pool, finalizing, 10.0).await;
+
+    let recovered = mark_stale_running_as_failed(
+        &core,
+        StatementLog::Off,
+        thresholds_ms(300_000, 5_000),
+        whole_scan(),
+    )
+    .await
+    .expect("the stale pass");
+
+    assert_eq!(recovered, 1);
+    assert_eq!(live_status(&pool, finalizing).await, None);
+    let (status, kind, error_code, _) = history_facts(&pool, finalizing)
+        .await
+        .expect("the stale row moved to history");
+    assert_eq!(
+        (status.as_str(), kind.as_str(), error_code.as_deref()),
+        ("FAILED", "FAIL_STALE", Some("WORKER_CRASHED"))
+    );
+    core.close();
+}
+
+/// A stale pass whose scan reads its whole batch warns on `horsies.broker`
+/// that the rest is recovered next pass, and counts the rows it recovered.
+#[tokio::test]
+#[serial]
+async fn a_stale_pass_whose_scan_reads_its_whole_batch_warns_that_the_rest_waits() {
+    let pool = migrated_pool().await;
+    let core = core_pool_for_test_pool(&pool);
+    let _stale = seed_tasks(&pool, &Seed::stale_running(), 2).await;
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+
+    let recovered = mark_stale_running_as_failed(
+        &core,
+        StatementLog::Off,
+        thresholds_ms(300_000, 300_000),
+        RecoveryBatch::new(1).expect("1 row is a recovery batch"),
+    )
+    .await
+    .expect("the stale pass");
+
+    assert_eq!(recovered, 1);
+    let [warning]: [CapturedEvent; 1] = capture
+        .lines_starting(
+            tracing::Level::WARN,
+            "mark_stale_tasks_as_failed read a full scan batch",
+        )
+        .try_into()
+        .expect("one full-batch warning");
+    assert_eq!(warning.target, "horsies.broker");
+    assert_eq!(
+        warning.message,
+        "mark_stale_tasks_as_failed read a full scan batch of 1 candidates; the rest is \
+         recovered next pass",
+    );
+    core.close();
+}
+
+/// A stale pass whose scan cannot run (its pool is closed) is an error, not
+/// a count; nothing is written.
+#[tokio::test]
+#[serial]
+async fn a_stale_pass_whose_scan_cannot_run_is_an_error() {
+    let pool = migrated_pool().await;
+    let core = core_pool_for_test_pool(&pool);
+    core.close();
+
+    let failed = mark_stale_running_as_failed(
+        &core,
+        StatementLog::Off,
+        thresholds_ms(300_000, 300_000),
+        whole_scan(),
+    )
+    .await;
+
+    assert!(
+        matches!(failed, Err(BrokerError::Statement(_))),
+        "{failed:?}"
+    );
 }
 
 /// Python `TestMarkStaleTasksAsFailed::test_update_includes_worker_crashed_error_code`,

@@ -772,28 +772,45 @@ class TestTaskHandleRecordToTaskResult:
             raw_result=raw_result,
         )
 
-    def test_stored_result_past_the_depth_bound_is_a_deserialization_error(
+    @pytest.mark.asyncio
+    async def test_stored_result_past_the_depth_bound_is_a_deserialization_error(
         self,
     ) -> None:
-        """Before, `RecursionError` left the read. The broker refuses the text,
-        and the handle folds the refusal."""
-        from horsies.core.brokers.postgres import PostgresBroker
-        from horsies.core.types.status import TaskStatus
+        """Before, `RecursionError` left the read. The broker's result read
+        refuses the stored text, and the handle folds the refusal. The core
+        handle of the broker is faked."""
+        import uuid
 
-        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
-        broker_result = PostgresBroker._build_raw_result_record(  # pyright: ignore[reportPrivateUsage]
-            MagicMock(),
-            task_id='task-x',
+        from pydantic import SecretStr
+
+        from horsies._core import RawResultRecordRecord
+        from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.models.broker import PostgresConfig
+
+        task_id = uuid.UUID('0195b4a0-0000-7000-8000-000000000001')
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr('postgresql://u:p@localhost:5432/db')),
+        )
+        core_handle = MagicMock()
+        core_handle.raw_result_record_async = AsyncMock(return_value=MagicMock(
+            spec=RawResultRecordRecord,
+            task_id=task_id,
             task_name='my_task',
-            status=TaskStatus.COMPLETED,
+            status='COMPLETED',
             result_json=(
                 '{"__h_task_result__":true,"ok":'
                 + '[' * 1_100 + ']' * 1_100
                 + ',"err":null}'
             ),
+        ))
+        broker._core_handle = core_handle  # pyright: ignore[reportPrivateUsage]
+        app = _make_app()
+        app.get_broker.return_value = broker
+        handle: TaskHandle[int] = TaskHandle(
+            task_id, app=app, broker_mode=True, ok_type=int,
         )
 
-        result = handle._record_to_task_result(broker_result, timeout_ms=None)  # pyright: ignore[reportPrivateUsage]
+        result = await handle.get_async()
 
         assert result.is_err()
         assert result.err is not None

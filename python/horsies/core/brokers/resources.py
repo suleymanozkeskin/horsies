@@ -72,15 +72,6 @@ class BrokerResources:
     partition_maintenance: PartitionMaintenanceDatabase
     listener: ListenerState
 
-    def session_async_engine(self) -> AsyncEngine:
-        """The engine that serves the session-capable URL."""
-        match self.session_engine:
-            case SessionEngineShared():
-                return self.engine
-            case SessionEngineSeparate(engine=separate):
-                return separate
-
-
 @dataclass(frozen=True, slots=True)
 class EventLoopLimit:
     """The broker already holds resource sets for its limit of open event loops.

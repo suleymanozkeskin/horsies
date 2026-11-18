@@ -7,7 +7,7 @@ Lives next to the other codec helpers and routes through the strict
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, assert_never
+from typing import assert_never
 
 from pydantic import ValidationError
 
@@ -67,46 +67,6 @@ def _stored_cancel_grace_ms(task_options: TaskOptions) -> int | None:
             return None
         case _ as unreachable:
             assert_never(unreachable)
-
-
-MIN_OPTIONS_INTEGER: Final = -(2**63)
-"""The smallest integer that the task options of a send may hold."""
-
-MAX_OPTIONS_INTEGER: Final = 2**64 - 1
-"""The largest integer that the task options of a send may hold."""
-
-OPTIONS_INTEGER_OUT_OF_RANGE: Final = (
-    'task_options JSON holds an integer outside '
-    f'{MIN_OPTIONS_INTEGER} to {MAX_OPTIONS_INTEGER}'
-)
-"""The refusal of a send whose options hold an integer outside the range.
-The core refuses the same options with the same text."""
-
-
-def options_integer_out_of_range(options: Json) -> bool:
-    """Whether decoded task options hold an int outside ``MIN_OPTIONS_INTEGER``
-    to ``MAX_OPTIONS_INTEGER``, at any depth.
-
-    No count, delay or limit of that size has a meaning, so a send refuses
-    such options. A bool is not an int here, and a dict key is text. The walk
-    visits each value of the decoded document once. Pure.
-    """
-    pending: list[Json] = [options]
-    while pending:
-        match pending.pop():
-            case bool():
-                pass
-            case int() as number if not (
-                MIN_OPTIONS_INTEGER <= number <= MAX_OPTIONS_INTEGER
-            ):
-                return True
-            case list() as items:
-                pending.extend(items)
-            case dict() as mapping:
-                pending.extend(mapping.values())
-            case _:
-                pass
-    return False
 
 
 @dataclass(frozen=True, slots=True)
