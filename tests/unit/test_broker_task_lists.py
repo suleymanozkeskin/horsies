@@ -15,6 +15,7 @@ tested in ``tests/unit/test_broker_task_lists_in_core.py``.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -27,7 +28,8 @@ from horsies.core.brokers.result_types import BrokerInvalidInput
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, is_ok
 from tests.dualrun.reference import broker_monitoring as reference
-from tests.unit.test_broker_postgres import _make_broker, _set_resources  # pyright: ignore[reportPrivateUsage]
+from tests.broker_resources_support import pin_resources
+from tests.unit.test_broker_postgres import _make_broker  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.unit
 
@@ -66,6 +68,12 @@ def _expired_row(task_id: str) -> dict[str, Any]:
         'good_until': _STARTED,
         'expired_for': timedelta(minutes=5),
     }
+
+
+def _set_resources(broker: Any, **parts: Any) -> None:
+    """Replace parts of the resource set that ``_make_broker`` pinned
+    (white-box test helper)."""
+    pin_resources(broker, dataclasses.replace(broker._build_resources(), **parts))
 
 
 def _answer(broker: Any, rows: list[dict[str, Any]]) -> AsyncMock:
