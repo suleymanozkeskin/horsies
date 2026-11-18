@@ -287,4 +287,4 @@ byte-identical.)
 ## File Location
 
 `crates/horsies-core/baseline/` (the schema); `python/horsies/core/baseline/install.py` (the install);
-`python/horsies/core/models/task_pg.py` and `python/horsies/core/models/workflow_pg.py` (query models).
+`python/horsies/core/models/workflow_pg.py` (query models).
