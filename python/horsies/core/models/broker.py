@@ -265,6 +265,13 @@ class PostgresConfig(BaseModel):
 
     @field_validator('pool_size')
     def validate_pool_size(cls, v: int) -> int:
+        """Accept a pool size from ``POOL_SIZE_MIN`` to ``POOL_SIZE_MAX``.
+
+        Any other value raises ``ConfigurationError``
+        (``CONFIG_INVALID_BROKER_POOL``). ``0`` is refused with its own cause:
+        SQLAlchemy reads it as no size limit, and the core always bounds its
+        connections.
+        """
         match v:
             case _ if POOL_SIZE_MIN <= v <= POOL_SIZE_MAX:
                 return v
@@ -286,6 +293,13 @@ class PostgresConfig(BaseModel):
 
     @field_validator('max_overflow')
     def validate_max_overflow(cls, v: int) -> int:
+        """Accept an overflow from ``POOL_CONNECTIONS_MIN`` to ``POOL_CONNECTIONS_MAX``.
+
+        Any other value raises ``ConfigurationError``
+        (``CONFIG_INVALID_BROKER_POOL``). ``-1`` is refused with its own cause:
+        SQLAlchemy reads it as no overflow limit, and the core always bounds
+        its connections.
+        """
         match v:
             case _ if POOL_CONNECTIONS_MIN <= v <= POOL_CONNECTIONS_MAX:
                 return v
@@ -307,6 +321,11 @@ class PostgresConfig(BaseModel):
 
     @field_validator('pool_timeout')
     def validate_pool_timeout(cls, v: int) -> int:
+        """Accept whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
+
+        ``0`` means that a checkout does not wait. Any other value raises
+        ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        """
         match v:
             case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
                 return v
@@ -321,6 +340,11 @@ class PostgresConfig(BaseModel):
 
     @field_validator('pool_recycle')
     def validate_pool_recycle(cls, v: int) -> int:
+        """Accept ``-1`` or whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
+
+        ``-1`` means that a connection is never replaced by age. Any other
+        value raises ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        """
         match v:
             case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
                 return v
