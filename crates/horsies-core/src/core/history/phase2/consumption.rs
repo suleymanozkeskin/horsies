@@ -96,13 +96,7 @@ impl sql::FromTestRow for Phase2DispositionRow {
 }
 
 /// Why a test call of a phase-2 function failed.
-#[derive(Debug)]
-pub(crate) enum Phase2CallError {
-    /// The server refused the statement, or the session failed.
-    Database(sql::Error),
-    /// The function answered outside its vocabulary.
-    Contract(HistoryError),
-}
+pub(crate) type Phase2CallError = sql::CallError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phase2Disposition {

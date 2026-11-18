@@ -205,22 +205,23 @@ mod tests {
 
     /// The shared test database, with heartbeat leaves for the current hours.
     async fn covered_pool() -> TestPool {
-        use crate::core::history::heartbeats::partitioning::{
-            ensure_heartbeat_coverage, EnsureHeartbeatCoverage,
+        use crate::core::history::maintenance::coverage::{
+            ensure_partition_coverage_in_pool, CoverageOutcome,
         };
         let pool = crate::test_support::migrated_pool().await;
-        // ensure_heartbeat_coverage takes a sqlx connection: it runs on the
-        // sqlx pool of the same database.
-        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-        let mut connection = sqlx_pool.acquire().await.expect("acquire");
-        ensure_heartbeat_coverage(
-            &mut connection,
-            &EnsureHeartbeatCoverage::new(2).expect("coverage command"),
+        let coverage = ensure_partition_coverage_in_pool(
+            &crate::broker::pools::core_pool_for_test_url(pool.url()),
+            crate::broker::core_rows::StatementLog::Off,
+            2,
+            2,
+            &[],
         )
         .await
         .expect("heartbeat leaves");
-        drop(connection);
-        sqlx_pool.close().await;
+        assert!(
+            matches!(coverage, CoverageOutcome::Ensured(_)),
+            "{coverage:?}"
+        );
         pool
     }
 

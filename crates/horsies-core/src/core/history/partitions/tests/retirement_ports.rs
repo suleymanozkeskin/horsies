@@ -14,12 +14,13 @@ use crate::core::history::errors::HistoryError;
 use crate::core::history::partitions::manager::{
     finalize_interrupted_detach, FinalizeInterruptedLeafOutcome,
 };
+use crate::test_support::sql::{self, TestPool};
 
 /// A detachable leaf of `class_key` (1 day) that starts `days_ago` days
 /// before today.
-async fn expired_leaf(pool: &PgPool, parent: &str, class_key: &str, days_ago: i64) -> LeafRef {
+async fn expired_leaf(pool: &TestPool, parent: &str, class_key: &str, days_ago: i64) -> LeafRef {
     let mut clock = pool.acquire().await.expect("acquire clock");
-    let today = utc_day_start(database_now(&mut clock).await.expect("database now"));
+    let today = utc_day_start(database_now(&mut clock).await);
     drop(clock);
     let leaf = leaf_ref(parent, class_key, today - Duration::days(days_ago));
     assert!(matches!(
@@ -29,8 +30,8 @@ async fn expired_leaf(pool: &PgPool, parent: &str, class_key: &str, days_ago: i6
     leaf
 }
 
-async fn detached_at_is_set(pool: &PgPool, leaf: &LeafRef) -> bool {
-    sqlx::query_scalar(&format!(
+async fn detached_at_is_set(pool: &TestPool, leaf: &LeafRef) -> bool {
+    sql::query_scalar(&format!(
         "SELECT detached_at IS NOT NULL FROM {LEAF_CATALOG} WHERE leaf_name = $1"
     ))
     .bind(leaf.leaf_name())
@@ -39,8 +40,8 @@ async fn detached_at_is_set(pool: &PgPool, leaf: &LeafRef) -> bool {
     .expect("read the detach stamp")
 }
 
-async fn relation_exists(pool: &PgPool, relation: &str) -> bool {
-    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+async fn relation_exists(pool: &TestPool, relation: &str) -> bool {
+    sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(relation)
         .fetch_one(pool)
         .await
@@ -60,7 +61,7 @@ async fn a_drop_of_a_ref_that_differs_from_the_catalog_rolls_back() {
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None).expect("detach command");
     assert!(matches!(
         detach_expired_leaf(
-            &core_pool_for_test_pool(&database.pool),
+            &core_pool_for_test_url(database.pool.url()),
             StatementLog::Off,
             &command
         )
@@ -71,11 +72,13 @@ async fn a_drop_of_a_ref_that_differs_from_the_catalog_rolls_back() {
     let stale = LeafRef::new(leaf.leaf_name(), "standard_7d", leaf.bounds().clone())
         .expect("stale leaf ref");
 
-    let mut transaction = database.pool.begin().await.expect("begin drop");
-    let error = drop_detached_leaf(&mut transaction, &DropDetachedHistoryLeaf::new(stale))
-        .await
-        .expect_err("a ref that differs from the catalog is a caller defect");
-    transaction.rollback().await.expect("roll the drop back");
+    let error = drop_detached_leaf_in_pool(
+        &core_pool_for_test_url(database.pool.url()),
+        StatementLog::Off,
+        &DropDetachedHistoryLeaf::new(stale),
+    )
+    .await
+    .expect_err("a ref that differs from the catalog is a caller defect");
 
     assert!(
         matches!(&error, HistoryError::Contract(detail) if detail.contains("catalog row has class")),
@@ -96,7 +99,7 @@ async fn finalize_records_a_detach_made_out_of_band() {
     let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let leaf = expired_leaf(&database.pool, &parent, class_key, 5).await;
-    sqlx::query(&format!(
+    sql::query(&format!(
         "ALTER TABLE {parent} DETACH PARTITION {}",
         leaf.leaf_name()
     ))
@@ -107,7 +110,7 @@ async fn finalize_records_a_detach_made_out_of_band() {
 
     let command = FinalizeInterruptedLeafDetach::new(leaf.clone(), None).expect("finalize");
     let outcome = finalize_interrupted_detach(
-        &core_pool_for_test_pool(&database.pool),
+        &core_pool_for_test_url(database.pool.url()),
         StatementLog::Off,
         &command,
     )
@@ -139,7 +142,7 @@ async fn a_held_leaf_lock_makes_the_detach_and_the_drop_busy() {
     let detach_other = DetachExpiredHistoryLeaf::new(other.clone(), None).expect("detach other");
     assert!(matches!(
         detach_expired_leaf(
-            &core_pool_for_test_pool(&database.pool),
+            &core_pool_for_test_url(database.pool.url()),
             StatementLog::Off,
             &detach_other
         )
@@ -150,12 +153,12 @@ async fn a_held_leaf_lock_makes_the_detach_and_the_drop_busy() {
 
     let mut holder = database.pool.begin().await.expect("begin lock holder");
     for held in [&leaf, &other] {
-        sqlx::query(&format!(
+        sql::query(&format!(
             "SELECT pg_advisory_xact_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
         ))
         .bind(held.class_key())
         .bind(held.bounds().lower())
-        .execute(holder.as_mut())
+        .execute(&mut *holder)
         .await
         .expect("hold the leaf lock");
     }
@@ -163,7 +166,7 @@ async fn a_held_leaf_lock_makes_the_detach_and_the_drop_busy() {
     let busy_detach = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         detach_expired_leaf(
-            &core_pool_for_test_pool(&database.pool),
+            &core_pool_for_test_url(database.pool.url()),
             StatementLog::Off,
             &detach,
         ),
@@ -171,18 +174,17 @@ async fn a_held_leaf_lock_makes_the_detach_and_the_drop_busy() {
     .await
     .expect("a busy detach does not wait")
     .expect("busy detach outcome");
-    let mut transaction = database.pool.begin().await.expect("begin drop");
     let busy_drop = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        drop_detached_leaf(
-            &mut transaction,
+        drop_detached_leaf_in_pool(
+            &core_pool_for_test_url(database.pool.url()),
+            StatementLog::Off,
             &DropDetachedHistoryLeaf::new(other.clone()),
         ),
     )
     .await
     .expect("a busy drop does not wait")
     .expect("busy drop outcome");
-    transaction.rollback().await.expect("end the drop");
     holder.rollback().await.expect("release the leaf locks");
 
     assert_eq!(

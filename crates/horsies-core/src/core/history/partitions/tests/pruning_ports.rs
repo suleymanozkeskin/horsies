@@ -7,22 +7,23 @@ use chrono::DateTime;
 
 use super::*;
 use crate::core::history::maintenance::pruning::PrunePass;
+use crate::test_support::sql::{self, TestPool};
 
-async fn database_today(pool: &PgPool) -> DateTime<Utc> {
+async fn database_today(pool: &TestPool) -> DateTime<Utc> {
     let mut connection = pool.acquire().await.expect("acquire clock");
-    utc_day_start(database_now(&mut connection).await.expect("database now"))
+    utc_day_start(database_now(&mut connection).await)
 }
 
-async fn relation_exists(pool: &PgPool, relation: &str) -> bool {
-    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+async fn relation_exists(pool: &TestPool, relation: &str) -> bool {
+    sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(relation)
         .fetch_one(pool)
         .await
         .expect("read relation presence")
 }
 
-async fn catalog_dropped(pool: &PgPool, leaf_name: &str) -> bool {
-    sqlx::query_scalar(&format!(
+async fn catalog_dropped(pool: &TestPool, leaf_name: &str) -> bool {
+    sql::query_scalar(&format!(
         "SELECT dropped_at IS NOT NULL FROM {LEAF_CATALOG} WHERE leaf_name = $1"
     ))
     .bind(leaf_name)
@@ -32,7 +33,7 @@ async fn catalog_dropped(pool: &PgPool, leaf_name: &str) -> bool {
 }
 
 /// A daily leaf of `class_key` that starts `days_ago` days before today.
-async fn leaf_days_ago(pool: &PgPool, parent: &str, class_key: &str, days_ago: i64) -> LeafRef {
+async fn leaf_days_ago(pool: &TestPool, parent: &str, class_key: &str, days_ago: i64) -> LeafRef {
     let leaf = leaf_ref(
         parent,
         class_key,
@@ -64,10 +65,12 @@ async fn same_age_leaves_diverge_on_the_declared_period() {
     let short_leaf = leaf_days_ago(&database.pool, &short_parent, "standard_7d", 10).await;
     let long_leaf = leaf_days_ago(&database.pool, &long_parent, "standard_30d", 10).await;
 
-    let pass =
-        prune_expired_partitions(&core_pool_for_test_pool(&database.pool), StatementLog::Off)
-            .await
-            .expect("a pruning pass");
+    let pass = prune_expired_partitions(
+        &core_pool_for_test_url(database.pool.url()),
+        StatementLog::Off,
+    )
+    .await
+    .expect("a pruning pass");
 
     assert!(pass.errors.is_empty(), "{:?}", pass.errors);
     assert_eq!(swept_names(&pass), vec![short_leaf.leaf_name()]);
@@ -91,10 +94,12 @@ async fn the_smallest_period_still_retains_each_whole_day() {
     let yesterday = leaf_days_ago(&database.pool, &parent, "standard_1d", 1).await;
     let old = leaf_days_ago(&database.pool, &parent, "standard_1d", 3).await;
 
-    let pass =
-        prune_expired_partitions(&core_pool_for_test_pool(&database.pool), StatementLog::Off)
-            .await
-            .expect("a pruning pass");
+    let pass = prune_expired_partitions(
+        &core_pool_for_test_url(database.pool.url()),
+        StatementLog::Off,
+    )
+    .await
+    .expect("a pruning pass");
 
     assert!(pass.errors.is_empty(), "{:?}", pass.errors);
     assert_eq!(swept_names(&pass), vec![old.leaf_name()]);
@@ -116,10 +121,12 @@ async fn an_overdue_leaf_drops_and_leaves_inside_their_period_stay() {
     let inside = leaf_days_ago(&database.pool, &parent, "standard_30d", 10).await;
     let fresh = leaf_days_ago(&database.pool, &parent, "standard_30d", 0).await;
 
-    let pass =
-        prune_expired_partitions(&core_pool_for_test_pool(&database.pool), StatementLog::Off)
-            .await
-            .expect("a pruning pass");
+    let pass = prune_expired_partitions(
+        &core_pool_for_test_url(database.pool.url()),
+        StatementLog::Off,
+    )
+    .await
+    .expect("a pruning pass");
 
     assert!(pass.errors.is_empty(), "{:?}", pass.errors);
     assert_eq!(pass.dropped_count(), 1);

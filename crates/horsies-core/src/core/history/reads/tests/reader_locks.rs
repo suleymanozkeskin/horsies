@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::core::history::names::{LIVE_TASKS, TASK_DETAIL_FUNCTION, TASK_HISTORY_FOREVER_LEAF};
+use crate::test_support::sql::{self, TestPool};
 
 const CLASS_KEY: &str = "standard_30d";
 
@@ -32,8 +33,8 @@ const HELD_RELATIONS_SQL: &str = "SELECT relation.relname::text
 /// manifest leaves whose upper anchor is after `birth` in probe order, then
 /// the other manifest leaves, newest first. Read in its own statements, so
 /// that the lookup's transaction holds no lock of these reads.
-async fn probe_order(pool: &PgPool, birth: DateTime<Utc>) -> Vec<String> {
-    let pruned: Vec<String> = sqlx::query_scalar(
+async fn probe_order(pool: &TestPool, birth: DateTime<Utc>) -> Vec<String> {
+    let pruned: Vec<String> = sql::query_scalar(
         "SELECT leaf_name FROM horsies_task_lookup_manifest
          WHERE upper_anchor > $1 ORDER BY probe_position",
     )
@@ -41,7 +42,7 @@ async fn probe_order(pool: &PgPool, birth: DateTime<Utc>) -> Vec<String> {
     .fetch_all(pool)
     .await
     .expect("read the pruned probes");
-    let fallback: Vec<String> = sqlx::query_scalar(
+    let fallback: Vec<String> = sql::query_scalar(
         "SELECT leaf_name FROM horsies_task_lookup_manifest
          WHERE upper_anchor <= $1 ORDER BY probe_position DESC",
     )
@@ -72,15 +73,15 @@ fn expected_locks(order: &[String], holder: Option<&str>) -> BTreeSet<String> {
 
 /// One detail lookup in its own transaction: the location it answers and
 /// the relations the transaction holds a lock on after it.
-async fn detail_lookup_locks(pool: &PgPool, task_id: Uuid) -> (Option<String>, BTreeSet<String>) {
+async fn detail_lookup_locks(pool: &TestPool, task_id: Uuid) -> (Option<String>, BTreeSet<String>) {
     let mut transaction = pool.begin().await.expect("begin the lookup");
     let location: Option<String> =
-        sqlx::query_scalar(&format!("SELECT location FROM {TASK_DETAIL_FUNCTION}($1)"))
+        sql::query_scalar(&format!("SELECT location FROM {TASK_DETAIL_FUNCTION}($1)"))
             .bind(task_id)
             .fetch_optional(&mut *transaction)
             .await
             .expect("call the detail reader");
-    let held: Vec<String> = sqlx::query_scalar(HELD_RELATIONS_SQL)
+    let held: Vec<String> = sql::query_scalar(HELD_RELATIONS_SQL)
         .fetch_all(&mut *transaction)
         .await
         .expect("read the held relation locks");
@@ -98,7 +99,7 @@ async fn detail_lookup_locks(pool: &PgPool, task_id: Uuid) -> (Option<String>, B
 async fn the_staged_lookup_locks_only_the_leaves_it_probes() {
     let database = TestDatabase::create().await;
     let mut transaction = database.pool.begin().await.expect("begin the setup");
-    let today = utc_day(database_now(&mut transaction).await.expect("database now"));
+    let today = utc_day(database_now(&mut transaction).await);
     let parent = register_test_class(&mut transaction, CLASS_KEY, 30).await;
     // Oldest first: 20 to 16 days ago, all inside the 30-day period.
     let days: Vec<DateTime<Utc>> = (16..=20)

@@ -451,15 +451,15 @@ pub(crate) async fn register_retention_classes(
 
 /// One row of a leaf-creation function.
 #[derive(Debug)]
-struct LeafCreationRow {
-    outcome: String,
-    leaf_name: Option<String>,
-    conflict_kind: Option<String>,
+pub(crate) struct LeafCreationRow {
+    pub(crate) outcome: String,
+    pub(crate) leaf_name: Option<String>,
+    pub(crate) conflict_kind: Option<String>,
 }
 
 /// Which index of a created or repaired leaf names it in the outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreatedLeafKind {
+pub(crate) enum CreatedLeafKind {
     /// The task-ID index `<leaf>_task_idx`.
     History,
     /// The probe index `<leaf>_probe_idx`.
@@ -534,7 +534,7 @@ fn leaf_creation_row(
 /// The outcome of one leaf-creation row. Pure. An outcome outside the
 /// function's set, a missing leaf name, or an unknown conflict kind is
 /// `HistoryError::Contract`.
-fn leaf_creation_of(
+pub(crate) fn leaf_creation_of(
     kind: CreatedLeafKind,
     class_key: &str,
     row: LeafCreationRow,

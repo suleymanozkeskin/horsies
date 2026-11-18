@@ -15,8 +15,7 @@
 //! - `horsies_record_leaf_detached(p_leaf_name)`: the catalog record of a
 //!   detach, and whether the published reader manifest still names the leaf;
 //! - `horsies_drop_detached_leaf(p_leaf_name)`: the drop, inside the caller's
-//!   transaction (a core transaction, or a sqlx connection for the
-//!   single-connection form [`drop_detached_retention_leaf`]).
+//!   core transaction.
 //!
 //! The `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY | FINALIZE`
 //! statement stays with the caller (`partitions::manager`, as a
@@ -26,7 +25,6 @@
 //! Python: `python/horsies/core/history/partitions/retirement.py`.
 
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgConnection};
 
 use crate::broker::core_rows::{column, one_row, query_in, query_on, RowDecodeError, StatementLog};
 use crate::core::history::commands::{LeafBounds, LeafRef};
@@ -246,7 +244,7 @@ fn prune_candidate_of(row: CandidateRow) -> Result<PruneCandidate, HistoryError>
 /// One row of `horsies_begin_leaf_detach`, `horsies_drop_detached_leaf` or
 /// `horsies_inspect_history_leaf` (its `state` read as `outcome`): the outcome
 /// and the inspection columns, as stored.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub(crate) struct LeafStateRow {
     pub(crate) outcome: String,
     pub(crate) class_key: Option<String>,
@@ -676,33 +674,8 @@ pub(crate) fn drop_outcome(leaf_name: &str, row: &LeafStateRow) -> Result<LeafDr
     }
 }
 
-/// Drop one detached PERIOD or HEARTBEAT leaf inside the caller's
-/// transaction.
-///
-/// One statement: `horsies_drop_detached_leaf`. The drop, the delete of the
-/// clock exceptions of its interval and the catalog update commit with the
-/// caller; this function does not commit. A leaf that the published manifest
-/// names is `RefusedLoaderReferences`; a held leaf or relation lock is
-/// `Busy`; any state other than detached is returned as its inspection. A
-/// `LeafRef` whose class or bounds differ from the catalog row of its name is
-/// `HistoryError::Contract`: the caller's transaction must roll back, which
-/// undoes a drop the call made.
-pub(crate) async fn drop_detached_retention_leaf(
-    connection: &mut PgConnection,
-    leaf: &LeafRef,
-) -> Result<LeafDrop, HistoryError> {
-    let row: LeafStateRow = sqlx::query_as(DROP_DETACHED_LEAF_SQL)
-        .bind(leaf.leaf_name())
-        .fetch_one(connection)
-        .await?;
-    match catalog_facet_mismatch(leaf, &row) {
-        Some(mismatch) => Err(HistoryError::contract(mismatch)),
-        None => drop_outcome(leaf.leaf_name(), &row),
-    }
-}
-
-/// The core form of [`drop_detached_retention_leaf`]: the same statement and
-/// outcomes, inside the caller's core transaction. It does not commit.
+/// The drop of a detached retention leaf, inside the caller's core
+/// transaction. It does not commit.
 ///
 /// Errors: `HistoryError::Statement` (the transaction is aborted),
 /// `HistoryError::RowDecode`, `HistoryError::Contract` (the transaction must
@@ -730,8 +703,6 @@ pub(crate) async fn drop_detached_leaf_in(
 #[cfg(test)]
 mod tests {
     //! Python specification: `tests/unit/test_history_retirement_rows.py`.
-
-    use chrono::TimeZone;
 
     use super::*;
 

@@ -52,21 +52,22 @@ pub(crate) use owner_gone::{forget_ended_workers, owner_gone_step, UnheldOwners}
 #[cfg(test)]
 mod p7_maintenance_tests {
     use super::*;
-    use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
-    use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
+    use crate::broker::core_rows::StatementLog;
+    use crate::broker::pools::core_pool_for_test_url;
+    use crate::core::history::commands::{LeafBounds, LeafRef};
+    use crate::core::history::ddl::classes::finite_class_parent_name;
     use crate::core::history::ddl::runtime_names::daily_leaf_name;
-    use crate::core::history::heartbeats::partitioning::{
-        create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
-    };
+    use crate::core::history::heartbeats::partitioning::hourly_leaf_ref;
     use crate::core::history::maintenance::coverage::{
-        ensure_startup_coverage, StartupCoverageOutcome,
+        ensure_startup_coverage_in_pool, StartupCoverageOutcome,
     };
-    use crate::core::history::partitions::catalog::database_now;
-    use crate::core::history::partitions::manager::create_daily_leaf;
-    use crate::core::history::partitions::publication::LoaderPublication;
+    use crate::core::history::outcomes::LeafCreation;
     use crate::core::history::periods::RetentionDays;
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::lifecycle::TerminalizationOutcome;
+    use crate::test_support::history::{
+        create_heartbeat_leaf_of, create_history_leaf_of, database_now, register_period_class,
+    };
     use crate::test_support::sql::{self, TestPool};
     use crate::test_support::terminal_writes;
     use chrono::Timelike;
@@ -161,16 +162,16 @@ mod p7_maintenance_tests {
     #[serial]
     async fn retention_owns_only_worker_state_and_workflow_rows() {
         let pool = crate::test_support::migrated_pool().await;
-        // ensure_startup_coverage takes a sqlx connection: the pass runs on
-        // the sqlx pool of the same database.
-        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-        let mut coverage = sqlx_pool.begin().await.unwrap();
-        let outcome = ensure_startup_coverage(coverage.as_mut(), 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .unwrap();
+        let outcome = ensure_startup_coverage_in_pool(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
+            2,
+            2,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, StartupCoverageOutcome::Ready(_)));
-        coverage.commit().await.unwrap();
-        sqlx_pool.close().await;
 
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
@@ -465,10 +466,6 @@ mod p7_maintenance_tests {
     async fn periodic_maintenance_creates_ahead_prunes_both_partition_families_and_contains_a_blocker(
     ) {
         let pool = crate::test_support::migrated_pool().await;
-        // The setup and cleanup transactions call history functions that
-        // take a sqlx connection: they run on the sqlx pool of the same
-        // database.
-        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut recovery = RecoveryConfig::default();
         recovery.auto_requeue_stale_claimed = false;
         recovery.auto_fail_stale_running = false;
@@ -486,24 +483,22 @@ mod p7_maintenance_tests {
 
         // Settle all pre-existing classes at the same horizons so the pass's
         // creation counts are attributable to the two classes introduced here.
-        let mut baseline = sqlx_pool.begin().await.unwrap();
-        let baseline_outcome = ensure_startup_coverage(
-            baseline.as_mut(),
+        let baseline_outcome = ensure_startup_coverage_in_pool(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
             retention.history_leaf_horizon_days,
             retention.heartbeat_leaf_horizon_hours,
             &[],
-            &StagedLoaderPublisher,
         )
         .await
         .unwrap();
         assert!(matches!(baseline_outcome, StartupCoverageOutcome::Ready(_)));
-        baseline.commit().await.unwrap();
 
-        let mut setup = sqlx_pool.begin().await.unwrap();
+        let mut setup = pool.begin().await.unwrap();
         for period in [blocked_period, valid_period] {
-            register_period_class(&mut setup, period).await.unwrap();
+            let _registered = register_period_class(&mut setup, period).await;
         }
-        let now = database_now(&mut setup).await.unwrap();
+        let now = database_now(&mut setup).await;
         let old_day = (now - chrono::Duration::days(6))
             .with_hour(0)
             .and_then(|value| value.with_minute(0))
@@ -520,13 +515,14 @@ mod p7_maintenance_tests {
                 LeafBounds::new(lower, lower + chrono::Duration::days(1)).unwrap(),
             )
             .unwrap();
-            create_daily_leaf(
-                &mut setup,
-                &CreateDailyHistoryLeaf::new(leaf.clone()).unwrap(),
-                &StagedLoaderPublisher,
-            )
-            .await
-            .unwrap();
+            // A created leaf publishes the readers, as the coverage pass does
+            // after its leaves.
+            match create_history_leaf_of(&mut setup, &leaf).await.unwrap() {
+                LeafCreation::Created { .. } => {
+                    let _republished = StagedLoaderPublisher.republish(&mut setup).await.unwrap();
+                }
+                _not_created => {}
+            }
             history_leaves.push(leaf);
         }
         let old_hour = (now - chrono::Duration::hours(12))
@@ -535,17 +531,14 @@ mod p7_maintenance_tests {
             .and_then(|value| value.with_nanosecond(0))
             .unwrap();
         let heartbeat_leaf = hourly_leaf_ref(old_hour).unwrap();
-        create_hourly_heartbeat_leaf(
-            &mut setup,
-            &CreateHourlyHeartbeatLeaf::new(heartbeat_leaf.clone()).unwrap(),
-        )
-        .await
-        .unwrap();
+        let _created = create_heartbeat_leaf_of(&mut setup, &heartbeat_leaf)
+            .await
+            .unwrap();
 
         let workflow_id = Uuid::new_v4();
         let node_id = Uuid::new_v4();
         let blocker_task_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, definition_key, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at
@@ -556,7 +549,7 @@ mod p7_maintenance_tests {
         .execute(&mut *setup)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                  downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type, max_retries, execution,
@@ -573,7 +566,7 @@ mod p7_maintenance_tests {
         .unwrap();
         // A record at the attempt bound has a last attempt and its failure
         // class (baseline CHECK horsies_workflow_phase2_pending_attempts).
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_phase2_pending (
                  task_id, workflow_id, workflow_node_row_id, terminalization_kind,
                  recovery_source, history_class, history_anchor, history_schema_version,
@@ -613,7 +606,7 @@ mod p7_maintenance_tests {
                  AFTER DELETE ON horsies_heartbeats FOR EACH STATEMENT
                  EXECUTE FUNCTION p7_reaper_record_row_delete()",
         ] {
-            sqlx::query(statement).execute(&mut *setup).await.unwrap();
+            sql::query(statement).execute(&mut *setup).await.unwrap();
         }
         setup.commit().await.unwrap();
 
@@ -696,42 +689,42 @@ mod p7_maintenance_tests {
             }
         }
 
-        let mut cleanup = sqlx_pool.begin().await.unwrap();
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+        let mut cleanup = pool.begin().await.unwrap();
+        sql::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
             .bind(blocker_task_id)
             .execute(&mut *cleanup)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .execute(&mut *cleanup)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&mut *cleanup)
             .await
             .unwrap();
-        sqlx::query("DROP TABLE p7_reaper_row_delete_audit CASCADE")
+        sql::query("DROP TABLE p7_reaper_row_delete_audit CASCADE")
             .execute(&mut *cleanup)
             .await
             .unwrap();
-        sqlx::query("DROP FUNCTION p7_reaper_record_row_delete() CASCADE")
+        sql::query("DROP FUNCTION p7_reaper_record_row_delete() CASCADE")
             .execute(&mut *cleanup)
             .await
             .unwrap();
         for class_key in [blocked_class, valid_class] {
             let parent = finite_class_parent_name(class_key).unwrap();
-            sqlx::query(&format!("DROP TABLE {parent} CASCADE"))
+            sql::query(&format!("DROP TABLE {parent} CASCADE"))
                 .execute(&mut *cleanup)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM horsies_task_history_leaf_catalog WHERE class_key = $1")
+            sql::query("DELETE FROM horsies_task_history_leaf_catalog WHERE class_key = $1")
                 .bind(class_key)
                 .execute(&mut *cleanup)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM horsies_retention_classes WHERE class_key = $1")
+            sql::query("DELETE FROM horsies_retention_classes WHERE class_key = $1")
                 .bind(class_key)
                 .execute(&mut *cleanup)
                 .await
@@ -1800,7 +1793,7 @@ fn stale_running_thresholds(
     })
 }
 
-/// The reaper's stale recovery steps for tests that hold a sqlx pool: each
+/// The reaper's stale recovery steps for tests that hold a test pool: each
 /// runs on a main core pool on the same database, built for the call and
 /// closed after it. The thresholds are in seconds and the scan limit is an
 /// `i64`, as the earlier sqlx forms took them, so a test call site keeps its
@@ -1884,7 +1877,6 @@ impl OrphanSweepState {
 #[cfg(test)]
 mod orphan_audit_schedule_tests {
     use super::*;
-    use crate::test_support::sql;
 
     #[test]
     fn orphan_task_audit_uses_its_own_interval() {
@@ -2211,9 +2203,8 @@ mod tests {
     use super::on_test_pool::{mark_stale_running_as_failed, requeue_stale_claimed};
     use super::*;
     use crate::core::history::maintenance::coverage::{
-        ensure_startup_coverage, StartupCoverageOutcome,
+        ensure_startup_coverage_in_pool, StartupCoverageOutcome,
     };
-    use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use serial_test::serial;
     use uuid::Uuid;
@@ -2394,22 +2385,16 @@ mod tests {
 
     async fn test_pool() -> TestPool {
         let pool = crate::test_support::migrated_pool().await;
-        // ensure_startup_coverage takes a sqlx connection: the pass runs on
-        // the sqlx pool of the same database.
-        let sqlx_pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
-        let mut coverage = sqlx_pool.begin().await.expect("begin startup coverage");
-        let outcome = ensure_startup_coverage(
-            coverage.as_mut(),
+        let outcome = ensure_startup_coverage_in_pool(
+            &crate::broker::pools::core_pool_for_test_url(pool.url()),
+            crate::broker::core_rows::StatementLog::Off,
             RetentionConfig::default().history_leaf_horizon_days,
             RetentionConfig::default().heartbeat_leaf_horizon_hours,
             &[],
-            &StagedLoaderPublisher,
         )
         .await
         .expect("startup coverage");
         assert!(matches!(outcome, StartupCoverageOutcome::Ready(_)));
-        coverage.commit().await.expect("commit startup coverage");
-        sqlx_pool.close().await;
         sql::query("DELETE FROM horsies_tasks WHERE task_name = 'reaper_test'")
             .execute(&pool)
             .await
