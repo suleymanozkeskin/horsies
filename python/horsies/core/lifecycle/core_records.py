@@ -33,8 +33,6 @@ from horsies.core.lifecycle.outcomes import (
     ObservedClaim,
     ObservedTaskState,
     OutcomeDecodeError,
-    PhaseTwoOwed,
-    PhaseTwoStep,
     SourceStateConflict,
     TaskAbsent,
     TerminalizationOutcome,
@@ -93,15 +91,6 @@ def terminalization_kind_of(kind: str) -> TerminalizationKind:
         return TerminalizationKind(kind)
     except ValueError as exc:
         raise OutcomeDecodeError(f'kind is not a terminalization kind: {kind!r}') from exc
-
-
-def phase_two_owed_of(record: core.PhaseTwoOwedRecord) -> PhaseTwoOwed:
-    """The phase 2 that a workflow task owes. Pure."""
-    return PhaseTwoOwed(
-        task_name=record.task_name,
-        queue_name=record.queue_name,
-        step=PhaseTwoStep(record.step),
-    )
 
 
 def already_applied_of(record: core.AttemptAlreadyApplied) -> AlreadyApplied:

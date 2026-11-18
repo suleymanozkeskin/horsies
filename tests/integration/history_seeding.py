@@ -33,7 +33,6 @@ from horsies.core.history.archive.attempts import (
     decode_attempt_snapshot,
 )
 from horsies.core.history.archive.versions import DecodedArchiveValue
-from horsies.core.history.names import WORKFLOW_PHASE2_PENDING
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     DEFAULT_RETENTION_DAYS,
@@ -43,6 +42,9 @@ from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
 from horsies.core.models.workflow_pg import WorkflowTaskModel
 from horsies.core.types.status import TaskStatus
 from tests.attempt_snapshot_support import encode_attempt_snapshot
+
+WORKFLOW_PHASE2_PENDING: Final = 'horsies_workflow_phase2_pending'
+"""The phase-2 record table of the baseline."""
 
 HISTORY_SEED_CLASS_KEY = DEFAULT_RETENTION_CLASS_KEY
 """Seeding uses the ratified default class, so fixture rows, stamped

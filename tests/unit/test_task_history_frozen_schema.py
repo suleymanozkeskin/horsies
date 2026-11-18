@@ -14,7 +14,7 @@ import re
 import pytest
 
 from tests.baseline_sql import baseline_function_statements, baseline_sql, baseline_table
-from tests.unit.test_terminal_writer_inventory import history_insert_columns
+from tests.terminal_writer_scan import history_insert_columns
 
 pytestmark = [pytest.mark.unit]
 

@@ -38,19 +38,6 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import TextClause
 
-from horsies.core.lifecycle.commands import (
-    CompleteTaskFused,
-)
-from horsies.core.lifecycle.fences import OwnedClaim
-from horsies.core.lifecycle.outcomes import (
-    Applied,
-)
-from horsies.core.lifecycle.persistence import (
-    FUSED_BATCH_MAX_ROWS,
-    FusedCompletionBatch,
-    _fused_outcomes,
-    _fused_statement,
-)
 from tests.perf.statistics import Budget
 
 WORKER_ID = 'perf-harness'
@@ -330,6 +317,20 @@ def seed_running_tasks(
     connection.commit()
 
 
+FUSED_BATCH_MAX_ROWS: Final = 64
+"""The most rows of one batched plain-success statement of the product."""
+
+_COMPLETE_TASKS_FUSED_SQL = text("""
+    SELECT outcome FROM horsies_complete_tasks_fused(
+        CAST(:task_ids AS uuid[]), CAST(:claimed_ats AS timestamptz[]),
+        CAST(:results AS text[]), CAST(:worker_id AS text), TRUE
+    )
+    ORDER BY ordinality
+""")
+"""The batch of plain successes of the product: one completion per row, each
+under its own fence (``horsies_complete_tasks_fused``)."""
+
+
 def seed_terminal_ballast(
     connection: Connection,
     *,
@@ -343,8 +344,8 @@ def seed_terminal_ballast(
     production, and a scan over one answers a question nobody asked. The
     live table holds live rows only (CHECK horsies_tasks_status_live), so
     each ballast row is seeded RUNNING and completed by the statement of a
-    batch of plain successes, at most ``FUSED_BATCH_MAX_ROWS`` rows per
-    statement and one transaction each. The measured statements then meet a
+    batch of plain successes (``horsies_complete_tasks_fused``), at most
+    ``FUSED_BATCH_MAX_ROWS`` rows per statement and one transaction each. The measured statements then meet a
     history leaf with rows in it and a live table with their dead tuples.
 
     Raises:
@@ -354,30 +355,22 @@ def seed_terminal_ballast(
     payload = payload_of(payload_bytes)
     task_ids = list(rows.tasks.ids(count))
     for start in range(0, count, FUSED_BATCH_MAX_ROWS):
-        batch = FusedCompletionBatch(
-            commands=tuple(
-                CompleteTaskFused(
-                    task_id=task_id,
-                    fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=CLAIMED_AT),
-                    result_json=payload,
-                )
-                for task_id in task_ids[start : start + FUSED_BATCH_MAX_ROWS]
-            )
-        )
-        statement = _fused_statement(batch)
-        result = connection.execute(
-            statement.statement,
-            dict(statement.parameters),
-        )
-        outcomes = _fused_outcomes(batch, _mappings(result.mappings().all()))
-        refused = [
-            outcome for outcome in outcomes if not isinstance(outcome, Applied)
-        ]
-        if refused:
+        batch = task_ids[start : start + FUSED_BATCH_MAX_ROWS]
+        outcomes = connection.execute(
+            _COMPLETE_TASKS_FUSED_SQL,
+            {
+                'task_ids': batch,
+                'claimed_ats': [CLAIMED_AT] * len(batch),
+                'results': [payload] * len(batch),
+                'worker_id': WORKER_ID,
+            },
+        ).scalars().all()
+        refused = [outcome for outcome in outcomes if outcome != 'APPLIED']
+        if len(outcomes) != len(batch) or refused:
             connection.rollback()
             raise RuntimeError(
-                f'ballast completion refused {len(refused)} of '
-                f'{len(batch.commands)} rows; first: {refused[0]!r}'
+                f'ballast completion applied {len(outcomes) - len(refused)} of '
+                f'{len(batch)} rows; first refusal: {refused[:1]!r}'
             )
         connection.commit()
 
@@ -394,10 +387,6 @@ def analyze(connection: Connection) -> None:
     connection.execute(text('ANALYZE horsies_tasks'))
     connection.execute(text('ANALYZE horsies_task_history'))
     connection.commit()
-
-
-def _mappings(rows: Sequence[Mapping[Any, Any]]) -> list[dict[str, Any]]:
-    return [{str(key): value for key, value in row.items()} for row in rows]
 
 
 SCENARIOS: tuple[Scenario, ...] = ()

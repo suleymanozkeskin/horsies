@@ -16,18 +16,23 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Final
 
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from horsies.core.baseline.migration import load_baseline_migration
-from horsies.core.history.names import FOREVER_LEAF, TASK_HISTORY_PARENT
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.attempt_snapshot_support import encode_attempt_snapshot
 from tests.task_ids import mint_task_id
 from horsies.core.utils.url import sqlalchemy_url
+
+TASK_HISTORY_PARENT: Final = 'horsies_task_history'
+"""The history parent table of the baseline."""
+
+FOREVER_LEAF: Final = 'horsies_task_history_forever_open'
+"""The static leaf of the forever class of the baseline."""
 
 
 def _database_url() -> str:
