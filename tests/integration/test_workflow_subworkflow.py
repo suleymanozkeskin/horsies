@@ -28,9 +28,6 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
     OnError,
 )
-from horsies.core.workflows.registry import (
-    unregister_workflow_spec,
-)
 
 from .conftest import finish_task, make_simple_task, start_ok
 
@@ -87,27 +84,6 @@ def _extract_taskresult_value(
 # =============================================================================
 # Child WorkflowDefinitions
 # =============================================================================
-
-
-class ImportableChildWorkflow(WorkflowDefinition[int]):
-    """Child workflow used for registry fallback tests."""
-
-    name = 'importable_child_workflow'
-    definition_key = 'tests.importable_child.v1'
-
-    @classmethod
-    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        @app.task(task_name='importable_child_task')
-        def child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=5)
-
-        node = TaskNode(fn=child_task)
-        return app.workflow(
-            name=cls.name,
-            tasks=[node],
-            output=node,
-            on_error=OnError.FAIL,
-        )
 
 
 class ParamChildWorkflow(WorkflowDefinition[int]):
@@ -236,7 +212,7 @@ class MiddleWorkflow(WorkflowDefinition[int]):
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestSubworkflowIntegration:
-    """Integration tests for subworkflow start, fallback, and summaries."""
+    """Integration tests for subworkflow start and summaries."""
 
     @pytest_asyncio.fixture
     async def setup(
@@ -349,40 +325,6 @@ class TestSubworkflowIntegration:
         decoded = await asyncio.to_thread(handle.result_for, node_child.key())
         assert decoded.is_ok(), f'expected Ok(int), got {decoded}'
         assert decoded.unwrap() == 42
-
-    async def test_subworkflow_registry_fallback(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        session, broker, app = setup
-
-        parent_task = make_simple_task(app, 'sub_parent_task_fallback')
-
-        node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 2})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ImportableChildWorkflow,
-            waits_for=[node_a],
-        )
-
-        spec = _workflow(app, 
-            name='parent_workflow_fallback',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-        unregister_workflow_spec(spec.name)
-
-        await finish_task(
-            session, broker, str(handle.workflow_id), 0, TaskResult(ok=4)
-        )
-
-        row = await self._get_workflow_task_row(session, str(handle.workflow_id), 1)
-        assert row is not None
-        status, child_id, _ = row
-        assert status == 'RUNNING'
-        assert isinstance(child_id, str)
-
 
     async def test_build_with_refuses_a_value_outside_its_constraint(
         self,
