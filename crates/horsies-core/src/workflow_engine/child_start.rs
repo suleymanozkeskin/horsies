@@ -30,13 +30,14 @@ use crate::db::{
     BoundStatement, ParameterBinder, ParameterType, Row, StatementFailure, Transaction,
     TypedStatement,
 };
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::start_statement::{
     build_child, child_tree_arguments, ChildBuildOutcome, ChildInput, ChildOfNode, ChildTree,
     StartArguments,
 };
 use crate::workflow_engine::steps::{
-    step_row_select, step_rows, ChildBuild, OwedChildStart, OwedParentAdvances, StepContractError,
+    step_row_select, step_rows, OwedChildStart, OwedParentAdvances, StepContractError,
     StepDisposition, StepOutcome,
 };
 
@@ -179,7 +180,7 @@ pub(crate) async fn run_child_starts(
     transaction: &mut Transaction<'_>,
     log: StatementLog,
     owed: Vec<OwedChildStart>,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<OwedParentAdvances, ChildStartsFailure> {
     let mut pending = OwedChildStarts::new(owed);
     let mut advances = OwedParentAdvances::default();
@@ -260,7 +261,7 @@ impl OwedChildStarts {
 /// answer.
 pub(crate) async fn child_start_kind(
     owed: &OwedChildStart,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<ChildStartKind, WorkflowError> {
     let built = build_child(
         ChildOfNode {

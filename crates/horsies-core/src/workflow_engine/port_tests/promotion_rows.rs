@@ -27,7 +27,6 @@ use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::engine::on_workflow_task_complete_with;
 use crate::workflow_engine::lifecycle::{pause_workflow, resume_client_workflow};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// Stored task options that do not parse (Python's `_corrupt_stored_options`).
 const CORRUPT_TASK_OPTIONS: &str = "{not-json";
@@ -217,7 +216,7 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     on_workflow_task_complete_with(
         &PostgresBroker::from_pool(db.pool.clone()),
         root_task,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await
     .expect("phase 2 of the root");
@@ -417,7 +416,7 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
     // test thread has 2 MiB); boxed, it needs 1.75 to 1.875 MiB.
     let recovery = Box::pin(recover_stuck_workflows_observed_with(
         &recovery_broker,
-        ChildBuild::Client(&child_specs),
+        &child_specs,
         RECOVERY_FAILURE_LIMIT,
     ));
     let pause_during_the_step = async {

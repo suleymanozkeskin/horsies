@@ -214,8 +214,8 @@ pub use crate::core::history::rerun::{
 pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
 pub use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
 pub use crate::workflow_engine::child_spec::{
-    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
-    ChildStartSource, ClientChildSpec, ClientSpec,
+    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildStartSource,
+    ClientChildSpec, ClientSpec,
 };
 
 // The steps that a client's child spec source runs around its own builder:

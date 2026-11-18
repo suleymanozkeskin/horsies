@@ -24,7 +24,6 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::worker::execution::{phase_retry_delay, run_phase2, Phase2Work, PhaseTwoForm};
 use crate::worker::executor::protocol::FailureDetail;
-use crate::workflow_engine::steps::ChildBuild;
 
 const WORKER: &str = "worker-1";
 const OTHER_WORKER: &str = "worker-2";
@@ -546,7 +545,7 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
     let started = std::time::Instant::now();
     run_phase2(
         &broker,
-        ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
+        &crate::test_support::child_specs::TestChildSpecs::empty(),
         Phase2Work {
             task_id: Uuid::new_v4(),
             queue_name: "default".to_owned(),

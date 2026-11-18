@@ -167,7 +167,7 @@ async def rerun_task(
         queue_name=source.queue_name,
         priority=source.priority,
         args_json=None,
-        kwargs_json=decoded.input_json,
+        input_json=decoded.input_json,
         good_until=command.deadline,
         enqueue_delay_seconds=None,
         task_options_json=options_json,

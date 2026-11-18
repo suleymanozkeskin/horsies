@@ -18,7 +18,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -33,13 +32,12 @@ use crate::broker::PostgresBroker;
 use crate::core::WorkflowSpec;
 use crate::monitoring::{
     cancel_workflow_action, pause_workflow_action, resume_workflow_action, ActionBody,
-    ActionOutcome, ActionResponse, ResumeChildren,
+    ActionOutcome, ActionResponse,
 };
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::{database_name_prefix, is_valid_prefix, DATABASE_PREFIX_VARIABLE};
 use crate::worker::execution::{run_phase2, Phase2Work};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// The stack of the thread that runs the paths: 1.5 MiB, 512 KiB under the
 /// 2 MiB of a libtest thread and of a tokio worker thread.
@@ -211,11 +209,7 @@ async fn recovery_pass_with_a_case_zero_candidate(pool: &PgPool) {
 
     let report = probe_step(
         "recover_stuck_workflows",
-        recover_stuck_workflows_observed_with(
-            &broker,
-            ChildBuild::Client(&child_specs),
-            RECOVERY_FAILURE_LIMIT,
-        ),
+        recover_stuck_workflows_observed_with(&broker, &child_specs, RECOVERY_FAILURE_LIMIT),
     )
     .await
     .expect("the recovery pass returns its report");
@@ -271,7 +265,7 @@ async fn finish_through_the_worker(
         name,
         run_phase2(
             &broker,
-            ChildBuild::Client(child_specs),
+            child_specs,
             Phase2Work {
                 task_id: task.task_id,
                 queue_name: task.queue_name.clone(),
@@ -331,7 +325,6 @@ async fn phase_two_with_a_parent_advance(
 /// step, the parent advances and the recovery pass of the tree.
 async fn monitoring_actions(pool: &PgPool, parent_id: Uuid, child_specs: TestChildSpecs) {
     let broker = PostgresBroker::from_pool(pool.clone());
-    let children = ResumeChildren::Client(Arc::new(child_specs));
 
     let paused = probe_step(
         "pause_workflow_action",
@@ -343,7 +336,7 @@ async fn monitoring_actions(pool: &PgPool, parent_id: Uuid, child_specs: TestChi
 
     let resumed = probe_step(
         "resume_workflow_action",
-        resume_workflow_action(&broker, parent_id, &children),
+        resume_workflow_action(&broker, parent_id, &child_specs),
     )
     .await;
     assert_success(&resumed, "resumed");

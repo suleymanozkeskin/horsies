@@ -464,7 +464,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
     let broker = PostgresBroker::from_pool(pool.clone());
-    let children = ResumeChildren::Client(std::sync::Arc::new(TestChildSpecs::empty()));
+    let children = TestChildSpecs::empty();
 
     let running_to_pause = seed_workflow(&pool, WorkflowStatus::Running).await;
     let paused = pause_workflow_action(&broker, running_to_pause).await;

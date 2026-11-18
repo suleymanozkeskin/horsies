@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::PostgresBroker;
-use crate::monitoring::ResumeChildren;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::auth::{
     MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE, NOT_AUTHORIZED,
@@ -59,7 +59,7 @@ pub(crate) struct WebState {
     pub ui_config: MonitoringUiConfig,
     pub assets: Arc<dyn AssetStore>,
     /// Where the resume route gets the children that a resume owes.
-    pub children: ResumeChildren,
+    pub children: Arc<dyn ChildSpecSource>,
     pub heartbeat: std::time::Duration,
     /// The version that `/api/meta` reports: the package version of the
     /// client that serves the app.

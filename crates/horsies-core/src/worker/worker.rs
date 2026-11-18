@@ -75,7 +75,7 @@ use crate::worker::runner_beats::{
     LiveDispatches, RunnerBeatWatch, StaleRunningRecovery,
 };
 use crate::worker::worker_state::ClaimColumns;
-use crate::workflow_engine::child_spec::ChildSpecs;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 /// How long the stop waits for the outcome writes in flight after the pools
 /// stopped (Python `_FINALIZER_DRAIN_TIMEOUT_S`). The children have ended,
@@ -785,7 +785,7 @@ pub struct Worker {
     /// Where the workflow steps of the worker get the spec of a
     /// sub-workflow child: the parent advances of phase 2, workflow recovery
     /// and phase-2 recovery.
-    child_specs: ChildSpecs,
+    child_specs: Arc<dyn ChildSpecSource>,
     app_config: AppConfig,
     worker_config: WorkerConfig,
     /// The profile the worker runs: its children, claim limits, drain
@@ -818,7 +818,7 @@ impl Worker {
     /// refuses such a profile; Python `execution_settings`).
     pub(crate) fn of_child_specs(
         broker: Arc<PostgresBroker>,
-        child_specs: ChildSpecs,
+        child_specs: Arc<dyn ChildSpecSource>,
         app_config: AppConfig,
         worker_config: WorkerConfig,
         profile: SelectedProfile,
@@ -1097,7 +1097,7 @@ impl Worker {
         // batch users of the worker profile pool cannot exhaust.
         spawn_reaper(
             Arc::clone(&self.broker),
-            self.child_specs.clone(),
+            Arc::clone(&self.child_specs),
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
             health,
@@ -1535,7 +1535,7 @@ impl Worker {
 
         let writer = Arc::new(OutcomeWriter::new(
             Arc::clone(&self.broker),
-            self.child_specs.clone(),
+            Arc::clone(&self.child_specs),
             self.worker_id.clone(),
             self.app_config.payload.clone(),
             batcher.clone(),
@@ -1971,7 +1971,6 @@ mod tests {
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult, UserCode};
-    use crate::workflow_engine::steps::ChildBuild;
     use chrono::Utc;
     use futures::FutureExt;
     use serial_test::serial;
@@ -4008,7 +4007,7 @@ mod tests {
 
         run_phase2(
             &broker,
-            ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
+            &crate::test_support::child_specs::TestChildSpecs::empty(),
             phase2_work,
         )
         .await;
@@ -4050,7 +4049,7 @@ mod tests {
         let phase2_work = run_phase_one(&broker, test_task(callback_success_task), task_id).await;
         run_phase2(
             &broker,
-            ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
+            &crate::test_support::child_specs::TestChildSpecs::empty(),
             phase2_work,
         )
         .await;
@@ -4096,7 +4095,7 @@ mod tests {
         assert_eq!(workflow_result, None);
 
         let child_specs = crate::test_support::child_specs::TestChildSpecs::empty();
-        run_phase2(&broker, ChildBuild::Client(&child_specs), phase2_work).await;
+        run_phase2(&broker, &child_specs, phase2_work).await;
 
         let workflow_task_status = fetch_workflow_task_status(&pool, &workflow_id, &task_id).await;
         assert_eq!(workflow_task_status, "COMPLETED");
@@ -4134,12 +4133,7 @@ mod tests {
         );
 
         let child_specs = crate::test_support::child_specs::TestChildSpecs::empty();
-        run_phase2(
-            &failed_phase2_broker,
-            ChildBuild::Client(&child_specs),
-            phase2_work,
-        )
-        .await;
+        run_phase2(&failed_phase2_broker, &child_specs, phase2_work).await;
 
         let (task_status, result_json, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(task_status, "COMPLETED");
@@ -5408,6 +5402,9 @@ mod tests {
         database.drop().await;
     }
 }
+
+#[cfg(test)]
+mod held_task_tests;
 
 #[cfg(test)]
 mod live_worker_tests;

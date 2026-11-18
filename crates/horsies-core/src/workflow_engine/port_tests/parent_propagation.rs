@@ -23,7 +23,6 @@ use crate::core::TaskResult;
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// The definition key that the parent nodes name (the tests resolve no child).
 const CHILD_KEY: &str = "tests.port.denest_child.v1";
@@ -171,7 +170,7 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
 
     let report = recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         RECOVERY_FAILURE_LIMIT,
     )
     .await
@@ -245,7 +244,7 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
 
     run_phase2(
         &PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         Phase2Work {
             task_id: child_task,
             queue_name: "default".to_owned(),

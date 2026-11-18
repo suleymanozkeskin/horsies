@@ -23,7 +23,7 @@ use crate::workflow_engine::recovery::{
     recover_stuck_workflows_observed_with, RecoveryPassFailure, RecoveryReport,
 };
 use crate::workflow_engine::steps::{
-    advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
+    advance_parents, node_finish_alone, node_finish_in_transaction, Dependents,
     NodeFinishDisposition, OwedParentAdvances, ParentAdvance, ParentAdvanceFailure, SourceFailure,
 };
 
@@ -130,9 +130,7 @@ impl PostgresBroker {
                 )
             }
             NodeFinishForm::SubworkflowReachable | NodeFinishForm::FactsUnknown => {
-                let committed =
-                    node_finish_in_transaction(self, task_id, wake, ChildBuild::Client(source))
-                        .await?;
+                let committed = node_finish_in_transaction(self, task_id, wake, source).await?;
                 (
                     committed.disposition,
                     committed.detail,
@@ -179,18 +177,13 @@ impl PostgresBroker {
                 error: WorkflowError::Broker(error),
             });
         }
-        advance_parents(
-            self,
-            CheckoutClass::Reserved,
-            owed,
-            ChildBuild::Client(source),
-        )
-        .await
-        .map_err(|failure: ParentAdvanceFailure| ParentAdvanceStopped {
-            failed_child_workflow_id: failure.failed_child_workflow_id,
-            still_owed: failure.still_owed().child_workflow_ids().to_vec(),
-            error: failure.error,
-        })
+        advance_parents(self, CheckoutClass::Reserved, owed, source)
+            .await
+            .map_err(|failure: ParentAdvanceFailure| ParentAdvanceStopped {
+                failed_child_workflow_id: failure.failed_child_workflow_id,
+                still_owed: failure.still_owed().child_workflow_ids().to_vec(),
+                error: failure.error,
+            })
     }
 }
 
@@ -218,14 +211,8 @@ impl PostgresBroker {
         self.ensure_client_family_for_write()
             .await
             .map_err(WorkflowError::Broker)?;
-        drive_phase2_recovery_with(
-            self,
-            ChildBuild::Client(source),
-            grace_ms,
-            max_rows,
-            quarantine_after_attempts,
-        )
-        .await
+        drive_phase2_recovery_with(self, source, grace_ms, max_rows, quarantine_after_attempts)
+            .await
     }
 }
 
@@ -259,7 +246,7 @@ impl PostgresBroker {
                 error: WorkflowError::Broker(error),
             });
         }
-        recover_stuck_workflows_observed_with(self, ChildBuild::Client(source), failure_limit).await
+        recover_stuck_workflows_observed_with(self, source, failure_limit).await
     }
 }
 

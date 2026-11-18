@@ -22,7 +22,7 @@ use http::{HeaderName, HeaderValue, Method, StatusCode};
 use tower::ServiceExt;
 
 use crate::broker::PostgresBroker;
-use crate::monitoring::ResumeChildren;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::app::{build_router, MountPath, WebState};
 use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER};
@@ -195,7 +195,7 @@ impl MonitoringHandler {
     /// subscriber.
     pub fn new(
         broker: Arc<PostgresBroker>,
-        children: ResumeChildren,
+        children: Arc<dyn ChildSpecSource>,
         config: MonitoringHandlerConfig,
     ) -> Self {
         let state = WebState {

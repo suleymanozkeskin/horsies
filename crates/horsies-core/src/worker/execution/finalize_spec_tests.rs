@@ -31,7 +31,6 @@ use crate::core::task::Execution;
 use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
-use crate::workflow_engine::steps::ChildBuild;
 
 const WORKER: &str = "finalize-spec-worker";
 const TASK_NAME: &str = "finalize_spec_task";
@@ -816,7 +815,7 @@ async fn phase_two_on(
 ) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
         broker,
-        ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
+        &crate::test_support::child_specs::TestChildSpecs::empty(),
         task_id,
         queue,
         is_workflow_task,

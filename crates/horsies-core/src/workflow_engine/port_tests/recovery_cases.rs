@@ -14,7 +14,6 @@ use super::support::{
 use crate::core::{TaskError, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::recovery::{recover_stuck_workflows_observed_with, RecoveryReport};
-use crate::workflow_engine::steps::ChildBuild;
 
 /// `workflow_recovery_failure_limit` of each pass.
 const LIMIT: u32 = 3;
@@ -22,7 +21,7 @@ const LIMIT: u32 = 3;
 async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        ChildBuild::Client(child_specs),
+        child_specs,
         LIMIT,
     )
     .await

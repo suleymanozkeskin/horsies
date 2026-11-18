@@ -57,9 +57,7 @@ use crate::workflow_engine::query::{
     TerminalErrorStatus, WorkflowEnd, WorkflowWait,
 };
 use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
-use crate::workflow_engine::steps::{
-    advance_parents, ChildBuild, OwedParentAdvances, ParentAdvance,
-};
+use crate::workflow_engine::steps::{advance_parents, OwedParentAdvances, ParentAdvance};
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -1104,7 +1102,7 @@ pub(super) async fn try_finish_task(
     on_workflow_task_complete_with(
         &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        ChildBuild::Client(child_specs),
+        child_specs,
     )
     .await
 }
@@ -1205,19 +1203,14 @@ async fn drive_parent_advances(
     owed: OwedParentAdvances,
     child_specs: &TestChildSpecs,
 ) {
-    advance_parents(
-        broker,
-        CheckoutClass::Reserved,
-        owed,
-        ChildBuild::Client(child_specs),
-    )
-    .await
-    .unwrap_or_else(|failure| {
-        panic!(
-            "the parent advance of child workflow {} failed: {:?}",
-            failure.failed_child_workflow_id, failure.error
-        )
-    });
+    advance_parents(broker, CheckoutClass::Reserved, owed, child_specs)
+        .await
+        .unwrap_or_else(|failure| {
+            panic!(
+                "the parent advance of child workflow {} failed: {:?}",
+                failure.failed_child_workflow_id, failure.error
+            )
+        });
 }
 
 /// A failure outcome with a user error code.
@@ -1377,7 +1370,7 @@ pub(super) async fn worker_phase_two(
 ) {
     let owed = finalize_workflow_phase(
         broker,
-        ChildBuild::Client(child_specs),
+        child_specs,
         task.task_id,
         &task.queue_name,
         true,

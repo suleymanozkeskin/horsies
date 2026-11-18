@@ -18,7 +18,6 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::WorkflowSpec;
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::recovery::recover_workflow_tree;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// The child of the sub-workflow node: one task node.
 fn child() -> WorkflowSpec {
@@ -62,10 +61,9 @@ async fn seed_completed_root_and_dependent(
 
 /// The tree recovery pass of `workflow_id`: case 0 promotes node 1.
 async fn recover(pool: &PgPool, workflow_id: Uuid, child_specs: &TestChildSpecs) {
-    let _report =
-        recover_workflow_tree(&broker(pool), ChildBuild::Client(child_specs), workflow_id)
-            .await
-            .expect("the tree recovery pass");
+    let _report = recover_workflow_tree(&broker(pool), child_specs, workflow_id)
+        .await
+        .expect("the tree recovery pass");
 }
 
 /// Child workflows of `workflow_id`.
