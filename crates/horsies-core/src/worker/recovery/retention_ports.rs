@@ -90,8 +90,18 @@ async fn run_maintenance_pass(
     snapshot
 }
 
+/// A sqlx connection to the database of `pool`, for the history functions
+/// that take a sqlx connection (`database_now`, `register_period_class`,
+/// `create_daily_leaf`).
+async fn sqlx_connection(pool: &TestPool) -> sqlx::PgConnection {
+    use sqlx::Connection;
+    sqlx::PgConnection::connect(pool.url())
+        .await
+        .expect("connect a sqlx session to the retention database")
+}
+
 async fn database_today(pool: &TestPool) -> DateTime<Utc> {
-    let mut connection = pool.acquire().await.expect("acquire clock");
+    let mut connection = sqlx_connection(pool).await;
     let now = database_now(&mut connection).await.expect("database now");
     now.date_naive()
         .and_hms_opt(0, 0, 0)
@@ -101,7 +111,10 @@ async fn database_today(pool: &TestPool) -> DateTime<Utc> {
 
 async fn create_period_leaf(pool: &TestPool, days: RetentionDays, lower: DateTime<Utc>) -> LeafRef {
     let class_key = days.class_key();
-    let mut transaction = pool.begin().await.expect("begin leaf creation");
+    let mut connection = sqlx_connection(pool).await;
+    let mut transaction = sqlx::Connection::begin(&mut connection)
+        .await
+        .expect("begin leaf creation");
     let _ = register_period_class(&mut transaction, days)
         .await
         .expect("register the class");
