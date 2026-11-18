@@ -55,12 +55,12 @@ async fn an_unreadable_slot_health_fails_the_read() {
 
     delete_snapshots(&pool, &worker_id).await;
     let error = result.expect_err("a slot health of another shape fails the read");
-    assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(error.message.contains(&worker_id), "{}", error.message);
+    assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(error.message().contains(&worker_id), "{}", error.message());
     assert!(
-        error.message.contains("slots_down is unreadable"),
+        error.message().contains("slots_down is unreadable"),
         "{}",
-        error.message
+        error.message()
     );
 }
 
@@ -84,12 +84,16 @@ async fn an_unreadable_class_capacity_fails_the_read() {
 
     delete_snapshots(&pool, &worker_id).await;
     let error = result.expect_err("an unknown budget name fails the read");
-    assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(error.message.contains(&worker_id), "{}", error.message);
+    assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(error.message().contains(&worker_id), "{}", error.message());
     assert!(
-        error.message.contains("class_capacity is unreadable"),
+        error.message().contains("class_capacity is unreadable"),
         "{}",
-        error.message
+        error.message()
     );
-    assert!(error.message.contains("'EXCLUSIVE'"), "{}", error.message);
+    assert!(
+        error.message().contains("'EXCLUSIVE'"),
+        "{}",
+        error.message()
+    );
 }

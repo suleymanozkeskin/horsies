@@ -31,7 +31,7 @@ use crate::broker::class_coverage::{
 use crate::broker::core_rows::{column, one_row};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
+use crate::broker::result_types::{BrokerOperationError, BrokerOperationFailedCode, BrokerResult};
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
@@ -354,8 +354,8 @@ pub(crate) async fn read_class_coverage(broker: &PostgresBroker) -> BrokerResult
 /// ([`BrokerError::is_retryable`]); a row that does not read is not
 /// retryable.
 fn class_statement_failed(operation: &str, error: &BrokerError) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::MonitoringQueryFailed,
+    BrokerOperationError::OperationFailed {
+        code: BrokerOperationFailedCode::MonitoringQueryFailed,
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
         cause: error.failure_cause(),
@@ -366,8 +366,8 @@ fn class_statement_failed(operation: &str, error: &BrokerError) -> BrokerOperati
 /// Not retryable: the same rows give the same answer. Nothing changed
 /// (Python `_class_read_refused`, `postgres.py:408-421`).
 fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::MonitoringQueryFailed,
+    BrokerOperationError::OperationFailed {
+        code: BrokerOperationFailedCode::MonitoringQueryFailed,
         message: format!("{operation} refused: {cause}"),
         retryable: false,
         cause: FailureCause::ContractViolation,

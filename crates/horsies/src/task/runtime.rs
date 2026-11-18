@@ -228,13 +228,13 @@ mod tests {
         let spec = builder.build().unwrap();
         let refused = runtime.start::<u32>(&spec).await.unwrap_err();
         assert_eq!(
-            refused.code,
+            refused.code(),
             crate::WorkflowStartErrorCode::ValidationFailed
         );
         let refused = runtime
             .start_with_id::<u32>(&spec, uuid::Uuid::nil())
             .await
             .unwrap_err();
-        assert_eq!(refused.workflow_id, Some(uuid::Uuid::nil()));
+        assert_eq!(refused.workflow_id(), Some(uuid::Uuid::nil()));
     }
 }

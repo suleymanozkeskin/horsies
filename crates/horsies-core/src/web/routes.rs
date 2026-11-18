@@ -530,7 +530,7 @@ async fn read_worker_ping(
         .broker
         .ping_workers(None, Duration::from_secs_f64(params.timeout_seconds), None)
         .await
-        .map_err(|error| ApiError::unavailable(format!("Worker ping failed: {}", error.message)))?
+        .map_err(|error| ApiError::unavailable(format!("Worker ping failed: {}", error.message())))?
         .into_iter()
         .map(|pong| WorkerPingInfo {
             worker_id: pong.worker_id,
@@ -562,7 +562,7 @@ async fn read_class_report(
     State(state): State<WebState>,
 ) -> Result<Json<ClassReportInfo>, ApiError> {
     let report = state.broker.get_class_report().await.map_err(|error| {
-        ApiError::unavailable(format!("Class report query failed: {}", error.message))
+        ApiError::unavailable(format!("Class report query failed: {}", error.message()))
     })?;
     Ok(Json(class_report_info(&report)))
 }
@@ -614,7 +614,7 @@ async fn read_workers(
         .list_worker_states_with_read_time()
         .await
         .map_err(|error| {
-            ApiError::unavailable(format!("Worker state query failed: {}", error.message))
+            ApiError::unavailable(format!("Worker state query failed: {}", error.message()))
         })?;
     Ok(Json(listed.into_iter().map(worker_state).collect()))
 }
@@ -645,7 +645,7 @@ async fn read_worker_history(
         .get_worker_state_history(&worker_id, Some(params.limit))
         .await
         .map_err(|error| {
-            ApiError::unavailable(format!("Worker history query failed: {}", error.message))
+            ApiError::unavailable(format!("Worker history query failed: {}", error.message()))
         })
         .map(|snapshots| {
             Json(

@@ -18,6 +18,7 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
     CancelGraceMs, FailureDetail, IsolatedWork, RunEnd, SharedWork, StopReason,
     StoredOptionsRefusal,
@@ -368,9 +369,11 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
 
 /// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_reported_deadline_writes_the_timeout`
 /// and `TestFinalizeKilledRun::test_a_run_past_its_deadline_writes_the_timeout`,
-/// and `test_thread_dispatch.py::TestFinalizeThread::test_a_task_past_its_deadline_writes_the_timeout`:
+/// `test_thread_dispatch.py::TestFinalizeThread::test_a_task_past_its_deadline_writes_the_timeout`,
+/// and `tests/integration/test_task_timeout.py::test_timeout_retries_when_opted_in`:
 /// the timeout retries by the policy at the placement of the end; an
-/// isolated placement moves the row to the `ISOLATED` class.
+/// isolated placement moves the row to the `ISOLATED` class. The attempt
+/// records `TASK_TIMEOUT` and will retry.
 #[tokio::test]
 #[serial]
 async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
@@ -432,6 +435,18 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
         assert_eq!(row["status"], "PENDING", "{execution} {placement:?}");
         assert_eq!(row["execution"], class_after, "{execution} {placement:?}");
         assert_eq!(row["retry_count"], 1, "{execution} {placement:?}");
+        let attempts: Vec<(bool, Option<String>)> = sqlx::query_as(
+            "SELECT will_retry, error_code FROM horsies_task_attempts WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read the attempt rows");
+        assert_eq!(
+            attempts,
+            vec![(true, Some("TASK_TIMEOUT".to_owned()))],
+            "{execution} {placement:?}"
+        );
         remove_task(&pool, task_id).await;
     }
 }
@@ -811,14 +826,21 @@ const ONE_STAGE_OF_WAITS: Duration = Duration::from_millis(3_500);
 /// `TestFinalizeKilledRun::test_a_database_error_of_the_write_is_retryable`,
 /// `::test_the_retry_of_a_failed_kill_write_writes_the_same_verdict`,
 /// `::test_a_crash_error_retries_as_a_crash`, `TestTimeoutWriteRetry::*`,
-/// and `test_thread_dispatch.py::TestFinalizeThread::test_a_failed_timeout_write_after_the_kill_is_retried_as_that_write`:
+/// `test_thread_dispatch.py::TestFinalizeThread::test_a_failed_timeout_write_after_the_kill_is_retried_as_that_write`,
+/// and `test_task_timeout_order.py::TestTheKillComesFirst::test_a_database_error_comes_after_the_kill`
+/// (the write and its log lines; the order is
+/// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
 /// a write that keeps failing is sent again up to its bound; a timeout
 /// runs its crash recovery stage after the last retry of its own write, a
 /// loop kill or a crash has one stage only. Each settles as spent retries.
+/// Each failed send of the `TASK_TIMEOUT` write is logged with the task and
+/// the stage, and the end of its retries at error with the task.
 #[tokio::test]
 async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
     let claimed = task(1, ExecutionClass::SharedAsync);
     let writer = unreachable_writer();
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
 
     let started = Instant::now();
     let loop_kill = writer
@@ -850,6 +872,25 @@ async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
     assert!(one_stage >= ONE_STAGE_OF_WAITS, "{one_stage:?}");
     assert!(one_stage < 2 * ONE_STAGE_OF_WAITS, "{one_stage:?}");
     assert!(two_stages >= 2 * ONE_STAGE_OF_WAITS, "{two_stages:?}");
+    let timeout_write_retries = capture.lines_starting(
+        tracing::Level::WARN,
+        &format!(
+            "Finalize retry scheduled for task {} stage=timeout_write",
+            claimed.task_id
+        ),
+    );
+    assert_eq!(
+        timeout_write_retries.len(),
+        usize::try_from(super::outcome::WriteStage::TimeoutWrite.max_retries()).unwrap(),
+        "{timeout_write_retries:?}"
+    );
+    let task_id = claimed.task_id.to_string();
+    let spent: Vec<CapturedEvent> = capture.lines_starting(
+        tracing::Level::ERROR,
+        "every retry of the TASK_TIMEOUT write failed",
+    );
+    assert_eq!(spent.len(), 1, "{spent:?}");
+    assert_eq!(spent[0].field("task_id"), Some(task_id.as_str()));
 }
 
 /// The work of a shared async run with its stored timeout and grace, as

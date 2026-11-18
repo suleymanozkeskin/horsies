@@ -5407,6 +5407,9 @@ mod tests {
 mod held_task_tests;
 
 #[cfg(test)]
+mod claim_config_tests;
+
+#[cfg(test)]
 mod live_worker_tests;
 
 #[cfg(test)]

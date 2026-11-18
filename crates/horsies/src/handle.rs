@@ -168,15 +168,17 @@ impl ReadError {
     /// The failure of a read. A stored payload that does not read keeps its
     /// own variant.
     pub(crate) fn of_operation(task_id: Uuid, error: BrokerOperationError) -> Self {
-        match error.code {
-            BrokerErrorCode::InvalidJsonPayload => Self::StoredResultUnreadable {
-                task_id,
-                cause: error.message,
-            },
-            code => Self::Database {
-                code,
-                message: error.message,
-                retryable: error.retryable,
+        match error {
+            BrokerOperationError::InvalidJsonPayload { message, .. } => {
+                Self::StoredResultUnreadable {
+                    task_id,
+                    cause: message,
+                }
+            }
+            other => Self::Database {
+                code: other.code(),
+                message: other.message().to_owned(),
+                retryable: other.retryable(),
             },
         }
     }
@@ -875,10 +877,8 @@ mod tests {
     fn an_invalid_payload_read_is_unreadable_and_another_failure_is_database() {
         let unreadable = ReadError::of_operation(
             task(),
-            BrokerOperationError {
-                code: BrokerErrorCode::InvalidJsonPayload,
+            BrokerOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
-                retryable: false,
                 cause: horsies_core::FailureCause::ContractViolation,
             },
         );
@@ -888,8 +888,8 @@ mod tests {
         ));
         let database = ReadError::of_operation(
             task(),
-            BrokerOperationError {
-                code: BrokerErrorCode::TaskInfoQueryFailed,
+            BrokerOperationError::OperationFailed {
+                code: horsies_core::BrokerOperationFailedCode::TaskInfoQueryFailed,
                 message: "timeout".to_owned(),
                 retryable: true,
                 cause: horsies_core::FailureCause::Connection,

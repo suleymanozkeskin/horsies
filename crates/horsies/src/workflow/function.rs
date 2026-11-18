@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use horsies_core::{WorkflowStartError, WorkflowStartErrorCode};
+use horsies_core::WorkflowStartError;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
@@ -196,13 +196,13 @@ where
         params: P,
         workflow_id: Uuid,
     ) -> Result<WorkflowHandle<T>, WorkflowStartError> {
-        let spec = self.build(params).map_err(|error| WorkflowStartError {
-            code: WorkflowStartErrorCode::ValidationFailed,
-            message: error.to_string(),
-            retryable: false,
-            workflow_name: self.name.to_owned(),
-            workflow_id: Some(workflow_id),
-        })?;
+        let spec = self
+            .build(params)
+            .map_err(|error| WorkflowStartError::ValidationFailed {
+                message: error.to_string(),
+                workflow_name: self.name.to_owned(),
+                workflow_id: Some(workflow_id),
+            })?;
         self.starter.start(&spec, workflow_id).await
     }
 
@@ -419,13 +419,11 @@ fn global<D: 'static, V: Any + Clone>() -> Option<V> {
 }
 
 fn not_registered(name: &str, method: &str) -> WorkflowStartError {
-    WorkflowStartError {
-        code: WorkflowStartErrorCode::ValidationFailed,
+    WorkflowStartError::ValidationFailed {
         message: format!(
             "workflow '{name}' is not registered in this process; call app.{method}::<...>() when \
              main builds the app"
         ),
-        retryable: false,
         workflow_name: name.to_owned(),
         workflow_id: None,
     }

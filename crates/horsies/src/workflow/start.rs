@@ -17,7 +17,7 @@ use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
     child_producer, ChildProducer, ClientStartError, ClientStartOutcome, WorkflowError,
-    WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartError,
 };
 use uuid::Uuid;
 
@@ -86,46 +86,34 @@ impl WorkflowStarter {
         spec: &WorkflowSpec,
         workflow_id: Uuid,
     ) -> Result<WorkflowHandle<T>, WorkflowStartError> {
-        let refused =
-            |code: WorkflowStartErrorCode, message: String, retryable: bool| WorkflowStartError {
-                code,
-                message,
-                retryable,
-                workflow_name: spec.name().to_owned(),
-                workflow_id: Some(workflow_id),
-            };
-        let validation = |error: HorsiesError| {
-            refused(
-                WorkflowStartErrorCode::ValidationFailed,
-                error.to_string(),
-                false,
-            )
+        let validation_failed = |message: String| WorkflowStartError::ValidationFailed {
+            message,
+            workflow_name: spec.name().to_owned(),
+            workflow_id: Some(workflow_id),
         };
+        let validation = |error: HorsiesError| validation_failed(error.to_string());
         if spec
             .definition_key()
             .map(str::trim)
             .unwrap_or_default()
             .is_empty()
         {
-            return Err(refused(
-                WorkflowStartErrorCode::ValidationFailed,
-                format!(
-                    "WorkflowSpec is missing definition_key: workflow '{}' has no stable \
-                     definition_key; set a definition key such as 'your.workflow.v1'",
-                    spec.name()
-                ),
-                false,
-            ));
+            return Err(validation_failed(format!(
+                "WorkflowSpec is missing definition_key: workflow '{}' has no stable \
+                 definition_key; set a definition key such as 'your.workflow.v1'",
+                spec.name()
+            )));
         }
         spec.check_output_type::<T>().map_err(validation)?;
         let client = self.workflows.prepare(spec).map_err(validation)?;
         let handle = self.operation_handle();
         let broker = handle.initialized_broker().await.map_err(|error| {
-            refused(
-                WorkflowStartErrorCode::EnqueueFailed,
-                format!("Schema initialization failed: {error}"),
-                error.is_retryable(),
-            )
+            WorkflowStartError::EnqueueFailed {
+                message: format!("Schema initialization failed: {error}"),
+                retryable: error.is_retryable(),
+                workflow_name: spec.name().to_owned(),
+                workflow_id,
+            }
         })?;
         let started = broker
             .start_client_workflow(
@@ -140,20 +128,19 @@ impl WorkflowStarter {
             Ok(ClientStartOutcome::Started | ClientStartOutcome::Exists) => Ok(
                 WorkflowHandle::new(workflow_id, handle, Arc::clone(&self.workflows)),
             ),
-            Ok(ClientStartOutcome::IdTaken { existing_name }) => Err(refused(
-                WorkflowStartErrorCode::WorkflowIdConflict,
-                format!(
-                    "workflow_id '{workflow_id}' already exists for workflow name \
-                     '{existing_name}', cannot start workflow name '{}' with the same id",
-                    spec.name(),
-                ),
-                false,
-            )),
-            Err(error) => Err(refused(
-                start_error_code(&error, workflow_id),
-                error.to_string(),
-                error.is_retryable(),
-            )),
+            Ok(ClientStartOutcome::IdTaken { existing_name }) => {
+                Err(WorkflowStartError::IdConflict {
+                    message: format!(
+                        "workflow_id '{workflow_id}' already exists for workflow name \
+                         '{existing_name}', cannot start workflow name '{}' with the same id",
+                        spec.name(),
+                    ),
+                    workflow_name: spec.name().to_owned(),
+                    workflow_id,
+                    existing_workflow_name: existing_name,
+                })
+            }
+            Err(error) => Err(start_error(&error, spec.name(), workflow_id)),
         }
     }
 
@@ -179,24 +166,37 @@ pub(crate) fn new_workflow_id() -> Uuid {
     Uuid::new_v4()
 }
 
-/// The start catalog code of the failed start of `workflow_id`: a spec or a
-/// child spec that the core refuses is `VALIDATION_FAILED`; the schema
-/// install, the database, the client family check and a child build that
-/// raised are `ENQUEUE_FAILED`. Pure.
+/// The start error of the failed start `workflow_id` of `workflow_name`: a
+/// spec or a child spec that the core refuses is `VALIDATION_FAILED`; the
+/// schema install, the database, the client family check and a child build
+/// that raised are `ENQUEUE_FAILED`, with the retry rule of the cause. Pure.
 ///
 /// Panics: an error that a start never gives (a defect).
-fn start_error_code(error: &ClientStartError, workflow_id: Uuid) -> WorkflowStartErrorCode {
+fn start_error(
+    error: &ClientStartError,
+    workflow_name: &str,
+    workflow_id: Uuid,
+) -> WorkflowStartError {
     match error {
-        ClientStartError::SchemaInstall(_) => WorkflowStartErrorCode::EnqueueFailed,
         ClientStartError::Start(WorkflowError::Serialization(_) | WorkflowError::Validation(_)) => {
-            WorkflowStartErrorCode::ValidationFailed
+            WorkflowStartError::ValidationFailed {
+                message: error.to_string(),
+                workflow_name: workflow_name.to_owned(),
+                workflow_id: Some(workflow_id),
+            }
         }
-        ClientStartError::Start(
+        ClientStartError::SchemaInstall(_)
+        | ClientStartError::Start(
             WorkflowError::Database(_)
             | WorkflowError::Broker(_)
             | WorkflowError::StepContract(_)
             | WorkflowError::ChildSpecSource(_),
-        ) => WorkflowStartErrorCode::EnqueueFailed,
+        ) => WorkflowStartError::EnqueueFailed {
+            message: error.to_string(),
+            retryable: error.is_retryable(),
+            workflow_name: workflow_name.to_owned(),
+            workflow_id,
+        },
         ClientStartError::Start(
             WorkflowError::WorkflowNotFound { .. } | WorkflowError::InvalidStatus(_),
         ) => panic!(
@@ -208,7 +208,7 @@ fn start_error_code(error: &ClientStartError, workflow_id: Uuid) -> WorkflowStar
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerError, ChildSpecUnavailable};
+    use horsies_core::{BrokerError, ChildSpecUnavailable, WorkflowStartErrorCode};
 
     use super::*;
     use crate::workflow::node::tests::task_node;
@@ -297,7 +297,10 @@ mod tests {
             ),
         ];
         for (error, code) in cases {
-            assert_eq!(start_error_code(&error, Uuid::nil()), code, "{error}");
+            let failed = start_error(&error, "nightly", Uuid::nil());
+            assert_eq!(failed.code(), code, "{error}");
+            assert_eq!(failed.workflow_name(), "nightly", "{error}");
+            assert_eq!(failed.workflow_id(), Some(Uuid::nil()), "{error}");
         }
     }
 }

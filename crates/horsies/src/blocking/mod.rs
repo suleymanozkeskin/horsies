@@ -24,8 +24,8 @@
 //!   its catalog, as a Python sync call inside a running event loop does:
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
 //!   so `retry_send(&error).await` completes the same send),
-//!   `ReadError::AsyncContext`, `BrokerOperationError` with
-//!   `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
+//!   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
+//!   `CheckReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
 //!   start, `HandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
@@ -35,7 +35,9 @@
 //! - When the process runtime cannot run the call (this process is a fork
 //!   of the one that started it, or the OS refused its threads), the call
 //!   answers the database failure of its catalog with the cause; nothing
-//!   was sent.
+//!   was sent. A send or a retry in a fork panics instead: a fork is a state
+//!   of the process, never a send result, as Python's sends raise
+//!   `ForkedAfterCoreStart`.
 
 mod workflow;
 
@@ -50,9 +52,9 @@ use std::time::Duration;
 
 use horsies_core::process_runtime::{process_runtime, ProcessRuntimeRefusal};
 use horsies_core::{
-    process_role, thread_role, BrokerErrorCode, BrokerOperationError, ClassCoverage, ClassReport,
-    DatabasePing, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
-    WorkerStateSnapshot,
+    process_role, thread_role, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
+    ClassCoverage, ClassReport, DatabasePing, ProcessRole, SendKind, TaskSendError, ThreadRole,
+    WorkerPong, WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -60,7 +62,7 @@ use tokio::runtime::{Handle, Runtime};
 use uuid::Uuid;
 
 use crate::check::{connectivity_report, CHECK};
-use crate::send::{RetryOf, SendStart};
+use crate::send::{forked_send, RetryOf, SendStart};
 use crate::{
     CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
     StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
@@ -199,6 +201,11 @@ where
     }
 
     /// The enqueue with resends of a prepared send, on the process runtime.
+    ///
+    /// # Panics
+    ///
+    /// In a fork, without `exec`, of the process that started the process
+    /// runtime ([`refused_send`]). Nothing was sent.
     fn enqueue(
         &self,
         task_id: Uuid,
@@ -221,13 +228,41 @@ where
                     self.function.task_name()
                 ),
             }),
-            Place::RuntimeRefused(refusal) => Err(TaskSendError::EnqueueFailed {
+            Place::RuntimeRefused(refusal) => Err(refused_send(
+                self.function.task_name(),
                 task_id,
-                payload: Box::new(payload),
-                message: format!("the send did not start: {refusal}"),
-                retryable: refusal_retryable(&refusal),
-            }),
+                payload,
+                &refusal,
+            )),
         }
+    }
+}
+
+/// The answer of a blocking send whose process runtime refused it. A start
+/// that the OS refused is `EnqueueFailed`, retryable: the next use tries
+/// again.
+///
+/// # Panics
+///
+/// For a fork, without `exec`, of the process that started the runtime
+/// ([`forked_send`]): the fork is a state of the process, never a send
+/// result.
+fn refused_send(
+    task_name: &str,
+    task_id: Uuid,
+    payload: horsies_core::TaskSendPayload,
+    refusal: &ProcessRuntimeRefusal,
+) -> TaskSendError {
+    match refusal {
+        ProcessRuntimeRefusal::ForkedAfterStart { core_pid, this_pid } => {
+            forked_send(task_name, *core_pid, *this_pid)
+        }
+        ProcessRuntimeRefusal::StartFailed { .. } => TaskSendError::EnqueueFailed {
+            task_id,
+            payload: Box::new(payload),
+            message: format!("the send did not start: {refusal}"),
+            retryable: refusal_retryable(refusal),
+        },
     }
 }
 
@@ -332,19 +367,16 @@ fn block_read<V>(
 /// A runtime refusal has the broker code `code` of the read.
 fn block_health<V>(
     read: impl Future<Output = Result<V, BrokerOperationError>>,
-    code: BrokerErrorCode,
+    code: BrokerOperationFailedCode,
     blocking_call: &str,
     async_call: &str,
 ) -> Result<V, BrokerOperationError> {
     match place() {
         Place::Runs(runtime) => runtime.block_on(read),
-        Place::AsyncContext => Err(BrokerOperationError {
-            code: BrokerErrorCode::AsyncContext,
+        Place::AsyncContext => Err(BrokerOperationError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
-            retryable: false,
-            cause: horsies_core::FailureCause::PreconditionFailed,
         }),
-        Place::RuntimeRefused(refusal) => Err(BrokerOperationError {
+        Place::RuntimeRefused(refusal) => Err(BrokerOperationError::OperationFailed {
             code,
             message: format!("the read did not start: {refusal}"),
             retryable: refusal_retryable(&refusal),
@@ -417,7 +449,7 @@ impl HorsiesView<'_> {
     pub fn ping_database(&self) -> Result<DatabasePing, BrokerOperationError> {
         block_health(
             self.app.ping_database(),
-            BrokerErrorCode::DbPingFailed,
+            BrokerOperationFailedCode::DbPingFailed,
             "Horsies::ping_database()",
             "app.ping_database()",
         )
@@ -432,7 +464,7 @@ impl HorsiesView<'_> {
     ) -> Result<Vec<WorkerPong>, BrokerOperationError> {
         block_health(
             self.app.ping_workers(target, timeout, min_responses),
-            BrokerErrorCode::WorkerPingFailed,
+            BrokerOperationFailedCode::WorkerPingFailed,
             "Horsies::ping_workers()",
             "app.ping_workers(target, timeout, min_responses)",
         )
@@ -442,7 +474,7 @@ impl HorsiesView<'_> {
     pub fn list_worker_states(&self) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.list_worker_states(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::list_worker_states()",
             "app.list_worker_states()",
         )
@@ -455,7 +487,7 @@ impl HorsiesView<'_> {
     ) -> Result<Option<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.get_worker_state(worker_id),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state()",
             "app.get_worker_state(worker_id)",
         )
@@ -469,7 +501,7 @@ impl HorsiesView<'_> {
     ) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.get_worker_state_history(worker_id, limit),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state_history()",
             "app.get_worker_state_history(worker_id, limit)",
         )
@@ -479,7 +511,7 @@ impl HorsiesView<'_> {
     pub fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
         block_health(
             self.app.get_class_coverage(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_coverage()",
             "app.get_class_coverage()",
         )
@@ -489,7 +521,7 @@ impl HorsiesView<'_> {
     pub fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
         block_health(
             self.app.get_class_report(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_report()",
             "app.get_class_report()",
         )
@@ -623,8 +655,8 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_health_read_on_a_runtime_thread_has_the_async_context_code() {
         let refused = app().blocking().ping_database().unwrap_err();
-        assert_eq!(refused.code, BrokerErrorCode::AsyncContext);
-        assert!(!refused.retryable);
+        assert_eq!(refused.code(), BrokerErrorCode::AsyncContext);
+        assert!(!refused.retryable());
     }
 
     #[tokio::test]
@@ -648,6 +680,61 @@ mod tests {
                 this_pid: 2,
             }
         ));
+    }
+
+    /// A runtime start that the OS refused is a retryable `ENQUEUE_FAILED`
+    /// with the prepared task id and payload: the next use tries again.
+    #[test]
+    fn a_send_whose_runtime_did_not_start_is_a_retryable_enqueue_failed() {
+        let app = app();
+        let (task_id, payload) = function(&app)
+            .prepare(SendStart::Now, &TaskSendOptions::new(), &Invoice { id: 3 })
+            .unwrap();
+        let refused = refused_send(
+            "bill",
+            task_id,
+            payload,
+            &ProcessRuntimeRefusal::StartFailed {
+                cause: "EAGAIN".to_owned(),
+                os_error: horsies_core::process_runtime::OsErrorCode::Code(11),
+            },
+        );
+        let TaskSendError::EnqueueFailed {
+            task_id: failed_id,
+            payload,
+            message,
+            retryable,
+        } = &refused
+        else {
+            panic!("expected ENQUEUE_FAILED, got {refused}");
+        };
+        assert_eq!(*failed_id, task_id);
+        assert_eq!(payload.input_json, r#"{"id":3}"#);
+        assert!(message.contains("the send did not start"), "{message}");
+        assert!(*retryable);
+    }
+
+    /// #1938: a blocking send in a fork panics; it never answers
+    /// `ENQUEUE_FAILED`.
+    #[test]
+    #[should_panic(
+        expected = "send of task 'bill' refused: the core runtime started in process 1, \
+                               and this process (2) is a fork of it without exec"
+    )]
+    fn a_blocking_send_in_a_fork_panics() {
+        let app = app();
+        let (task_id, payload) = function(&app)
+            .prepare(SendStart::Now, &TaskSendOptions::new(), &Invoice { id: 4 })
+            .unwrap();
+        let _never = refused_send(
+            "bill",
+            task_id,
+            payload,
+            &ProcessRuntimeRefusal::ForkedAfterStart {
+                core_pid: 1,
+                this_pid: 2,
+            },
+        );
     }
 
     #[test]

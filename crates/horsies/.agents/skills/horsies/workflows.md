@@ -357,8 +357,12 @@ async fn run_checkout(
 
 ### `WorkflowStartError`
 
-Fields: `code`, `message`, `retryable`, `workflow_name`, `workflow_id`
-(`Option<Uuid>`).
+An enum with one variant per state: `ValidationFailed { message,
+workflow_name, workflow_id: Option<Uuid> }`, `IdConflict { message,
+workflow_name, workflow_id, existing_workflow_name }`, `EnqueueFailed {
+message, retryable, workflow_name, workflow_id }` and `AsyncContext {
+message, workflow_name, workflow_id }`. The methods `code()`, `message()`,
+`retryable()`, `workflow_name()` and `workflow_id()` read every variant.
 
 | `WorkflowStartErrorCode` | When |
 |---|---|
@@ -369,8 +373,8 @@ Fields: `code`, `message`, `retryable`, `workflow_name`, `workflow_id`
 
 `WorkflowFunction::retry_start(&error)` starts again with the error's
 `workflow_id`. It takes an `EnqueueFailed` or an `AsyncContext` error. It
-refuses with `ValidationFailed` an error with another code, an error of
-another workflow name, and an error with no workflow id. For a template, call `start_with_id(params, workflow_id)`
+refuses with `ValidationFailed` an error with another code and an error of
+another workflow name. For a template, call `start_with_id(params, workflow_id)`
 with the error's id.
 
 ## `WorkflowHandle<T>`

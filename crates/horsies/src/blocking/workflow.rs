@@ -8,7 +8,7 @@
 //!
 //! - On a thread that runs a tokio runtime the call runs nothing and
 //!   answers the `ASYNC_CONTEXT` member of its catalog: a start answers
-//!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
+//!   `WorkflowStartError::AsyncContext` with the workflow id of the
 //!   start, nothing written (Python `WorkflowStartAsyncContext`); `status`,
 //!   `results`, `tasks`, `cancel`, `pause` and `resume` answer
 //!   `HandleErrorCode::AsyncContext` (Python `HandleAsyncContext`); `get`
@@ -31,8 +31,7 @@ use std::future::Future;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::{
     process_role, wait_inside_task_message, FailureCause, HandleErrorCode, HandleOperationError,
-    HandleResult, ProcessRole, UserCode, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStatus,
+    HandleResult, ProcessRole, UserCode, WorkflowStartError, WorkflowStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -62,26 +61,19 @@ fn block_start<H>(
     workflow_id: Uuid,
     names: &StartNames<'_>,
 ) -> Result<H, WorkflowStartError> {
-    let refused =
-        |code: WorkflowStartErrorCode, message: String, retryable: bool| WorkflowStartError {
-            code,
-            message,
-            retryable,
-            workflow_name: names.workflow_name.to_owned(),
-            workflow_id: Some(workflow_id),
-        };
     match place() {
         Place::Runs(runtime) => runtime.block_on(start),
-        Place::AsyncContext => Err(refused(
-            WorkflowStartErrorCode::AsyncContext,
-            async_context_message(&names.blocking_call, names.async_call),
-            false,
-        )),
-        Place::RuntimeRefused(refusal) => Err(refused(
-            WorkflowStartErrorCode::EnqueueFailed,
-            format!("the start did not run: {refusal}"),
-            refusal_retryable(&refusal),
-        )),
+        Place::AsyncContext => Err(WorkflowStartError::AsyncContext {
+            message: async_context_message(&names.blocking_call, names.async_call),
+            workflow_name: names.workflow_name.to_owned(),
+            workflow_id,
+        }),
+        Place::RuntimeRefused(refusal) => Err(WorkflowStartError::EnqueueFailed {
+            message: format!("the start did not run: {refusal}"),
+            retryable: refusal_retryable(&refusal),
+            workflow_name: names.workflow_name.to_owned(),
+            workflow_id,
+        }),
     }
 }
 

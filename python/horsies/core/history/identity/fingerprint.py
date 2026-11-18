@@ -34,16 +34,22 @@ class EnqueueCommandV1:
     Serialized inputs travel as their canonical JSON strings — the
     fingerprint covers the bytes the request actually carries, not a
     re-serialization. A send stores its input in the one ``input`` column,
-    so it passes ``args_json=None`` and the stored ``input`` text as
-    ``input_json``: the fingerprint is then a function of the stored row.
-    ``input_json`` takes the element of the keyword arguments of version 1,
-    so the digest of a stored row does not change.
+    so it passes the stored ``input`` text as ``input_json``: the
+    fingerprint is then a function of the stored row. ``input_json`` takes
+    the element of the keyword arguments of version 1, so the digest of a
+    stored row does not change.
+
+    ``positional_args_json`` takes the element of the positional arguments
+    of version 1. A task takes keyword arguments only, so every send passes
+    ``None``. (In 0.6 and 0.7 a workflow node passed its stored args text,
+    ``'[]'`` for a node that those versions wrote.) The field keeps its
+    place in the array, so no version-1 digest changes.
     """
 
     task_name: str
     queue_name: str
     priority: int
-    args_json: str | None
+    positional_args_json: str | None
     input_json: str | None
     good_until: datetime | None
     enqueue_delay_seconds: int | None
@@ -78,7 +84,7 @@ class EnqueueCommandV1:
                 self.task_name,
                 self.queue_name,
                 self.priority,
-                self.args_json,
+                self.positional_args_json,
                 self.input_json,
                 _canonical_datetime(self.good_until),
                 self.enqueue_delay_seconds,
