@@ -779,11 +779,8 @@ mod queue_tests {
     /// then the marker.
     #[tokio::test]
     async fn a_degraded_stream_keeps_its_marker_when_events_overflow_it() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-            .expect("a lazy pool opens no connection");
-        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(
-            pool,
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_test_url(
+            "postgresql://horsies@127.0.0.1:1/horsies",
             crate::ClientFamily::Rust,
         )));
         let subscription = broadcaster.subscribe().await;
@@ -923,11 +920,8 @@ mod queue_tests {
     /// A dropped client stream is removed at the next publish.
     #[tokio::test]
     async fn publish_drops_a_client_whose_stream_ended() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-            .expect("a lazy pool opens no connection");
-        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(
-            pool,
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_test_url(
+            "postgresql://horsies@127.0.0.1:1/horsies",
             crate::ClientFamily::Rust,
         )));
         let kept = Arc::new(SubscriberQueue::default());
