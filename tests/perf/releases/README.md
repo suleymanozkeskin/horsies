@@ -48,6 +48,11 @@ operation. The patch makes these changes:
   strings.
 - **Selection.** `--scenario candidates` selects no scenario now. A selection
   of no scenario is refused.
+- **Public call scenarios.** The patch adds `tests/perf/public_calls.py`, the
+  same file as in the current harness, and the scenarios `send` and
+  `workflow-start` (see "Scenario map"). The runner, the entry point and the
+  report change as in the current harness to run them; the report names the
+  payload "payload per operation".
 
 The patch does not change the unit tests of the 0.7.0 harness
 (`tests/unit/test_perf_run_exit.py`). Some of these tests need a scenario
@@ -56,16 +61,37 @@ them.
 
 ## Scenario map
 
-The current harness has no scenario. Its scenarios measured statements of
-the Python core implementation, which 0.8.0 deleted; scenarios on public
-operations that run on both releases are tracked in #2049. The table below
-records the pairs that the harness measured before that deletion.
+The scenarios of the current harness call public operations of the library.
+Each one has a v0.7.0 scenario of the same name that runs the same file,
+`tests/perf/public_calls.py`. Every call in that file is public API of both
+releases with the same signature, so a pair measures the same call through
+the product of each release.
 
-The comparison pairs these scenarios. Each cell names what the scenario
-sends in one operation: the statements that the product of that release
-sends for the same case.
+| Scenario (both releases) | Public call | Rows that one call writes |
+|---|---|---|
+| `send` | `send(text=...)` of one task, with a 200-byte text argument | one PENDING task row |
+| `workflow-start` | `WorkflowSpec.start()` of a one-node workflow; the node has a 200-byte text argument | the workflow row, its node row, the task row of the node |
 
-| Current scenario | Current statements | v0.7.0 scenario | v0.7.0 statements |
+- The client of a scenario connects with the `--dsn` of the run. Both sides
+  of a run share one client; the first block of each side is a warmup.
+- The library mints the ids of the rows. The run deletes the rows by the
+  task name or the workflow name of the scenario (`perf.public.*`), before
+  and after it measures.
+- No plan evidence: the statements are the library's. The server counts are
+  the statements that the library sent.
+- Claim and finish have no scenario. No public API of either release claims
+  or finishes a task: the worker does both (#2049).
+
+### Statement scenarios of the v0.7.0 harness
+
+The v0.7.0 harness keeps its statement scenarios. The current harness had the
+same scenarios until 0.8.0 deleted the Python core implementation, whose
+statements and decoders they measured; no current scenario pairs with them.
+The table records the pairs that the harness measured before that deletion.
+Each cell names what the scenario sent in one operation: the statements that
+the product of that release sends for the same case.
+
+| Branch scenario before the deletion | Branch statements | v0.7.0 scenario | v0.7.0 statements |
 |---|---|---|---|
 | `fused-completion-small-result` | `horsies_complete_task_fused` | `fused-completion-small-result` | `horsies_complete_task_fused` |
 | `fused-completion-1mib-result` | `horsies_complete_task_fused` | `fused-completion-1mib-result` | `horsies_complete_task_fused` |
@@ -147,11 +173,11 @@ release: the two schemas have the same table names.
 
    ```sh
    (cd ../horsies-v0.7.0 && uv run python -m tests.perf \
-       --scenario terminal-application-failure --scale gate \
+       --scenario send --scale gate \
        --demo-quiesced --control --write-summary \
        --dsn postgresql+psycopg://USER:PASSWORD@HOST:PORT/horsies_v070)
    uv run python -m tests.perf \
-       --scenario failed-attempt-terminal --scale gate \
+       --scenario send --scale gate \
        --demo-quiesced --control --write-summary \
        --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_v080
    ```
