@@ -281,14 +281,14 @@ class TestCancelOutcome:
 
     @pytest.mark.asyncio
     async def test_a_core_boundary_error_is_db_operation_failed(self) -> None:
-        stopped = core.CoreStopped('core task', 'planned panic')
-        handle = _handle_with_core_answer(raises=stopped)
+        not_started = core.CoreStartFailed('the core runtime could not start')
+        handle = _handle_with_core_answer(raises=not_started)
 
         result = await handle.cancel_async()
 
         assert is_err(result)
         assert isinstance(result.err_value, HandleDbOperationFailed)
-        assert result.err_value.exception is stopped
+        assert result.err_value.exception is not_started
         assert result.err_value.retryable is False
 
 

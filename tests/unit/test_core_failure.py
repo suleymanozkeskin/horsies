@@ -1,5 +1,6 @@
-"""``horsies.core.types.core_failure``: the retry rule of a core boundary
-error, and the absence of the interim class ``CoreOperationFailed``.
+"""``horsies.core.types.core_failure``: the call rule and the retry rule of
+a core boundary error, and the absence of the interim class
+``CoreOperationFailed``.
 
 A failure record of the core carries the core's class of the cause
 (``horsies._core.CoreServerError`` and the other ``CoreFailure`` leaf
@@ -17,7 +18,7 @@ import pytest
 
 import horsies
 import horsies._core as core
-from horsies.core.types.core_failure import core_error_retryable
+from horsies.core.types.core_failure import call_refusal_or_raise, core_error_retryable
 
 pytestmark = [pytest.mark.unit]
 
@@ -72,3 +73,39 @@ class TestCoreErrorRetryable:
         self, error: core.CoreError,
     ) -> None:
         assert core_error_retryable(error) is False
+
+
+class TestCallRefusalOrRaise:
+    @pytest.mark.parametrize(
+        'error',
+        [
+            core.TooManyPendingCalls('CoreHandle.task_info_async', 65_536),
+            core.CoreCallTimedOut('CoreHandle.task_info', 1800, 'no_change'),
+            core.CoreStartFailed('the tokio runtime could not be built'),
+        ],
+        ids=['too-many-pending-calls', 'call-timed-out', 'start-failed'],
+    )
+    def test_the_failure_of_one_call_is_returned(self, error: core.CoreError) -> None:
+        assert call_refusal_or_raise(error) is error
+
+    @pytest.mark.parametrize(
+        'error',
+        [
+            core.ForkedAfterCoreStart(100, 101, 'use spawn'),
+            core.CoreStopped('core task', 'panic'),
+        ],
+        ids=['forked', 'stopped'],
+    )
+    def test_a_state_of_the_process_is_raised_unchanged(self, error: core.CoreError) -> None:
+        with pytest.raises(type(error)) as raised:
+            _ = call_refusal_or_raise(error)
+
+        assert raised.value is error
+
+    def test_a_class_the_core_does_not_define_is_a_defect(self) -> None:
+        unknown = core.CoreError('not a class of the core')
+
+        with pytest.raises(AssertionError, match='CoreError: not a class of the core') as raised:
+            _ = call_refusal_or_raise(unknown)
+
+        assert raised.value.__cause__ is unknown

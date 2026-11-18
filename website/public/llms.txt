@@ -265,9 +265,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - LOOP_RUNNER_FAILED: not returned; a sync send calls the core on the calling thread, not on the broker's sync runner (the variant stays in TaskSendError and TaskSendRetryable)
 
 ### Raised, never returned: ForkedAfterCoreStart, CoreStopped (horsies._core)
-- Both are states of the process: the core refuses every later call in it. send, send_async, schedule, schedule_async, retry_send, retry_send_async, retry_schedule, retry_schedule_async and PostgresBroker.enqueue / enqueue_async raise them; none returns them as ENQUEUE_FAILED. Nothing was sent; a retry in the same process raises again
-- ForkedAfterCoreStart: the process was forked without exec after the core started in its parent (for example a fork-start multiprocessing pool inside a task). Fix: start child processes that call horsies with the spawn or forkserver start method, or fork before the parent's first send or read
-- CoreStopped: a core background task panicked; args are the (subject, cause) of the first panic. Fix: restart the process; report the panic's subject and cause as a defect
+- Both are states of the process: the core refuses every later call in it. Every call that runs on the core raises them, sync and async forms alike: the sends and their retry methods, PostgresBroker.enqueue, the task, result and health reads, the broker's task lists and recovery passes, ensure_schema_initialized, close, check(live=True), the workflow start, WorkflowHandle, pause_workflow / resume_workflow, horsies.monitoring and the horsies web schema probe. No call returns them as a result; no result type has a variant for them. Nothing ran; a retry in the same process raises again
+- ForkedAfterCoreStart: the process was forked without exec after the core started in its parent (for example a fork-start multiprocessing pool inside a task). Fix: start child processes that call horsies with the spawn or forkserver start method, or fork before the parent's first call
+- CoreStopped: a background task of the core panicked (a defect in horsies, not a database failure); args are the (subject, cause) of the first panic. Fix: restart the process; report the panic's subject and cause as a defect
 
 ### TaskSendPayload (frozen dataclass)
 - task_name: str, queue_name: str, priority: int

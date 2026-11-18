@@ -282,6 +282,8 @@ async def start_workflow_async(
         id then finds the workflow).
 
     Raises:
+        ForkedAfterCoreStart, CoreStopped: the core of this process refuses
+            every call (``call_refusal_or_raise``). Nothing was written.
         SerializationError: a value of the node rows does not serialize (a
             defect of values that the process built and validated); or the
             build of a sub-workflow child raised it (task options of a child
@@ -306,7 +308,7 @@ async def start_workflow_async(
         WorkflowStarted,
         WorkflowStartRequest,
     )
-    from horsies.core.types.core_failure import core_error_retryable
+    from horsies.core.types.core_failure import call_refusal_or_raise, core_error_retryable
     from horsies.core.workflows.spec_data import workflow_spec_json
     from horsies.core.workflows.start_tree import top_node_rows
 
@@ -392,12 +394,13 @@ async def start_workflow_async(
     try:
         outcome = await broker._core_handle.start_workflow_async(request)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
+        refusal = call_refusal_or_raise(exc)
         return Err(WorkflowStartEnqueueFailed(
-            message=f'start of workflow {spec.name!r}: {type(exc).__name__}: {exc}',
-            retryable=core_error_retryable(exc),
+            message=f'start of workflow {spec.name!r}: {type(refusal).__name__}: {refusal}',
+            retryable=core_error_retryable(refusal),
             workflow_name=spec.name,
             workflow_id=wf_id,
-            exception=exc,
+            exception=refusal,
         ))
     match outcome:
         case WorkflowStarted():
@@ -545,6 +548,8 @@ async def pause_workflow(
         ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
 
     Raises:
+        ForkedAfterCoreStart, CoreStopped: the core of this process refuses
+            every call (``call_refusal_or_raise``). Nothing ran.
         PanicException: the function returned a row outside its contract
             (a defect of the core).
     """
@@ -555,6 +560,7 @@ async def pause_workflow(
         WorkflowNotRunning,
         WorkflowPaused,
     )
+    from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
@@ -570,7 +576,9 @@ async def pause_workflow(
     try:
         record = await broker._core_handle.pause_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(core_call_error(exc, workflow_id, WorkflowOperation.PAUSE))
+        return Err(core_call_error(
+            call_refusal_or_raise(exc), workflow_id, WorkflowOperation.PAUSE,
+        ))
     # The status trigger (horsies_notify_workflow_changes) sends
     # workflow_done for each paused workflow at commit, so get() returns
     # WORKFLOW_PAUSED without waiting for a poll.
@@ -714,6 +722,8 @@ async def resume_workflow(
         is RUNNING.
 
     Raises:
+        ForkedAfterCoreStart, CoreStopped: the core of this process refuses
+            every call (``call_refusal_or_raise``). Nothing ran.
         PanicException: a row outside a function's contract, or a child tree
             that the core refuses (a defect); nothing committed.
         KeyboardInterrupt, SystemExit: raised by a child's ``build_with``;
@@ -730,6 +740,7 @@ async def resume_workflow(
         WorkflowResumed,
         WorkflowResumeRecoveryFailed,
     )
+    from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
@@ -745,7 +756,9 @@ async def resume_workflow(
     try:
         record = await broker._core_handle.resume_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
-        return Err(core_call_error(exc, workflow_id, WorkflowOperation.RESUME))
+        return Err(core_call_error(
+            call_refusal_or_raise(exc), workflow_id, WorkflowOperation.RESUME,
+        ))
     match record:
         case WorkflowResumed():
             return Ok(True)

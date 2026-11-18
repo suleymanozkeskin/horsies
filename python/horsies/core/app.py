@@ -94,6 +94,7 @@ from horsies.core.models.workflow.nesting_check import (
 )
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
+from horsies.core.types.core_failure import call_refusal_or_raise
 from horsies.core.types.result import is_err
 from horsies.core.models.broker import PostgresConfig
 from horsies._catalog.manifest import dump_producer_manifest
@@ -855,6 +856,10 @@ class Horsies:
                 __getattr__ raising during member scans) — propagates to
                 the CLI command (traceback, non-zero exit) rather than
                 being masked as a validation error.
+            ForkedAfterCoreStart, CoreStopped: a live phase called the
+                core in a process that was forked without exec after the
+                core started, or whose core stopped
+                (``call_refusal_or_raise``).
         """
         all_errors: list[HorsiesError] = []
 
@@ -1399,12 +1404,13 @@ class Horsies:
         Returns at most one error, ``BROKER_INVALID_URL``: "broker listener
         capability check failed" for the probe, "broker connectivity check
         failed" for every other step and for a core that cannot run the
-        call. Nothing is written but the probe's one NOTIFY.
+        call. Nothing is written but the probe's one NOTIFY. Raises
+        ``ForkedAfterCoreStart`` and ``CoreStopped``.
         """
         try:
             outcome = handle.check_connectivity()
         except CoreError as exc:
-            return [_connectivity_failed(str(exc))]
+            return [_connectivity_failed(str(call_refusal_or_raise(exc)))]
         match outcome:
             case ConnectivityPassed():
                 return []
@@ -1434,12 +1440,14 @@ class Horsies:
     def _close_check_handle(self, handle: CoreHandle) -> None:
         """Close the core handle of a live check. A core that cannot run the
         close is logged: the check's answer stands, and the process holds the
-        handle's pools until it ends."""
+        handle's pools until it ends. Raises ``ForkedAfterCoreStart`` and
+        ``CoreStopped``."""
         try:
             _ = handle.close()
         except CoreError as exc:
             self.logger.warning(
-                'the core handle of the live check did not close: %s', exc,
+                'the core handle of the live check did not close: %s',
+                call_refusal_or_raise(exc),
             )
 
     def _check_worker_connections(self, handle: CoreHandle) -> list[HorsiesError]:
@@ -1458,13 +1466,14 @@ class Horsies:
 
         Returns one ``CHECK_WORKER_CONNECTIONS`` error per profile that does
         not fit, in name order, or one when the limit was not read or the
-        core could not run the call. Writes nothing.
+        core could not run the call. Writes nothing. Raises
+        ``ForkedAfterCoreStart`` and ``CoreStopped``.
         """
         profiles_json = dump_worker_profiles(self.config.worker_profiles)
         try:
             refusals = handle.check_worker_connections(profiles_json)
         except CoreError as exc:
-            return [_worker_connections_unchecked(str(exc))]
+            return [_worker_connections_unchecked(str(call_refusal_or_raise(exc)))]
         return [_worker_connection_error(refusal) for refusal in refusals]
 
     def list_tasks(self) -> list[str]:
