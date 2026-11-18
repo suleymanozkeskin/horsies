@@ -33,7 +33,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import Connection
-from tests.dualrun.clients import open_broker
+from tests.dualrun.clients import install_as_a_client, open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
@@ -145,6 +145,7 @@ def _seed(connection: Connection) -> None:
 
 
 def _reference_pass(database: DualRunDatabase, _seed: None) -> int:
+    install_as_a_client(database)
     with psycopg.connect(database.url, autocommit=True) as connection:
         install_interim_terminal_writes(connection)
         return reference.mark_stale_tasks_as_failed(

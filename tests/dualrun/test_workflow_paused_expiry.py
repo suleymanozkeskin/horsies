@@ -28,7 +28,7 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.worker.reaper import ReaperMixin
 from horsies.core.workflows.lifecycle import expire_paused_workflows
 from tests.dualrun.capture import Connection
-from tests.dualrun.clients import open_broker
+from tests.dualrun.clients import install_as_a_client, open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
@@ -149,6 +149,7 @@ def _seed(connection: Connection) -> _Seed:
 
 def _reference(database: DualRunDatabase, _seed_facts: _Seed) -> int:
     cover_history(database)
+    install_as_a_client(database)
     with psycopg.connect(database.url, autocommit=True) as connection:
         return reference.expire_paused(
             connection,

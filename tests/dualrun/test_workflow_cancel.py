@@ -28,7 +28,7 @@ from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import HandleOperationError, HandleWorkflowNotFound
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import Connection
-from tests.dualrun.clients import open_broker
+from tests.dualrun.clients import install_as_a_client, open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
@@ -149,6 +149,7 @@ def _targets(seed: _Seed) -> tuple[uuid.UUID, ...]:
 
 def _reference(database: DualRunDatabase, seed: _Seed) -> tuple[reference.CancelReport, ...]:
     cover_history(database)
+    install_as_a_client(database)
     with psycopg.connect(database.url, autocommit=True) as connection:
         return tuple(reference.cancel(connection, target) for target in _targets(seed))
 
