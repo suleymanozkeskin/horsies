@@ -212,7 +212,7 @@ impl CoreFailureSource for MonitoringQueryError {
         self.failure_cause()
     }
     fn exception_retryable(&self) -> bool {
-        self.retryable
+        self.retryable()
     }
 }
 

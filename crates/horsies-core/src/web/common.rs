@@ -6,8 +6,8 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::monitoring::{
-    ErrorCategory, MonitoringQueryError, MonitoringQueryErrorCode, PaginationRefused,
-    SortDirection, TaskGroupBy, TaskSortField,
+    ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection, TaskGroupBy,
+    TaskSortField,
 };
 use crate::TaskStatus;
 
@@ -392,12 +392,10 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
 /// not decode is 500, the request was valid and a repeat gives the same
 /// answer until the stored row changes.
 pub(crate) fn query_failed(surface: &str, error: MonitoringQueryError) -> ApiError {
-    let detail = format!("{surface} query failed: {}", error.message);
-    match error.code {
-        MonitoringQueryErrorCode::DbOperationFailed => ApiError::unavailable(detail),
-        // Python answers it with 503 too; the core never produces it.
-        MonitoringQueryErrorCode::EventLoopLimit => ApiError::unavailable(detail),
-        MonitoringQueryErrorCode::HistoryContractViolation => {
+    let detail = format!("{surface} query failed: {}", error.message());
+    match error {
+        MonitoringQueryError::DbOperationFailed { .. } => ApiError::unavailable(detail),
+        MonitoringQueryError::HistoryContractViolation { .. } => {
             ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, detail)
         }
     }
@@ -523,13 +521,8 @@ mod tests {
     use super::*;
     use crate::monitoring::MonitoringQueryErrorSource;
 
-    fn query_error(code: MonitoringQueryErrorCode) -> MonitoringQueryError {
-        MonitoringQueryError {
-            code,
-            message: "read failed".to_owned(),
-            retryable: false,
-            source: MonitoringQueryErrorSource::Database(sqlx::Error::PoolTimedOut),
-        }
+    fn read_source() -> MonitoringQueryErrorSource {
+        MonitoringQueryErrorSource::Database(sqlx::Error::PoolTimedOut)
     }
 
     #[test]
@@ -580,22 +573,25 @@ mod tests {
 
     #[test]
     fn a_query_failure_maps_to_python_s_status() {
-        let status = |code| match query_failed("Task list", query_error(code)) {
+        let status = |error| match query_failed("Task list", error) {
             ApiError::Detail(status, _) => status,
             ApiError::InvalidInput(_) | ApiError::Validation(_) => {
                 panic!("a query failure is always a detail body")
             }
         };
         assert_eq!(
-            status(MonitoringQueryErrorCode::DbOperationFailed),
+            status(MonitoringQueryError::DbOperationFailed {
+                message: "read failed".to_owned(),
+                retryable: false,
+                source: read_source(),
+            }),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            status(MonitoringQueryErrorCode::EventLoopLimit),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        assert_eq!(
-            status(MonitoringQueryErrorCode::HistoryContractViolation),
+            status(MonitoringQueryError::HistoryContractViolation {
+                message: "read failed".to_owned(),
+                source: read_source(),
+            }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }

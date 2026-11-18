@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::broker::{BrokerError, CancelAnswer, CancelTaskError, PostgresBroker};
 use crate::core::types::status::TaskStatus;
+use crate::failure_cause::FailureCause;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
@@ -30,14 +31,108 @@ pub enum TaskActionErrorCode {
     StoredDataInvalid,
 }
 
+/// A refused or failed task action: one variant per class of Python's task
+/// action catalog that the core produces, each with the facts of its state.
+/// Python's `TaskActionEventLoopLimit` is a class of the Python client only,
+/// so it is not a variant.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct TaskActionError {
-    pub code: TaskActionErrorCode,
-    pub message: String,
-    pub retryable: bool,
-    pub task_id: Uuid,
-    pub current_status: Option<TaskStatus>,
+pub enum TaskActionError {
+    /// Python `TaskActionNotFound`: neither the live table nor the history
+    /// holds the task. Nothing changed.
+    #[error("{message}")]
+    NotFound { message: String, task_id: Uuid },
+    /// Python `TaskActionNotCancellable`: the status that the cancel found
+    /// does not admit it (a terminal status, or `RUNNING` without
+    /// `include_running`). Nothing changed.
+    #[error("{message}")]
+    NotCancellable {
+        message: String,
+        task_id: Uuid,
+        current_status: TaskStatus,
+    },
+    /// Python `TaskActionWorkflowTask`: the task belongs to a workflow; only
+    /// the workflow actions drive it. Nothing changed.
+    #[error("{message}")]
+    WorkflowTask {
+        message: String,
+        task_id: Uuid,
+        current_status: TaskStatus,
+    },
+    /// Python `TaskActionDbOperationFailed`: the connect, the client family
+    /// check or the statement failed. Nothing was written, or the
+    /// statement's outcome is unknown. `retryable` is the classification of
+    /// the cause.
+    #[error("{message}")]
+    DbOperationFailed {
+        message: String,
+        retryable: bool,
+        task_id: Uuid,
+        cause: FailureCause,
+    },
+    /// Python `TaskActionStoredDataInvalid`: stored task data does not parse.
+    /// Nothing changed: the cancel refused the task. Not retryable.
+    #[error("{message}")]
+    StoredDataInvalid { message: String, task_id: Uuid },
+}
+
+impl TaskActionError {
+    /// The catalog code of the variant. Pure.
+    pub fn code(&self) -> TaskActionErrorCode {
+        match self {
+            Self::NotFound { .. } => TaskActionErrorCode::TaskNotFound,
+            Self::NotCancellable { .. } => TaskActionErrorCode::TaskNotCancellable,
+            Self::WorkflowTask { .. } => TaskActionErrorCode::TaskIsWorkflowTask,
+            Self::DbOperationFailed { .. } => TaskActionErrorCode::DbOperationFailed,
+            Self::StoredDataInvalid { .. } => TaskActionErrorCode::StoredDataInvalid,
+        }
+    }
+
+    /// What was refused or failed, and why. Pure.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NotFound { message, .. }
+            | Self::NotCancellable { message, .. }
+            | Self::WorkflowTask { message, .. }
+            | Self::DbOperationFailed { message, .. }
+            | Self::StoredDataInvalid { message, .. } => message,
+        }
+    }
+
+    /// Whether a repeat of the same action can succeed: the classification
+    /// of the cause of a database failure; every refusal stays. Pure.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::DbOperationFailed { retryable, .. } => *retryable,
+            Self::NotFound { .. }
+            | Self::NotCancellable { .. }
+            | Self::WorkflowTask { .. }
+            | Self::StoredDataInvalid { .. } => false,
+        }
+    }
+
+    /// The task of the action. Pure.
+    pub fn task_id(&self) -> Uuid {
+        match self {
+            Self::NotFound { task_id, .. }
+            | Self::NotCancellable { task_id, .. }
+            | Self::WorkflowTask { task_id, .. }
+            | Self::DbOperationFailed { task_id, .. }
+            | Self::StoredDataInvalid { task_id, .. } => *task_id,
+        }
+    }
+
+    /// The cause of the failure: the cause of a database failure; stored
+    /// data that does not parse broke the read contract; a refusal is a
+    /// precondition that does not hold. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::DbOperationFailed { cause, .. } => cause.clone(),
+            Self::StoredDataInvalid { .. } => FailureCause::ContractViolation,
+            Self::NotFound { .. } | Self::NotCancellable { .. } | Self::WorkflowTask { .. } => {
+                FailureCause::PreconditionFailed
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,34 +144,23 @@ pub struct TaskCancelled {
 pub type TaskActionResult<T> = Result<T, TaskActionError>;
 
 fn not_found(task_id: Uuid) -> TaskActionError {
-    TaskActionError {
-        code: TaskActionErrorCode::TaskNotFound,
+    TaskActionError::NotFound {
         message: format!("Task {task_id} does not exist."),
-        retryable: false,
         task_id,
-        current_status: None,
     }
 }
 
-fn workflow_bound(task_id: Uuid, current_status: Option<TaskStatus>) -> TaskActionError {
-    TaskActionError {
-        code: TaskActionErrorCode::TaskIsWorkflowTask,
+fn workflow_bound(task_id: Uuid, current_status: TaskStatus) -> TaskActionError {
+    TaskActionError::WorkflowTask {
         message: format!("Task {task_id} belongs to a workflow; use the workflow actions instead."),
-        retryable: false,
         task_id,
         current_status,
     }
 }
 
-fn state_conflict(
-    task_id: Uuid,
-    status_value: &str,
-    current_status: Option<TaskStatus>,
-) -> TaskActionError {
-    TaskActionError {
-        code: TaskActionErrorCode::TaskNotCancellable,
-        message: format!("Task {task_id} cannot be cancelled from status {status_value}."),
-        retryable: false,
+fn state_conflict(task_id: Uuid, current_status: TaskStatus) -> TaskActionError {
+    TaskActionError::NotCancellable {
+        message: format!("Task {task_id} cannot be cancelled from status {current_status}."),
         task_id,
         current_status,
     }
@@ -85,27 +169,23 @@ fn state_conflict(
 /// A failed connect, client family check or statement: nothing was
 /// written, or the statement's outcome is unknown.
 fn broker_failure(task_id: Uuid, error: &BrokerError) -> TaskActionError {
-    TaskActionError {
-        code: TaskActionErrorCode::DbOperationFailed,
+    TaskActionError::DbOperationFailed {
         message: format!("Task cancel failed: {error}"),
         retryable: error.is_retryable(),
         task_id,
-        current_status: None,
+        cause: error.failure_cause(),
     }
 }
 
 /// Stored data that does not parse. Nothing changed: the cancel refused the
 /// task.
 fn stored_data_invalid(task_id: Uuid, detail: impl Into<String>) -> TaskActionError {
-    TaskActionError {
-        code: TaskActionErrorCode::StoredDataInvalid,
+    TaskActionError::StoredDataInvalid {
         message: format!(
             "Task cancel failed: stored data does not parse: {}",
             detail.into()
         ),
-        retryable: false,
         task_id,
-        current_status: None,
     }
 }
 
@@ -130,13 +210,11 @@ pub async fn cancel_task(
             was_status,
         }),
         Ok(CancelAnswer::WorkflowTask { current_status }) => {
-            Err(workflow_bound(task_id, Some(current_status)))
+            Err(workflow_bound(task_id, current_status))
         }
-        Ok(CancelAnswer::NotCancellable { current_status }) => Err(state_conflict(
-            task_id,
-            &current_status.to_string(),
-            Some(current_status),
-        )),
+        Ok(CancelAnswer::NotCancellable { current_status }) => {
+            Err(state_conflict(task_id, current_status))
+        }
         Ok(CancelAnswer::TaskAbsent) => Err(not_found(task_id)),
         Err(CancelTaskError::Broker(error)) => Err(broker_failure(task_id, &error)),
         Err(CancelTaskError::StoredDataInvalid(error)) => {

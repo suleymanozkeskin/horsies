@@ -24,6 +24,7 @@ use uuid::Uuid;
 use super::handle::WorkflowHandle;
 use super::registry::WorkflowRegistry;
 use super::spec::WorkflowSpec;
+use crate::process_state::refuse_in_a_fork;
 use crate::{Horsies, HorsiesError};
 
 /// What a start sends with: the app's handle, its workflow registry and
@@ -81,6 +82,12 @@ impl WorkflowStarter {
     /// `ENQUEUE_FAILED` with `retryable` for a connect, a schema install or
     /// a start that failed (nothing committed, or the commit reply was
     /// lost: a start again with the same id finds the workflow).
+    ///
+    /// # Panics
+    ///
+    /// After the checks before any I/O, in a process that was forked
+    /// without `exec` after the core's process runtime started. Nothing
+    /// was written.
     pub(crate) async fn start<T: 'static>(
         &self,
         spec: &WorkflowSpec,
@@ -106,6 +113,7 @@ impl WorkflowStarter {
         }
         spec.check_output_type::<T>().map_err(validation)?;
         let client = self.workflows.prepare(spec).map_err(validation)?;
+        refuse_in_a_fork(format_args!("start of workflow '{}'", spec.name()));
         let handle = self.operation_handle();
         let broker = handle.initialized_broker().await.map_err(|error| {
             WorkflowStartError::EnqueueFailed {

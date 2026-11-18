@@ -396,12 +396,8 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key
   with another command. Nothing was written.
 - `error.code()` returns the `TaskSendErrorCode`.
-- A send, a schedule or a retry, async or blocking, panics in a process
-  that was forked without `exec` after the core's process runtime started
-  in its parent. A fork is a state of the process, never a send result
-  (Python raises `ForkedAfterCoreStart`). Nothing was sent. Start child
-  processes with `exec` (`std::process::Command`), or fork before the
-  parent's first call that runs on the core.
+- A send in a fork panics, as every call that runs on the core: see
+  `SKILL.md`, Result Types.
 
 ```rust
 use horsies::{task, TaskError, TaskFunction, TaskHandle, TaskSendError};
