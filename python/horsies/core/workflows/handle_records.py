@@ -3,7 +3,9 @@
 A workflow operation of the handle (pause, cancel, and the reads) runs one
 statement through ``horsies._core``. The core answers with one record per outcome; these
 functions build the public ``HandleOperationError`` of a failure record, of a
-core boundary error, and of a workflow id text that is not a UUID.
+core boundary error, and of a workflow id text that is not a UUID. The calls
+raise ``ForkedAfterCoreStart`` and ``CoreStopped`` (``call_refusal_or_raise``):
+no handle error names them.
 """
 
 from __future__ import annotations
@@ -13,12 +15,11 @@ from enum import Enum
 from typing import assert_never
 
 import horsies._core as core
-from horsies._core import CoreError
 from horsies.core.models.workflow.handle_types import (
     HandleDbOperationFailed,
     HandleStoredDataInvalid,
 )
-from horsies.core.types.core_failure import core_error_retryable
+from horsies.core.types.core_failure import CoreCallRefusal, core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 
 
@@ -114,12 +115,12 @@ def handle_failed_error(
 
 
 def core_call_error(
-    exc: CoreError,
+    exc: CoreCallRefusal,
     workflow_id: str,
     operation: WorkflowOperation,
 ) -> HandleDbOperationFailed:
     """The handle error of a core boundary error raised by the call: nothing
-    ran (``TooManyPendingCalls``, ``CoreStopped``, ...), or the outcome is
+    ran (``TooManyPendingCalls``, ``CoreStartFailed``), or the outcome is
     unknown (``CoreCallTimedOut``). Retryable by ``core_error_retryable``. Pure."""
     return HandleDbOperationFailed(
         message=(
