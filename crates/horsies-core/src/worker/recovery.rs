@@ -16,8 +16,8 @@ use crate::broker::expiry_and_orphans::{
 };
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claimed_pass, scan_stale_running, wake_retried_queue,
-    FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass, StaleRetry,
-    StaleRunningPass, StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
+    FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass, StaleEvidence,
+    StaleRetry, StaleRunningPass, StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
     STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::broker::CoveragePassError;
@@ -43,8 +43,13 @@ use crate::db::{
 use crate::log_targets::STALE_RUNNING_PASS;
 
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
+use crate::worker::liveness::OWNER_GONE_SPAN;
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 use crate::workflow_engine::child_spec::ChildSpecs;
+
+pub(crate) mod owner_gone;
+
+pub(crate) use owner_gone::{owner_gone_step, UnheldOwners};
 
 #[cfg(test)]
 mod p7_maintenance_tests {
@@ -842,7 +847,9 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// Spawn the reaper loop for stale task recovery.
 ///
 /// Periodically checks for stale RUNNING and CLAIMED tasks, marking them
-/// as FAILED or requeuing them respectively. Every statement of the loop
+/// as FAILED or requeuing them respectively: the tasks of a worker whose
+/// liveness lock stays free (`owner_gone_step`), and the tasks whose
+/// heartbeats stopped. Every statement of the loop
 /// runs on the broker's core pools: the gate, the recovery steps, the
 /// retention cleanup and the fleet check on the main core pool as reserved
 /// work ([`CheckoutClass::Reserved`]), the partition maintenance on the
@@ -865,6 +872,9 @@ pub fn spawn_reaper(
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
+        // When this reaper first read each worker's liveness lock free; it
+        // lives as long as the loop.
+        let mut unheld_owners = UnheldOwners::default();
         // The fleet check runs after each pass, from one check interval after
         // the start on (Python `reaper.py:622-628, 747-750`).
         let mut coverage_log =
@@ -894,6 +904,7 @@ pub fn spawn_reaper(
                     &mut next_retention_cleanup,
                     &mut next_partition_maintenance,
                     &mut orphan_state,
+                    &mut unheld_owners,
                 )
                 .await;
                 check_class_coverage(&broker, &mut coverage_log).await;
@@ -1073,9 +1084,10 @@ async fn end_gate(gate: Transaction<'_>) {
     let _ended: RollbackOutcome = gate.rollback().await;
 }
 
-/// Run one reaper pass, in Python's order: stale-CLAIMED requeue, orphan
-/// audit, stale-RUNNING recovery, PENDING expiry, workflow recovery, then
-/// periodic retention cleanup and partition maintenance.
+/// Run one reaper pass: the owner-gone step, then Python's order:
+/// stale-CLAIMED requeue, orphan audit, stale-RUNNING recovery, PENDING
+/// expiry, workflow recovery, then periodic retention cleanup and partition
+/// maintenance.
 async fn run_reaper_pass(
     broker: &PostgresBroker,
     child_specs: &ChildSpecs,
@@ -1085,7 +1097,44 @@ async fn run_reaper_pass(
     next_retention_cleanup: &mut tokio::time::Instant,
     next_partition_maintenance: &mut tokio::time::Instant,
     orphan_state: &mut OrphanSweepState,
+    unheld_owners: &mut UnheldOwners,
 ) {
+    // The tasks of workers whose liveness lock stays free, on the main core
+    // pool with the reserve. It runs when either recovery of task rows is on.
+    if config.auto_fail_stale_running || config.auto_requeue_stale_claimed {
+        let step = match broker.core_pools_for_write() {
+            Ok((open, _write)) => {
+                owner_gone_step(
+                    open.main(),
+                    broker.statement_log(),
+                    config,
+                    unheld_owners,
+                    OWNER_GONE_SPAN,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        match step {
+            Ok(step) if step.gone_owners > 0 => {
+                tracing::warn!(
+                    target: STALE_RUNNING_PASS,
+                    gone_owners = step.gone_owners,
+                    running_recovered = step.running_recovered,
+                    claims_requeued = step.claims_requeued,
+                    "reaper recovered the tasks of workers whose liveness lock stayed free",
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "Reaper owner-gone step failed and runs again on the next pass: {error}",
+                );
+            }
+        }
+    }
+
     // Python's order (`reaper.py:144-638`): requeue stale CLAIMED rows,
     // audit orphaned workflow tasks, fail stale RUNNING rows, expire PENDING
     // rows, then the workflow and maintenance steps. No step stops for the
@@ -1608,7 +1657,7 @@ fn stale_attempt_command(
     let result_json = task_result_to_json_string(&TaskResult::<()>::Err(task_error))?;
     Ok(FinishStaleAttempt {
         task_id: candidate.task_id,
-        thresholds,
+        evidence: StaleEvidence::BeatAge(thresholds),
         retry: stale_retry(candidate, &error_code),
         result_json,
         error_code,

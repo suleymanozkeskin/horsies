@@ -10,6 +10,7 @@
 use crate::broker::{BrokerError, SessionCheckFailure};
 use crate::worker::error::WorkerError;
 use crate::worker::executor::slots::ChildrenStartFailed;
+use crate::worker::liveness::LivenessStartError;
 
 /// Where the run was when it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +191,13 @@ fn boot_cause(error: &WorkerError) -> WorkerBootCause {
             false => WorkerBootCause::StatementPooledUrl,
         },
         WorkerError::Listener(_) => WorkerBootCause::ListenerRefused,
+        WorkerError::LivenessLock(LivenessStartError::Lock(_)) => match error.is_retryable() {
+            true => WorkerBootCause::DatabaseUnavailable,
+            false => WorkerBootCause::DatabaseRefused,
+        },
+        WorkerError::LivenessLock(
+            LivenessStartError::Plan(_) | LivenessStartError::WatchThread(_),
+        ) => WorkerBootCause::ConfigRefused,
         // `run_end_of` maps these before it asks for a boot cause.
         WorkerError::ServiceLoopDied { .. }
         | WorkerError::RunnerHeartbeatLost { .. }

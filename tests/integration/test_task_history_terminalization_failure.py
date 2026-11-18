@@ -93,8 +93,8 @@ async def fail_stale(
         await connection.execute(
             text(
                 'SELECT * FROM horsies_finish_stale_attempt('
-                'CAST(:task_id AS uuid), CAST(:stale_ms AS INTEGER), '
-                "CAST(:finalizing_ms AS INTEGER), 'NONE', NULL, NULL, "
+                "CAST(:task_id AS uuid), 'BEAT_AGE', CAST(:stale_ms AS INTEGER), "
+                "CAST(:finalizing_ms AS INTEGER), NULL, NULL, 'NONE', NULL, NULL, "
                 "'{\"error\":{\"code\":\"STALE\"}}', 'STALE', 'went silent', "
                 "'went silent', 'went silent')"
             ),

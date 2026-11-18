@@ -304,7 +304,7 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
             false,
         ),
         (
-            "horsies_finish_stale_attempt(uuid,integer,integer,text,integer,double precision,text,text,text,text,text)",
+            "horsies_finish_stale_attempt(uuid,text,integer,integer,text,timestamp with time zone,text,integer,double precision,text,text,text,text,text)",
             true,
             false,
         ),

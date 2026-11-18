@@ -1381,6 +1381,11 @@ fn exit_codes_are_distinct_and_leave_the_worker_code_free() {
     codes.dedup();
     assert_eq!(codes.len(), ChildExitCode::ALL.len());
     assert!(!codes.contains(&crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE));
+    assert!(!codes.contains(&crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE));
+    assert_ne!(
+        crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE,
+        crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE
+    );
     for code in ChildExitCode::ALL {
         assert_eq!(ChildExitCode::from_code(code.code()), Some(code));
     }

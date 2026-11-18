@@ -2,6 +2,7 @@ use crate::broker::{is_retryable_sqlx_error, BrokerError, ListenError, SessionCh
 use crate::worker::executor::placement::PlacementRefused;
 use crate::worker::executor::slots::{BaselineOverLimit, ChildrenStartFailed, PoolFailure};
 use crate::worker::executor::supervisor::SpawnerStartError;
+use crate::worker::liveness::LivenessStartError;
 
 /// Errors produced by worker operations.
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +94,11 @@ pub enum WorkerError {
     /// worker. Retryable when the refusal is transient.
     #[error("listener subscription failed: {0}")]
     Listener(ListenError),
+
+    /// The worker could not take its liveness lock at the start
+    /// ([`crate::worker::liveness`]). Retryable when the failure can clear.
+    #[error("worker liveness lock failed: {0}")]
+    LivenessLock(LivenessStartError),
 }
 
 impl From<crate::broker::CoveragePassError> for WorkerError {
@@ -124,6 +130,7 @@ impl WorkerError {
             | Self::BaselineOverLimit(_) => false,
             Self::SessionCheck(failure) => failure.is_retryable(),
             Self::Listener(refused) => refused.is_retryable(),
+            Self::LivenessLock(failed) => failed.is_retryable(),
         }
     }
 }

@@ -61,6 +61,10 @@ use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::stop::drain_then_close;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
+use crate::worker::liveness::{
+    liveness_connect_plan, start_liveness_lock, LivenessRule, LivenessStartError,
+    StartedLivenessLock,
+};
 use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_boot};
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartCount};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
@@ -1486,6 +1490,37 @@ impl Worker {
                 }
             };
 
+        // The liveness lock is held before the first claim, until every task
+        // of the stop ended: a peer that finds it free in two passes far
+        // enough apart recovers this worker's rows.
+        let liveness_start = self.start_liveness_with_resilience(&live).await;
+        let StartedLivenessLock {
+            running: liveness,
+            holder: liveness_holder,
+        } = match liveness_start {
+            Ok(Some(started)) => started,
+            Ok(None) => {
+                RunningChildren {
+                    children,
+                    spawner,
+                    live,
+                }
+                .stop_after_failed_start()
+                .await;
+                return Ok(());
+            }
+            Err(error) => {
+                RunningChildren {
+                    children,
+                    spawner,
+                    live,
+                }
+                .stop_after_failed_start()
+                .await;
+                return Err(error);
+            }
+        };
+
         // Liveness pings are answered off the claim path.
         let ping_responder = spawn_ping_responder(
             pings,
@@ -1506,20 +1541,22 @@ impl Worker {
             batcher.clone(),
         ));
         let stops = ChildrenStopCell::default();
-        let services = match self.spawn_services(&children, &live, &stops, ping_responder) {
-            Ok(services) => services,
-            Err(error) => {
-                self.cancel.cancel();
-                RunningChildren {
-                    children,
-                    spawner,
-                    live,
+        let services =
+            match self.spawn_services(&children, &live, &stops, ping_responder, liveness_holder) {
+                Ok(services) => services,
+                Err(error) => {
+                    self.cancel.cancel();
+                    RunningChildren {
+                        children,
+                        spawner,
+                        live,
+                    }
+                    .stop_after_failed_start()
+                    .await;
+                    liveness.stop().await;
+                    return Err(error);
                 }
-                .stop_after_failed_start()
-                .await;
-                return Err(error);
-            }
-        };
+            };
         // The start ended: the first generation is in, and no claim ran.
         self.serving.store(true, Ordering::Release);
         match &self.on_started {
@@ -1555,6 +1592,9 @@ impl Worker {
         // Last: the runner heartbeats covered the drain above, and their
         // watchdog keeps the exit bound of a fail-closed stop until here.
         let services = services.stop_runner_beats().await;
+        // Every task ended: the liveness lock is released, so a peer may
+        // recover a row that the stop left at its next passes.
+        liveness.stop().await;
         RunningChildren::stop_spawner(spawner).await;
         tracing::info!("Worker stopped");
         Self::stop_result(services, stops, fatal_claim_error)
@@ -1602,7 +1642,8 @@ impl Worker {
     /// Start the service loops: the claimer heartbeat, the reaper, the
     /// worker snapshot, the runner heartbeats of the tasks that children
     /// hold, the watch of the pool failure and the new-kind baseline guard.
-    /// Each of them and `ping_responder` runs under a watchdog: one that ends
+    /// Each of them, `ping_responder` and `liveness_holder` (the holder of
+    /// the liveness lock) runs under a watchdog: one that ends
     /// with no stop request stops the worker with `ServiceLoopDied`
     /// (C11-inverse). With stale running recovery off, no task depends on a
     /// runner beat: a beat writer that dies is logged once and the worker
@@ -1616,6 +1657,7 @@ impl Worker {
         live: &LiveDispatches,
         stops: &ChildrenStopCell,
         ping_responder: JoinHandle<()>,
+        liveness_holder: JoinHandle<()>,
     ) -> Result<Services, WorkerError> {
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
@@ -1692,7 +1734,7 @@ impl Worker {
         // stopped listener ends it.
         let (fatal_tx, fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let watched: [(&'static str, tokio::task::JoinHandle<()>); 7] = [
+        let watched: [(&'static str, tokio::task::JoinHandle<()>); 8] = [
             ("claimer-heartbeat", claimer_hb),
             ("runner-heartbeat", runner_beats),
             ("reaper", reaper),
@@ -1700,6 +1742,7 @@ impl Worker {
             ("ping-responder", ping_responder),
             ("slot-failure-watch", pool_failure),
             ("new-kind-baseline-watch", new_kind_baselines),
+            ("liveness-lock", liveness_holder),
         ];
         for (service, handle) in watched {
             crate::worker::supervision::spawn_service_watchdog(
@@ -1783,6 +1826,56 @@ impl Worker {
             claim_wakes: ClaimWakes { subscriptions },
             pings,
         })
+    }
+
+    /// Take the worker's liveness lock and start its holder and watchdog
+    /// ([`start_liveness_lock`]) on the session URL, with the resilience
+    /// backoff after a failure that can clear, as the listener. A stop
+    /// request during a backoff wait ends the start with `Ok(None)`.
+    ///
+    /// Errors: [`WorkerError::LivenessLock`] for a refused plan or lock, or
+    /// for a failure that can clear after the retry budget.
+    async fn start_liveness_with_resilience(
+        &self,
+        live: &LiveDispatches,
+    ) -> Result<Option<StartedLivenessLock>, WorkerError> {
+        let plan = liveness_connect_plan(&self.app_config.broker)
+            .map_err(|refused| WorkerError::LivenessLock(LivenessStartError::Plan(refused)))?;
+        let plan = Arc::new(plan);
+        let rule = LivenessRule::of_config(&self.app_config.recovery);
+        let mut backoff = RetryBackoff::from_config(&self.app_config.resilience);
+        loop {
+            let error =
+                match start_liveness_lock(Arc::clone(&plan), &self.worker_id, rule, live.clone())
+                    .await
+                {
+                    Ok(started) => return Ok(Some(started)),
+                    Err(failed) => WorkerError::LivenessLock(failed),
+                };
+            if !error.is_retryable() {
+                tracing::error!(error = %error, "non-retryable liveness lock error: {error}");
+                return Err(error);
+            }
+            if !backoff.can_retry() {
+                tracing::error!(
+                    error = %error,
+                    attempts = backoff.attempts(),
+                    "liveness lock retries exhausted: {error}",
+                );
+                return Err(error);
+            }
+            let delay = backoff.next_delay_seconds();
+            tracing::warn!(
+                error = %error,
+                attempt = backoff.attempts(),
+                delay_s = format!("{:.2}", delay),
+                "taking the liveness lock failed: {error}; retrying",
+            );
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Ok(None),
+                _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+            }
+        }
     }
 
     /// Run [`Worker::try_connect_listener`] with exponential backoff on

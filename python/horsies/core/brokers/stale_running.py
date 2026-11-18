@@ -47,8 +47,10 @@ reads a full batch leaves the rest to the next pass."""
 
 STALE_RUNNING_SCAN_SQL = text("""
     SELECT * FROM horsies_stale_running_scan(
+        'BEAT_AGE',
         CAST(:stale_after_ms AS INTEGER),
         CAST(:finalizing_stale_after_ms AS INTEGER),
+        NULL, NULL,
         CAST(:batch_size AS INTEGER)
     )
 """)
@@ -56,8 +58,10 @@ STALE_RUNNING_SCAN_SQL = text("""
 FINISH_STALE_ATTEMPT_SQL = text("""
     SELECT * FROM horsies_finish_stale_attempt(
         CAST(:task_id AS uuid),
+        'BEAT_AGE',
         CAST(:stale_after_ms AS INTEGER),
         CAST(:finalizing_stale_after_ms AS INTEGER),
+        NULL, NULL,
         :retry_kind,
         CAST(:expected_retry_count AS INTEGER),
         CAST(:retry_delay_s AS DOUBLE PRECISION),

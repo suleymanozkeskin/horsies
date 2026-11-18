@@ -82,7 +82,7 @@ const FAIL_STALE_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, terminal
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_stale_attempt(
-         $1, $2, $3, 'NONE', NULL, NULL, $4, $5, $6, $6, $6)";
+         $1, 'BEAT_AGE', $2, $3, NULL, NULL, 'NONE', NULL, NULL, $4, $5, $6, $6, $6)";
 
 /// `horsies_cancel_task`, the administrative cancel of one plain task.
 /// Parameters: task id, whether a RUNNING row may be cancelled.

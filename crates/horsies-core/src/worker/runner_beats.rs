@@ -45,7 +45,8 @@ use crate::worker::thread_dispatch::with_starter_dispatch;
 
 /// Exit code of the worker process when it failed closed because its runner
 /// heartbeats stopped. No other horsies process uses it. The core parent
-/// owns exit codes 76 and 77.
+/// owns exit codes 76 and 77, and 79 for a lost liveness lock
+/// ([`crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE`]).
 pub const RUNNER_HEARTBEAT_LOST_EXIT_CODE: i32 = 77;
 
 /// How often the watchdog reads the time since the last beat.
@@ -250,6 +251,12 @@ impl LiveDispatches {
             .values()
             .map(|dispatch| (dispatch.task_id, dispatch.claimed_at))
             .unzip()
+    }
+
+    /// Whether a task is held now: a task whose row a peer must not recover
+    /// while it runs.
+    pub(crate) fn holds_any(&self) -> bool {
+        !self.lock().held.is_empty()
     }
 
     /// The ids of the held tasks, in ticket order, for tests that check
@@ -917,7 +924,7 @@ fn run_watch(context: &WatchContext, stop: &Receiver<()>) {
 /// Whether the closed registry held a dispatch that runs in the worker
 /// process itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskCodeInWorker {
+pub(crate) enum TaskCodeInWorker {
     Held,
     NoneHeld,
 }
@@ -988,8 +995,9 @@ struct ChildToKill {
 /// Close the registry, mark each child that held a task as killed by the
 /// worker, and queue `SIGKILL` to its session through the spawner thread.
 /// The answers are read for the log, at most
-/// [`FAIL_CLOSED_KILL_ANSWER_WAIT`] in all.
-fn kill_held_children(live: &LiveDispatches) -> TaskCodeInWorker {
+/// [`FAIL_CLOSED_KILL_ANSWER_WAIT`] in all. The fail-closed exit of the
+/// worker liveness lock ([`crate::worker::liveness`]) calls it too.
+pub(crate) fn kill_held_children(live: &LiveDispatches) -> TaskCodeInWorker {
     let mut in_worker = TaskCodeInWorker::NoneHeld;
     let mut children: BTreeMap<ChildId, ChildToKill> = BTreeMap::new();
     for dispatch in live.close() {

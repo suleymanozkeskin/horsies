@@ -3,7 +3,8 @@
 //!
 //! One worker of a profile opens connections itself: its pool (the resolved
 //! `WorkerProfile.pool`), its session pool when the session URL differs, its
-//! listener, its runner heartbeat connection, and the pool of each child.
+//! listener, its runner heartbeat connection, its liveness lock connection,
+//! and the pool of each child.
 //! The sum is compared with the slots that an
 //! ordinary role can use on the server: `max_connections` minus
 //! `superuser_reserved_connections` minus `reserved_connections`
@@ -26,7 +27,11 @@
 //!   LISTEN of the process ([`crate::db::Listener`]); Python's listener holds
 //!   two;
 //! - runner heartbeat: a pool of one connection of its own
-//!   ([`crate::worker::runner_beats::runner_beat_pool`]).
+//!   ([`crate::worker::runner_beats::runner_beat_pool`]);
+//! - liveness lock: one dedicated connection on the session URL that holds
+//!   the worker's session advisory lock ([`crate::worker::liveness`]).
+//!   Python has no such connection; with the core listener's one connection
+//!   in place of Python's two, a worker opens as many connections as Python's.
 //!
 //! The broker's sqlx adapter pools, kept beside the core pools until the
 //! call sites move, are not terms: the layout above is the one they move to.
@@ -59,6 +64,10 @@ pub const LISTENER_CONNECTIONS_PER_WORKER: u32 = 1;
 /// The connection over which the worker process writes the runner
 /// heartbeats of the RUNNING tasks of its children.
 pub const RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER: u32 = 1;
+
+/// The connection on the session URL that holds the worker's liveness lock
+/// for the life of the process.
+pub const LIVENESS_LOCK_CONNECTIONS_PER_WORKER: u32 = 1;
 
 /// The longest wait for the server to answer the connection limit read
 /// (Python `CONNECTION_LIMIT_READ_TIMEOUT_S`).
@@ -323,6 +332,7 @@ pub struct WorkerConnectionNeed {
     pub session_pool: SessionPoolTerm,
     pub listener: u32,
     pub runner_heartbeat: u32,
+    pub liveness_lock: u32,
     /// One entry for each mode with children: isolated, shared async, shared
     /// thread.
     pub child_pools: Vec<ModePools>,
@@ -334,6 +344,7 @@ impl WorkerConnectionNeed {
             + self.session_pool.connections()
             + u64::from(self.listener)
             + u64::from(self.runner_heartbeat)
+            + u64::from(self.liveness_lock)
             + self
                 .child_pools
                 .iter()
@@ -356,6 +367,7 @@ impl WorkerConnectionNeed {
             self.session_pool.term(),
             Some(format!("listener {}", self.listener)),
             Some(format!("runner heartbeat {}", self.runner_heartbeat)),
+            Some(format!("liveness lock {}", self.liveness_lock)),
         ]
         .into_iter()
         .flatten()
@@ -431,7 +443,8 @@ fn session_pool_term(broker: &PostgresConfig, parent_pool: u32) -> SessionPoolTe
 }
 
 /// The connections of one worker of this profile on the database of
-/// `broker` (Python `worker_connection_need`, with the session pool). Pure.
+/// `broker` (Python `worker_connection_need`, with the session pool and the
+/// liveness lock). Pure.
 pub fn worker_connection_need(
     profile: &WorkerProfile,
     broker: &PostgresConfig,
@@ -442,6 +455,7 @@ pub fn worker_connection_need(
         session_pool: session_pool_term(broker, parent_pool),
         listener: LISTENER_CONNECTIONS_PER_WORKER,
         runner_heartbeat: RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
+        liveness_lock: LIVENESS_LOCK_CONNECTIONS_PER_WORKER,
         child_pools: [
             isolated_pools(&profile.isolated),
             shared_async_pools(&profile.shared_async),

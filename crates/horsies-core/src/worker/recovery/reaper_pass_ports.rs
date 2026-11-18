@@ -234,7 +234,7 @@ fn a_candidate_without_a_crash_retry_fails_with_the_crash_code_reason_and_result
 
     let reason = "Worker process crashed (no runner heartbeat for 300000ms = 300.0s)";
     assert_eq!(command.task_id, Uuid::from_u128(1));
-    assert_eq!(command.thresholds, thresholds);
+    assert_eq!(command.evidence, StaleEvidence::BeatAge(thresholds));
     assert_eq!(command.retry, StaleRetry::NoRetry);
     assert_eq!(command.error_code, "WORKER_CRASHED");
     assert_eq!(command.failed_reason, reason);

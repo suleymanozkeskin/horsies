@@ -344,7 +344,8 @@ def _deadlocks(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 _STALE_FINISH_SQL = text(
     'SELECT outcome FROM horsies_finish_stale_attempt('
-    'CAST(:id AS uuid), :after_ms, :after_ms, :retry_kind, NULL, NULL, :result, '
+    "CAST(:id AS uuid), 'BEAT_AGE', :after_ms, :after_ms, NULL, NULL, :retry_kind, "
+    'NULL, NULL, :result, '
     "'WORKER_CRASHED', 'went silent', 'went silent', 'went silent')"
 )
 """The statement of the stale recovery for one task, with no retry."""
