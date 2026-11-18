@@ -479,7 +479,8 @@ async fn print_outcome(
 
 `handle.info(TaskInfoParts { result, failed_reason, attempts })` returns the
 `TaskInfo`: status and times, plus the parts asked for (attempts newest
-first). The info is not kept. Its errors are `TaskNotFound`,
+first). Its `result` is a `TaskResult<JsonText>`: the value as its stored
+text, read with `decode::<T>()`. The info is not kept. Its errors are `TaskNotFound`,
 `StoredResultUnreadable` and `Database`.
 
 Reads by task id, on the app:

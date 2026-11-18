@@ -996,7 +996,8 @@ fn node_error_from_result(task_index: i32, result: Option<&str>) -> Result<Optio
     if text.trim_matches([' ', '\t', '\n', '\r']) == "null" {
         return Ok(None);
     }
-    match serde_json::from_str::<TaskResult<serde_json::Value>>(text) {
+    // The value is not read: the envelope is checked and the ok slot skipped.
+    match serde_json::from_str::<TaskResult<serde::de::IgnoredAny>>(text) {
         Ok(TaskResult::Ok(_)) => Ok(None),
         Ok(TaskResult::Err(error)) => Ok(normalize_optional_text(error.message.as_deref())),
         Err(cause) => Err(format!(
