@@ -20,7 +20,8 @@ use crate::core::lifecycle::{
     AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationKind,
     TerminalizationOutcome, WorkflowSuccessOutcome,
 };
-use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, StaleFailure};
+use crate::test_support::sql::{self, TestPool};
+use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const RETRY_FACTS_QUEUE: &str = "lifecycle_retry_facts";
 
@@ -54,7 +55,7 @@ fn retry_after(expected_retry_count: i32) -> RetryRequest {
 
 /// The reaper fails a silent runner (`horsies_finish_stale_attempt`, no
 /// retry): the row moves to history as FAIL_STALE.
-async fn reaper_fails(pool: &sqlx::PgPool, task_id: Uuid) {
+async fn reaper_fails(pool: &TestPool, task_id: Uuid) {
     set_started(pool, task_id, Since::SecondsAgo(120.0)).await;
     let outcomes = terminal_writes::fail_stale_task(
         pool,
@@ -102,7 +103,7 @@ fn assert_refused_by_the_reaper(outcome: &FailedAttemptOutcome) {
 async fn fail_guard_blocks_when_not_running() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
-    sqlx::query("UPDATE horsies_tasks SET status = 'PENDING' WHERE id = $1")
+    sql::query("UPDATE horsies_tasks SET status = 'PENDING' WHERE id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
@@ -216,7 +217,7 @@ async fn the_claim_returns_the_retry_facts() {
     )
     .await;
     let pass = crate::broker::claims::claim_pass(
-        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &crate::broker::pools::core_pool_for_test_url(pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         &claim_request(RETRY_FACTS_QUEUE),
     )
@@ -292,7 +293,7 @@ async fn fused_finalize_null_fence_is_refused() {
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = sqlx::query("SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, TRUE)")
+    let refused = sql::query("SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, TRUE)")
         .bind(task_id)
         .bind(WORKER)
         .bind(r#"{"ok": 2}"#)

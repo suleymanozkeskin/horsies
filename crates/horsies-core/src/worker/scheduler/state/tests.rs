@@ -61,7 +61,7 @@ async fn database_time(pool: &PgPool) -> DateTime<Utc> {
 #[tokio::test]
 #[serial_test::serial]
 async fn due_read_returns_the_database_time_and_the_rows_due_at_it() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_pool(&pool);
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let earlier = format!("qw_due_earlier_{suffix}");
@@ -108,7 +108,7 @@ async fn due_read_returns_the_database_time_and_the_rows_due_at_it() {
 #[tokio::test]
 #[serial_test::serial]
 async fn start_read_and_write_follow_the_stored_digests() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_pool(&pool);
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let new_name = format!("qw_start_new_{suffix}");
@@ -196,7 +196,7 @@ async fn start_read_and_write_follow_the_stored_digests() {
 #[tokio::test]
 #[serial_test::serial]
 async fn heal_creates_missing_rows_and_leaves_existing_rows() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_pool(&pool);
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let missing = format!("qw_heal_missing_{suffix}");
@@ -281,7 +281,7 @@ fn command_of(pool: &PgPool, task_name: &str) -> SendCommand {
 #[tokio::test]
 #[serial_test::serial]
 async fn the_fire_answers_each_state_of_the_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_pool(&pool);
     let name = format!("qw_fire_{}", uuid::Uuid::new_v4().simple());
     let command = command_of(&pool, &name);
@@ -361,7 +361,7 @@ async fn the_fire_answers_each_state_of_the_row() {
 #[serial_test::serial]
 #[should_panic(expected = "broke a precondition of horsies_fire_schedule")]
 async fn a_slot_after_the_database_time_is_a_caller_defect() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_pool(&pool);
     let name = format!("qw_defect_{}", uuid::Uuid::new_v4().simple());
     let command = command_of(&pool, &name);

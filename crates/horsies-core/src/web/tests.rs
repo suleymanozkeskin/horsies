@@ -15,10 +15,11 @@ use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::{PostgresBroker, SchemaInitializationMode};
 use crate::monitoring::TaskAbsenceReason;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::migrated_database_url;
 use crate::AppConfig;
 
 use super::app::{build_router, WebState};

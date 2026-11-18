@@ -216,10 +216,11 @@ mod tests {
     use crate::core::history::identity::uuid7::mint_task_id;
     use crate::core::history::periods::RetentionDays;
     use crate::core::types::TaskStatus;
+    use crate::test_support::sql::{self, TestPool};
     use crate::test_support::TestDatabase;
 
-    async fn class_rows(pool: &sqlx::PgPool) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM horsies_retention_classes")
+    async fn class_rows(pool: &TestPool) -> i64 {
+        sql::query_scalar("SELECT count(*) FROM horsies_retention_classes")
             .fetch_one(pool)
             .await
             .expect("count the class rows")
@@ -230,8 +231,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_pass_of_the_recorded_family_ends_covered() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool(pool, ClientFamily::Rust);
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
         let request = CoverageRequest::new(2, 2, &[]).expect("a request in bounds");
 
         let outcome = broker
@@ -247,9 +248,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_handle_of_the_other_family_is_refused_before_the_pass() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let before = class_rows(&pool).await;
-        let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Python);
+        let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Python);
         let request = CoverageRequest::new(2, 2, &[]).expect("a request in bounds");
 
         let refused = broker
@@ -271,8 +272,8 @@ mod tests {
         assert_eq!(class_rows(&pool).await, before);
     }
 
-    async fn catalog_stamps(pool: &sqlx::PgPool) -> (i64, i64) {
-        sqlx::query_as(
+    async fn catalog_stamps(pool: &TestPool) -> (i64, i64) {
+        sql::query_as(
             "SELECT count(detached_at), count(dropped_at) FROM horsies_task_history_leaf_catalog",
         )
         .fetch_one(pool)
@@ -287,8 +288,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_pruning_pass_of_the_recorded_family_ends_with_a_report() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool(pool, ClientFamily::Rust);
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
 
         let _pass = broker
             .prune_expired_partitions()
@@ -301,9 +302,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_handle_of_the_other_family_is_refused_before_the_pruning_pass() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let before = catalog_stamps(&pool).await;
-        let broker = PostgresBroker::from_pool(pool.clone(), ClientFamily::Python);
+        let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Python);
 
         let refused = broker
             .prune_expired_partitions()

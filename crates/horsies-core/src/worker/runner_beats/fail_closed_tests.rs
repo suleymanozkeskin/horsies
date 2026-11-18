@@ -367,7 +367,7 @@ async fn a_dead_writer_stops_the_worker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn a_failed_write_inside_the_window_recovers() {
-    let database = crate::broker::terminalization_matrix::migrated_pool().await;
+    let database = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let options = database.connect_options();
     let refuse_until = Instant::now() + Duration::from_millis(700);
     let gate = ClosingGate::start(

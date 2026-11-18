@@ -17,7 +17,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::*;
 use crate::broker::client_family::ClientFamily;
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::PoolProfile;
 use crate::core::config::bounded::BoundedU32;
 use crate::core::config::child_sizing::{
@@ -30,6 +30,7 @@ use crate::core::config::worker_profile::{
 };
 use crate::handle::HandleConnection;
 use crate::manifest::parse_producer_manifest;
+use crate::test_support::migrated_database_url;
 use crate::worker::children::{
     isolated_pool_config, shared_async_pool_config, shared_thread_pool_config, ChildLaunch,
     PoolFacts,

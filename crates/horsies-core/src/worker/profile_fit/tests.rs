@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use tracing::instrument::WithSubscriber;
 
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::child_sizing::DEFAULT_ISOLATED_POOL_CONNECTIONS;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
+use crate::test_support::migrated_database_url;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;

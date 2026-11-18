@@ -1127,11 +1127,11 @@ mod kept_session_tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::broker::terminalization_matrix::migrated_database_url;
     use crate::db::{
         CheckoutClass, IsolationLevel, PooledConnection, RollbackOutcome, StatementBound,
         TypedStatement,
     };
+    use crate::test_support::migrated_database_url;
 
     /// The value of `jit` on the connection and where it comes from.
     const JIT_SETTING: TypedStatement = TypedStatement::new(

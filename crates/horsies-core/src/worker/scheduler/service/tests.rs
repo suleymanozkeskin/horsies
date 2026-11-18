@@ -290,7 +290,7 @@ async fn drop_slot_refusal(pool: &sqlx::PgPool) {
 }
 
 async fn test_pool() -> sqlx::PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+    crate::broker::terminalization_matrix::sqlx_migrated_pool().await
 }
 
 /// One enabled schedule of a test manifest: an interval in whole seconds,
@@ -429,7 +429,7 @@ fn command_for(schedule: &TestSchedule) -> SendCommand {
 #[tokio::test]
 #[serial]
 async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
-    let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+    let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
     let task_name = "p6_scheduled_facts";
     let mut schedule = interval_schedule_secs("p6-scheduled-facts", 60);
     schedule.task_name = task_name.to_owned();
@@ -479,7 +479,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
 #[tokio::test]
 #[serial]
 async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
-    let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+    let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
     let name = format!("fired_options_{}", Uuid::new_v4().simple());
     let mut schedule = interval_schedule_secs(&name, 60);
     schedule.task_name = name.clone();
@@ -526,7 +526,7 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
 #[tokio::test]
 #[serial]
 async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
-    let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+    let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
     for (execution, cancel_grace_ms, stored_execution) in [
         (
             crate::core::task::Execution::SharedAsync,

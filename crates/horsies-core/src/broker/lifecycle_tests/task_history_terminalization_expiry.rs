@@ -11,6 +11,7 @@ use crate::core::lifecycle::{
     BatchSize, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
 use crate::core::types::status::TaskStatus;
+use crate::test_support::sql;
 
 const EXPIRY_RESULT: &str = r#"{"err": "expired"}"#;
 
@@ -140,7 +141,7 @@ async fn batch_deferred_fence_raises_before_any_move() {
     let workflow_id = link_workflow_task(&pool, workflow_task, "PENDING", "RUNNING").await;
 
     let refused =
-        sqlx::query("SELECT * FROM horsies_expire_pending_tasks(10, NULL, 'TASK_EXPIRED')")
+        sql::query("SELECT * FROM horsies_expire_pending_tasks(10, NULL, 'TASK_EXPIRED')")
             .fetch_all(&pool)
             .await
             .map(|rows| rows.len());

@@ -441,7 +441,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_start_stores_the_downstream_subworkflow_fact_of_each_node() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let spec = keyed_spec(
             Some("tests.downstream.start.v1"),
             vec![
@@ -607,7 +607,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_start_of_another_client_family_is_refused_and_writes_nothing() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_pool(
             pool.clone(),
             crate::ClientFamily::Python,
@@ -691,7 +691,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_node_whose_retry_policy_does_not_fit_is_refused_before_any_row() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_pool(
             pool.clone(),
             crate::ClientFamily::Rust,
@@ -779,7 +779,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_node_whose_options_or_deadline_do_not_read_is_refused_before_any_row() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_pool(
             pool.clone(),
             crate::ClientFamily::Rust,
@@ -847,7 +847,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_node_whose_retry_policy_fits_stores_its_limit_on_both_rows() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_pool(
             pool.clone(),
             crate::ClientFamily::Rust,
@@ -906,7 +906,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn an_enqueued_root_node_holds_its_enqueue_time() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let mut fast = node_with(false, Some(17));
         fast.task_name = "enqueue_time_fast_root".to_owned();
         fast.node_id = Some("fast".to_owned());
@@ -973,7 +973,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_pool(
             pool.clone(),
             crate::ClientFamily::Rust,
@@ -1032,7 +1032,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn p6_workflow_enqueue_start_paths_persist_mapped_class_and_never_eligible_facts() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let workflow_name = "p6_workflow_facts";
         let task_name = "p6_workflow_node_facts";
         sqlx::query("DELETE FROM horsies_workflows WHERE name = $1")
@@ -1099,7 +1099,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_root_task_row_stores_the_start_call_time_of_its_workflow() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let pool = crate::broker::enqueue_history_tests::sqlx_migrated_pool().await;
         let task_name = "sent_at_root_task";
         sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
             .bind(task_name)

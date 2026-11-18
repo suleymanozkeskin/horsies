@@ -28,7 +28,7 @@ use super::*;
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, RetryPlacement, RetryRequest,
 };
-use crate::broker::terminalization_matrix::migrated_pool;
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::{PostgresBroker, PrestartExpiry};
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};

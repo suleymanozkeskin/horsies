@@ -231,7 +231,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn cleanup_wrapper_deletes_only_expired_terminal_rows_with_the_requested_bound() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let expired = [vec![31_u8; 32], vec![32_u8; 32]];
         let retained = vec![33_u8; 32];
         for (index, digest) in expired.iter().enumerate() {
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn cleanup_pass_stops_at_its_batch_bound_and_reports_truncation() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let core = crate::broker::pools::core_pool_for_test_pool(&pool);
         // Start from no expired row of other tests in the shared database.
         cleanup_expired_reservations_pass(&core, StatementLog::Off, 10_000, 100)

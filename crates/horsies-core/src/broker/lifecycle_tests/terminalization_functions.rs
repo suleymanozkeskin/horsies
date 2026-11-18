@@ -17,7 +17,7 @@ use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::terminalization::terminalize_in_tx;
+use crate::broker::terminalization::on_test_pool::terminalize_in_transaction;
 use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
 use crate::core::lifecycle::{
     AttemptWriteRefusal, BatchSize, FailedAttemptOutcome, GuardEvidence, OwnedClaim,
@@ -25,7 +25,8 @@ use crate::core::lifecycle::{
     WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
-use crate::test_support::sqlx_terminal_writes::{self as terminal_writes, StaleFailure};
+use crate::test_support::sql;
+use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const STALE_AFTER_MS: i32 = 60_000;
 const FINALIZING_STALE_AFTER_MS: i32 = 30_000;
@@ -124,7 +125,7 @@ mod terminal_at_invariant {
         let task_id = seed_task(&pool, &TaskSeed::pending()).await;
 
         let terminal_in_live_table =
-            sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
+            sql::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
                 .bind(task_id)
                 .execute(&pool)
                 .await
@@ -352,7 +353,7 @@ mod kind_vocabulary {
         let mut families: Vec<(TerminalizationKind, String)> = Vec::new();
         for kind in TerminalizationKind::ALL {
             let family: Option<String> =
-                sqlx::query_scalar("SELECT horsies_terminalization_family($1)")
+                sql::query_scalar("SELECT horsies_terminalization_family($1)")
                     .bind(kind.as_str())
                     .fetch_one(&pool)
                     .await
@@ -537,7 +538,7 @@ mod fail_stale {
         ensure_recent_heartbeat_leaves(&pool).await;
 
         let mut transaction = pool.begin().await.expect("begin");
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks SET started_at = NOW() - interval '10 seconds' WHERE id = $1",
         )
         .bind(task_id)
@@ -546,7 +547,7 @@ mod fail_stale {
         .expect("age the start");
         insert_beat(&mut *transaction, task_id, BeatRole::Runner, 1.25).await;
         let outcomes = terminal_writes::fail_stale_task(
-            transaction.as_mut(),
+            &mut *transaction,
             task_id,
             &StaleFailure {
                 stale_after_ms: 1_500,
@@ -817,19 +818,17 @@ mod expire_owned_claim {
 
         let mut mutator = pool.begin().await.expect("begin mutator");
         let mutator_pid = backend_pid(&mut *mutator).await;
-        sqlx::query(
-            "UPDATE horsies_tasks SET good_until = NOW() - interval '1 hour' WHERE id = $1",
-        )
-        .bind(task_id)
-        .execute(&mut *mutator)
-        .await
-        .expect("move the deadline under the row lock");
+        sql::query("UPDATE horsies_tasks SET good_until = NOW() - interval '1 hour' WHERE id = $1")
+            .bind(task_id)
+            .execute(&mut *mutator)
+            .await
+            .expect("move the deadline under the row lock");
 
         let mut applier = pool.begin().await.expect("begin applier");
         let applier_pid = backend_pid(&mut *applier).await;
         let command = expire_claim(task_id);
         let application = tokio::spawn(async move {
-            let outcomes = terminalize_in_tx(&mut applier, &command).await;
+            let outcomes = terminalize_in_transaction(&mut applier, &command).await;
             applier.commit().await.expect("commit applier");
             outcomes
         });
@@ -1111,7 +1110,7 @@ mod expire_pending_tasks {
         set_deadline(&pool, free, Deadline::PassedSecondsAgo(60.0)).await;
 
         let mut holder = pool.begin().await.expect("begin holder");
-        sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+        sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
             .bind(held)
             .execute(&mut *holder)
             .await
@@ -1409,7 +1408,7 @@ mod cancel_orphaned_tasks {
         let free = seed_task(&pool, &claimed_workflow_task()).await;
 
         let mut holder = pool.begin().await.expect("begin holder");
-        sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+        sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
             .bind(held)
             .execute(&mut *holder)
             .await
@@ -1439,7 +1438,7 @@ mod abandon_owned_node {
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
         let before = live_row(&pool, task_id).await;
 
-        let refused = sqlx::query("SELECT * FROM horsies_abandon_owned_node($1, $2, NULL)")
+        let refused = sql::query("SELECT * FROM horsies_abandon_owned_node($1, $2, NULL)")
             .bind(task_id)
             .bind(WORKER)
             .fetch_all(&pool)
@@ -1816,7 +1815,7 @@ mod id_keyed_workflow_batches {
             let task_id = seed_task(&pool, &claimed_workflow_task()).await;
             let before = live_row(&pool, task_id).await;
 
-            let refused = sqlx::query(&format!(
+            let refused = sql::query(&format!(
                 "SELECT * FROM {function}(ARRAY[$1]::uuid[], ARRAY[NULL]::timestamptz[], $2)"
             ))
             .bind(task_id)

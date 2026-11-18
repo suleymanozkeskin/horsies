@@ -13,7 +13,6 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
@@ -25,6 +24,7 @@ use crate::core::lifecycle::{
     PhaseTwoStep, RetryRefusal, TerminalizationKind,
 };
 use crate::core::types::status::TaskStatus;
+use crate::test_support::sql::{self, TestPool};
 
 const QUEUE: &str = "lifecycle_failed_attempt";
 const CHANNEL: &str = "task_queue_lifecycle_failed_attempt";
@@ -62,8 +62,8 @@ fn retry_after(delay_seconds: f64) -> RetryRequest {
     }
 }
 
-async fn good_until_of(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT good_until FROM horsies_tasks WHERE id = $1")
+async fn good_until_of(pool: &TestPool, task_id: Uuid) -> DateTime<Utc> {
+    sql::query_scalar("SELECT good_until FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -723,7 +723,7 @@ mod arguments {
                 (None, None, None) => "NONE",
                 _ => "RETRY",
             };
-            let refused = sqlx::query(
+            let refused = sql::query(
                 "SELECT * FROM horsies_finish_failed_attempt(
                     $1, $2, $3, $4, $5::integer, $6::double precision, $7,
                     $8, 'BOOM', NULL, $9, 'message', NULL, 'REFUSE', TRUE

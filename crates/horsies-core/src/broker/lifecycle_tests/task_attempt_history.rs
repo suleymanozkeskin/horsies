@@ -13,7 +13,7 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::postgres::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
@@ -137,7 +137,7 @@ async fn stale_cleanup_writes_failed_attempt_worker_crashed() {
 async fn replay_does_not_create_duplicate_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
-    let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task = ClaimedTask {
         task_id,
         task_name: "lifecycle.test".to_owned(),
@@ -180,7 +180,7 @@ async fn replay_does_not_create_duplicate_attempt() {
 async fn claim_lost_writes_no_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
 
     let started = start_attempt(
         &core,

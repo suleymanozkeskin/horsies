@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::*;
 use crate::broker::expiry_and_orphans::transitioned_count;
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::terminalization_matrix::migrated_pool;
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::BrokerError;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::test_support::{CapturedEvent, LogCapture};

@@ -785,7 +785,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_contains_retaining_row_advances_healthy_row_and_quarantines_at_bound() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
@@ -865,7 +865,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_rolls_back_one_failed_row_counts_its_raise_and_advances_the_next_candidate() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
@@ -976,7 +976,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn terminal_workflow_supersedes_pending_evidence_without_touching_the_node() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         for workflow_status in ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"] {
             let workflow_id = Uuid::new_v4();
             let task_id = Uuid::new_v4();
@@ -1023,7 +1023,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn every_retaining_disposition_preserves_available_evidence() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
 
         let mut transaction = pool.begin().await.unwrap();
         let absent = consume_phase2(&mut transaction, Uuid::new_v4(), "FAILED")
@@ -1141,7 +1141,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_reads_the_kind_of_a_failure_record_and_fails_its_node() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
@@ -1212,7 +1212,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn discovery_is_oldest_first_strictly_graced_and_capped() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut cases = Vec::new();
         for age in ["3 hours", "2 hours", "1 minute"] {
             let workflow_id = Uuid::new_v4();
@@ -1270,7 +1270,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_recovery_loop_quarantines_a_retaining_row_at_the_attempt_bound() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
@@ -1441,7 +1441,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_raise_at_the_bound_fails_the_workflow_closed_and_quarantines() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 2).await;
@@ -1499,7 +1499,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_transient_raise_adds_no_attempt() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 0).await;
@@ -1523,7 +1523,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_raise_at_the_bound_of_a_paused_workflow_is_not_recorded() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
@@ -1561,7 +1561,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_raise_under_the_bound_is_counted_and_a_gone_record_is_absent() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let broker = PostgresBroker::from_pool(pool.clone(), crate::ClientFamily::Rust);
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
@@ -1593,7 +1593,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_runs_the_child_start_that_its_record_owes() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 0).await;
@@ -1777,7 +1777,7 @@ mod tests {
     #[serial]
     async fn each_raise_record_outcome_reads_into_its_variant() {
         let broker = PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
+            crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
             crate::ClientFamily::Rust,
         );
 
@@ -1868,7 +1868,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_writes_the_stored_error_of_a_failed_task_into_its_node() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let with_message =
             crate::core::TaskError::new("NODE_FAILURE", "the real one").expect("a user error code");
         let without_message = crate::core::TaskError {

@@ -46,7 +46,7 @@ const DROP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// The pool with the heartbeat class registered at the default horizon, as
 /// at worker start.
 async fn pool_at_worker_start() -> PgPool {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let retention = RetentionConfig::default();
     ensure_startup_coverage_in_pool(
         &crate::broker::pools::core_pool_for_test_pool(&pool),

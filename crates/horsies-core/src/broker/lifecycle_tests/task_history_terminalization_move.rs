@@ -5,6 +5,7 @@ use serial_test::serial;
 use super::support::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
+use crate::test_support::sql;
 
 /// Python `TestAppliedCompletion::test_completed_is_never_eligible_even_with_retained_input`
 /// (the test map names it `test_completed_is_never_eligible_even_with_prepared_inline`):
@@ -117,7 +118,7 @@ async fn duplicate_identity_fails_closed() {
     assert!(live_row(&pool, task_id).await.is_some());
     assert_eq!(live_attempts(&pool, task_id).await, attempts_before);
     let history_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await

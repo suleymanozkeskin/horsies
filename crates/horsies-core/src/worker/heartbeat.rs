@@ -208,7 +208,7 @@ mod tests {
         use crate::core::history::heartbeats::partitioning::{
             ensure_heartbeat_coverage, EnsureHeartbeatCoverage,
         };
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let mut connection = pool.acquire().await.expect("acquire");
         ensure_heartbeat_coverage(
             &mut connection,

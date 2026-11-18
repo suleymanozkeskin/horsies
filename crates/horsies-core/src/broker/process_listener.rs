@@ -499,6 +499,7 @@ impl ProcessListener {
 mod tests {
     use super::*;
     use crate::db::{Keepalives, ListenerStartFailure, DEFAULT_SOCKET_SETTINGS};
+    use crate::test_support::sql;
 
     fn any_channel() -> ChannelName {
         fixed_channel("horsies_listener_unit")
@@ -607,8 +608,8 @@ mod tests {
         let second = caller_runtime();
         let application_name = format!("process_listener_{}", uuid::Uuid::new_v4().simple());
         let (pool, url) = first.block_on(async {
-            let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-            let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+            let url = crate::test_support::migrated_database_url().await;
+            let pool = crate::test_support::migrated_pool().await;
             (pool, url)
         });
         let separator = match url.contains('?') {
@@ -628,7 +629,7 @@ mod tests {
             .expect("the second runtime subscribes");
         let connections: i64 = first
             .block_on(
-                sqlx::query_scalar(
+                sql::query_scalar(
                     "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
                 )
                 .bind(&application_name)
@@ -868,11 +869,9 @@ mod tests {
     async fn a_listener_whose_listen_fails_refuses_its_first_subscription_with_the_cause() {
         use crate::broker::lifecycle_tests::support::WireProxy;
 
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        let upstream: sqlx::postgres::PgConnectOptions =
-            url.parse().expect("the test database URL parses");
-        let proxy = WireProxy::start(&upstream).await;
-        let proxied_url = crate::broker::pools::test_url_of(&proxy.options(&upstream));
+        let url = crate::test_support::migrated_database_url().await;
+        let proxy = WireProxy::start(url.as_str()).await;
+        let proxied_url = proxy.url(&url);
         proxy.drop_reply_to_request_carrying(b"LISTEN");
         let listener = ProcessListener::on_session_url(&proxied_url, DEFAULT_SOCKET_SETTINGS);
 
@@ -895,7 +894,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn the_schema_install_does_not_start_the_listener() {
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let url = crate::test_support::migrated_database_url().await;
         let broker = crate::broker::PostgresBroker::connect(&url, crate::ClientFamily::Rust)
             .await
             .expect("connect a broker");

@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::terminalization_matrix::migrated_pool;
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;

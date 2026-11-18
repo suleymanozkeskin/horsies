@@ -10,14 +10,14 @@
 use std::time::{Duration, Instant};
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{decode_pong, PostgresBroker};
 use crate::broker::health::{WorkerPingRequest, WorkerPongPayload, WORKER_PING_CHANNEL};
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::SendKind;
 use crate::core::config::EnqueueRetention;
+use crate::test_support::sql::{self, TestListener, TestPool};
+use crate::test_support::{migrated_database_url, migrated_pool};
 
 /// The polls of [`wait_for_listener_statement`], 20 ms apart: at most 5 s.
 const LISTENER_STATEMENT_POLLS: u32 = 250;
@@ -42,12 +42,12 @@ fn pong_payload(correlation_id: &str) -> String {
 
 /// A broker on the database of this test whose listener connects with
 /// `application_name`.
-async fn listener_broker(application_name: &str) -> (PostgresBroker, PgPool) {
+async fn listener_broker(application_name: &str) -> (PostgresBroker, TestPool) {
     let url = migrated_database_url().await;
     let separator = if url.contains('?') { '&' } else { '?' };
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool_and_session_url(
-        pool.clone(),
+    let broker = PostgresBroker::from_test_url_and_session_url(
+        pool.url(),
         &format!("{url}{separator}application_name={application_name}"),
         crate::ClientFamily::Rust,
     );
@@ -57,13 +57,13 @@ async fn listener_broker(application_name: &str) -> (PostgresBroker, PgPool) {
 /// Whether the last statement of the backend of `application_name` became
 /// `statement` within [`LISTENER_STATEMENT_POLLS`] polls.
 async fn wait_for_listener_statement(
-    pool: &PgPool,
+    pool: &TestPool,
     application_name: &str,
     statement: &str,
 ) -> bool {
     for _ in 0..LISTENER_STATEMENT_POLLS {
         let last: Option<String> =
-            sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE application_name = $1")
+            sql::query_scalar("SELECT query FROM pg_stat_activity WHERE application_name = $1")
                 .bind(application_name)
                 .fetch_optional(pool)
                 .await
@@ -110,7 +110,7 @@ fn a_pong_of_another_round_is_dropped() {
 #[serial]
 async fn the_ping_returns_at_the_first_pong_when_one_is_enough() {
     let (broker, pool) = listener_broker("ping_min_responses").await;
-    let mut requests = sqlx::postgres::PgListener::connect_with(&pool)
+    let mut requests = TestListener::connect_with(&pool)
         .await
         .expect("connect the responder");
     requests
@@ -122,7 +122,7 @@ async fn the_ping_returns_at_the_first_pong_when_one_is_enough() {
         let notification = requests.recv().await.expect("a ping request");
         let request: WorkerPingRequest =
             serde_json::from_str(notification.payload()).expect("a ping request decodes");
-        sqlx::query("SELECT pg_notify($1, $2)")
+        sql::query("SELECT pg_notify($1, $2)")
             .bind(&request.reply_channel)
             .bind(pong_payload(&request.correlation_id))
             .execute(&replies)

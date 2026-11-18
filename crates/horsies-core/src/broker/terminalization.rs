@@ -714,18 +714,109 @@ pub async fn terminalize_in_tx(
     Ok(outcomes)
 }
 
-/// [`terminalize`] for tests that hold a sqlx pool: the command runs on a
+/// [`terminalize`] for tests that hold a test pool: the command runs on a
 /// main core pool on the same database, built for the call and closed after
 /// it, so a test call site keeps its form.
 #[cfg(test)]
 pub(crate) mod on_test_pool {
-    use super::{BrokerError, StatementLog, TerminalizationCommand, TerminalizationOutcome};
+    use super::{
+        decode_outcomes, statement_of, BrokerError, StatementLog, TerminalizationCommand,
+        TerminalizationOutcome,
+    };
+    use crate::test_support::sql::{self, TestDatabaseUrl, TestTransaction};
+
+    /// Why [`terminalize_in_transaction`] failed.
+    #[derive(Debug)]
+    pub(crate) enum InTransactionError {
+        /// The server refused the statement, or the session failed. The
+        /// transaction is aborted.
+        Database(sql::Error),
+        /// A row or the row count broke the wire contract
+        /// ([`BrokerError::TerminalizationContract`]).
+        Contract(BrokerError),
+    }
+
+    /// The statement of `command` with its values, on the test client.
+    fn bound_query(command: &TerminalizationCommand) -> sql::Query<'_> {
+        let query = sql::query(statement_of(command).sql());
+        match command {
+            TerminalizationCommand::CompleteTaskFused {
+                task_id,
+                fence,
+                result_json,
+            } => query
+                .bind(task_id)
+                .bind(&fence.worker_id)
+                .bind(fence.claimed_at)
+                .bind(result_json),
+            TerminalizationCommand::ExpireOwnedClaim {
+                task_id,
+                fence,
+                result_json,
+                error_code,
+            } => query
+                .bind(task_id)
+                .bind(&fence.worker_id)
+                .bind(result_json)
+                .bind(error_code),
+            TerminalizationCommand::ExpirePendingTasks {
+                batch_size,
+                result_json,
+                error_code,
+            } => query
+                .bind(batch_size.get())
+                .bind(result_json)
+                .bind(error_code),
+            TerminalizationCommand::CancelOwnedOrphan { task_id, fence }
+            | TerminalizationCommand::AbandonOwnedNode { task_id, fence } => query
+                .bind(task_id)
+                .bind(&fence.worker_id)
+                .bind(fence.claimed_at),
+            TerminalizationCommand::CancelOrphanedTasks { batch_size } => {
+                query.bind(batch_size.get())
+            }
+            TerminalizationCommand::AbandonOwnedNodes { fence }
+            | TerminalizationCommand::CancelOwnedNodes { fence } => query
+                .bind(fence.task_ids())
+                .bind(fence.generations())
+                .bind(fence.worker_id().to_owned()),
+            TerminalizationCommand::AbandonNodesOfPausedWorkflows { workflow_ids }
+            | TerminalizationCommand::CancelNodesOfCancelledWorkflow { workflow_ids } => {
+                query.bind(workflow_ids)
+            }
+            TerminalizationCommand::CancelOwnedNode {
+                task_id,
+                fence,
+                accepts_requeued_pending,
+            } => query
+                .bind(task_id)
+                .bind(&fence.worker_id)
+                .bind(fence.claimed_at)
+                .bind(accepts_requeued_pending),
+        }
+    }
+
+    /// [`super::terminalize_in_core_transaction`] in a test's open
+    /// transaction on the test client: the statement of the command, decoded
+    /// and checked as the core decodes it. The caller commits or rolls back.
+    ///
+    /// Errors: [`InTransactionError`].
+    pub(crate) async fn terminalize_in_transaction(
+        transaction: &mut TestTransaction<'_>,
+        command: &TerminalizationCommand,
+    ) -> Result<Vec<TerminalizationOutcome>, InTransactionError> {
+        let rows = bound_query(command)
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(InTransactionError::Database)?;
+        decode_outcomes(&rows, command).map_err(InTransactionError::Contract)
+    }
 
     pub(crate) async fn terminalize(
-        pool: &sqlx::PgPool,
+        pool: &impl TestDatabaseUrl,
         command: &TerminalizationCommand,
     ) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
-        let core = crate::broker::pools::core_pool_for_test_pool(pool);
+        let core = crate::broker::pools::core_pool_for_test_url(&pool.test_url());
         let outcomes = super::terminalize(&core, StatementLog::Off, command).await;
         core.close();
         outcomes
@@ -740,11 +831,11 @@ mod catalog_tests {
     //! changed argument list appears here as a difference.
     use super::*;
     use crate::core::lifecycle::TerminalizationKind;
+    use crate::test_support::sql::{self, TestPool};
     use serial_test::serial;
-    use sqlx::Row;
 
-    async fn migrated_pool() -> sqlx::PgPool {
-        crate::broker::terminalization_matrix::migrated_pool().await
+    async fn migrated_pool() -> TestPool {
+        crate::test_support::migrated_pool().await
     }
 
     /// A row with two of the ten columns of the wire contract.
@@ -852,7 +943,7 @@ mod catalog_tests {
             .iter()
             .map(|(name, _, _, _)| (*name).to_owned())
             .collect();
-        let rows = sqlx::query(
+        let rows = sql::query(
             "SELECT p.proname,
                     pg_get_function_arguments(p.oid) AS args,
                     pg_get_function_result(p.oid) AS result,
@@ -876,11 +967,11 @@ mod catalog_tests {
         let mut expected: Vec<(&str, &str, &str, &str)> = EXPECTED_SIGNATURES.to_vec();
         expected.sort_by_key(|(name, _, _, _)| *name);
         for (row, (name, args, result, language)) in rows.iter().zip(expected) {
-            assert_eq!(row.get::<String, _>("proname"), name);
-            assert_eq!(row.get::<String, _>("args"), args, "{name} arguments");
-            assert_eq!(row.get::<String, _>("result"), result, "{name} result");
-            assert_eq!(row.get::<String, _>("prokind"), "f", "{name} prokind");
-            assert_eq!(row.get::<String, _>("lanname"), language, "{name} language");
+            assert_eq!(row.get::<_, String>("proname"), name);
+            assert_eq!(row.get::<_, String>("args"), args, "{name} arguments");
+            assert_eq!(row.get::<_, String>("result"), result, "{name} result");
+            assert_eq!(row.get::<_, String>("prokind"), "f", "{name} prokind");
+            assert_eq!(row.get::<_, String>("lanname"), language, "{name} language");
         }
     }
 
@@ -888,7 +979,7 @@ mod catalog_tests {
     #[serial]
     async fn outcome_type_matches_wire_contract() {
         let pool = migrated_pool().await;
-        let rows = sqlx::query(
+        let rows = sql::query(
             "SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS type
              FROM pg_attribute a
              JOIN pg_type t ON t.typrelid = a.attrelid
@@ -925,7 +1016,7 @@ mod catalog_tests {
     #[serial]
     async fn body_canary_fragments_present() {
         let pool = migrated_pool().await;
-        let fused: String = sqlx::query_scalar(
+        let fused: String = sql::query_scalar(
             "SELECT pg_get_functiondef(
                 'horsies_complete_task_fused(uuid, text, timestamptz, text, boolean)'::regprocedure
              )",
@@ -949,7 +1040,7 @@ mod catalog_tests {
             );
         }
 
-        let miss: String = sqlx::query_scalar(
+        let miss: String = sql::query_scalar(
             "SELECT pg_get_functiondef(
                 'horsies_terminalization_miss(uuid, text, text, text, timestamptz)'::regprocedure
              )",
@@ -992,14 +1083,14 @@ mod catalog_tests {
     #[serial]
     async fn decoder_rejects_wrong_row_shape() {
         let pool = migrated_pool().await;
-        let row = sqlx::query(WRONG_ROW_SHAPE.sql())
+        let row = sql::query(WRONG_ROW_SHAPE.sql())
             .fetch_one(&pool)
             .await
             .expect("query");
         let err = decode_outcome_pg_row(&row).expect_err("a sqlx row of the wrong shape");
         assert!(err.to_string().contains("row shape"), "{err}");
 
-        let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let core = crate::broker::pools::core_pool_for_test_url(pool.url());
         let rows = core
             .query(
                 CheckoutClass::Reserved,

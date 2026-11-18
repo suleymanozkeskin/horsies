@@ -563,7 +563,7 @@ mod tests {
         use serde_json::json;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let health = new_reaper_health();
         let phase2 = json!({"applied": 2, "failed": 0});
@@ -952,7 +952,7 @@ mod tests {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
@@ -1068,7 +1068,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn a_failed_claimed_count_writes_no_snapshot() {
-        let migrated = crate::broker::terminalization_matrix::migrated_pool().await;
+        let migrated = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         // On the one connection of this pool a temporary `horsies_tasks`
         // without the counted columns hides the table of that name, so the
         // count fails; the snapshot table is untouched, so the insert alone
@@ -1152,7 +1152,7 @@ mod tests {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;

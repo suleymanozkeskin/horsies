@@ -1,36 +1,35 @@
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::postgres::{PgListener, PgNotification};
-use sqlx::{PgPool, Row};
 use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::core::lifecycle::{TerminalizationKind, TerminalizationOutcome};
-use crate::test_support::sqlx_terminal_writes as terminal_writes;
+use crate::test_support::sql::{self, TestListener, TestPool};
+use crate::test_support::terminal_writes;
 
-use super::terminalization_matrix::migrated_pool;
+use crate::test_support::migrated_pool;
 
 const TASK_STATUS_CHANNEL: &str = "horsies_task_status";
 const TASK_DONE_CHANNEL: &str = "task_done";
 const WORKFLOW_STATUS_CHANNEL: &str = "horsies_workflow_status";
 const WORKER_STATE_CHANNEL: &str = "horsies_worker_state";
 
-async fn next_notification(listener: &mut PgListener) -> PgNotification {
+async fn next_notification(listener: &mut TestListener) -> tokio_postgres::Notification {
     timeout(Duration::from_secs(3), listener.recv())
         .await
         .expect("monitoring notification timed out")
         .expect("monitoring listener failed")
 }
 
-async fn assert_notification(listener: &mut PgListener, channel: &str, payload: &str) {
+async fn assert_notification(listener: &mut TestListener, channel: &str, payload: &str) {
     let notification = next_notification(listener).await;
     assert_eq!(notification.channel(), channel);
     assert_eq!(notification.payload(), payload);
 }
 
-async fn seed_task(pool: &PgPool, task_id: Uuid, task_name: &str) {
-    sqlx::query(
+async fn seed_task(pool: &TestPool, task_id: Uuid, task_name: &str) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -58,8 +57,8 @@ async fn seed_task(pool: &PgPool, task_id: Uuid, task_name: &str) {
     .expect("seed W1 task");
 }
 
-async fn seed_workflow(pool: &PgPool, workflow_id: Uuid) {
-    sqlx::query(
+async fn seed_workflow(pool: &TestPool, workflow_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_workflows (
             id, name, status, on_error, output_task_index,
             definition_key, depth, root_workflow_id,
@@ -77,8 +76,8 @@ async fn seed_workflow(pool: &PgPool, workflow_id: Uuid) {
 
 /// One snapshot with every NOT NULL column of the baseline
 /// `horsies_worker_states` named: no slot down, no class budget.
-async fn seed_worker_state(pool: &PgPool, worker_id: &str) {
-    sqlx::query(
+async fn seed_worker_state(pool: &TestPool, worker_id: &str) {
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, cluster_wide_cap, queues,
@@ -100,13 +99,13 @@ async fn seed_worker_state(pool: &PgPool, worker_id: &str) {
     .expect("seed W1 worker state");
 }
 
-async fn explain(pool: &PgPool, statement: &str) -> String {
+async fn explain(pool: &TestPool, statement: &str) -> String {
     let mut transaction = pool.begin().await.expect("begin EXPLAIN transaction");
-    sqlx::query("SET LOCAL enable_seqscan = off")
+    sql::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *transaction)
         .await
         .expect("disable sequential scans");
-    let rows = sqlx::query(&format!("EXPLAIN {statement}"))
+    let rows = sql::query(&format!("EXPLAIN {statement}"))
         .fetch_all(&mut *transaction)
         .await
         .expect("EXPLAIN monitoring statement");
@@ -115,7 +114,7 @@ async fn explain(pool: &PgPool, statement: &str) -> String {
         .await
         .expect("rollback EXPLAIN transaction");
     rows.into_iter()
-        .map(|row| row.get::<String, _>(0))
+        .map(|row| row.get::<_, String>(0))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -129,7 +128,7 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
     // idx_horsies_tasks_task_name: its only reader was the facet statement of
     // a plan test, which production does not call.
     for (index_name, expected_column) in [("idx_horsies_tasks_enqueued_at", "enqueued_at")] {
-        let shape: (String, bool, bool, bool, bool, i32, i32, String) = sqlx::query_as(
+        let shape: (String, bool, bool, bool, bool, i32, i32, String) = sql::query_as(
             "SELECT am.amname, i.indisvalid, i.indisready, i.indisunique,
                         i.indpred IS NULL, i.indnkeyatts::int, i.indnatts::int,
                         a.attname
@@ -160,7 +159,7 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
         );
     }
 
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, execution, status,
             sent_at, enqueued_at, is_workflow_task,
@@ -178,7 +177,7 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
     .execute(&pool)
     .await
     .expect("seed W1 plan population");
-    sqlx::query("ANALYZE horsies_tasks")
+    sql::query("ANALYZE horsies_tasks")
         .execute(&pool)
         .await
         .expect("analyze W1 plan population");
@@ -223,7 +222,7 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
         "{claim_plan}"
     );
 
-    sqlx::query("DELETE FROM horsies_tasks WHERE task_name LIKE 'w1_plan_task_%'")
+    sql::query("DELETE FROM horsies_tasks WHERE task_name LIKE 'w1_plan_task_%'")
         .execute(&pool)
         .await
         .expect("clean W1 plan population");
@@ -235,7 +234,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     let pool = migrated_pool().await;
 
     let task_id = Uuid::new_v4();
-    let mut task_listener = PgListener::connect_with(&pool)
+    let mut task_listener = TestListener::connect_with(&pool)
         .await
         .expect("connect task listener");
     task_listener
@@ -250,7 +249,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     )
     .await;
     // A CLAIMED row carries its lease (horsies_tasks_status_live).
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_tasks
          SET status = 'CLAIMED', claim_expires_at = NOW() + interval '1 minute'
          WHERE id = $1",
@@ -267,7 +266,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     .await;
 
     let workflow_id = Uuid::new_v4();
-    let mut workflow_listener = PgListener::connect_with(&pool)
+    let mut workflow_listener = TestListener::connect_with(&pool)
         .await
         .expect("connect workflow listener");
     workflow_listener
@@ -281,7 +280,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         &workflow_id.to_string(),
     )
     .await;
-    sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+    sql::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
@@ -294,7 +293,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     .await;
 
     let worker_id = format!("w1-worker-{}", Uuid::new_v4());
-    let mut worker_listener = PgListener::connect_with(&pool)
+    let mut worker_listener = TestListener::connect_with(&pool)
         .await
         .expect("connect worker listener");
     worker_listener
@@ -307,7 +306,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     // update of a snapshot sends nothing. A marker sent after the update
     // commits is the next event on the channel; an event of the update
     // would arrive before it.
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_worker_states
          SET tasks_running = 1
          WHERE worker_id = $1",
@@ -317,7 +316,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     .await
     .expect("update worker state");
     let marker = format!("{worker_id}-after-update");
-    sqlx::query("SELECT pg_notify($1, $2)")
+    sql::query("SELECT pg_notify($1, $2)")
         .bind(WORKER_STATE_CHANNEL)
         .bind(&marker)
         .execute(&pool)
@@ -325,17 +324,17 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         .expect("send the marker event");
     assert_notification(&mut worker_listener, WORKER_STATE_CHANNEL, &marker).await;
 
-    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(&worker_id)
         .execute(&pool)
         .await
         .expect("clean W1 worker state");
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
         .expect("clean W1 workflow");
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
@@ -350,7 +349,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
 async fn a_start_sends_no_status_event() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
-    let mut listener = PgListener::connect_with(&pool)
+    let mut listener = TestListener::connect_with(&pool)
         .await
         .expect("connect status listener");
     listener
@@ -362,7 +361,7 @@ async fn a_start_sends_no_status_event() {
     assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await;
 
     for (status, sends_event) in [("CLAIMED", true), ("RUNNING", false), ("PENDING", true)] {
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET status = $2,
                  claim_expires_at = CASE WHEN $2 = 'CLAIMED'
@@ -387,7 +386,7 @@ async fn a_start_sends_no_status_event() {
         }
     }
 
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
@@ -403,7 +402,7 @@ async fn a_start_sends_no_status_event() {
 async fn a_terminal_move_sends_task_done_and_the_status_event() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
-    let mut listener = PgListener::connect_with(&pool)
+    let mut listener = TestListener::connect_with(&pool)
         .await
         .expect("connect terminal-move listener");
     listener
@@ -431,13 +430,13 @@ async fn a_terminal_move_sends_task_done_and_the_status_event() {
     assert_notification(&mut listener, TASK_DONE_CHANNEL, &task_id.to_string()).await;
     assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await;
 
-    let live_count: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+    let live_count: i64 = sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&pool)
         .await
         .expect("count moved live task");
     let history_status: String =
-        sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await
@@ -445,7 +444,7 @@ async fn a_terminal_move_sends_task_done_and_the_status_event() {
     assert_eq!(live_count, 0);
     assert_eq!(history_status, "CANCELLED");
 
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .execute(&pool)
         .await

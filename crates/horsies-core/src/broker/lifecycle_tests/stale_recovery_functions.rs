@@ -19,13 +19,12 @@
 //! is prepared on the connection, with no checkout ping.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::expiry_and_orphans::expire_pending_pass;
-use crate::broker::pools::{core_pool_for_test_pool, unpinged_single_connection_core_pool};
+use crate::broker::pools::{core_pool_for_test_url, unpinged_single_connection_core_pool_for_url};
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claims, scan_stale_running, FinishStaleAttempt,
     RecoveryBatch, StaleEvidence, StaleRetry, StaleRunningThresholds, ThresholdMs,
@@ -37,6 +36,7 @@ use crate::core::lifecycle::{
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::CorePool;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::recovery::{mark_stale_running_as_failed, requeue_stale_claimed};
 
 const QUEUE: &str = "q_stale";
@@ -59,12 +59,12 @@ fn thresholds() -> StaleRunningThresholds {
 /// A RUNNING row of `WORKER` on `QUEUE`, started 10 minutes ago with no
 /// beat, at retry count 1 of 3 (Python `lc_task(..., 'RUNNING')` and its
 /// update).
-async fn stale_task(pool: &PgPool) -> Uuid {
+async fn stale_task(pool: &TestPool) -> Uuid {
     stale_task_with(pool, None, 1, 3).await
 }
 
 async fn stale_task_with(
-    pool: &PgPool,
+    pool: &TestPool,
     task_options: Option<String>,
     retry_count: i32,
     max_retries: i32,
@@ -116,8 +116,8 @@ type AttemptRow = (
     Option<String>,
 );
 
-async fn attempt_rows(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRow> {
-    sqlx::query_as(
+async fn attempt_rows(pool: &TestPool, task_id: Uuid) -> Vec<AttemptRow> {
+    sql::query_as(
         "SELECT attempt, outcome::text, will_retry, error_code, error_message, failed_reason,
                 worker_id
          FROM horsies_task_attempts WHERE task_id = $1 ORDER BY attempt",
@@ -151,7 +151,7 @@ mod scan {
     #[serial]
     async fn the_silent_rows_not_the_beaten_or_finalizing_ones() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let silent = stale_task(&pool).await;
         let beaten = stale_task(&pool).await;
         let finalizing = stale_task(&pool).await;
@@ -182,10 +182,10 @@ mod scan {
     #[serial]
     async fn the_facts_of_a_candidate() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
         let started_at: chrono::DateTime<chrono::Utc> =
-            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
+            sql::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
@@ -233,7 +233,7 @@ mod scan {
     #[serial]
     async fn the_batch_bound() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_ids = [
             stale_task(&pool).await,
             stale_task(&pool).await,
@@ -264,7 +264,7 @@ mod finish {
     #[serial]
     async fn no_retry_fails_the_task() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
         // A row at retry count 1 holds its attempt 1: the archive numbers
         // attempts from 1 with no gap, and its decoder refuses a gap
@@ -324,7 +324,7 @@ mod finish {
     #[serial]
     async fn a_replay_is_already_applied() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
         let command = finish(task_id, StaleRetry::NoRetry);
         let _first: StaleAttemptOutcome = recover(&core, &command).await;
@@ -348,9 +348,9 @@ mod finish {
     #[serial]
     async fn a_crash_retry_by_policy() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
-        let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+        let before: chrono::DateTime<chrono::Utc> = sql::query_scalar("SELECT NOW()")
             .fetch_one(&pool)
             .await
             .expect("database clock");
@@ -416,7 +416,7 @@ mod finish {
     #[serial]
     async fn a_fresh_beat_is_not_stale() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
         beat(&pool, task_id, BeatRole::Runner, 0.0).await;
 
@@ -442,7 +442,7 @@ mod finish {
     #[serial]
     async fn a_recent_finalizing_marker_is_not_stale() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
         set_finalizing(&pool, task_id, Since::SecondsAgo(0.0)).await;
 
@@ -468,7 +468,7 @@ mod finish {
     #[serial]
     async fn a_retry_from_another_retry_count_is_refused() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
 
         let outcome = recover(
@@ -501,7 +501,7 @@ mod finish {
     #[serial]
     async fn a_crash_retry_at_or_after_the_deadline_fails_the_task() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
         set_deadline(&pool, task_id, Deadline::AheadSeconds(2.0)).await;
 
@@ -537,7 +537,7 @@ mod finish {
     #[serial]
     async fn a_row_that_is_not_running() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
 
         let outcome = recover(&core, &finish(task_id, StaleRetry::NoRetry)).await;
@@ -558,7 +558,7 @@ mod finish {
     #[serial]
     async fn an_absent_task() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = Uuid::new_v4();
 
         let outcome = recover(&core, &finish(task_id, StaleRetry::NoRetry)).await;
@@ -576,7 +576,7 @@ mod finish {
     #[serial]
     async fn a_workflow_task_owes_phase_two() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_id = seed_task(
             &pool,
             &TaskSeed {
@@ -609,7 +609,7 @@ mod finish {
     }
 
     /// Case `stale attempt: refusals write nothing`, for one row.
-    async fn assert_refusal_wrote_nothing(pool: &PgPool, task_id: Uuid) {
+    async fn assert_refusal_wrote_nothing(pool: &TestPool, task_id: Uuid) {
         assert_eq!(status_of(pool, task_id).await, "RUNNING");
         assert!(attempt_rows(pool, task_id).await.is_empty());
     }
@@ -626,7 +626,7 @@ mod reaper_pass {
     #[serial]
     async fn a_pass_retries_by_policy_fails_the_rest_and_wakes_the_retried_queue() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let mut wakes = Wakes::listen(&pool, CHANNEL).await;
         let retried = stale_task_with(&pool, Some(crash_retry_options()), 0, 1).await;
         let failed = stale_task_with(&pool, None, 0, 0).await;
@@ -669,7 +669,7 @@ mod requeue {
 
     /// A CLAIMED row of `WORKER`, claimed at `generation()`, months before
     /// the database clock, with no beat.
-    async fn stale_claim(pool: &PgPool, origin: Origin) -> Uuid {
+    async fn stale_claim(pool: &TestPool, origin: Origin) -> Uuid {
         seed_task(
             pool,
             &TaskSeed {
@@ -685,7 +685,7 @@ mod requeue {
     #[serial]
     async fn the_batch_bound() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let task_ids = [
             stale_claim(&pool, Origin::Send).await,
             stale_claim(&pool, Origin::Send).await,
@@ -714,7 +714,7 @@ mod requeue {
     #[serial]
     async fn silent_claims_go_back_a_beaten_claim_a_fresh_claim_and_an_orphan_stay() {
         let pool = pool().await;
-        let core = core_pool_for_test_pool(&pool);
+        let core = core_pool_for_test_url(pool.url());
         let silent = stale_claim(&pool, Origin::Send).await;
         let beaten = stale_claim(&pool, Origin::Send).await;
         let fresh = stale_claim(&pool, Origin::Send).await;
@@ -723,7 +723,7 @@ mod requeue {
         let workflow_id = link_workflow_task(&pool, linked, "ENQUEUED", "RUNNING").await;
         set_finalizing(&pool, silent, Since::SecondsAgo(0.0)).await;
         beat(&pool, beaten, BeatRole::Claimer, 0.0).await;
-        sqlx::query("UPDATE horsies_tasks SET claimed_at = NOW() WHERE id = $1")
+        sql::query("UPDATE horsies_tasks SET claimed_at = NOW() WHERE id = $1")
             .bind(fresh)
             .execute(&pool)
             .await
@@ -773,10 +773,10 @@ mod round_trips {
         pool: CorePool,
     }
 
-    async fn counted_pool(pool: &PgPool) -> CountedPool {
-        let upstream = database_options(pool);
-        let proxy = WireProxy::start(&upstream).await;
-        let core = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    async fn counted_pool(pool: &TestPool) -> CountedPool {
+        let upstream = pool.url();
+        let proxy = WireProxy::start(upstream).await;
+        let core = unpinged_single_connection_core_pool_for_url(&proxy.url(upstream));
         CountedPool { proxy, pool: core }
     }
 

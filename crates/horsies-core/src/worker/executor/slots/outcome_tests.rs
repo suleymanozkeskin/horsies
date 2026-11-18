@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
-use crate::broker::terminalization_matrix::migrated_pool;
+use crate::broker::terminalization_matrix::sqlx_migrated_pool as migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::task::error::{OperationalErrorCode, TaskErrorCode};

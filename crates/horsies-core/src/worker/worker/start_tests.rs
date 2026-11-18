@@ -139,7 +139,7 @@ fn unreachable_broker() -> Arc<PostgresBroker> {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_start_on_a_ready_database_starts_with_no_retry() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let worker = worker_on(
         Arc::new(PostgresBroker::from_pool(pool, crate::ClientFamily::Rust)),
         resilience(60_000, 0),
@@ -183,7 +183,7 @@ async fn a_start_error_that_can_clear_is_retried_until_its_budget_ends() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_start_error_that_cannot_clear_is_returned_at_once() {
-    let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let url = crate::test_support::migrated_database_url().await;
     let missing = PgConnectOptions::from_str(&url)
         .expect("the test database url parses")
         .database(&format!(
@@ -307,9 +307,9 @@ async fn send_burst(broker: &PostgresBroker, witness: &crate::db::WakeSubscripti
 #[tokio::test]
 #[serial_test::serial]
 async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
-    let session_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let session_url = crate::test_support::migrated_database_url().await;
     let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-        crate::broker::terminalization_matrix::migrated_pool().await,
+        crate::broker::terminalization_matrix::sqlx_migrated_pool().await,
         &session_url,
         crate::ClientFamily::Rust,
     ));

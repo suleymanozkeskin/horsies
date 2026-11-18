@@ -157,7 +157,7 @@ fn the_engine_merge_errors_are_python_s_texts() {
 #[tokio::test]
 #[serial]
 async fn the_sql_writer_builds_python_s_engine_errors() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     for name in [
         "upstream_skipped",
         "result_deserialization_error_dependency_without_result",

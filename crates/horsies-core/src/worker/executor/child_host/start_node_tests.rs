@@ -177,7 +177,7 @@ async fn remove_case(pool: &PgPool, workflow_id: Option<Uuid>, task_id: Uuid) {
 #[tokio::test]
 #[serial]
 async fn workflow_task_still_transitions_node_to_running() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id).await;
@@ -219,7 +219,7 @@ async fn workflow_task_still_transitions_node_to_running() {
 #[tokio::test]
 #[serial]
 async fn running_replay_preserves_the_first_node_start() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     let first_started_at =
@@ -271,7 +271,7 @@ async fn running_replay_preserves_the_first_node_start() {
 #[tokio::test]
 #[serial]
 async fn plain_task_starts_running_without_workflow_update() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, false).await;
     let (context, _peer) = context(pool.clone());
@@ -297,7 +297,7 @@ async fn plain_task_starts_running_without_workflow_update() {
 #[tokio::test]
 #[serial]
 async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     for status in [
         Some("ENQUEUED"),
         Some("READY"),
@@ -416,7 +416,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
 #[tokio::test]
 #[serial]
 async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, true).await;
     let (context, _peer) = context(pool.clone());
@@ -450,7 +450,7 @@ async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
 #[tokio::test]
 #[serial]
 async fn an_unlinked_task_stays_claimed_when_the_self_heal_is_off() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::broker::terminalization_matrix::sqlx_migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, true).await;
     let (context, _peer) = context(pool.clone());
