@@ -18,17 +18,17 @@ use tokio::sync::oneshot;
 
 use super::held_exits::{ExitRelease, HeldExits};
 use super::scripted::{
-    async_work, boot, idle_child, input, isolated_config, isolated_init, layout, leftover_cancel,
-    ok_envelope, printf_bytes, read_frame, reported, run_ref, send, serving, serving_pid,
-    shared_async_init, shared_config, shared_result, shared_thread_init, shell,
-    start_isolated_from, start_shared_from, submit_shared, task, thread_work, timeout_ms, until,
-    TestDir, ANSWER_WAIT, SPAWNER_STOP_WAIT, STATE_WAIT,
+    async_work, boot, ended, idle_child, input, isolated_config, isolated_init, layout,
+    leftover_cancel, ok_envelope, printf_bytes, read_frame, reported, result_frame, run_ref, send,
+    serving, serving_pid, shared_async_init, shared_config, shared_result, shared_thread_init,
+    shell, start_isolated_from, start_shared_from, submit_shared, task, thread_work, timeout_ms,
+    until, TestDir, ANSWER_WAIT, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    BodyEnd, BodyReturnedFrame, ChildFrame, InitFrame, IsolatedWork, LeftoverName, LoopHoldsTasks,
-    ShortageErrno,
+    encode_child_frame, BodyEnd, BodyReturnedFrame, ChildFrame, InitFrame, IsolatedWork,
+    LeftoverName, LoopHoldsTasks, ShortageErrno,
 };
 use crate::worker::executor::supervisor::{BootFailureCause, Spawner};
 use crate::worker::retry::MIN_TASK_TIMEOUT_MS;
@@ -46,10 +46,16 @@ const SHORT_DEADLINE_MS: u64 = MIN_TASK_TIMEOUT_MS;
 /// deadline killed has passed the kill wait by then.
 const PAST_THE_DEADLINE_KILL_WAIT: Duration =
     PAST_THE_KILL_WAIT.saturating_add(Duration::from_millis(SHORT_DEADLINE_MS));
+/// A kill wait that the tests of an exit seen within it never pass: the
+/// test releases the held exit long before.
+const LONG_KILL_WAIT: Duration = Duration::from_secs(20);
+/// How long the test watches a slot that waits for the exit of its killed
+/// child, within [`LONG_KILL_WAIT`].
+const WATCHED_IN_THE_KILL_WAIT: Duration = Duration::from_millis(500);
 
-fn isolated(script: &str, exit_not_seen: ExitNotSeen) -> IsolatedPoolConfig {
+fn isolated(script: &str, exit_not_seen: ExitNotSeen, kill_wait: Duration) -> IsolatedPoolConfig {
     IsolatedPoolConfig {
-        kill_wait: SHORT_KILL_WAIT,
+        kill_wait,
         exit_not_seen,
         ..isolated_config(shell(script))
     }
@@ -73,13 +79,17 @@ struct HeldPool {
 
 impl HeldPool {
     fn start(script: &str, exit_not_seen: ExitNotSeen) -> Self {
+        Self::start_with_kill_wait(script, exit_not_seen, SHORT_KILL_WAIT)
+    }
+
+    fn start_with_kill_wait(script: &str, exit_not_seen: ExitNotSeen, kill_wait: Duration) -> Self {
         let spawner = Spawner::start().unwrap();
         let source = HeldExits::new(spawner.handle(), ExitRelease::Held);
         let (pool, board) = start_isolated_from(
             &spawner,
             &source,
             1,
-            isolated(script, exit_not_seen),
+            isolated(script, exit_not_seen, kill_wait),
             LiveDispatches::default(),
         );
         Self {
@@ -230,6 +240,104 @@ async fn a_deadline_kill_with_no_exit_seen_ends_unknown() {
     held.stop().await;
 }
 
+/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_nothing_is_written_while_the_child_runs`
+/// (and the order of `::test_a_retry_is_written_only_after_the_exit` and
+/// `::test_a_database_error_comes_after_the_kill`), with stale RUNNING
+/// recovery on: at the deadline the slot kills the child (the spawner reaps
+/// it), and while its exit is not seen, within the kill wait, the task has no
+/// end. The worker writes an end only after the answer
+/// (`worker::worker`, `Worker::dispatch`), so nothing is written while the
+/// child may run. Once the exit is seen, the end is the timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deadline_kill_gives_no_end_before_the_exit_is_seen() {
+    let held = HeldPool::start_with_kill_wait(
+        &after_one_run("exec sleep 60"),
+        ExitNotSeen::LeaveToRecovery,
+        LONG_KILL_WAIT,
+    );
+    let child = serving(&held.board, 0).await;
+    let mut answer = held.submit(
+        &task(1, ExecutionClass::Isolated),
+        deadline(SHORT_DEADLINE_MS),
+    );
+
+    ended(child.as_pid_t()).await;
+    tokio::time::sleep(WATCHED_IN_THE_KILL_WAIT).await;
+    still_waiting(&mut answer);
+    held.source.release();
+    let end = answer_within(answer).await;
+
+    assert_eq!(
+        end,
+        AttemptEnd::TimedOut {
+            timeout: timeout_ms(SHORT_DEADLINE_MS),
+            retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
+        }
+    );
+    held.stop().await;
+}
+
+/// How long after the run frame the late writer of
+/// [`a_result_that_reaches_the_socket_after_the_deadline_is_not_read`]
+/// sends the result: past the deadline by two seconds.
+const LATE_RESULT_AFTER_S: u64 = 3;
+
+/// Python `test_task_timeout_order.py::TestSlotAnsweredAfterTheDeadline::test_a_result_after_the_deadline_is_still_a_timeout`,
+/// `::test_the_finalizer_drops_a_result_that_came_after_the_timer`,
+/// `::test_a_failed_write_after_a_late_answer_is_retried_as_the_timeout_write`
+/// (the slot half) and `tests/integration/test_task_timeout.py::test_timeout_after_the_slot_answered_is_still_a_timeout`
+/// (the slot half): a complete result frame that reaches the socket after
+/// the deadline is not read; the end is the timeout. The late writer is a
+/// process of the child in a session of its own (`perl`, `POSIX::setsid`),
+/// so the kill of the child's session does not end it, and it holds the
+/// child's socket. The exit of the killed child is held until the frame was
+/// written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_that_reaches_the_socket_after_the_deadline_is_not_read() {
+    let dir = TestDir::new();
+    let first = task(1, ExecutionClass::Isolated);
+    let frame = encode_child_frame(&result_frame(&first, 1))
+        .unwrap()
+        .to_bytes();
+    let late_writer = dir.file("late_writer.sh");
+    std::fs::write(
+        &late_writer,
+        format!(
+            r#"sleep {LATE_RESULT_AFTER_S}; printf '{}' >&"$1"; touch "{}""#,
+            printf_bytes(&frame),
+            dir.file("sent"),
+        ),
+    )
+    .unwrap();
+    let script = after_one_run(&format!(
+        r#"( exec perl -MPOSIX -e 'defined POSIX::setsid() or die "setsid: $!"; exec @ARGV or die "exec: $!"' /bin/sh "{late_writer}" "$0" ) & exec sleep 60"#
+    ));
+    let held =
+        HeldPool::start_with_kill_wait(&script, ExitNotSeen::LeaveToRecovery, LONG_KILL_WAIT);
+    let child = serving(&held.board, 0).await;
+    let mut answer = held.submit(&first, deadline(SHORT_DEADLINE_MS));
+
+    ended(child.as_pid_t()).await;
+    until("the late writer sent the result", STATE_WAIT, || {
+        dir.path().join("sent").exists()
+    })
+    .await;
+    still_waiting(&mut answer);
+    held.source.release();
+    let end = answer_within(answer).await;
+
+    assert_eq!(
+        end,
+        AttemptEnd::TimedOut {
+            timeout: timeout_ms(SHORT_DEADLINE_MS),
+            retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
+        }
+    );
+    held.stop().await;
+}
+
 /// Python `test_isolated_left_work.py::TestFinalize::test_no_exit_seen_writes_nothing_with_stale_recovery_on`
 /// (the slot half): the body returned with work left, then the child was
 /// lost and its exit not seen. The left work may still run, so the end is
@@ -362,16 +470,13 @@ async fn a_parent_short_of_descriptors_takes_only_the_replacing_slot_down() {
     let script = format!(
         "{}{}",
         boot(&isolated_init()),
-        super::scripted::answer_runs(
-            &[(&first, vec![super::scripted::result_frame(&first, 1)])],
-            1
-        ),
+        super::scripted::answer_runs(&[(&first, vec![result_frame(&first, 1)])], 1),
     );
     let spawner = Spawner::start().unwrap();
     let source = HeldExits::new(spawner.handle(), ExitRelease::Released);
     let config = IsolatedPoolConfig {
         tasks_per_child: TaskLimit::After(NonZeroU64::MIN),
-        ..isolated(&script, ExitNotSeen::LeaveToRecovery)
+        ..isolated(&script, ExitNotSeen::LeaveToRecovery, SHORT_KILL_WAIT)
     };
     let (pool, board) =
         start_isolated_from(&spawner, &source, 2, config, LiveDispatches::default());
