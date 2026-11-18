@@ -30,6 +30,9 @@
 -- - horsies_key_reservations_pkey (idempotency_key_digest): key claim, terminalize.
 -- - horsies_task_history_clock_exceptions_pkey (task_id): duplicate guard absence probe; ON CONFLICT at the move.
 -- - horsies_schedule_state_pkey (schedule_name): schedule fire row lock, scheduler start, existence heal.
+-- - horsies_worker_liveness_pkey (worker_id): the generation write of horsies_take_worker_liveness, the generation
+--   reads of horsies_unheld_worker_owners and horsies_worker_liveness_generations, the delete of
+--   horsies_forget_ended_worker_liveness.
 -- - horsies_migrations_pkey (version), horsies_client_family_pkey (only_row): schema install state read.
 --
 -- Indexes created at run time, not here: each hourly heartbeat leaf gets (task_id, role, sent_at DESC), read by

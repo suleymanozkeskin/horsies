@@ -1,4 +1,4 @@
--- horsies baseline schema, part 1: tables, constraints, seed rows, helper functions, triggers.
+-- horsies baseline schema, part 1: tables, constraints, a sequence, seed rows, helper functions, triggers.
 --
 -- Part 2 (0002_indexes.sql) holds the indexes that are not created by a PRIMARY KEY or UNIQUE constraint here.
 -- Part 3 (0003_interim_functions.sql) holds the SQL functions that the clients call, and their composite types.
@@ -211,6 +211,20 @@ CREATE TABLE horsies_worker_states (
         AND (cluster_wide_cap IS NULL OR cluster_wide_cap > 0)
     )
 );
+
+-- The generation of the latest acquisition of each worker's liveness lock: one row per worker id, written by
+-- horsies_take_worker_liveness in the transaction of each acquisition. A reaper judges an owner gone only when its
+-- reads see one generation (horsies_unheld_worker_owners, horsies_worker_liveness_generations).
+-- horsies_forget_ended_worker_liveness deletes the rows of ended workers.
+CREATE TABLE horsies_worker_liveness (
+    worker_id text NOT NULL,
+    generation bigint NOT NULL,
+    CONSTRAINT horsies_worker_liveness_pkey PRIMARY KEY (worker_id)
+);
+
+-- The generations of horsies_worker_liveness. Each acquisition takes a new value, and no value is used twice, so a
+-- row that is deleted and written again never shows a generation that a reaper read before.
+CREATE SEQUENCE horsies_worker_liveness_generation AS bigint NO CYCLE;
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Workflows

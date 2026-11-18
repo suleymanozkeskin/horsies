@@ -19,7 +19,7 @@ use super::harness::{describe, BaselineDatabase};
 
 const FUNCTION_CALLS_SQL: &str = include_str!("cases/baseline_function_calls.sql");
 
-const EXPECTED_TABLES: [&str; 22] = [
+const EXPECTED_TABLES: [&str; 23] = [
     "horsies_client_family",
     "horsies_heartbeats",
     "horsies_key_reservations",
@@ -36,6 +36,7 @@ const EXPECTED_TABLES: [&str; 22] = [
     "horsies_task_history_leaf_catalog",
     "horsies_task_lookup_manifest",
     "horsies_tasks",
+    "horsies_worker_liveness",
     "horsies_worker_states",
     "horsies_workflow_phase2_pending",
     "horsies_workflow_phase2_quarantine",
@@ -44,7 +45,7 @@ const EXPECTED_TABLES: [&str; 22] = [
     "horsies_workflows",
 ];
 
-const EXPECTED_FUNCTIONS: [&str; 165] = [
+const EXPECTED_FUNCTIONS: [&str; 168] = [
     // 0001_tables.sql: the UUIDv7 helper and the trigger functions.
     "horsies_uuidv7",
     "horsies_notify_task_changes",
@@ -87,6 +88,7 @@ const EXPECTED_FUNCTIONS: [&str; 165] = [
     "horsies_finish_failed_attempt",
     "horsies_finish_stale_attempt",
     "horsies_finish_workflow_success",
+    "horsies_forget_ended_worker_liveness",
     "horsies_insert_task_rows",
     "horsies_mark_finalizing",
     "horsies_node_has_dependents",
@@ -95,7 +97,9 @@ const EXPECTED_FUNCTIONS: [&str; 165] = [
     "horsies_requeue_stale_claims",
     "horsies_stale_running_scan",
     "horsies_start_attempt",
+    "horsies_take_worker_liveness",
     "horsies_unheld_worker_owners",
+    "horsies_worker_liveness_generations",
     "horsies_worker_liveness_key",
     // 0005_workflow_functions.sql.
     "horsies_task_error_envelope",
