@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import LiteralString, TypeVar
+from typing import Final, LiteralString, TypeVar
 
 import psycopg
 import pytest
@@ -38,8 +38,15 @@ from tests.dualrun.scenario import (
     ScenarioVariant,
     write_scenario,
 )
-from tests.dualrun.selfcheck import seed_history
-from tests.dualrun.values import Cell, ExactValue, IdLabel, make_run_window
+from tests.dualrun.selfcheck import seed_history, straddles
+from tests.dualrun.values import (
+    CalendarUnit,
+    Cell,
+    ExactValue,
+    IdLabel,
+    RunWindow,
+    make_run_window,
+)
 
 pytestmark = [pytest.mark.integration]
 
@@ -47,6 +54,10 @@ T = TypeVar('T')
 E = TypeVar('E')
 
 MakeDatabase = Callable[[], DualRunDatabase]
+
+BOUNDARY_RETRY_LIMIT: Final = 1
+"""A pair whose run window crosses an hour boundary runs again once: the
+core install names its heartbeat leaves by the hour of the install."""
 
 
 def _ok(result: Result[T, E], subject: str) -> T:
@@ -61,6 +72,7 @@ def _ok(result: Result[T, E], subject: str) -> T:
 class _Run:
     snapshot: NormalizedSnapshot
     facts: ScenarioFacts
+    window: RunWindow
 
 
 def _installed(make: MakeDatabase) -> DualRunDatabase:
@@ -85,7 +97,20 @@ def _run_scenario(make: MakeDatabase, variant: ScenarioVariant) -> _Run:
             capture_snapshot(connection, BASELINE_CATALOG, window),
             'capture the snapshot',
         )
-    return _Run(snapshot=snapshot, facts=facts)
+    return _Run(snapshot=snapshot, facts=facts, window=window)
+
+
+def _scenario_pair(
+    make: MakeDatabase, reference: ScenarioVariant, candidate: ScenarioVariant
+) -> tuple[_Run, _Run]:
+    """Two scenario runs whose run windows stay inside one hour (UTC)."""
+    for _ in range(BOUNDARY_RETRY_LIMIT + 1):
+        runs = (_run_scenario(make, reference), _run_scenario(make, candidate))
+        if not any(straddles(run.window, CalendarUnit.HOUR) for run in runs):
+            return runs
+    pytest.fail(
+        f'the run windows crossed an hour boundary {BOUNDARY_RETRY_LIMIT + 1} times'
+    )
 
 
 def _coverage_gaps_after(make: MakeDatabase, ddl: LiteralString) -> object:
@@ -111,12 +136,18 @@ def test_catalog_covers_every_column_of_a_fresh_install(
         )
     rows = {table.name: len(table.rows) for table in raw.tables}
     assert tuple(rows) == tuple(table.name for table in BASELINE_CATALOG.tables)
+    # The core install with the default retention: the classes forever,
+    # heartbeats and standard_30d; the forever leaf, 7 hourly heartbeat
+    # leaves (this hour and a horizon of 6) and 4 daily standard_30d leaves
+    # (today and a horizon of 3); the lookup manifest of the forever leaf and
+    # the 4 daily leaves.
     assert {name: count for name, count in rows.items() if count} == {
         'horsies_migrations': 1,
         'horsies_schema_version': 1,
         'horsies_client_family': 1,
-        'horsies_retention_classes': 1,
-        'horsies_task_history_leaf_catalog': 1,
+        'horsies_retention_classes': 3,
+        'horsies_task_history_leaf_catalog': 12,
+        'horsies_task_lookup_manifest': 5,
         'horsies_recovery_scan_cursors': 2,
     }
 
@@ -124,12 +155,9 @@ def test_catalog_covers_every_column_of_a_fresh_install(
 def test_same_state_with_other_ids_times_and_row_order_compares_equal(
     empty_database: MakeDatabase,
 ) -> None:
-    reference = _run_scenario(
+    reference, candidate = _scenario_pair(
         empty_database,
         ScenarioVariant(row_order=RowOrder.AS_LISTED, invoice_max_retries=3),
-    )
-    candidate = _run_scenario(
-        empty_database,
         ScenarioVariant(row_order=RowOrder.REVERSED, invoice_max_retries=3),
     )
 
@@ -159,11 +187,11 @@ def test_history_row_is_read_through_its_parent_with_its_leaf(
     leaves = run.snapshot.table('horsies_task_history_leaf_catalog')
     nodes = run.snapshot.table('horsies_workflow_tasks')
     (history_row,) = history.rows
-    (leaf_row,) = leaves.rows
     extract_node = nodes.rows[0]
     forever_leaf = ExactValue(text='horsies_task_history_forever_open')
     assert history_row[history.rules.position('tableoid')] == forever_leaf
-    assert leaf_row[leaves.rules.position('leaf_name')] == forever_leaf
+    leaf_names = [row[leaves.rules.position('leaf_name')] for row in leaves.rows]
+    assert leaf_names.count(forever_leaf) == 1
     assert (
         history_row[history.rules.position('task_id')]
         == extract_node[nodes.rules.position('task_id')]
@@ -173,12 +201,9 @@ def test_history_row_is_read_through_its_parent_with_its_leaf(
 def test_one_field_difference_is_reported_as_one_column_difference(
     empty_database: MakeDatabase,
 ) -> None:
-    reference = _run_scenario(
+    reference, candidate = _scenario_pair(
         empty_database,
         ScenarioVariant(row_order=RowOrder.AS_LISTED, invoice_max_retries=3),
-    )
-    candidate = _run_scenario(
-        empty_database,
         ScenarioVariant(row_order=RowOrder.REVERSED, invoice_max_retries=4),
     )
 
@@ -275,8 +300,9 @@ def test_table_over_the_row_limit_fails_the_capture(
     with psycopg.connect(database.url, autocommit=True) as connection:
         outcome = read_raw_snapshot(connection, BASELINE_CATALOG, row_limit=1)
 
+    # The first table of the catalog with more than one row after the install.
     assert outcome == Err(
-        TableRowLimitExceeded(table='horsies_recovery_scan_cursors', limit=1)
+        TableRowLimitExceeded(table='horsies_retention_classes', limit=1)
     )
 
 
