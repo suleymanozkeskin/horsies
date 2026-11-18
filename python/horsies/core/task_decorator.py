@@ -2420,7 +2420,7 @@ def create_task_wrapper(
             ))
 
         # Serialize kwargs against the receiver's declared parameter types.
-        kwargs_json: str | None = None
+        input_json: str | None = None
         if kwargs_dict:
             try:
                 encoded_kwargs = encode_kwargs_read_back(fn, kwargs_dict)
@@ -2435,17 +2435,17 @@ def create_task_wrapper(
                     message=f'Failed to serialize encoded kwargs for {task_name}: {kwargs_r.err_value}',
                     exception=kwargs_r.err_value,
                 ))
-            kwargs_json = kwargs_r.ok_value
+            input_json = kwargs_r.ok_value
 
             warn_if_payload_large(
                 app.config.payload,
                 task_name=task_name,
                 kind='kwargs',
-                payload_text=kwargs_json,
+                payload_text=input_json,
             )
             match check_payload_size(
                 app.config.payload,
-                payload_text=kwargs_json,
+                payload_text=input_json,
             ):
                 case PayloadWithinLimit():
                     pass
@@ -2471,7 +2471,7 @@ def create_task_wrapper(
             task_name=task_name,
             queue_name=validated_queue_name,
             priority=priority,
-            input_json=kwargs_json,
+            input_json=input_json,
             sent_at=sent_at,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,

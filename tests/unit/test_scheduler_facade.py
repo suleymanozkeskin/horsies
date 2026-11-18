@@ -190,7 +190,7 @@ class TestToSchedulerManifest:
     def test_a_task_without_options_text_sends_no_options(self) -> None:
         app = _app(_plain())
         prepared = _prepared(app)
-        prepared['plain'] = PreparedSchedule(kwargs_json=None, task_options_json=None)
+        prepared['plain'] = PreparedSchedule(input_json=None, task_options_json=None)
         schedule_config = app.config.schedule
         assert schedule_config is not None
 

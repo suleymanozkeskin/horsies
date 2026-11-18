@@ -35,14 +35,16 @@ class EnqueueCommandV1:
     fingerprint covers the bytes the request actually carries, not a
     re-serialization. A send stores its input in the one ``input`` column,
     so it passes ``args_json=None`` and the stored ``input`` text as
-    ``kwargs_json``: the fingerprint is then a function of the stored row.
+    ``input_json``: the fingerprint is then a function of the stored row.
+    ``input_json`` takes the element of the keyword arguments of version 1,
+    so the digest of a stored row does not change.
     """
 
     task_name: str
     queue_name: str
     priority: int
     args_json: str | None
-    kwargs_json: str | None
+    input_json: str | None
     good_until: datetime | None
     enqueue_delay_seconds: int | None
     task_options_json: str | None
@@ -77,7 +79,7 @@ class EnqueueCommandV1:
                 self.queue_name,
                 self.priority,
                 self.args_json,
-                self.kwargs_json,
+                self.input_json,
                 _canonical_datetime(self.good_until),
                 self.enqueue_delay_seconds,
                 self.task_options_json,

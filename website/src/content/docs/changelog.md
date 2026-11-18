@@ -83,7 +83,9 @@ written in Rust, on a new baseline schema.
   `enqueue_async` take `input_json` in their place and require `sent_at` and
   `send_kind`. The row stores the text as sent, `{}` for none; an input that
   is not a JSON object or null is `INVALID_INPUT`.
-  `horsies.core.utils.fingerprint.enqueue_fingerprint` is removed.
+  `PostgresBroker.prepare_send_command` takes `input_json` in place of
+  `kwargs_json`. `horsies.core.utils.fingerprint.enqueue_fingerprint` is
+  removed.
 
 - **A database URL takes the scheme `postgresql://` or `postgres://`.**
   `postgresql+psycopg://`, the one scheme 0.7 accepted, and every other

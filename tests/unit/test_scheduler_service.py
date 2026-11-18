@@ -222,7 +222,7 @@ def _fire_harness(
     scheduler = Scheduler(app)
     scheduler.broker = MagicMock()
     scheduler._prepared_schedules = {
-        schedule.name: PreparedSchedule(kwargs_json=None, task_options_json=None),
+        schedule.name: PreparedSchedule(input_json=None, task_options_json=None),
     }
     scheduler._commands = {schedule.name: COMMAND}
     state_manager = MagicMock()
@@ -948,7 +948,7 @@ class TestValidateSchedules:
 
         assert scheduler._prepared_schedules == {
             's': PreparedSchedule(
-                kwargs_json=_json_text({'value': 5}),
+                input_json=_json_text({'value': 5}),
                 task_options_json=None,
             ),
         }
@@ -1429,7 +1429,7 @@ class TestSchedulerStart:
             'task_name': 'my_task',
             'queue_name': 'default',
             'priority': 100,
-            'kwargs_json': None,
+            'input_json': None,
             'task_options': None,
             'retention_class_key': 'standard_30d',
         }
@@ -2392,7 +2392,7 @@ class TestScheduleCommand:
             task_name='my_task',
             queue_name='default',
             priority=100,
-            kwargs_json=wire_text,
+            input_json=wire_text,
             task_options=None,
         ):
             case Ok(expected):

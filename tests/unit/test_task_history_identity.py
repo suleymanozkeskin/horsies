@@ -172,7 +172,7 @@ def make_command(**overrides: object) -> EnqueueCommandV1:
         'queue_name': 'default',
         'priority': 50,
         'args_json': '[1,2]',
-        'kwargs_json': '{"a":true}',
+        'input_json': '{"a":true}',
         'good_until': datetime(2026, 8, 7, 12, 0, tzinfo=UTC),
         'enqueue_delay_seconds': 30,
         'task_options_json': '{"timeout_ms":1000}',
@@ -197,7 +197,7 @@ class TestCommandFingerprint:
 
     def test_pinned_digest_with_non_ascii_input(self) -> None:
         """Version 1 hashes non-ASCII text unescaped."""
-        assert make_command(kwargs_json='{"city":"Köln"}').fingerprint.hex() == (
+        assert make_command(input_json='{"city":"Köln"}').fingerprint.hex() == (
             'f3c9df759d775bf1da1550c9a94ad4d5f5bc5524bfd90210f9d7632d7bb4bdfb'
         )
 
@@ -207,7 +207,7 @@ class TestCommandFingerprint:
             'queue_name',
             'priority',
             'args_json',
-            'kwargs_json',
+            'input_json',
             'good_until',
             'enqueue_delay_seconds',
             'task_options_json',
@@ -225,7 +225,7 @@ class TestCommandFingerprint:
             {'priority': 51},
             {'args_json': '[1,3]'},
             {'args_json': None},
-            {'kwargs_json': '{"a":false}'},
+            {'input_json': '{"a":false}'},
             {'good_until': datetime(2026, 8, 7, 12, 1, tzinfo=UTC)},
             {'good_until': None},
             {'enqueue_delay_seconds': 31},

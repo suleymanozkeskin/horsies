@@ -285,7 +285,7 @@ class TestScheduledRunStoresTheTaskOptions:
                 task_name=TASK_NAME,
                 queue_name=fire.command.queue_name,
                 priority=fire.command.priority,
-                kwargs_json=fire.command.stored_input,
+                input_json=fire.command.stored_input,
                 task_options=task_options,
                 retention_class_key=RetentionClassKey(fire.command.retention_class_key),
             ):

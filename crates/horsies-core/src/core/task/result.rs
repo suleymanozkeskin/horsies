@@ -580,6 +580,36 @@ mod tests {
         ));
     }
 
+    /// Python `test_task_error_stored_decode.py::TestRecoveryReaders::test_finalize_records_a_refused_result_as_undecodable`
+    /// (its `_NOT_A_TASK_ERROR` cases): an envelope whose err slot is not a
+    /// task error is refused, and the text of the refusal, which the outcome
+    /// writer stores as the diagnosis of `WORKER_SERIALIZATION_ERROR`
+    /// (`worker/executor/slots/report_tests.rs`), names the cause.
+    #[test]
+    fn an_err_slot_that_is_not_a_task_error_is_refused_with_its_cause() {
+        for (err_slot, cause) in [
+            (r#"{"nope":1}"#, "nope"),
+            (
+                r#"{"error_code":"MY_CODE","message":"m","data":null,"exception":null,"nope":1}"#,
+                "nope",
+            ),
+            ("{}", "error_code"),
+            (r#"{"message":"m"}"#, "error_code"),
+            (
+                r#"{"error_code":null,"message":"m","data":null,"exception":null}"#,
+                "error_code",
+            ),
+        ] {
+            let text = format!(r#"{{"__h_task_result__":true,"ok":null,"err":{err_slot}}}"#);
+            match read_task_result_text(&text) {
+                Err(refused @ TaskResultTextRefused::ErrorRefused(_)) => {
+                    assert!(refused.to_string().contains(cause), "{text}: {refused}")
+                }
+                other => panic!("{text} must be refused for its err slot, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn malformed_envelopes_are_refused() {
         for text in [

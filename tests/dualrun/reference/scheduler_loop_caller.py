@@ -943,12 +943,12 @@ class Scheduler:
                 f"Schedule '{schedule.name}' has no prepared wire text: start() did not run",
             )
         prepared = self._prepared_schedules[schedule.name]
-        if prepared.kwargs_json is not None:
+        if prepared.input_json is not None:
             warn_if_payload_large(
                 self.app.config.payload,
                 task_name=schedule.task_name,
                 kind='kwargs',
-                payload_text=prepared.kwargs_json,
+                payload_text=prepared.input_json,
             )
         return prepared
 
@@ -977,7 +977,7 @@ class Scheduler:
                 task_name=schedule.task_name,
                 queue_name=queue_name,
                 priority=effective_priority(self.app, queue_name),
-                kwargs_json=prepared.kwargs_json,
+                input_json=prepared.input_json,
                 task_options=prepared.task_options_json,
                 retention_class_key=resolve_queue_retention_class(
                     getattr(self.app.config, 'retention', None),

@@ -652,7 +652,7 @@ def compute_test_command_fingerprint(
         queue_name=queue_name,
         priority=priority,
         args_json=None,
-        kwargs_json=input_json,
+        input_json=input_json,
         good_until=good_until,
         enqueue_delay_seconds=None,
         task_options_json=task_options,

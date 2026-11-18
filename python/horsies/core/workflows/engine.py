@@ -961,7 +961,7 @@ async def _build_enqueued_task_params(
 
     # Serialize kwargs before creating the task. Stored data that does not
     # parse failed this node above; a failure here is a defect and raises.
-    kwargs_json = _ser_or_raise(
+    input_json = _ser_or_raise(
         dumps_json(kwargs), f'kwargs for workflow {workflow_id} task {task_index}',
     )
 
@@ -976,7 +976,7 @@ async def _build_enqueued_task_params(
             broker.app.config.payload,
             task_name=task_name,
             kind='kwargs',
-            payload_text=kwargs_json,
+            payload_text=input_json,
         )
 
     # Create actual task in tasks table
@@ -985,7 +985,7 @@ async def _build_enqueued_task_params(
         task_name=task_name,
         queue_name=queue_name,
         priority=priority,
-        input_json=kwargs_json,
+        input_json=input_json,
         sent_at=workflow_sent_at,
         task_options_json=task_options_str,
         facts=task_node_facts(
