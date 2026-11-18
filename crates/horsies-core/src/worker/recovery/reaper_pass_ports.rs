@@ -290,6 +290,93 @@ fn a_candidate_whose_crash_retries_are_spent_fails() {
     assert_eq!(command.retry, StaleRetry::NoRetry);
 }
 
+/// The stored options of Python `tests/unit/test_stale_running.py`: a fixed
+/// policy of 3 retries after 5, 10 and 20 s, with no jitter, for the codes
+/// `auto_retry_for`.
+fn fixed_policy_for(auto_retry_for: &[&str]) -> String {
+    serde_json::json!({
+        "retry_policy": {
+            "max_retries": 3,
+            "intervals": [5, 10, 20],
+            "backoff_strategy": "fixed",
+            "jitter": false,
+            "auto_retry_for": auto_retry_for
+        }
+    })
+    .to_string()
+}
+
+/// Python `tests/unit/test_stale_running.py::TestCrashRetryRequest`
+/// (`test_a_policy_that_names_the_crash_retries_with_its_delay`,
+/// `test_no_policy_does_not_retry`, `test_a_policy_for_other_codes_does_not_retry`):
+/// a policy that names the crash retries from the scanned count after the
+/// interval of the next attempt (count 1: the second interval, 10 s). No
+/// policy, or a policy for other codes, does not retry while retries
+/// remain.
+#[test]
+fn the_crash_retry_of_a_candidate_follows_its_stored_policy() {
+    let thresholds = thresholds_ms(300_000, 300_000);
+    let retry_of = |retry_count: i32, task_options: Option<String>| {
+        stale_attempt_command(&candidate(retry_count, 3, task_options), thresholds)
+            .expect("the crash result encodes")
+            .retry
+    };
+
+    assert_eq!(
+        retry_of(1, Some(fixed_policy_for(&["WORKER_CRASHED"]))),
+        StaleRetry::RetryAfter {
+            expected_retry_count: 1,
+            delay_seconds: 10.0,
+        }
+    );
+    assert_eq!(retry_of(0, None), StaleRetry::NoRetry);
+    let python_options_for_timeout = serde_json::json!({
+        "retry_policy": {
+            "max_retries": 3,
+            "intervals": [5],
+            "auto_retry_for": ["TIMEOUT"]
+        }
+    })
+    .to_string();
+    assert_eq!(
+        retry_of(0, Some(python_options_for_timeout)),
+        StaleRetry::NoRetry
+    );
+    assert_eq!(
+        retry_of(0, Some(fixed_policy_for(&["TIMEOUT"]))),
+        StaleRetry::NoRetry
+    );
+}
+
+/// Python `tests/unit/test_stale_running.py::TestFinishParameters::test_the_crash_result_names_the_silent_attempt`:
+/// the crash result is a `WORKER_CRASHED` error whose message is the crash
+/// reason and whose data are the facts of the silent attempt, the
+/// threshold in ms and in s, and the scan's clock.
+#[test]
+fn the_crash_result_names_the_silent_attempt() {
+    let command = stale_attempt_command(&candidate(0, 0, None), thresholds_ms(30_000, 60_000))
+        .expect("the crash result encodes");
+
+    let result: serde_json::Value =
+        serde_json::from_str(&command.result_json).expect("the crash result is JSON");
+    assert_eq!(
+        result["err"]["message"],
+        "Worker process crashed (no runner heartbeat for 30000ms = 30.0s)"
+    );
+    assert_eq!(
+        result["err"]["data"],
+        serde_json::json!({
+            "stale_threshold_ms": 30_000,
+            "stale_threshold_seconds": 30.0,
+            "worker_pid": 1234,
+            "worker_hostname": "host-1",
+            "worker_id": "worker-1",
+            "started_at": "2025-01-01T00:00:00+00:00",
+            "detected_at": "2025-01-01T00:10:00+00:00"
+        })
+    );
+}
+
 /// Python `TestMarkStaleTasksAsFailed::test_fractional_second_thresholds_keep_millisecond_precision`
 /// (now `test_the_scan_takes_the_thresholds_in_ms_and_the_batch_size`): the
 /// pass judges both thresholds to the millisecond. With 1.9 s and 2.75 s, a

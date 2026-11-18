@@ -54,8 +54,8 @@ use std::time::Duration;
 
 use horsies_core::{
     process_role, thread_role, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
-    ClassCoverage, ClassReport, DatabasePing, ProcessRole, SendKind, TaskSendError, ThreadRole,
-    WorkerPong, WorkerStateSnapshot,
+    ClassCoverage, ClassReport, DatabasePing, FailureCause, ProcessRole, SendKind, TaskSendError,
+    ThreadRole, WorkerPong, WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -249,6 +249,7 @@ fn start_failed_send(
         payload: Box::new(payload),
         message: format!("the send did not start: {failed}"),
         retryable: true,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -374,7 +375,7 @@ fn block_health<V>(
             code,
             message: format!("the read did not start: {failed}"),
             retryable: true,
-            cause: horsies_core::FailureCause::PreconditionFailed,
+            cause: FailureCause::PreconditionFailed,
         }),
     }
 }
@@ -683,6 +684,7 @@ mod tests {
             payload,
             message,
             retryable,
+            cause,
         } = &refused
         else {
             panic!("expected ENQUEUE_FAILED, got {refused}");
@@ -694,6 +696,7 @@ mod tests {
             "{message}"
         );
         assert!(*retryable);
+        assert_eq!(*cause, FailureCause::PreconditionFailed);
     }
 
     #[test]

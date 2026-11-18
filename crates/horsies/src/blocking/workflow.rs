@@ -79,6 +79,7 @@ fn block_start<H>(
             retryable: true,
             workflow_name: names.workflow_name.to_owned(),
             workflow_id,
+            cause: FailureCause::PreconditionFailed,
         }),
     }
 }
@@ -259,9 +260,10 @@ where
     D: WorkflowDefinition<Params = ()>,
     D::Output: DeserializeOwned + Send + Sync,
 {
+    let workflow_id = new_workflow_id();
     block_start(
-        crate::workflow::start_workflow::<D>(),
-        new_workflow_id(),
+        crate::workflow::start_workflow_as::<D>(workflow_id),
+        workflow_id,
         &definition_names::<D>("start_workflow()", "start_workflow::<D>()"),
     )
 }
@@ -279,9 +281,10 @@ where
     D::Params: Send + Sync,
     D::Output: DeserializeOwned + Send + Sync,
 {
+    let workflow_id = new_workflow_id();
     block_start(
-        crate::workflow::start_workflow_with::<D>(params),
-        new_workflow_id(),
+        crate::workflow::start_workflow_with_as::<D>(params, workflow_id),
+        workflow_id,
         &definition_names::<D>("start_workflow_with()", "start_workflow_with::<D>(params)"),
     )
 }

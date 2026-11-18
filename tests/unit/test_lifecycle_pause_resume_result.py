@@ -10,8 +10,8 @@ advance and the recovery pass after the commit drive the Python caller
 before the switch (``tests/dualrun/reference/workflow_resume_caller.py``),
 the reference side of the resume's dual-run: a database error after the
 commit is ``HandleResumeRecoveryFailed``. The sync wrappers return a
-``LoopRunnerError`` as ``HandleLoopRunnerFailed`` and let other exceptions
-propagate.
+core boundary error of the blocking call as ``HandleDbOperationFailed`` and
+let other exceptions propagate.
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ from tests.workflow_start_support import outcome_row
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.models.workflow.handle_types import (
     HandleDbOperationFailed,
-    HandleLoopRunnerFailed,
     HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
     HandleWorkflowNotFound,
@@ -606,83 +605,109 @@ class TestResumeCommitSplit:
 
 
 # ===========================================================================
-# Sync wrappers: LoopRunnerError and other exceptions
+# Sync wrappers: the blocking form, a core boundary error, other exceptions
 # ===========================================================================
+
+
+def _blocking_broker(method: str, answer: object) -> MagicMock:
+    """A broker whose core handle answers the blocking ``method`` with
+    ``answer``: a record, or an exception that the call raises."""
+    broker = MagicMock()
+    match answer:
+        case BaseException():
+            setattr(broker._core_handle, method, MagicMock(side_effect=answer))
+        case _:
+            setattr(broker._core_handle, method, MagicMock(return_value=answer))
+    return broker
 
 
 @pytest.mark.unit
 class TestPauseSyncWrapper:
-    """pause_workflow_sync returns LoopRunnerError as an Err and lets other exceptions propagate."""
+    """pause_workflow_sync calls CoreHandle.pause_workflow on the calling
+    thread: a core boundary error is HandleDbOperationFailed, and other
+    exceptions propagate."""
 
-    def test_loop_runner_error_returns_err(self) -> None:
-        """LoopRunnerError -> Err(HandleLoopRunnerFailed)."""
+    def test_the_record_decides_the_result(self) -> None:
         from horsies.core.workflows.lifecycle import pause_workflow_sync
-        from horsies.core.utils.loop_runner import LoopRunnerError
 
-        broker = MagicMock()
-        with patch.object(
-            broker, 'run_sync',
-        ) as mock_call:
-            runner_error = LoopRunnerError('dead')
-            mock_call.side_effect = runner_error
-            result = pause_workflow_sync(broker, 'wf-1')
+        broker = _blocking_broker('pause_workflow', _record(core.WorkflowPaused))
+        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_ok(result)
+        assert result.ok_value is True
+        broker._core_handle.pause_workflow.assert_called_once_with(
+            uuid.UUID(PAUSE_WORKFLOW_ID),
+        )
+        broker.run_sync.assert_not_called()
+
+    def test_core_boundary_error_returns_err(self) -> None:
+        """A CoreError of the blocking call -> Err(HandleDbOperationFailed)."""
+        from horsies.core.workflows.lifecycle import pause_workflow_sync
+
+        refused = core.TooManyPendingCalls('CoreHandle.pause_workflow', 64)
+        broker = _blocking_broker('pause_workflow', refused)
+        result = pause_workflow_sync(broker, PAUSE_WORKFLOW_ID)
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleLoopRunnerFailed)
-        assert err.workflow_id == 'wf-1'
-        assert err.retryable is False
-        assert err.exception is runner_error
+        assert isinstance(err, HandleDbOperationFailed)
+        assert err.workflow_id == PAUSE_WORKFLOW_ID
+        assert err.retryable is True
+        assert err.exception is refused
 
     def test_unexpected_exception_propagates(self) -> None:
-        """An exception that is not a LoopRunnerError propagates unchanged."""
+        """An exception that is not a CoreError propagates unchanged."""
         from horsies.core.workflows.lifecycle import pause_workflow_sync
 
-        broker = MagicMock()
         defect = RuntimeError('boom')
-        with (
-            patch.object(broker, 'run_sync', side_effect=defect),
-            pytest.raises(RuntimeError) as exc_info,
-        ):
-            pause_workflow_sync(broker, 'wf-1')
+        broker = _blocking_broker('pause_workflow', defect)
+        with pytest.raises(RuntimeError) as exc_info:
+            pause_workflow_sync(broker, PAUSE_WORKFLOW_ID)
 
         assert exc_info.value is defect
 
 
 @pytest.mark.unit
 class TestResumeSyncWrapper:
-    """resume_workflow_sync returns LoopRunnerError as an Err and lets other exceptions propagate."""
+    """resume_workflow_sync calls CoreHandle.resume_workflow on the calling
+    thread: a core boundary error is HandleDbOperationFailed, and other
+    exceptions propagate."""
 
-    def test_loop_runner_error_returns_err(self) -> None:
-        """LoopRunnerError -> Err(HandleLoopRunnerFailed)."""
+    def test_the_record_decides_the_result(self) -> None:
         from horsies.core.workflows.lifecycle import resume_workflow_sync
-        from horsies.core.utils.loop_runner import LoopRunnerError
 
-        broker = MagicMock()
-        with patch.object(
-            broker, 'run_sync',
-        ) as mock_call:
-            runner_error = LoopRunnerError('dead')
-            mock_call.side_effect = runner_error
-            result = resume_workflow_sync(broker, 'wf-1')
+        broker = _blocking_broker('resume_workflow', _record(core.WorkflowNotPaused))
+        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_ok(result)
+        assert result.ok_value is False
+        broker._core_handle.resume_workflow.assert_called_once_with(
+            uuid.UUID(PAUSE_WORKFLOW_ID),
+        )
+        broker.run_sync.assert_not_called()
+
+    def test_core_boundary_error_returns_err(self) -> None:
+        """A CoreError of the blocking call -> Err(HandleDbOperationFailed)."""
+        from horsies.core.workflows.lifecycle import resume_workflow_sync
+
+        refused = core.TooManyPendingCalls('CoreHandle.resume_workflow', 64)
+        broker = _blocking_broker('resume_workflow', refused)
+        result = resume_workflow_sync(broker, PAUSE_WORKFLOW_ID)
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleLoopRunnerFailed)
-        assert err.workflow_id == 'wf-1'
-        assert err.retryable is False
-        assert err.exception is runner_error
+        assert isinstance(err, HandleDbOperationFailed)
+        assert err.workflow_id == PAUSE_WORKFLOW_ID
+        assert err.retryable is True
+        assert err.exception is refused
 
     def test_unexpected_exception_propagates(self) -> None:
-        """An exception that is not a LoopRunnerError propagates unchanged."""
+        """An exception that is not a CoreError propagates unchanged."""
         from horsies.core.workflows.lifecycle import resume_workflow_sync
 
-        broker = MagicMock()
         defect = RuntimeError('boom')
-        with (
-            patch.object(broker, 'run_sync', side_effect=defect),
-            pytest.raises(RuntimeError) as exc_info,
-        ):
-            resume_workflow_sync(broker, 'wf-1')
+        broker = _blocking_broker('resume_workflow', defect)
+        with pytest.raises(RuntimeError) as exc_info:
+            resume_workflow_sync(broker, PAUSE_WORKFLOW_ID)
 
         assert exc_info.value is defect

@@ -2648,15 +2648,16 @@ class TestWorkflowStartErrors:
         )
         assert wf_check.scalar() == 0
 
-    async def test_start_sync_loop_runner_failed(
+    async def test_start_sync_core_boundary_error_is_enqueue_failed(
         self,
         setup: _SetupTuple,
     ) -> None:
-        """A sync runner failure returns Err(LOOP_RUNNER_FAILED)."""
-        from unittest.mock import patch
+        """A core boundary error of the blocking start (the call reached its
+        bound) returns Err(ENQUEUE_FAILED) with the error, retryable."""
+        from unittest.mock import MagicMock, patch
 
+        from horsies._core import CoreCallTimedOut
         from horsies.core.workflows.engine import start_workflow
-        from horsies.core.utils.loop_runner import LoopRunnerError
 
         session, broker, app = setup
         task_a = make_simple_task(app, 'sync_fail')
@@ -2667,27 +2668,29 @@ class TestWorkflowStartErrors:
             broker,
         )
 
-        # Make the broker's sync runner raise an infrastructure error
-        with patch.object(
-            broker._loop_runner,
-            'call',
-            side_effect=LoopRunnerError('No running event loop'),
+        timed_out = CoreCallTimedOut('CoreHandle.start_workflow', 1800, 'outcome_unknown')
+        core_handle = MagicMock()
+        core_handle.start_workflow = MagicMock(side_effect=timed_out)
+        with (
+            patch.object(broker, '_core_handle', core_handle),
+            patch.object(broker._loop_runner, 'call') as runner_call,
         ):
             r = await asyncio.to_thread(start_workflow, spec, broker)
 
         assert is_err(r)
-        assert r.err_value.code == WorkflowStartErrorCode.LOOP_RUNNER_FAILED
-        assert r.err_value.retryable is False
+        assert r.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
+        assert r.err_value.retryable is True
         assert r.err_value.workflow_name == 'sync_fail_wf'
         assert r.err_value.workflow_id  # always populated
-        assert 'No running event loop' in r.err_value.message
+        assert 'CoreCallTimedOut' in r.err_value.message
+        runner_call.assert_not_called()
 
     async def test_start_sync_unexpected_exception_propagates(
         self,
         setup: _SetupTuple,
     ) -> None:
-        """An exception that is not a LoopRunnerError propagates from start_workflow."""
-        from unittest.mock import patch
+        """An exception that is not a CoreError propagates from start_workflow."""
+        from unittest.mock import MagicMock, patch
 
         from horsies.core.workflows.engine import start_workflow
 
@@ -2700,9 +2703,11 @@ class TestWorkflowStartErrors:
             broker,
         )
 
-        defect = RuntimeError('Unexpected runner call failure')
+        defect = RuntimeError('Unexpected core call failure')
+        core_handle = MagicMock()
+        core_handle.start_workflow = MagicMock(side_effect=defect)
         with (
-            patch.object(broker._loop_runner, 'call', side_effect=defect),
+            patch.object(broker, '_core_handle', core_handle),
             pytest.raises(RuntimeError) as exc_info,
         ):
             await asyncio.to_thread(start_workflow, spec, broker)

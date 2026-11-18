@@ -705,6 +705,28 @@ fn a_stale_row_against_its_outcome_fails_closed() {
     }
 }
 
+/// Python `tests/unit/test_stale_running.py::TestDecodeStaleAttemptRow::test_a_failure_of_a_plain_task_with_a_node_fact_is_refused`:
+/// a node fact on the stale failure of a plain task fails closed and names
+/// the column.
+#[test]
+fn a_stale_failure_of_a_plain_task_with_a_node_fact_fails_closed() {
+    let extra = FailedAttemptColumns {
+        facts: NodeFactColumns {
+            node_has_dependents: None,
+            downstream_subworkflow: Some("NONE".to_owned()),
+        },
+        ..applied_extra()
+    };
+
+    let refused = decode_stale_attempt(stale_applied_raw(), extra)
+        .expect_err("a node fact on a plain task is refused");
+
+    assert!(
+        refused.0.contains("does not set") && refused.0.contains("downstream_subworkflow"),
+        "{refused}"
+    );
+}
+
 // --- workflow success ---------------------------------------------------------
 
 fn success_raw() -> RawOutcomeRow {

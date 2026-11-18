@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use horsies_core::WorkflowStartError;
+use horsies_core::{FailureCause, WorkflowStartError};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
@@ -201,7 +201,8 @@ where
             .map_err(|error| WorkflowStartError::ValidationFailed {
                 message: error.to_string(),
                 workflow_name: self.name.to_owned(),
-                workflow_id: Some(workflow_id),
+                workflow_id,
+                cause: FailureCause::PreconditionFailed,
             })?;
         self.starter.start(&spec, workflow_id).await
     }
@@ -418,14 +419,17 @@ fn global<D: 'static, V: Any + Clone>() -> Option<V> {
         .cloned()
 }
 
-fn not_registered(name: &str, method: &str) -> WorkflowStartError {
+/// The refusal of a process-wide start of `name` before its registration,
+/// with the id of that start (Python: the id is minted before the checks).
+fn not_registered(name: &str, method: &str, workflow_id: Uuid) -> WorkflowStartError {
     WorkflowStartError::ValidationFailed {
         message: format!(
             "workflow '{name}' is not registered in this process; call app.{method}::<...>() when \
              main builds the app"
         ),
         workflow_name: name.to_owned(),
-        workflow_id: None,
+        workflow_id,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -439,9 +443,21 @@ where
     D: WorkflowDefinition<Params = ()>,
     D::Output: DeserializeOwned + Send + Sync,
 {
+    start_workflow_as::<D>(new_workflow_id()).await
+}
+
+/// [`start_workflow`] with the id `workflow_id`, which the refusal before
+/// the registration carries too.
+pub(crate) async fn start_workflow_as<D>(
+    workflow_id: Uuid,
+) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+where
+    D: WorkflowDefinition<Params = ()>,
+    D::Output: DeserializeOwned + Send + Sync,
+{
     let function = global::<D, WorkflowFunction<D::Output>>()
-        .ok_or_else(|| not_registered(D::name(), "register_workflow_definition"))?;
-    function.start().await
+        .ok_or_else(|| not_registered(D::name(), "register_workflow_definition", workflow_id))?;
+    function.start_with_id(workflow_id).await
 }
 
 /// Start the workflow definition `D` with `params` from any call site,
@@ -457,9 +473,23 @@ where
     D::Params: Send + Sync,
     D::Output: DeserializeOwned + Send + Sync,
 {
+    start_workflow_with_as::<D>(params, new_workflow_id()).await
+}
+
+/// [`start_workflow_with`] with the id `workflow_id`, which the refusal
+/// before the registration carries too.
+pub(crate) async fn start_workflow_with_as<D>(
+    params: D::Params,
+    workflow_id: Uuid,
+) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+where
+    D: WorkflowDefinition,
+    D::Params: Send + Sync,
+    D::Output: DeserializeOwned + Send + Sync,
+{
     let template = global::<D, WorkflowTemplate<D::Params, D::Output>>()
-        .ok_or_else(|| not_registered(D::name(), "workflow_template"))?;
-    template.start(params).await
+        .ok_or_else(|| not_registered(D::name(), "workflow_template", workflow_id))?;
+    template.start_with_id(params, workflow_id).await
 }
 
 #[cfg(test)]
