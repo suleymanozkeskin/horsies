@@ -35,7 +35,6 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
     WorkflowSpec,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
@@ -242,8 +241,14 @@ class TestStartAnswers:
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_failure_record_is_the_enqueue_failure_with_its_retry_rule(self) -> None:
+        cause = core.CoreConnectionError('start_workflow', 'connection refused', True)
         broker = _broker(
-            _record(core.WorkflowStartFailed, message='connection refused', retryable=True),
+            _record(
+                core.WorkflowStartFailed,
+                message='connection refused',
+                retryable=True,
+                exception=cause,
+            ),
         )
         result = await start_workflow_async(_spec(), broker, WORKFLOW_ID, SENT_AT)
 
@@ -252,7 +257,7 @@ class TestStartAnswers:
         assert isinstance(error, WorkflowStartEnqueueFailed)
         assert error.retryable is True
         assert error.message == 'connection refused'
-        assert isinstance(error.exception, CoreOperationFailed)
+        assert error.exception is cause
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_core_boundary_error_is_the_enqueue_failure(self) -> None:
