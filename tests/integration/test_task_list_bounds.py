@@ -14,7 +14,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND, PostgresBroker
+from horsies._catalog.broker_bounds import TASK_LIST_ROW_BOUND
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_ok
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]

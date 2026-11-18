@@ -36,11 +36,6 @@ class PartitionMaintenanceDatabase:
         self._engine = engine
         self._connection_capacity = connection_capacity
 
-    @property
-    def coverage_gate_enabled(self) -> bool:
-        """Whether a gate holder can leave one connection for leaf work."""
-        return self._connection_capacity >= 2
-
     @asynccontextmanager
     async def connect(self) -> AsyncGenerator[AsyncConnection]:
         """Check out one session-capable physical connection."""

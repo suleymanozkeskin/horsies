@@ -1,6 +1,6 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, os, random, threading, time
+import asyncio, hashlib, contextlib, os, threading, time
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
@@ -12,12 +12,10 @@ from typing import (
     Optional,
     TYPE_CHECKING,
     assert_never,
-    cast,
 )
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 import psycopg
-from horsies._catalog import broker_bounds
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
     ClassCoverageRecord,
@@ -69,13 +67,11 @@ from horsies._core import (
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
-    AsyncSession,
     create_async_engine,
     async_sessionmaker,
 )
-from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
     BrokerResources,
@@ -95,9 +91,7 @@ from horsies.core.brokers.resources import (
     split_closed_loops,
 )
 from horsies.core.brokers.enqueue_task import (
-    ENQUEUE_TASK_DRIVER_SQL,
     EnqueueKey,
-    EnqueueOutcome,
     EnqueueRow,
     EnqueueStart,
     FirstRun,
@@ -107,11 +101,7 @@ from horsies.core.brokers.enqueue_task import (
     StartAt,
     StartNow,
     Unkeyed,
-    enqueue_result,
-    enqueue_task_params,
-    read_enqueue_outcome,
 )
-from horsies.core.brokers.session_capability import probe_session_capability
 from horsies.core.brokers.worker_state_records import (
     class_coverage_of,
     class_report_of,
@@ -144,7 +134,6 @@ from horsies.core.manifest import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
@@ -156,7 +145,6 @@ from horsies.core.types.core_failure import (
 )
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
-    TASK_TERMINAL_STATES,
     TaskAttemptOutcome,
     TaskStatus,
 )
@@ -187,22 +175,6 @@ from horsies.core.history.ddl.classes import (
 )
 from horsies.core.history.maintenance.database import (
     PartitionMaintenanceDatabase,
-)
-from horsies.core.baseline.install import (
-    CompleteInstall,
-    InstallBaseline,
-    RefuseInstall,
-    SchemaReady,
-    SchemaStatementFailed,
-    decide_install,
-    install_baseline,
-    publish_history_readers,
-    read_database_state,
-    record_client_family,
-)
-from horsies.core.baseline.migration import (
-    BaselineMigration,
-    load_baseline_migration,
 )
 from horsies.core.defaults import PRE_PING_AFTER_IDLE_S
 from horsies.core.utils.db import (
@@ -261,21 +233,6 @@ def _schema_init_failed(exc: CoreFailure | CoreCallRefusal) -> Err[BrokerOperati
         BrokerErrorCode.SCHEMA_INIT_FAILED,
         f'Schema initialization failed: {exc}',
         exc,
-    )
-
-
-def _enqueue_failed(message: str, exc: BaseException) -> Err[BrokerEnqueueFailed]:
-    """Build a ``BrokerEnqueueFailed`` with retryable classification from the raw exception.
-
-    The write may or may not have happened. A pydantic ``ValidationError``
-    cause is stored in its form without input values.
-    """
-    return Err(
-        BrokerEnqueueFailed(
-            message=message,
-            retryable=is_retryable_connection_error(exc),
-            exception=without_validation_input(exc),
-        )
     )
 
 
@@ -808,23 +765,6 @@ def _close_answer(errors: list[BaseException]) -> BrokerResult[None]:
             return Ok(None)
 
 
-def _loop_limit_err(  # pyright: ignore[reportUnusedFunction]
-    operation: str, loop_limit: EventLoopLimit,
-) -> Err[BrokerEventLoopLimit]:
-    """Build the broker error for the event loop limit. Nothing ran.
-
-    No broker method selects a SQLAlchemy resource set any longer; the
-    dual-run references of the switched methods (``tests/dualrun/``) build
-    their limit error with it.
-    """
-    return Err(
-        BrokerEventLoopLimit(
-            message=f'{operation}: {loop_limit.describe()}',
-            loop_limit=loop_limit,
-        )
-    )
-
-
 def _async_context_err(
     sync_call: str, async_call: str,
 ) -> Err[BrokerAsyncContext]:
@@ -859,20 +799,6 @@ def _cancel_requested() -> bool:
     return task is not None and task.cancelling() > 0
 
 
-def _dbapi_sqlstate(exc: BaseException) -> str | None:
-    orig = getattr(exc, 'orig', exc)
-    sqlstate = getattr(orig, 'sqlstate', None)
-    if isinstance(sqlstate, str):
-        return sqlstate
-    pgcode = getattr(orig, 'pgcode', None)
-    if isinstance(pgcode, str):
-        return pgcode
-    return None
-
-
-_SCHEMA_INIT_MAX_ATTEMPTS = 5
-_SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
-_UNDEFINED_FUNCTION_SQLSTATE = '42883'
 _SCHEMA_LOCK_POLL_INTERVAL_SECONDS = 0.025
 
 
@@ -903,72 +829,9 @@ async def _acquire_session_advisory_lock(
 
 # ---- Monitoring queries ----
 
-TASK_LIST_ROW_BOUND: Final = broker_bounds.TASK_LIST_ROW_BOUND
-"""The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return: the
-row bound of ``horsies_list_stale_tasks`` and ``horsies_list_expired_tasks``
-(the core's ``TASK_LIST_BOUND``, generated into
-``horsies._catalog.broker_bounds``)."""
-
-MAX_STALE_THRESHOLD_MINUTES: Final = 525_600
-"""The largest ``stale_threshold_minutes`` of ``get_stale_tasks``: one year
-of 365 days (the core's ``MAX_STALE_THRESHOLD_MINUTES``)."""
 
 # ---- Cleanup queries ----
 
-# The pending expiry and the orphan audit run in the core
-# (`expire_pending_tasks`, `audit_orphaned_workflow_tasks`) with the same batch
-# sizes and bound. The bounds and the cursor read stay here for the Python
-# reference of the dual-run (tests/dualrun/reference/expiry_and_orphans_caller.py).
-_EXPIRE_BATCH_SIZE = 500
-# Backstop against an unbounded pass; the remainder expires next interval.
-_EXPIRE_MAX_BATCHES_PER_PASS = 200
-_ORPHAN_BATCH_SIZE = 500
-
-READ_ORPHAN_TASK_SCAN_STATS_SQL = text("""
-SELECT last_scan_rows, last_candidate_rows
-FROM horsies_recovery_scan_cursors
-WHERE scan_name = 'orphan_workflow_tasks'
-""")
-
-SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
-    SELECT task_id, attempt, outcome, will_retry,
-           started_at, finished_at,
-           error_code, error_message, failed_reason,
-           worker_id, worker_hostname, worker_pid, worker_process_name
-    FROM horsies_task_attempts
-    WHERE task_id = :task_id
-    ORDER BY attempt DESC
-""")
-
-# Slim status probe for result-wait polling: the full row drags the
-# (potentially TOASTed) input column along on every poll iteration;
-# status+name is all the loop needs. A live row holds no result: the result
-# is stored with the terminal record in history.
-GET_TASK_STATUS_NAME_SQL = text("""
-    SELECT status, task_name FROM horsies_tasks WHERE id = :id
-""")
-
-# Sentinel returned by _probe_result_row while the row is non-terminal.
-_STILL_WAITING = object()
-
-# One bounded batch of the stale CLAIMED requeue, one statement in autocommit.
-# The function requeues a CLAIMED row with no claimer beat newer than the
-# threshold that was claimed longer ago than the threshold, skips a workflow
-# task with no runnable node and rows another transaction holds, and returns
-# the number of rows it requeued. The core runs the pass with the same batch
-# size and bound (`requeue_stale_claimed`); the statement and the two bounds
-# stay here for the Python reference of the dual-run
-# (tests/dualrun/reference/requeue_caller.py).
-REQUEUE_STALE_CLAIMS_SQL = text("""
-    SELECT horsies_requeue_stale_claims(
-        'BEAT_AGE', CAST(:stale_after_ms AS INTEGER), NULL, NULL,
-        CAST(:batch_size AS INTEGER)
-    )
-""")
-
-REQUEUE_STALE_CLAIMS_BATCH_SIZE: Final = 500
-REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS: Final = 200
-"""Backstop against an unbounded pass; the remainder is requeued next pass."""
 
 SIGNED_64_BIT_MIN: Final = -(2**63)
 SIGNED_64_BIT_MAX: Final = 2**63 - 1
@@ -1527,8 +1390,8 @@ class PostgresBroker:
         self._loop_sets_lock = threading.Lock()
 
         self._initialized = assume_initialized
-        # The engine of the sync sends that run on the caller's thread
-        # (send_route), opened by the first such send.
+        # The engine of the sync sends on the caller's thread; close()
+        # disposes it when one is open.
         self._sync_send_engine: _SyncSendEngineNotOpen | _SyncSendEngineOpen = (
             _SyncSendEngineNotOpen()
         )
@@ -1885,9 +1748,6 @@ class PostgresBroker:
             engine_cfg['connect_args'] = connect_args
         return engine_cfg
 
-    def _schema_engine_config(self) -> dict[str, Any]:
-        return self._session_engine_config()
-
     def _session_engine_config(self) -> dict[str, Any]:
         engine_cfg = self._base_engine_config()
         engine_cfg['connect_args'] = self.config.tcp_connect_args()
@@ -1952,35 +1812,6 @@ class PostgresBroker:
                 case SessionEngineShared():
                     pass
 
-    async def validate_worker_database_paths(self) -> None:
-        """Connect both worker paths and prove session capability."""
-        match await self.select_resources():
-            case Err(loop_limit):
-                raise AssertionError(
-                    f'worker broker resources: {loop_limit.describe()}'
-                )
-            case Ok(resources):
-                pass
-        async with resources.engine.connect() as connection:
-            await connection.execute(text('SELECT 1'))
-        async with resources.partition_maintenance.connect() as connection:
-            await connection.execute(text('SELECT 1'))
-        try:
-            await probe_session_capability(self.config.effective_session_database_url)
-        except (asyncio.TimeoutError, psycopg.Error) as exc:
-            raise ConfigurationError(
-                message='broker session capability check failed',
-                code=ErrorCode.BROKER_INVALID_URL,
-                notes=[
-                    'session_database_url appears to be transaction-pooled; '
-                    'LISTEN notification was not delivered',
-                ],
-                help_text=(
-                    'use a direct/session-capable Postgres URL for '
-                    'session_database_url'
-                ),
-            ) from exc
-
     def _schema_advisory_key(self) -> int:
         """
         Compute a stable 64-bit advisory lock key for schema initialization.
@@ -1990,161 +1821,6 @@ class PostgresBroker:
         """
         h = hashlib.sha256(b'horsies:schema:v1').digest()
         return int.from_bytes(h[:8], byteorder='big', signed=True)
-
-    async def _run_with_schema_engine(
-        self, resources: BrokerResources, fn: Any,
-    ) -> None:
-        await fn(resources.session_async_engine())
-
-    async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
-        """Install the baseline schema when this broker runs migrations.
-
-        The Python install before the switch to the core: the broker installs
-        through ``_ensure_initialized``, and only the dual-run reference
-        (``tests/dualrun/reference/install_caller.py``) runs this path.
-
-        ``engine`` is the session URL's engine: the reader publication runs
-        on it. The state read, the lock and the migration use their own
-        direct session connection.
-
-        A broker with migrations off runs no schema statement. Read-only
-        consumers such as the monitoring service inspect the schema with their
-        own probe and never change it.
-        """
-        if self.run_schema_migrations:
-            await self._run_fleet_schema_init(engine)
-
-    async def _run_fleet_schema_init(self, engine: AsyncEngine) -> None:
-        """Install the baseline into an empty database, or check an installed one.
-
-        Returns after the published history readers exist.
-
-        Raises:
-            RuntimeError: the database holds something other than an empty
-                schema or this build's baseline; the text names what it holds.
-                Nothing was changed.
-            psycopg.Error: a statement failed (after the deadlock retries).
-        """
-        migration = load_baseline_migration()
-        for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
-            match await self._install_once(migration, engine):
-                case Ok():
-                    return
-                case Err(failure):
-                    pass
-            match failure:
-                case RefuseInstall(cause=refusal):
-                    raise RuntimeError(refusal)
-                case SchemaStatementFailed(step=step, cause=cause):
-                    if (
-                        cause.sqlstate != _SCHEMA_INIT_DEADLOCK_SQLSTATE
-                        or attempt == _SCHEMA_INIT_MAX_ATTEMPTS
-                    ):
-                        cause.add_note(f'schema install step: {step}')
-                        raise cause
-                    backoff = 0.05 + random.uniform(0, 0.2) * (2 ** (attempt - 1))
-                    self.logger.warning(
-                        'schema init hit deadlock; retrying attempt=%s backoff_s=%.3f',
-                        attempt,
-                        backoff,
-                    )
-                    await asyncio.sleep(backoff)
-
-    async def _install_once(
-        self, migration: BaselineMigration, engine: AsyncEngine,
-    ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
-        """One pass: read the state, and only when a write is due, lock and act.
-
-        A database that already holds this build's baseline, its published
-        readers and this client's family gets no lock and no write.
-        """
-        connection = await psycopg.AsyncConnection.connect(
-            self.config.effective_session_database_url,
-            autocommit=True,
-        )
-        try:
-            first = await read_database_state(connection, migration)
-        finally:
-            await connection.close()
-        match first:
-            case Err(failed):
-                return Err(failed)
-            case Ok(state):
-                pass
-        match decide_install(state):
-            case SchemaReady():
-                return Ok(None)
-            case RefuseInstall() as refused:
-                return Err(refused)
-            case InstallBaseline() | CompleteInstall():
-                pass
-        async with self._schema_session_lock() as locked:
-            return await self._install_under_lock(locked, migration, engine)
-
-    async def _install_under_lock(
-        self,
-        connection: psycopg.AsyncConnection[Any],
-        migration: BaselineMigration,
-        engine: AsyncEngine,
-    ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
-        """Read the state again under the schema lock and do what it needs.
-
-        Another installer may have finished while this one waited for the
-        lock; the second read sees its work.
-
-        The migration (with the family row) and the reader publication are
-        two transactions. An install that stops between them leaves a
-        baseline with missing readers; the next install reads that state as
-        ``CompleteInstall`` and publishes them.
-        """
-        match await read_database_state(connection, migration):
-            case Err(failed):
-                return Err(failed)
-            case Ok(state):
-                pass
-        match decide_install(state):
-            case SchemaReady():
-                return Ok(None)
-            case RefuseInstall() as refused:
-                return Err(refused)
-            case InstallBaseline():
-                self.logger.info(
-                    'Installing the baseline schema (migration %s)', migration.version,
-                )
-                match await install_baseline(connection, migration):
-                    case Err(failed):
-                        return Err(failed)
-                    case Ok():
-                        pass
-                # The family row committed with the migration, and no other
-                # installer writes while this one holds the lock.
-                return await publish_history_readers(engine)
-            case CompleteInstall():
-                match await publish_history_readers(engine):
-                    case Err(failed):
-                        return Err(failed)
-                    case Ok():
-                        pass
-                match await record_client_family(connection):
-                    case Err(failed):
-                        return Err(failed)
-                    case Ok():
-                        pass
-        # The family insert may have lost to another client's row: read again.
-        match await read_database_state(connection, migration):
-            case Err(failed):
-                return Err(failed)
-            case Ok(after):
-                pass
-        match decide_install(after):
-            case SchemaReady():
-                return Ok(None)
-            case RefuseInstall() as refused:
-                return Err(refused)
-            case InstallBaseline() | CompleteInstall():
-                raise AssertionError(
-                    f'schema state after completing the install: {after!r}'
-                )
 
     @contextlib.asynccontextmanager
     async def _schema_session_lock(
@@ -2201,10 +1877,6 @@ class PostgresBroker:
         no schema statement. After a success the broker does not call the
         core again; a broker built with ``assume_initialized=True`` never
         calls it.
-
-        The ``_maybe_run_schema_init`` path of this class is the Python
-        install before the switch; the dual-run reference
-        (``tests/dualrun/reference/install_caller.py``) runs it.
 
         Raises:
             CoreFailure: the core answered ``BrokerOperationFailed`` with
@@ -2491,220 +2163,6 @@ class PostgresBroker:
             raw_result=raw_value,
         ))
 
-    async def _history_result_record(
-        self,
-        session: AsyncSession,
-        task_id: UUID,
-    ) -> 'BrokerResult[RawResultRecord | None] | object':
-        """Resolve a result from the task-history side.
-
-        Terminalization moves the finished row out of ``horsies_tasks``,
-        so an absent (or vanished-between-statements) live row is the
-        NORMAL terminal signal, not an error. Resolution rides the
-        staged detail function — location then detail, one statement.
-        Returns ``Ok(None)`` when history does not hold the task, and
-        ``_STILL_WAITING`` when the row is reported live (it appeared
-        after the live probe missed it). The install and every coverage
-        pass publish the detail reader, so no publication probe runs; a
-        reader removed out of band raises ``42883`` naming it.
-        """
-        from horsies.core.history.reads.detail import (
-            HistoryTaskDetail,
-            TaskDetailAbsent,
-            read_task_detail,
-        )
-
-        connection = await session.connection()
-        detail = await read_task_detail(connection, task_id=task_id)
-        match detail:
-            case TaskDetailAbsent():
-                return Ok(None)
-            case HistoryTaskDetail():
-                pass
-            case _:
-                # Reported live: it appeared after the live probe
-                # missed it — keep polling.
-                return _STILL_WAITING
-        return self._history_raw_result_record(
-            task_id,
-            detail.task_name,
-            detail.status,
-            detail.result_payload,
-            detail.result_digest,
-        )
-
-    def _history_raw_result_record(
-        self,
-        task_id: UUID,
-        task_name: str,
-        status: TaskStatus,
-        payload: bytes | None,
-        digest: bytes | None,
-    ) -> BrokerResult[RawResultRecord | None]:
-        """Verify and decode a stored history result payload.
-
-        No payload gives a record without a result. A digest that is
-        absent or differs from the SHA-256 of the payload, or a payload
-        that is not UTF-8, gives ``Err(INVALID_JSON_PAYLOAD)``.
-        """
-        if payload is None:
-            return Ok(RawResultRecord(
-                task_id=task_id,
-                task_name=task_name,
-                status=status,
-                raw_result=None,
-            ))
-        # Digest over the exact stored bytes BEFORE parsing — the
-        # envelope discipline; a mismatch is corruption, not a payload.
-        if digest is None or hashlib.sha256(payload).digest() != digest:
-            return Err(BrokerInvalidJsonPayload(
-                message=(
-                    f'History result digest mismatch for task {task_id}'
-                ),
-                exception=NoCause(),
-            ))
-        try:
-            result_text = payload.decode('utf-8')
-        except UnicodeDecodeError as decode_error:
-            return Err(BrokerInvalidJsonPayload(
-                message=(
-                    f'History result payload for task {task_id} is not '
-                    f'valid UTF-8: {decode_error}'
-                ),
-                exception=decode_error,
-            ))
-        return self._build_raw_result_record(
-            task_id,
-            task_name,
-            status,
-            result_text,
-        )
-
-    async def _probe_result_row(
-        self,
-        session: AsyncSession,
-        task_id: UUID,
-        *,
-        non_terminal_snapshot: bool = False,
-    ) -> 'BrokerResult[RawResultRecord | None] | object':
-        """Result probe for the result-wait loop.
-
-        One statement through the staged result function. While that
-        function is not published, the live probe and the staged detail
-        read run instead. An absence from the function is confirmed
-        through the detail reader: a publisher of an earlier release can
-        add a leaf that this function does not probe yet.
-
-        Returns the loop's final ``BrokerResult`` when the wait is over,
-        or the ``_STILL_WAITING`` sentinel to keep polling. With
-        ``non_terminal_snapshot=True`` (timeout path) a non-terminal row is
-        returned as a payload-less record instead of the sentinel.
-        """
-        from horsies.core.history.reads.result import (
-            HistoryResultAbsent,
-            HistoryResultStored,
-            HistoryTaskResult,
-            LiveTaskResult,
-            TaskResultAbsent,
-            read_task_result,
-            staged_result_published,
-        )
-
-        connection = await session.connection()
-        if not self._staged_result_reader_published:
-            if not await staged_result_published(connection):
-                return await self._probe_live_result_row(
-                    session,
-                    task_id,
-                    non_terminal_snapshot=non_terminal_snapshot,
-                )
-            self._staged_result_reader_published = True
-        try:
-            read = await read_task_result(connection, task_id=task_id)
-        except DBAPIError as error:
-            if _dbapi_sqlstate(error) == _UNDEFINED_FUNCTION_SQLSTATE:
-                # Dropped after this broker saw it: check again next time.
-                self._staged_result_reader_published = False
-            raise
-        match read:
-            case LiveTaskResult(task_name=task_name):
-                status = TaskStatus(read.status)
-                match status:
-                    case (
-                        TaskStatus.COMPLETED
-                        | TaskStatus.FAILED
-                        | TaskStatus.EXPIRED
-                    ):
-                        # A live row stores no result.
-                        return self._build_raw_result_record(
-                            task_id, task_name, status, None,
-                        )
-                    case _ if (
-                        status is TaskStatus.CANCELLED or non_terminal_snapshot
-                    ):
-                        return Ok(RawResultRecord(
-                            task_id=task_id,
-                            task_name=task_name,
-                            status=status,
-                            raw_result=None,
-                        ))
-                    case _:
-                        return _STILL_WAITING
-            case HistoryTaskResult(task_name=task_name, payload=payload):
-                status = TaskStatus(read.status)
-                match payload:
-                    case HistoryResultAbsent():
-                        return self._history_raw_result_record(
-                            task_id, task_name, status, None, None,
-                        )
-                    case HistoryResultStored(payload=stored, digest=digest):
-                        return self._history_raw_result_record(
-                            task_id, task_name, status, stored, digest,
-                        )
-                    case _:
-                        assert_never(payload)
-            case TaskResultAbsent():
-                return await self._history_result_record(session, task_id)
-            case _:
-                assert_never(read)
-
-    async def _probe_live_result_row(
-        self,
-        session: AsyncSession,
-        task_id: UUID,
-        *,
-        non_terminal_snapshot: bool = False,
-    ) -> 'BrokerResult[RawResultRecord | None] | object':
-        """Slim status probe for the result-wait loop.
-
-        Polls status+name only. A live row holds no result: the result is
-        stored with the terminal record in history, so a live row that is
-        absent falls through to the history side, because terminalization
-        DELETES the live row as it records the terminal fact. A live row
-        with a terminal status has no result to read and gives a
-        payload-less record.
-
-        Returns the loop's final ``BrokerResult`` when the wait is over,
-        or the ``_STILL_WAITING`` sentinel to keep polling. With
-        ``non_terminal_snapshot=True`` (timeout path) a non-terminal row is
-        returned as a payload-less record instead of the sentinel.
-        """
-        probe = await session.execute(
-            GET_TASK_STATUS_NAME_SQL, {'id': str(task_id)},
-        )
-        probe_row = probe.fetchone()
-        if probe_row is None:
-            return await self._history_result_record(session, task_id)
-        status = TaskStatus(str(probe_row.status))
-        if status in TASK_TERMINAL_STATES or non_terminal_snapshot:
-            return Ok(RawResultRecord(
-                task_id=task_id,
-                task_name=str(probe_row.task_name),
-                status=status,
-                raw_result=None,
-            ))
-        return _STILL_WAITING
-
     async def get_raw_result_record_async(
         self,
         task_id: UUID,
@@ -2896,27 +2354,6 @@ class PostgresBroker:
                 )
             case _ as unreachable:
                 assert_never(unreachable)
-
-    async def _unsubscribe_task_done_safely(
-        self, listener: PostgresListener, task_id: UUID, q: asyncio.Queue[Any],
-    ) -> None:
-        """Ensure task_done unsubscribe completes even under repeated cancellation."""
-        unsubscribe_task = asyncio.create_task(
-            listener.unsubscribe_payload('task_done', str(task_id), q)
-        )
-        cancelled_during_cleanup = False
-        while not unsubscribe_task.done():
-            try:
-                await asyncio.shield(unsubscribe_task)
-            except asyncio.CancelledError:
-                cancelled_during_cleanup = True
-                continue
-
-        await unsubscribe_task
-
-        # Propagate cancellation only after cleanup has completed.
-        if cancelled_during_cleanup:
-            raise asyncio.CancelledError
 
     async def close_async(self) -> BrokerResult[None]:
         """Close every resource set and the core handle's pools, then stop
@@ -3683,116 +3120,6 @@ class PostgresBroker:
 
     # ----------------- Sync API Facades -----------------
 
-    def send_route(self) -> SyncSendRoute:
-        """Where a sync ``enqueue`` writes its row. Pure.
-
-        ``CALLER_THREAD`` for a send of a process that runs no task bodies,
-        once this broker's schema is initialized, with or without an
-        idempotency key: both are one ``horsies_enqueue_task`` statement in
-        autocommit. A send before the schema setup (which the first send may
-        run) stays on the loop runner.
-        Task code in a worker child sends through the child's
-        ``task_send_pool``, which the worker profile counts exactly, so it
-        stays on the loop runner too.
-        """
-        match (process_role(), self._initialized):
-            case (ProcessRole.RUNS_NO_TASK_BODIES, True):
-                return SyncSendRoute.CALLER_THREAD
-            case _:
-                return SyncSendRoute.LOOP_RUNNER
-
-    def _sync_send_engine_open(self) -> Engine:
-        """The engine of the sync sends, opened on first use: the runtime
-        engine's URL, pool sizes, connect args and session settings, in
-        autocommit, and the idle ping of ``pool_pre_ping``. Thread-safe. No
-        I/O: connections open on first checkout."""
-        with self._sync_send_lock:
-            match self._sync_send_engine:
-                case _SyncSendEngineOpen(engine=engine):
-                    return engine
-                case _SyncSendEngineNotOpen():
-                    pass
-                case _ as unreachable:
-                    assert_never(unreachable)
-            engine = create_engine(
-                sqlalchemy_url(self.config.database_url.get_secret_value()),
-                **self._runtime_engine_config(),
-                isolation_level='AUTOCOMMIT',
-            )
-            register_session_settings(engine, self._runtime_session_settings())
-            self._register_pre_ping(engine)
-            self._sync_send_engine = _SyncSendEngineOpen(engine)
-            return engine
-
-    def _enqueue_task_on_caller_thread(
-        self,
-        row: EnqueueRow,
-        send_kind: SendKind,
-    ) -> EnqueueOutcome:
-        """Run ``horsies_enqueue_task`` on this thread, one statement in
-        autocommit. Raises what the driver and SQLAlchemy raise: the caller
-        classifies it, as on the async path."""
-        engine = self._sync_send_engine_open()
-        with engine.connect() as connection:
-            rows = connection.exec_driver_sql(
-                ENQUEUE_TASK_DRIVER_SQL, enqueue_task_params(row, send_kind),
-            ).fetchall()
-        return read_enqueue_outcome(rows)
-
-    def _enqueue_on_caller_thread(
-        self,
-        task_name: str,
-        queue_name: str,
-        *,
-        task_id: UUID,
-        send_kind: SendKind,
-        input_json: str | None,
-        priority: int,
-        sent_at: datetime,
-        enqueued_at: Optional[datetime],
-        enqueue_delay_seconds: Optional[int],
-        good_until: Optional[datetime],
-        task_options: Optional[str],
-        retention_class_key: RetentionClassKey | None,
-        retain_rerun_input: Optional[bool],
-        idempotency_key: Optional[str],
-    ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
-        """``enqueue_async`` on the calling thread: the same row (with the
-        key of a keyed send), the same statement and the same error
-        classification."""
-        resolved_retention_class_key = resolve_retention_class_key(
-            retention_class_key
-        )
-        if retain_rerun_input is None:
-            retain_rerun_input = self.config.retain_rerun_input_default
-        prepared_r = self._prepare_enqueue(
-            task_id=task_id,
-            task_name=task_name,
-            queue_name=queue_name,
-            priority=priority,
-            input_json=input_json,
-            sent_at=sent_at,
-            enqueued_at=enqueued_at,
-            enqueue_delay_seconds=enqueue_delay_seconds,
-            good_until=good_until,
-            task_options=task_options,
-            retention_class_key=resolved_retention_class_key,
-            retain_rerun_input=retain_rerun_input,
-            idempotency_key=idempotency_key,
-            key_window=self.idempotency_reservation_window,
-        )
-        if is_err(prepared_r):
-            return prepared_r
-        prepared = prepared_r.ok_value
-        try:
-            outcome = self._enqueue_task_on_caller_thread(prepared.row, send_kind)
-        except _DRIVER_ERRORS as exc:
-            return _enqueue_failed(
-                f'Failed to enqueue task {task_name}: {exc}',
-                exc,
-            )
-        return enqueue_result(outcome, task_id=task_id, task_name=task_name)
-
     def enqueue(
         self,
         task_name: str,
@@ -3851,140 +3178,6 @@ class PostgresBroker:
         except CoreError as exc:
             return _enqueue_core_error(task_name, call_refusal_or_raise(exc))
         return _enqueue_result(outcome)
-
-    async def _history_task_info(
-        self,
-        session: 'AsyncSession',
-        task_id: UUID,
-        *,
-        include_result: bool,
-        include_failed_reason: bool,
-        include_attempts: bool,
-    ) -> BrokerResult[TaskInfo | None]:
-        """The history side of a task-info read, or Ok(None) if absent.
-
-        The terminal instant lands in completed_at for COMPLETED and in
-        failed_at otherwise; claim state is structurally absent on a
-        history record, while the claim's timestamp survives as
-        provenance. Attempts decode from the record's snapshot — their
-        only home after the move — and are listed newest first.
-        """
-        from horsies.core.history.reads.detail import (
-            HistoryTaskDetail,
-            read_task_detail,
-        )
-
-        connection = await session.connection()
-        detail = await read_task_detail(connection, task_id=task_id)
-        match detail:
-            case HistoryTaskDetail():
-                pass
-            case _:
-                return Ok(None)
-
-        status = detail.status
-        completed_at = (
-            detail.terminal_at if status is TaskStatus.COMPLETED else None
-        )
-        failed_at = (
-            detail.terminal_at if status is not TaskStatus.COMPLETED else None
-        )
-        raw_result_value: dict[str, Any] | None = None
-        if include_result and detail.result_payload is not None:
-            from horsies.core.history.archive.results import (
-                decode_result_envelope,
-            )
-            from horsies.core.history.archive.versions import (
-                DecodedArchiveValue,
-            )
-
-            if detail.result_digest is None:
-                return Err(BrokerInvalidJsonPayload(
-                    message=(
-                        f'History result digest is absent for task {task_id}'
-                    ),
-                    exception=NoCause(),
-                ))
-            decoded = decode_result_envelope(
-                version=detail.result_envelope_version,
-                payload=detail.result_payload,
-                digest=detail.result_digest,
-            )
-            match decoded:
-                case DecodedArchiveValue(value=loaded):
-                    pass
-                case failure:
-                    return Err(BrokerInvalidJsonPayload(
-                        message=(
-                            f'History result envelope failed validation for '
-                            f'task {task_id}: {failure!r}'
-                        ),
-                        exception=NoCause(),
-                    ))
-            if loaded is not None and not isinstance(loaded, dict):
-                return Err(BrokerInvalidJsonPayload(
-                    message=(
-                        f'Result for task {task_id} is not a JSON '
-                        f'object; got {type(loaded).__name__}'
-                    ),
-                    exception=NoCause(),
-                ))
-            raw_result_value = cast('dict[str, Any] | None', loaded)
-
-        attempts: list[TaskAttemptInfo] | None = None
-        if include_attempts:
-            # The snapshot holds the attempts oldest first; TaskInfo lists
-            # them newest first, as the live read does (ORDER BY attempt DESC).
-            attempts = [
-                TaskAttemptInfo(
-                    task_id=task_id,
-                    attempt=record.attempt,
-                    outcome=TaskAttemptOutcome(record.outcome),
-                    will_retry=record.will_retry,
-                    started_at=record.started_at,
-                    finished_at=record.finished_at,
-                    error_code=record.error_code,
-                    error_message=record.error_message,
-                    failed_reason=record.failed_reason,
-                    worker_id=record.worker_id,
-                    worker_hostname=record.worker_hostname,
-                    worker_pid=record.worker_pid,
-                    worker_process_name=record.worker_process_name,
-                )
-                for record in reversed(detail.attempts)
-            ]
-
-        return Ok(
-            TaskInfo(
-                task_id=detail.task_id,
-                task_name=detail.task_name,
-                status=status,
-                queue_name=detail.queue_name,
-                priority=detail.priority,
-                retry_count=detail.retry_count,
-                max_retries=detail.max_retries,
-                next_retry_at=None,
-                sent_at=detail.sent_at,
-                enqueued_at=detail.enqueued_at,
-                claimed_at=detail.claimed_at,
-                started_at=detail.started_at,
-                completed_at=completed_at,
-                failed_at=failed_at,
-                worker_hostname=detail.last_worker_hostname,
-                worker_pid=detail.last_worker_pid,
-                worker_process_name=None,
-                error_code=detail.error_code,
-                raw_result=raw_result_value,
-                decoded_result=None,
-                result_decoded=False,
-                failed_reason=(
-                    detail.final_failed_reason
-                    if include_failed_reason
-                    else None
-                ),
-                attempts=attempts,
-            )
-        )
 
     async def get_task_info_async(
         self,
@@ -4094,13 +3287,3 @@ class PostgresBroker:
             self._loop_runner.stop()
 
 
-class WorkerProcessBroker(PostgresBroker):
-    """The broker of a worker process, built from
-    ``PostgresConfig.worker_process_config``.
-
-    Its core handle connects with the ``WORKER`` pool profile: the batch
-    checkouts of the worker process leave connections of the main core pool
-    free for its per-task writes. Everything else is ``PostgresBroker``.
-    """
-
-    _CORE_POOL_PROFILE: ClassVar[CorePoolProfile] = 'WORKER'

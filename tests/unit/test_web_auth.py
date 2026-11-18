@@ -1,26 +1,17 @@
-"""Unit tests for the monitoring authorization policies and guards.
-
-Covers each shipped policy's verdicts and the two dependencies that enforced
-them in the Python app before it mounted the core's handler
-(``tests/dualrun/reference/web_guards.py``, the reference of the web
-dual-run): the read gate on every API route, and the action gate that
-additionally demands the intent header.
+"""Unit tests for the monitoring authorization policies: the verdicts of
+each shipped policy. The core's handler enforces them on every API route.
 """
 
 from __future__ import annotations
 
 import pytest
-from fastapi import HTTPException
 from starlette.requests import Request
 
 from horsies.web.auth import (
-    INTENT_HEADER,
-    INTENT_VALUE,
     AllowAll,
     TrustedHeader,
     ViewOnly,
 )
-from tests.dualrun.reference.web_guards import act_guard, view_guard
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio(loop_scope='function')]
 
@@ -106,62 +97,3 @@ class TestTrustedHeader:
         assert await policy.can_view(make_request(**{'x-forwarded-user': 'a'})) is True
 
 
-class TestViewGuard:
-    """The dependency every API route carries."""
-
-    async def test_passes_an_authorized_request(self) -> None:
-        guard = view_guard(AllowAll())
-
-        assert await guard(make_request()) is None
-
-    async def test_rejects_an_unauthorized_request(self) -> None:
-        guard = view_guard(TrustedHeader('X-Forwarded-User', allow_actions=False))
-
-        with pytest.raises(HTTPException) as raised:
-            await guard(make_request())
-
-        assert raised.value.status_code == 403
-        assert raised.value.detail == 'Not authorized.'
-
-
-class TestActGuard:
-    """Actions need authorization and an explicit statement of intent."""
-
-    async def test_passes_when_authorized_and_intent_is_declared(self) -> None:
-        guard = act_guard(AllowAll(), actions_enabled=True)
-
-        assert await guard(make_request(**{INTENT_HEADER: INTENT_VALUE})) is None
-
-    async def test_rejects_when_the_policy_refuses(self) -> None:
-        guard = act_guard(ViewOnly(), actions_enabled=True)
-
-        with pytest.raises(HTTPException) as raised:
-            await guard(make_request(**{INTENT_HEADER: INTENT_VALUE}))
-
-        assert raised.value.status_code == 403
-        assert raised.value.detail == 'Not authorized.'
-
-    async def test_rejects_when_actions_are_disabled_server_side(self) -> None:
-        guard = act_guard(AllowAll(), actions_enabled=False)
-
-        with pytest.raises(HTTPException) as raised:
-            await guard(make_request(**{INTENT_HEADER: INTENT_VALUE}))
-
-        assert raised.value.status_code == 403
-
-    async def test_rejects_a_missing_intent_header(self) -> None:
-        guard = act_guard(AllowAll(), actions_enabled=True)
-
-        with pytest.raises(HTTPException) as raised:
-            await guard(make_request())
-
-        assert raised.value.status_code == 403
-        assert INTENT_HEADER in raised.value.detail
-
-    async def test_rejects_a_wrong_intent_value(self) -> None:
-        guard = act_guard(AllowAll(), actions_enabled=True)
-
-        with pytest.raises(HTTPException) as raised:
-            await guard(make_request(**{INTENT_HEADER: 'something-else'}))
-
-        assert raised.value.status_code == 403
