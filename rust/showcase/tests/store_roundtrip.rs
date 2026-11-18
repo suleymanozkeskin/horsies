@@ -170,7 +170,7 @@ async fn schema_and_store_round_trip() {
             .find_payment("order-s1", &"authorization".into())
             .await
             .expect("payment read")
-            .unwrap()
+            .expect("the authorization payment of order-s1 is stored")
             .psp_reference,
         "psp-s1"
     );
@@ -188,7 +188,7 @@ async fn schema_and_store_round_trip() {
             .get_shipment("order-s1")
             .await
             .expect("shipment read")
-            .unwrap()
+            .expect("the shipment of order-s1 is stored")
             .booking_reference
             .as_deref(),
         Some("book-s1")
@@ -208,7 +208,7 @@ async fn schema_and_store_round_trip() {
             .get_return("return-s1")
             .await
             .expect("return read")
-            .unwrap(),
+            .expect("the return return-s1 is stored"),
         case
     );
     assert!(store
