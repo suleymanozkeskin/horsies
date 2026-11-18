@@ -35,7 +35,9 @@
 //! - When the process runtime cannot run the call (this process is a fork
 //!   of the one that started it, or the OS refused its threads), the call
 //!   answers the database failure of its catalog with the cause; nothing
-//!   was sent.
+//!   was sent. A send or a retry in a fork panics instead: a fork is a state
+//!   of the process, never a send result, as Python's sends raise
+//!   `ForkedAfterCoreStart`.
 
 mod workflow;
 
@@ -60,7 +62,7 @@ use tokio::runtime::{Handle, Runtime};
 use uuid::Uuid;
 
 use crate::check::{connectivity_report, CHECK};
-use crate::send::{RetryOf, SendStart};
+use crate::send::{forked_send, RetryOf, SendStart};
 use crate::{
     CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
     StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
@@ -199,6 +201,11 @@ where
     }
 
     /// The enqueue with resends of a prepared send, on the process runtime.
+    ///
+    /// # Panics
+    ///
+    /// In a fork, without `exec`, of the process that started the process
+    /// runtime ([`refused_send`]). Nothing was sent.
     fn enqueue(
         &self,
         task_id: Uuid,
@@ -221,13 +228,41 @@ where
                     self.function.task_name()
                 ),
             }),
-            Place::RuntimeRefused(refusal) => Err(TaskSendError::EnqueueFailed {
+            Place::RuntimeRefused(refusal) => Err(refused_send(
+                self.function.task_name(),
                 task_id,
-                payload: Box::new(payload),
-                message: format!("the send did not start: {refusal}"),
-                retryable: refusal_retryable(&refusal),
-            }),
+                payload,
+                &refusal,
+            )),
         }
+    }
+}
+
+/// The answer of a blocking send whose process runtime refused it. A start
+/// that the OS refused is `EnqueueFailed`, retryable: the next use tries
+/// again.
+///
+/// # Panics
+///
+/// For a fork, without `exec`, of the process that started the runtime
+/// ([`forked_send`]): the fork is a state of the process, never a send
+/// result.
+fn refused_send(
+    task_name: &str,
+    task_id: Uuid,
+    payload: horsies_core::TaskSendPayload,
+    refusal: &ProcessRuntimeRefusal,
+) -> TaskSendError {
+    match refusal {
+        ProcessRuntimeRefusal::ForkedAfterStart { core_pid, this_pid } => {
+            forked_send(task_name, *core_pid, *this_pid)
+        }
+        ProcessRuntimeRefusal::StartFailed { .. } => TaskSendError::EnqueueFailed {
+            task_id,
+            payload: Box::new(payload),
+            message: format!("the send did not start: {refusal}"),
+            retryable: refusal_retryable(refusal),
+        },
     }
 }
 
@@ -648,6 +683,61 @@ mod tests {
                 this_pid: 2,
             }
         ));
+    }
+
+    /// A runtime start that the OS refused is a retryable `ENQUEUE_FAILED`
+    /// with the prepared task id and payload: the next use tries again.
+    #[test]
+    fn a_send_whose_runtime_did_not_start_is_a_retryable_enqueue_failed() {
+        let app = app();
+        let (task_id, payload) = function(&app)
+            .prepare(SendStart::Now, &TaskSendOptions::new(), &Invoice { id: 3 })
+            .unwrap();
+        let refused = refused_send(
+            "bill",
+            task_id,
+            payload,
+            &ProcessRuntimeRefusal::StartFailed {
+                cause: "EAGAIN".to_owned(),
+                os_error: horsies_core::process_runtime::OsErrorCode::Code(11),
+            },
+        );
+        let TaskSendError::EnqueueFailed {
+            task_id: failed_id,
+            payload,
+            message,
+            retryable,
+        } = &refused
+        else {
+            panic!("expected ENQUEUE_FAILED, got {refused}");
+        };
+        assert_eq!(*failed_id, task_id);
+        assert_eq!(payload.input_json, r#"{"id":3}"#);
+        assert!(message.contains("the send did not start"), "{message}");
+        assert!(*retryable);
+    }
+
+    /// #1938: a blocking send in a fork panics; it never answers
+    /// `ENQUEUE_FAILED`.
+    #[test]
+    #[should_panic(
+        expected = "send of task 'bill' refused: the core runtime started in process 1, \
+                               and this process (2) is a fork of it without exec"
+    )]
+    fn a_blocking_send_in_a_fork_panics() {
+        let app = app();
+        let (task_id, payload) = function(&app)
+            .prepare(SendStart::Now, &TaskSendOptions::new(), &Invoice { id: 4 })
+            .unwrap();
+        let _never = refused_send(
+            "bill",
+            task_id,
+            payload,
+            &ProcessRuntimeRefusal::ForkedAfterStart {
+                core_pid: 1,
+                this_pid: 2,
+            },
+        );
     }
 
     #[test]

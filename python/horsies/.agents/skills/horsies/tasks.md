@@ -489,12 +489,21 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
 | `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 | `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
-| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
+| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
 | `PAYLOAD_TOO_LARGE` | Refused | The serialized input exceeded `payload.reject_bytes` bytes of UTF-8 text (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
 | `EVENT_LOOP_LIMIT` | Refused | Not returned: a send runs on the core of the process, which has no event loop limit. The variant stays in `TaskSendError`, so an exhaustive `match` names it |
 | `LOOP_RUNNER_FAILED` | Accepted | Not returned: a sync send calls the core on the calling thread, not on the broker's sync runner. The variant stays in `TaskSendError` and in `TaskSendRetryable` |
+
+### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
+
+These two core errors (`horsies._core`) are states of the process, not of one send. The core refuses every later call in the process. `send()`, `send_async()`, `schedule()`, `schedule_async()`, the four retry methods and `PostgresBroker.enqueue()` / `enqueue_async()` raise them; no send returns them as `ENQUEUE_FAILED`. Nothing was sent, and a retry in the same process raises again.
+
+| Raised | Cause | Fix |
+|---|---|---|
+| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task | Start child processes that call horsies with the `spawn` or `forkserver` start method, or start the core after the fork: fork before the parent's first send or read |
+| `CoreStopped` | A core background task panicked; `args` are the `(subject, cause)` of the first panic | Restart the process; report the panic's subject and cause as a defect |
 
 ### `TaskSendPayload`
 
