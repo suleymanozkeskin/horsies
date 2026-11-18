@@ -11,6 +11,9 @@ use horsies_core::manifest_schema::{
 use crate::catalogs::{group_by_module, render_module, render_package_init, CATALOG_FOLDER};
 use crate::constants::{render_constant_module, CONSTANT_MODULES};
 use crate::core_stub::{render_core_stub, CORE_STUB_FILE};
+use crate::error_classes::{
+    error_modules, render_error_detail_module, render_error_module, ERROR_DETAIL_MODULE,
+};
 use crate::manifest::{
     render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
     WORKER_MANIFEST_MODULE_FILE, WORKFLOW_SPEC_MODULE_FILE,
@@ -132,6 +135,16 @@ pub fn render_all() -> Vec<GeneratedFile> {
         files.push(GeneratedFile {
             relative_path: catalog_folder.join(module.file),
             text: render_constant_module(module),
+        });
+    }
+    files.push(GeneratedFile {
+        relative_path: catalog_folder.join(format!("{ERROR_DETAIL_MODULE}.py")),
+        text: render_error_detail_module(),
+    });
+    for (module, contents) in &error_modules() {
+        files.push(GeneratedFile {
+            relative_path: catalog_folder.join(format!("{module}.py")),
+            text: render_error_module(module, contents),
         });
     }
     files.push(GeneratedFile {
@@ -277,8 +290,12 @@ mod tests {
         let modules = group_by_module(CODE_CATALOGS);
         // __init__.py, one file per catalog module, manifest.py,
         // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
-        // one file per constant module, _core.pyi
-        assert_eq!(files.len(), modules.len() + 6 + CONSTANT_MODULES.len());
+        // one file per constant module, error_detail.py, one file per error
+        // module, _core.pyi
+        assert_eq!(
+            files.len(),
+            modules.len() + 6 + CONSTANT_MODULES.len() + 1 + error_modules().len()
+        );
         let paths: std::collections::BTreeSet<&PathBuf> =
             files.iter().map(|file| &file.relative_path).collect();
         assert_eq!(paths.len(), files.len());

@@ -13,6 +13,10 @@
 //!   (`horsies_core::manifest_schema::WORKFLOW_SPEC_DATA`) in the same form.
 //! - `_catalog/release_bounds.py` and `_catalog/monitoring_bounds.py`:
 //!   integer constants of horsies-core (`constants::CONSTANT_MODULES`).
+//! - `_catalog/broker_errors.py`, `_catalog/workflow_handle_errors.py` and
+//!   `_catalog/monitoring_errors.py`: the error classes, subsets and unions
+//!   of `horsies_core::error_catalog`, and `_catalog/error_detail.py` with
+//!   `NoCause`.
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:
@@ -28,6 +32,7 @@
 mod catalogs;
 mod constants;
 mod core_stub;
+mod error_classes;
 mod manifest;
 mod output;
 mod python_text;

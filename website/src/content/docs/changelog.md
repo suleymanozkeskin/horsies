@@ -67,6 +67,17 @@ before you upgrade a 0.7 deployment.
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
 
+- **The core's error classes are generated from the core.** The classes
+  of the broker, workflow handle, monitoring query and task action catalogs
+  that the core produces (for example `BrokerOperationFailed`,
+  `HandleDbOperationFailed`, `MonitoringQueryDbOperationFailed`,
+  `TaskActionNotFound`) and `NoCause` are rendered into `horsies._catalog`
+  from the core's records. Their names, fields, defaults and docs do not
+  change, and the old import paths re-export them. `BrokerOperationError`,
+  `BrokerEnqueueError`, `HandleOperationError`, `MonitoringQueryError` and
+  `TaskActionError` are the generated union of the catalog plus the classes
+  that only the Python client produces.
+
 - **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
   Both are states of the process: the core refuses every later call in it.
   Every call that runs on the core raises them, in its sync and async
