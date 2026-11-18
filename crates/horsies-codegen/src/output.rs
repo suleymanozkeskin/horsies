@@ -13,7 +13,7 @@ use crate::constants::{render_constant_module, CONSTANT_MODULES};
 use crate::core_stub::{render_core_stub, CORE_STUB_FILE};
 use crate::error_classes::{
     error_modules, exception_modules, render_error_detail_module, render_error_module,
-    render_exception_module, ERROR_DETAIL_MODULE,
+    render_exception_module, render_new_type_module, ERROR_DETAIL_MODULE,
 };
 use crate::manifest::{
     render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
@@ -21,6 +21,7 @@ use crate::manifest::{
 };
 use crate::python_text::GENERATED_HEADER;
 use crate::surface::CORE_MODULE;
+use horsies_core::error_catalog::TEXT_NEW_TYPES;
 
 /// Most entries read from the `_catalog` folder. A folder with more is
 /// refused rather than scanned without end.
@@ -142,6 +143,12 @@ pub fn render_all() -> Vec<GeneratedFile> {
         relative_path: catalog_folder.join(format!("{ERROR_DETAIL_MODULE}.py")),
         text: render_error_detail_module(),
     });
+    for new_type in TEXT_NEW_TYPES {
+        files.push(GeneratedFile {
+            relative_path: catalog_folder.join(format!("{}.py", new_type.python_module)),
+            text: render_new_type_module(new_type),
+        });
+    }
     for (module, contents) in &error_modules() {
         files.push(GeneratedFile {
             relative_path: catalog_folder.join(format!("{module}.py")),
@@ -297,14 +304,16 @@ mod tests {
         let modules = group_by_module(CODE_CATALOGS);
         // __init__.py, one file per catalog module, manifest.py,
         // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
-        // one file per constant module, error_detail.py, one file per error
-        // module, one file per exception-class module, _core.pyi
+        // one file per constant module, error_detail.py, one file per new
+        // type, one file per error module, one file per exception-class
+        // module, _core.pyi
         assert_eq!(
             files.len(),
             modules.len()
                 + 6
                 + CONSTANT_MODULES.len()
                 + 1
+                + TEXT_NEW_TYPES.len()
                 + error_modules().len()
                 + exception_modules().len()
         );

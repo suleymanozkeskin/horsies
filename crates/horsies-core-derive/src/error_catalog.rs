@@ -41,7 +41,15 @@ use crate::code_catalog::{doc_text, screaming_snake_case};
 
 /// The Python types that a field slot can have: the variants of
 /// `SlotType`.
-const SLOT_TYPES: &[&str] = &["Str", "Bool", "Uuid", "UuidText", "TaskStatus"];
+const SLOT_TYPES: &[&str] = &[
+    "Str",
+    "Bool",
+    "Int",
+    "Uuid",
+    "UuidText",
+    "TaskStatus",
+    "TaskSendPayload",
+];
 
 /// The container settings.
 struct CatalogSettings {

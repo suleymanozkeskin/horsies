@@ -25,6 +25,7 @@ use crate::core::lifecycle::{
 };
 use crate::core::workflow::handle_types::HandleErrorCode;
 use crate::core::{OnError, TaskResult, WorkflowSpec, WorkflowStatus};
+use crate::failure_cause::{FailureCause, ServerErrorFacts};
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_client_workflow};
 use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
@@ -462,6 +463,97 @@ async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
     assert_eq!(error.workflow_id(), workflow_id);
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "RUNNING");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "ENQUEUED");
+    db.drop().await;
+}
+
+/// `TestResumeCommitSplit.test_a_failed_parent_advance_returns_resume_recovery_failed`:
+/// the resume committed and ended a child workflow, and the advance of the
+/// parent node after the commit failed. `RESUME_RECOVERY_FAILED`, not
+/// retryable, with the error of the advance as its cause; the child stays
+/// COMPLETED, and the recovery pass does not run.
+///
+/// The resumed child has one COMPLETED node, so the resume completes it and
+/// owes the advance of its parent node. A trigger refuses every update of a
+/// node of the parent and counts each refusal in a sequence (a rollback does
+/// not reset it). The recovery pass of the child's tree writes the same
+/// parent node (case 1.6: a terminal child under a RUNNING parent node), so
+/// one refusal shows that the advance ran and the recovery pass did not.
+#[tokio::test]
+#[serial]
+async fn a_failed_parent_advance_after_the_resume_commit_is_resume_recovery_failed() {
+    const REFUSAL: &str = "parent advance refused by the test";
+    let db = IsolatedDatabase::create().await;
+    let parent = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
+    let child = seed_workflow(
+        &db.pool,
+        &WorkflowSeed::child(ParentLink::of_root(parent, 0)).status("PAUSED"),
+    )
+    .await;
+    seed_node(
+        &db.pool,
+        &NodeSeed::sub_workflow(parent, 0, "RUNNING", "tests.port.child.v1", Some(child)),
+    )
+    .await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(child, 0, "COMPLETED").result(done),
+    )
+    .await;
+    super::support::execute(
+        &db.pool,
+        "CREATE SEQUENCE port_test_parent_advance_refusals",
+    )
+    .await;
+    super::support::execute(
+        &db.pool,
+        &format!(
+            "CREATE FUNCTION port_test_refuse_parent_advance() RETURNS trigger
+             LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF NEW.workflow_id = '{parent}'::uuid THEN
+                     PERFORM nextval('port_test_parent_advance_refusals');
+                     RAISE EXCEPTION '{REFUSAL}' USING ERRCODE = 'P0001';
+                 END IF;
+                 RETURN NEW;
+             END
+             $body$"
+        ),
+    )
+    .await;
+    super::support::execute(
+        &db.pool,
+        "CREATE TRIGGER port_test_refuse_parent_advance BEFORE UPDATE ON horsies_workflow_tasks
+         FOR EACH ROW EXECUTE FUNCTION port_test_refuse_parent_advance()",
+    )
+    .await;
+
+    let error = handle(&db.pool, child)
+        .resume(&TestChildSpecs::empty())
+        .await
+        .expect_err("the parent advance after the commit meets the refused node write");
+
+    assert_eq!(error.code(), HandleErrorCode::ResumeRecoveryFailed);
+    assert!(!error.retryable());
+    assert_eq!(error.workflow_id(), child);
+    assert_eq!(
+        error.failure_cause(),
+        FailureCause::Server(ServerErrorFacts::of_code("P0001", REFUSAL.to_owned()))
+    );
+    assert_eq!(workflow_status(&db.pool, child).await, "COMPLETED");
+    assert_eq!(node_status(&db.pool, parent, 0).await, "RUNNING");
+    assert_eq!(workflow_status(&db.pool, parent).await, "RUNNING");
+    let refusals: i64 = sqlx::query_scalar(
+        "SELECT CASE WHEN is_called THEN last_value ELSE 0 END
+         FROM port_test_parent_advance_refusals",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the refusal count");
+    assert_eq!(
+        refusals, 1,
+        "the advance ran once, and no recovery pass wrote the parent node"
+    );
     db.drop().await;
 }
 

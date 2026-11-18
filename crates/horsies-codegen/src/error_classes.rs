@@ -1,17 +1,21 @@
 //! Render the error classes of horsies-core as Python modules under
 //! `_catalog/`: per module of `ERROR_CATALOGS`, the `Literal` subsets of its
-//! code fields, one frozen dataclass per class, the union of each catalog,
-//! and the per-operation unions of `ERROR_UNIONS`, in that order. Also
+//! code fields, the record classes that its fields hold (`ERROR_RECORDS`),
+//! one frozen dataclass per class, the union of each catalog, and the
+//! per-operation unions of `ERROR_UNIONS`, in that order. Also
 //! `_catalog/error_detail.py` with `NoCause`, the field type that several
-//! catalogs share, and one module per module of `EXCEPTION_CLASSES` with
-//! its `Exception` subclasses.
+//! catalogs share, one module per `NewType` of `TEXT_NEW_TYPES`, and one
+//! module per module of `EXCEPTION_CLASSES` with its `Exception`
+//! subclasses.
 
 use std::collections::BTreeMap;
 
 use horsies_core::catalog::CodeCatalog;
 use horsies_core::error_catalog::{
     code_subsets, CodeSubset, ErrorCatalog, ErrorClass, ErrorSlot, ErrorUnion, ExceptionClass,
-    ExceptionType, SlotRepr, SlotType, ERROR_CATALOGS, ERROR_UNIONS, EXCEPTION_CLASSES,
+    ExceptionType, FieldDefault, RecordClass, RecordField, RecordFieldType, SlotRepr, SlotType,
+    TextNewType, DEFAULT_RETENTION_CLASS, ERROR_CATALOGS, ERROR_RECORDS, ERROR_UNIONS,
+    EXCEPTION_CLASSES, RETENTION_CLASS_KEY,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -32,6 +36,7 @@ const STATUS_MODULE: &str = "status";
 pub struct ErrorModule {
     pub catalogs: Vec<ErrorCatalog>,
     pub subsets: Vec<CodeSubset>,
+    pub records: Vec<RecordClass>,
     pub unions: Vec<ErrorUnion>,
 }
 
@@ -48,6 +53,11 @@ pub fn error_modules() -> BTreeMap<&'static str, ErrorModule> {
             .subsets
             .push(subset);
     }
+    for record in ERROR_RECORDS {
+        module_entry(&mut modules, record.python_module)
+            .records
+            .push(*record);
+    }
     for union in ERROR_UNIONS {
         module_entry(&mut modules, union.python_module)
             .unions
@@ -63,6 +73,7 @@ fn module_entry<'a>(
     modules.entry(module).or_insert_with(|| ErrorModule {
         catalogs: Vec::new(),
         subsets: Vec::new(),
+        records: Vec::new(),
         unions: Vec::new(),
     })
 }
@@ -135,6 +146,7 @@ pub fn render_error_module(module: &str, contents: &ErrorModule) -> String {
     ));
     text.push_str(&render_imports(contents, &classes));
     let mut exported: Vec<&str> = contents.subsets.iter().map(|subset| subset.name).collect();
+    exported.extend(contents.records.iter().map(|record| record.python_class));
     exported.extend(classes.iter().map(|class| class.python_class));
     exported.extend(union_names.iter().copied());
     exported.extend(contents.unions.iter().map(|union| union.name));
@@ -143,6 +155,10 @@ pub fn render_error_module(module: &str, contents: &ErrorModule) -> String {
     for subset in &contents.subsets {
         text.push_str("\n\n");
         text.push_str(&render_subset(subset));
+    }
+    for record in &contents.records {
+        text.push_str("\n\n");
+        text.push_str(&render_record(record));
     }
     for catalog in &contents.catalogs {
         for class in catalog.classes {
@@ -200,11 +216,34 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
             }
         )
     });
+    let record_fields: Vec<&RecordField> = contents
+        .records
+        .iter()
+        .flat_map(|record| record.fields.iter())
+        .collect();
+    let uses_datetime = record_fields.iter().any(|field| {
+        matches!(
+            field.python_type,
+            RecordFieldType::DateTime | RecordFieldType::OptionalDateTime
+        )
+    });
+    let uses_retention_key = record_fields.iter().any(|field| {
+        matches!(
+            field.python_type,
+            RecordFieldType::OptionalRetentionClassKey
+        )
+    });
+    let uses_default_retention_key = record_fields
+        .iter()
+        .any(|field| field.default == FieldDefault::DefaultRetentionClassKey);
     let mut text = String::from("from __future__ import annotations\n\n");
     if uses_uuid {
         text.push_str("import uuid\n");
     }
     text.push_str("from dataclasses import dataclass, field\n");
+    if uses_datetime {
+        text.push_str("from datetime import datetime\n");
+    }
     match contents.subsets.is_empty() {
         true => text.push_str("from typing import ClassVar\n"),
         false => text.push_str("from typing import ClassVar, Literal\n"),
@@ -222,6 +261,20 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
     }
     if uses_no_cause {
         add_import(&mut catalog_imports, ERROR_DETAIL_MODULE, "NoCause");
+    }
+    if uses_retention_key {
+        add_import(
+            &mut catalog_imports,
+            RETENTION_CLASS_KEY.python_module,
+            RETENTION_CLASS_KEY.name,
+        );
+    }
+    if uses_default_retention_key {
+        add_import(
+            &mut catalog_imports,
+            RETENTION_CLASS_KEY.python_module,
+            DEFAULT_RETENTION_CLASS.name,
+        );
     }
     text.push('\n');
     for (module, names) in &catalog_imports {
@@ -305,9 +358,91 @@ fn annotation(python_type: SlotType) -> &'static str {
     match python_type {
         SlotType::Str | SlotType::UuidText => "str",
         SlotType::Bool => "bool",
+        SlotType::Int => "int",
         SlotType::Uuid => "uuid.UUID",
         SlotType::TaskStatus => "TaskStatus",
+        SlotType::TaskSendPayload => "TaskSendPayload",
     }
+}
+
+/// One frozen record class: its doc, then each field with the comment
+/// lines of its note, its annotation and its default.
+fn render_record(record: &RecordClass) -> String {
+    let mut text = format!(
+        "@dataclass(slots=True, frozen=True)\nclass {}:\n",
+        record.python_class
+    );
+    if let Some(doc) = docstring(record.doc, "    ") {
+        text.push_str(&doc);
+        text.push('\n');
+    }
+    for field in record.fields {
+        for line in field.note.lines().filter(|line| !line.trim().is_empty()) {
+            text.push_str(&format!("    # {}\n", line.trim()));
+        }
+        let annotation = record_annotation(field.python_type);
+        match field.default {
+            FieldDefault::Required => {
+                text.push_str(&format!("    {}: {annotation}\n", field.name));
+            }
+            FieldDefault::NoneValue => {
+                text.push_str(&format!("    {}: {annotation} = None\n", field.name));
+            }
+            FieldDefault::DefaultRetentionClassKey => text.push_str(&format!(
+                "    {}: {annotation} = {}\n",
+                field.name, DEFAULT_RETENTION_CLASS.name
+            )),
+        }
+    }
+    text
+}
+
+/// The annotation text of a record field type.
+fn record_annotation(python_type: RecordFieldType) -> &'static str {
+    match python_type {
+        RecordFieldType::Str => "str",
+        RecordFieldType::Int => "int",
+        RecordFieldType::DateTime => "datetime",
+        RecordFieldType::OptionalStr => "str | None",
+        RecordFieldType::OptionalInt => "int | None",
+        RecordFieldType::OptionalDateTime => "datetime | None",
+        RecordFieldType::OptionalRetentionClassKey => "RetentionClassKey | None",
+    }
+}
+
+/// The text of the module of one `NewType` of `str`: the type, then each
+/// of its constants, each with its doc.
+pub fn render_new_type_module(new_type: &TextNewType) -> String {
+    let mut text = format!("{GENERATED_HEADER}\n");
+    text.push_str(&format!(
+        "\"\"\"The `{}` type of horsies-core and its named values.\"\"\"\n",
+        new_type.name
+    ));
+    text.push_str("\nfrom __future__ import annotations\n\nfrom typing import Final, NewType\n\n");
+    let mut exported = vec![string_literal(new_type.name)];
+    exported.extend(
+        new_type
+            .constants
+            .iter()
+            .map(|constant| string_literal(constant.name)),
+    );
+    text.push_str(&format!("__all__ = [{}]\n\n\n", exported.join(", ")));
+    text.push_str(&format!(
+        "{name} = NewType({}, str)\n",
+        string_literal(new_type.name),
+        name = new_type.name
+    ));
+    text.push_str(&docstring(new_type.doc, "").unwrap_or_default());
+    for constant in new_type.constants {
+        text.push_str(&format!(
+            "\n{}: Final = {}({})\n",
+            constant.name,
+            new_type.name,
+            string_literal(constant.value)
+        ));
+        text.push_str(&docstring(constant.doc, "").unwrap_or_default());
+    }
+    text
 }
 
 /// A union alias of `members`, with its doc after it.
@@ -431,6 +566,56 @@ mod tests {
         assert!(text.contains("from horsies._catalog.broker import BrokerErrorCode\n"));
         assert!(text.contains("from horsies._catalog.error_detail import NoCause\n"));
         assert!(text.contains("\n    code: BrokerOperationFailedCode\n"));
+    }
+
+    #[test]
+    fn the_send_module_defines_the_payload_record_before_the_classes() {
+        let modules = error_modules();
+        let send = &modules["task_send_errors"];
+        let text = render_error_module("task_send_errors", send);
+        assert!(text.contains("__all__ = ['TaskSendPayload', 'TaskSendSuppressed', "));
+        assert!(text.contains("'TaskSendIdempotencyKeyConflict', 'TaskSendCoreError']\n"));
+        assert!(text.contains("import uuid\nfrom dataclasses import dataclass, field\nfrom datetime import datetime\nfrom typing import ClassVar\n"));
+        assert!(text.contains(
+            "from horsies._catalog.retention_class import DEFAULT_RETENTION_CLASS_KEY, RetentionClassKey\n"
+        ));
+        assert!(text.contains("from horsies._catalog.task_send import TaskSendErrorCode\n"));
+        let record = text
+            .find("class TaskSendPayload:")
+            .expect("the record is rendered");
+        let first_class = text
+            .find("class TaskSendSuppressed:")
+            .expect("the classes are rendered");
+        assert!(record < first_class);
+        assert!(text.contains("    payload: TaskSendPayload = field(repr=False)\n"));
+        assert!(text.contains("    size_bytes: int\n"));
+    }
+
+    #[test]
+    fn a_record_renders_its_notes_its_annotations_and_its_defaults() {
+        let text = render_record(&horsies_core::error_catalog::TASK_SEND_PAYLOAD);
+        assert!(text.starts_with(
+            "@dataclass(slots=True, frozen=True)\nclass TaskSendPayload:\n    \"\"\"Serialized envelope for idempotent retry.\n"
+        ));
+        assert!(text.contains(
+            "    task_options: str | None\n    # The caller's idempotency key, distinct from task identity. Riding the\n"
+        ));
+        assert!(text.contains("    good_until: datetime | None\n"));
+        assert!(text.contains("    idempotency_key: str | None = None\n"));
+        assert!(text.ends_with(
+            "    retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY\n"
+        ));
+    }
+
+    #[test]
+    fn the_retention_class_key_module_holds_the_type_and_the_default_key() {
+        let text = render_new_type_module(&RETENTION_CLASS_KEY);
+        assert!(text.starts_with(GENERATED_HEADER));
+        assert!(text.contains("__all__ = ['RetentionClassKey', 'DEFAULT_RETENTION_CLASS_KEY']\n"));
+        assert!(text.contains("\nRetentionClassKey = NewType('RetentionClassKey', str)\n"));
+        assert!(text.contains(
+            "\nDEFAULT_RETENTION_CLASS_KEY: Final = RetentionClassKey('standard_30d')\n"
+        ));
     }
 
     #[test]
