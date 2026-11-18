@@ -392,7 +392,7 @@ impl PrunePassError {
 impl MonitoringQueryError {
     /// The cause of a failed monitoring read: the cause of its source. Pure.
     pub fn failure_cause(&self) -> FailureCause {
-        match &self.source {
+        match self.error_source() {
             MonitoringQueryErrorSource::Database(error) => FailureCause::of_sqlx_error(error),
             MonitoringQueryErrorSource::History(error) => error.failure_cause(),
             MonitoringQueryErrorSource::Broker(error) => error.failure_cause(),

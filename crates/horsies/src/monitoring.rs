@@ -167,12 +167,11 @@ pub async fn cancel_task(
     refuse_in_a_fork(format_args!("Task cancel of task {task_id}"));
     match app.reads_handle().broker().await {
         Ok(broker) => core_monitoring::cancel_task(&broker, task_id, include_running).await,
-        Err(error) => Err(TaskActionError {
-            code: TaskActionErrorCode::DbOperationFailed,
+        Err(error) => Err(TaskActionError::DbOperationFailed {
             message: format!("Task cancel failed: {error}"),
             retryable: error.is_retryable(),
             task_id,
-            current_status: None,
+            cause: error.failure_cause(),
         }),
     }
 }
@@ -247,8 +246,7 @@ async fn monitoring_broker(
 
 /// The error of a failed connect before the read `operation`. Pure.
 fn connect_failed(operation: &str, error: BrokerError) -> MonitoringQueryError {
-    MonitoringQueryError {
-        code: MonitoringQueryErrorCode::DbOperationFailed,
+    MonitoringQueryError::DbOperationFailed {
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
         source: MonitoringQueryErrorSource::Broker(error),
@@ -290,12 +288,18 @@ mod tests {
     #[test]
     fn a_failed_connect_is_db_operation_failed_with_the_read_and_the_retry_rule() {
         let error = connect_failed("task list query", BrokerError::ListenerClosed);
-        assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
-        assert!(error.message.starts_with("task list query failed: "));
-        assert_eq!(error.retryable, BrokerError::ListenerClosed.is_retryable());
+        assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+        assert!(error.message().starts_with("task list query failed: "));
+        assert_eq!(
+            error.retryable(),
+            BrokerError::ListenerClosed.is_retryable()
+        );
         assert!(matches!(
-            error.source,
-            MonitoringQueryErrorSource::Broker(BrokerError::ListenerClosed)
+            error,
+            MonitoringQueryError::DbOperationFailed {
+                source: MonitoringQueryErrorSource::Broker(BrokerError::ListenerClosed),
+                ..
+            }
         ));
     }
 
