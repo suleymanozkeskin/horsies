@@ -56,7 +56,7 @@ use tokio::time::{sleep, Instant};
 use tokio_postgres::error::SqlState;
 
 use crate::broker::client_family::{
-    recorded_family_from, ClientFamily, RecordedFamily, RECORD_CLIENT_FAMILY,
+    recorded_family_from, ClientFamily, RecordedFamily, UnknownStoredFamily, RECORD_CLIENT_FAMILY,
 };
 use crate::broker::core_rows::{
     column, execute_in, one_row, query_in, query_on, RowDecodeError, StatementLog,
@@ -634,6 +634,11 @@ pub enum SchemaInstallError {
         stored: ClientFamily,
         own: ClientFamily,
     },
+    /// The family row holds a value that is not a client family: corrupt
+    /// stored data. The state read found it before any write of this
+    /// install. Not retryable.
+    #[error("schema install refused: {0}")]
+    UnknownStoredFamily(#[from] UnknownStoredFamily),
     /// The install lock could not be used ([`InstallLockFailure`]).
     #[error("schema install lock: {0}")]
     Lock(InstallLockFailure),
@@ -667,6 +672,7 @@ impl SchemaInstallError {
             )
             | SchemaInstallError::Refused(_)
             | SchemaInstallError::OtherFamily { .. }
+            | SchemaInstallError::UnknownStoredFamily(_)
             | SchemaInstallError::Lock(_)
             | SchemaInstallError::RowDecode(_) => false,
         }
@@ -702,6 +708,9 @@ impl From<SchemaInstallError> for BrokerError {
                 stored: RecordedFamily::Recorded(stored),
                 own,
             },
+            SchemaInstallError::UnknownStoredFamily(unknown) => {
+                BrokerError::UnknownStoredFamily(unknown)
+            }
             SchemaInstallError::Lock(failure) => BrokerError::InstallLock(failure),
             SchemaInstallError::Statement(failure) => BrokerError::Statement(failure),
             SchemaInstallError::RowDecode(error) => BrokerError::RowDecode(error),
@@ -1643,7 +1652,7 @@ async fn read_bookkeeping(
         .map(|row| applied_migration(row, statement))
         .collect::<Result<Vec<AppliedMigration>, RowDecodeError>>()?;
     let family = match rows.first() {
-        Some(row) => recorded_family_from(column(row, statement, "family")?),
+        Some(row) => recorded_family_from(column(row, statement, "family")?)?,
         None => RecordedFamily::NotRecorded,
     };
     // The read is newest first; the classification walks the chain in apply

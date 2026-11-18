@@ -49,7 +49,6 @@ use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimD
 
 use crate::broker::client_family::{
     admit_family, recorded_family_from, ClientFamily, FamilyCheckError, FamilyCheckFailure,
-    RecordedFamily,
 };
 use crate::broker::partition_maintenance::default_install_coverage;
 use crate::broker::process_listener::{
@@ -1422,39 +1421,49 @@ impl PostgresBroker {
 
     /// Check once, before the first write of this handle, that the database
     /// records this handle's client family. Reads never call it. A handle
-    /// whose install ran in this process has passed it already. A database of
-    /// the other family, or with no family row, is
-    /// `BrokerError::ClientFamilyMismatch`, not retryable; a failed read
-    /// ([`FamilyCheckFailure`]) is `BrokerError::Statement`,
-    /// `BrokerError::PoolSettings` or `BrokerError::RowDecode`, and is not
-    /// kept, so the next write checks again. One statement, once.
+    /// whose install ran in this process has passed it already. Nothing is
+    /// written when the check does not pass:
+    ///
+    /// - a database of the other family, or with no family row, is
+    ///   `BrokerError::ClientFamilyMismatch`, not retryable;
+    /// - a family row whose value is not a client family (corrupt stored
+    ///   data) is `BrokerError::UnknownStoredFamily`, not retryable;
+    /// - a failed read ([`FamilyCheckFailure`]) is `BrokerError::Statement`,
+    ///   `BrokerError::PoolSettings` or `BrokerError::RowDecode`.
+    ///
+    /// Only a pass is kept, so the next write checks again after a refusal.
+    /// One statement, once.
     pub async fn ensure_client_family_for_write(&self) -> Result<(), BrokerError> {
         match self.check_client_family_for_write().await {
             Ok(()) => Ok(()),
             Err(FamilyCheckError::Mismatch(mismatch)) => Err(mismatch.into()),
+            Err(FamilyCheckError::UnknownStoredFamily(unknown)) => Err(unknown.into()),
             Err(FamilyCheckError::ReadFailed(failure)) => Err(failure.into()),
         }
     }
 
     /// The check of [`PostgresBroker::ensure_client_family_for_write`], with
     /// its closed error. A pass is kept for the life of the handle; a
-    /// mismatch or a failed read is not.
+    /// mismatch, an unknown stored family or a failed read is not.
     async fn check_client_family_for_write(&self) -> Result<(), FamilyCheckError> {
         self.client_family_admitted
             .get_or_try_init(|| async {
-                let recorded = self
+                let stored = self
                     .read_client_family()
                     .await
                     .map_err(FamilyCheckError::ReadFailed)?;
+                let recorded =
+                    recorded_family_from(stored).map_err(FamilyCheckError::UnknownStoredFamily)?;
                 admit_family(recorded, self.client_family).map_err(FamilyCheckError::Mismatch)
             })
             .await?;
         Ok(())
     }
 
-    /// Reads the family row on the main core pool. Checkout and bound as
-    /// [`PostgresBroker::query_main`]. Writes nothing.
-    async fn read_client_family(&self) -> Result<RecordedFamily, FamilyCheckFailure> {
+    /// Reads the stored text of the family row on the main core pool (`None`:
+    /// no row). Checkout and bound as [`PostgresBroker::query_main`]. Writes
+    /// nothing.
+    async fn read_client_family(&self) -> Result<Option<String>, FamilyCheckFailure> {
         let open = self
             .core
             .pools()
@@ -1470,14 +1479,13 @@ impl PostgresBroker {
             )
             .await
             .map_err(FamilyCheckFailure::Statement)?;
-        let stored: Option<String> = match rows.first() {
-            Some(row) => Some(
+        match rows.first() {
+            Some(row) => Ok(Some(
                 column(row, &READ_CLIENT_FAMILY, "family")
                     .map_err(FamilyCheckFailure::FamilyColumnUndecodable)?,
-            ),
-            None => None,
-        };
-        Ok(recorded_family_from(stored))
+            )),
+            None => Ok(None),
+        }
     }
 
     /// Install the schema once for this broker: the migrations
@@ -1641,9 +1649,10 @@ impl PostgresBroker {
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
-    /// `RerunError::ClientFamilyMismatch`; a family row that could not be
-    /// read is `RerunError::FamilyCheckFailed`. In both cases nothing is
-    /// written.
+    /// `RerunError::ClientFamilyMismatch`; a family row whose value is not a
+    /// client family is `RerunError::UnknownStoredFamily`; a family row that
+    /// could not be read is `RerunError::FamilyCheckFailed`. In each case
+    /// nothing is written.
     ///
     /// Errors: as the rerun in its transaction, and
     /// [`RerunError::PoolSettings`] when a closed handle cannot open its
@@ -2757,6 +2766,7 @@ fn rerun_family_error(error: FamilyCheckError) -> RerunError {
             stored: mismatch.stored,
             own: mismatch.own,
         },
+        FamilyCheckError::UnknownStoredFamily(unknown) => RerunError::UnknownStoredFamily(unknown),
         FamilyCheckError::ReadFailed(failure) => RerunError::FamilyCheckFailed(failure),
     }
 }
@@ -2766,9 +2776,24 @@ mod rerun_family_error_tests {
     use super::rerun_family_error;
     use crate::broker::client_family::{
         ClientFamily, FamilyCheckError, FamilyCheckFailure, FamilyMismatch, RecordedFamily,
+        UnknownStoredFamily,
     };
     use crate::core::history::rerun::RerunError;
     use crate::db::{NotSentCause, StatementFailure, Transience};
+
+    /// A family row whose value is not a client family is the rerun's own
+    /// named error, with the stored value.
+    #[test]
+    fn an_unknown_stored_family_is_the_rerun_unknown_stored_family() {
+        let unknown = UnknownStoredFamily {
+            stored: "GO".to_owned(),
+        };
+        let error = rerun_family_error(FamilyCheckError::UnknownStoredFamily(unknown.clone()));
+        assert!(
+            matches!(&error, RerunError::UnknownStoredFamily(inner) if *inner == unknown),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn a_family_mismatch_is_the_rerun_mismatch() {
@@ -5561,6 +5586,91 @@ mod client_family_tests {
             .await
             .expect("count the rows of the refused send");
         assert_eq!(rows, 0);
+    }
+
+    /// Writes `value` into the family row past its CHECK
+    /// (`horsies_client_family_family_known`), which it drops first: stored
+    /// data that no horsies path writes.
+    async fn corrupt_family_row(pool: &PgPool, value: &str) {
+        sqlx::query(
+            "ALTER TABLE horsies_client_family \
+             DROP CONSTRAINT horsies_client_family_family_known",
+        )
+        .execute(pool)
+        .await
+        .expect("drop the family CHECK");
+        sqlx::query("UPDATE horsies_client_family SET family = $1")
+            .bind(value)
+            .execute(pool)
+            .await
+            .expect("write the corrupt family");
+    }
+
+    /// A family row that holds no client family is corrupt stored data. For
+    /// a handle of either family, the install, the check before the first
+    /// write and the first send are refused with the stored value, not
+    /// retryable, and the send writes no row.
+    #[tokio::test]
+    #[serial]
+    async fn a_family_row_that_holds_no_client_family_is_refused_before_any_write() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        corrupt_family_row(&pool, "GO").await;
+
+        for family in [ClientFamily::Python, ClientFamily::Rust] {
+            let installing = PostgresBroker::from_pool(pool.clone(), family);
+            let refused = installing
+                .migrate()
+                .await
+                .expect_err("no install into a database whose family row is corrupt");
+            assert!(
+                matches!(&refused, BrokerError::UnknownStoredFamily(unknown) if unknown.stored == "GO"),
+                "{refused:?}"
+            );
+            assert!(!refused.is_retryable());
+
+            let broker = PostgresBroker::from_pool_observe_only(pool.clone(), family);
+            let refused = broker
+                .ensure_client_family_for_write()
+                .await
+                .expect_err("no write into a database whose family row is corrupt");
+            assert!(
+                matches!(&refused, BrokerError::UnknownStoredFamily(unknown) if unknown.stored == "GO"),
+                "{refused:?}"
+            );
+            assert!(!refused.is_retryable());
+
+            let task_id = Uuid::new_v4();
+            let refused = broker
+                .enqueue(
+                    "family.send",
+                    "{}",
+                    "default",
+                    50,
+                    Some(Utc::now()),
+                    None,
+                    None,
+                    None,
+                    Some(task_id),
+                    None,
+                    None,
+                    EnqueueRetention::Default,
+                    None,
+                    SendKind::First,
+                )
+                .await
+                .expect_err("no send into a database whose family row is corrupt");
+            assert!(
+                matches!(&refused, BrokerError::UnknownStoredFamily(unknown) if unknown.stored == "GO"),
+                "{refused:?}"
+            );
+            let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count the rows of the refused send");
+            assert_eq!(rows, 0);
+        }
+        assert_eq!(family_row(&pool).await.as_deref(), Some("GO"));
     }
 }
 

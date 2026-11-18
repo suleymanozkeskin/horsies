@@ -19,7 +19,11 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from horsies._core import IdMintRefused, mint_task_id as core_mint_task_id
+from horsies._core import (
+    CoreContractViolation,
+    IdMintRefused,
+    mint_task_id as core_mint_task_id,
+)
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
@@ -433,6 +437,46 @@ async def test_installed_database_with_another_state_is_refused(
             case Ok():
                 pytest.fail(f'install accepted the database after: {change}')
         assert await _fetch_one(connection, _OBJECT_COUNT_SQL) == before
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_family_row_that_holds_no_client_family_fails_closed(database_url: str) -> None:
+    """A family value outside PYTHON and RUST is corrupt stored data.
+
+    The test writes it past the CHECK ``horsies_client_family_family_known``,
+    which it drops first. The install fails with the core's contract
+    violation, which names the table, the column and the stored value, and
+    changes nothing. The process does not crash.
+    """
+    await _installed(database_url)
+    connection = await _connect(database_url)
+    try:
+        await connection.execute(
+            'ALTER TABLE horsies_client_family '
+            'DROP CONSTRAINT horsies_client_family_family_known'
+        )
+        await connection.execute("UPDATE horsies_client_family SET family = 'GO'")
+        before = await _fetch_one(connection, _OBJECT_COUNT_SQL)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database_url)))
+        try:
+            match await broker.ensure_schema_initialized():
+                case Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+                        retryable=False,
+                        exception=CoreContractViolation() as exception,
+                    )
+                ):
+                    assert exception.subject == 'install_schema'
+                    assert 'horsies_client_family.family holds "GO"' in exception.message
+                case other:
+                    pytest.fail(f'expected the contract violation of the family row: {other!r}')
+        finally:
+            _ = await broker.close_async()
+        assert await _fetch_one(connection, _OBJECT_COUNT_SQL) == before
+        assert await _fetch_one(connection, 'SELECT family FROM horsies_client_family') == ('GO',)
     finally:
         await connection.close()
 

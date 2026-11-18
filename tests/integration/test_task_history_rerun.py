@@ -24,6 +24,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from horsies._core import CoreContractViolation
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import period_class_key
@@ -674,3 +675,44 @@ class TestStoredSourceDoesNotDecode:
         assert isinstance(outcome.exception, HistoryContractError)
         assert "'UNKNOWN'" in str(outcome.exception)
         assert tasks_after == tasks_before
+
+
+@pytest.mark.asyncio
+async def test_a_family_row_that_holds_no_client_family_raises_a_contract_violation(
+    terminalization_schema: HistorySchema,
+) -> None:
+    """A family value outside PYTHON and RUST is corrupt stored data.
+
+    The test writes it past the CHECK ``horsies_client_family_family_known``,
+    which it drops first. The core answers ``RerunUnknownStoredFamily`` with
+    the stored value, and ``rerun_task`` raises its ``CoreContractViolation``
+    (subject ``rerun_task``) before any write.
+    """
+    async with terminalization_schema.engine.begin() as connection:
+        await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
+        source = await seed_failed_source(connection)
+        _ = await connection.execute(
+            text(
+                'ALTER TABLE horsies_client_family '
+                'DROP CONSTRAINT horsies_client_family_family_known'
+            )
+        )
+        _ = await connection.execute(
+            text(
+                'INSERT INTO horsies_client_family (only_row, family, recorded_at) '
+                "VALUES (TRUE, 'GO', now())"
+            )
+        )
+        count_tasks = text('SELECT count(*) FROM horsies_tasks')
+        before = (await connection.execute(count_tasks)).scalar_one()
+
+        with pytest.raises(CoreContractViolation) as raised:
+            _ = await rerun_task(
+                connection,
+                RerunTask(source_task_id=UUID(source), deadline=None),
+                policy(),
+            )
+
+        assert raised.value.subject == 'rerun_task'
+        assert 'horsies_client_family.family holds "GO"' in raised.value.message
+        assert (await connection.execute(count_tasks)).scalar_one() == before

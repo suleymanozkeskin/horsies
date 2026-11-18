@@ -609,7 +609,8 @@ async fn rerun_with_audit(
 - `AppRerunError`: `Connect(BrokerError)` (nothing ran) or
   `Rerun(RerunError)`.
 - `CallerRerunError<E>`: `Driver(E)`, `ClassNotRegistered { key }`,
-  `ClientFamilyMismatch { stored }`, `CallerKeyRefused`, `IdMintRefused`,
+  `ClientFamilyMismatch { stored }`, `UnknownStoredFamily` (a family row
+  that holds no client family), `CallerKeyRefused`, `IdMintRefused`,
   `Row`.
 
 | `RerunOutcome` | Meaning |

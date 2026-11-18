@@ -13,10 +13,11 @@
 
 use chrono::Utc;
 use horsies::rerun::{
-    rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, SqlxCaller, TaskAbsenceReason,
-    TokioPostgresCaller,
+    rerun_task_in, AppRerunError, CallerRerunError, RerunEnqueuePolicy, RerunOutcome, RerunTask,
+    SqlxCaller, TaskAbsenceReason, TokioPostgresCaller, UnknownStoredFamily,
 };
-use horsies_core::{OperationalErrorCode, TaskError, TaskResult};
+use horsies::{AppConfig, Horsies};
+use horsies_core::{BrokerError, OperationalErrorCode, TaskError, TaskResult};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -252,6 +253,76 @@ async fn an_absent_source_reads_through_both_adapters() {
             "{outcome:?}"
         );
     }
+    pool.close().await;
+    database.drop().await;
+}
+
+/// Writes `value` into the family row past its CHECK
+/// (`horsies_client_family_family_known`), which it drops first: stored data
+/// that no horsies path writes.
+async fn corrupt_family_row(pool: &PgPool, value: &str) {
+    sqlx::query(
+        "ALTER TABLE horsies_client_family \
+         DROP CONSTRAINT horsies_client_family_family_known",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE horsies_client_family SET family = $1")
+        .bind(value)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A family row that holds no client family is corrupt stored data. A rerun
+/// in the caller's transaction ends with `UnknownStoredFamily` and the stored
+/// value before its write; the app's own rerun is refused at its schema
+/// install with `BrokerError::UnknownStoredFamily`. No new task exists.
+#[tokio::test]
+async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
+    let database = TestDatabase::create().await;
+    let pool = pool_of(&database).await;
+    let source = seed_failed_source(&pool).await;
+    corrupt_family_row(&pool, "GO").await;
+    let command = RerunTask::new(source, None, None);
+    let tasks_before: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let mut client = database.connect().await;
+    let mut transaction = client.transaction().await.unwrap();
+    let refused = rerun_task_in(
+        &mut TokioPostgresCaller::new(&mut transaction),
+        &command,
+        &policy(),
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            CallerRerunError::UnknownStoredFamily(UnknownStoredFamily { stored }) if stored == "GO"
+        ),
+        "{refused:?}"
+    );
+    transaction.rollback().await.unwrap();
+
+    let app = Horsies::new(AppConfig::for_database_url(database.url())).unwrap();
+    match app.rerun_task(command, policy()).await {
+        Err(AppRerunError::Connect(BrokerError::UnknownStoredFamily(UnknownStoredFamily {
+            stored,
+        }))) => assert_eq!(stored, "GO"),
+        other => panic!("expected the unknown stored family at the install, got {other:?}"),
+    }
+    let tasks_after: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tasks_after, tasks_before);
+
     pool.close().await;
     database.drop().await;
 }

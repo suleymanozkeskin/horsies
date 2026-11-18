@@ -27,7 +27,9 @@ pub enum RunPhase {
 pub enum WorkerBootCause {
     /// The schema step refused the database's schema.
     SchemaRefused,
-    /// The database belongs to the other client family.
+    /// The database belongs to the other client family, records none, or its
+    /// family row holds a value that is not a client family (corrupt stored
+    /// data).
     ClientFamilyRefused,
     /// The session URL does not keep a transaction (PgBouncer statement
     /// pooling).
@@ -160,9 +162,9 @@ pub fn run_end_of(result: Result<(), WorkerError>, phase: RunPhase) -> WorkerRun
 fn boot_cause(error: &WorkerError) -> WorkerBootCause {
     match error {
         WorkerError::Broker(BrokerError::SchemaRefused(_)) => WorkerBootCause::SchemaRefused,
-        WorkerError::Broker(BrokerError::ClientFamilyMismatch { .. }) => {
-            WorkerBootCause::ClientFamilyRefused
-        }
+        WorkerError::Broker(
+            BrokerError::ClientFamilyMismatch { .. } | BrokerError::UnknownStoredFamily(_),
+        ) => WorkerBootCause::ClientFamilyRefused,
         WorkerError::Broker(_) | WorkerError::Database(_) | WorkerError::History(_) => {
             match error.is_retryable() {
                 true => WorkerBootCause::DatabaseUnavailable,
@@ -242,6 +244,14 @@ mod tests {
             (
                 WorkerError::Config("coverage refused".to_owned()),
                 WorkerBootCause::ConfigRefused,
+            ),
+            (
+                WorkerError::Broker(BrokerError::UnknownStoredFamily(
+                    crate::broker::client_family::UnknownStoredFamily {
+                        stored: "GO".to_owned(),
+                    },
+                )),
+                WorkerBootCause::ClientFamilyRefused,
             ),
         ];
         for (error, cause) in cases {
