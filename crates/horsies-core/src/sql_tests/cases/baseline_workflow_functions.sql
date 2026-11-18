@@ -2943,3 +2943,92 @@ BEGIN
                       AND horsies_workflow_task_options_refusal('', 4) = 'Corrupt task_options JSON for task 4',
                       'empty text: empty node task options do not read; NULL options are no options');
 END $$;
+
+-- The output node at completion ------------------------------------------------------------------------------------
+-- An absent output row, or an output node that is not terminal, is a defect of the caller, which counted no live
+-- node: horsies_workflow_explicit_output raises data_corrupted (Python tests/unit/test_workflow_output_skipped.py,
+-- TestExplicitOutputResult).
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000e06';
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]', 0);
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'ENQUEUED', 'output node raise setup: the output node is live');
+    PERFORM wft_refused(format('SELECT horsies_workflow_explicit_output(%L, 0)', v_wf), 'XX001',
+                        'output node: a live output node raises data_corrupted');
+    PERFORM wft_refused(format('SELECT horsies_workflow_explicit_output(%L, 5)', v_wf), 'XX001',
+                        'output node: an absent output row raises data_corrupted');
+END $$;
+
+-- A stored error with a code and no message -----------------------------------------------------------------------
+-- message is for a human: each reader takes an error with a code and no message as that error, as stored (Python
+-- tests/unit/test_task_error_stored_decode.py, TestErrorWithNoMessage).
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000e07';
+    v_child uuid := '00000000-0000-7000-8000-000000000e08';
+    v_slot text;
+    v_envelope text;
+    v_result record;
+BEGIN
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(jsonb_build_object('idx', 0, 'sub', true), jsonb_build_object('idx', 1),
+                          jsonb_build_object('wf', v_child, 'idx', 0))
+    );
+    FOREACH v_slot IN ARRAY ARRAY[
+        '{"error_code":"RATE_LIMITED","message":null,"data":null,"exception":null}',
+        '{"error_code":"RATE_LIMITED","message":null}',
+        '{"error_code":"RATE_LIMITED"}'
+    ] LOOP
+        v_envelope := '{"__h_task_result__":true,"ok":null,"err":' || v_slot || '}';
+        PERFORM wft_check(horsies_workflow_result_kind(v_envelope) = 'ERROR'
+                          AND horsies_workflow_err_slot(v_envelope) = v_slot,
+                          'code-only error: the err slot is the stored error with its code: ' || v_slot);
+        PERFORM wft_check(horsies_workflow_source_value('FAILED', v_envelope, 1, 'n1', 't1') = v_envelope,
+                          'code-only error: a dependency gets the stored error: ' || v_slot);
+        UPDATE horsies_workflow_tasks SET status = 'FAILED', result = v_envelope
+        WHERE workflow_id = v_wf AND task_index = 1;
+        PERFORM wft_check(horsies_workflow_failure_error(v_wf, NULL) = v_slot
+                          AND horsies_workflow_failure_error(v_wf, '{"cases":[{"required_indices":[1]}]}') = v_slot,
+                          'code-only error: the workflow error is the stored error: ' || v_slot);
+        UPDATE horsies_workflows
+        SET status = 'COMPLETED', result = v_envelope, completed_at = now(), updated_at = now()
+        WHERE id = v_child;
+        SELECT * INTO v_result FROM horsies_workflow_child_node_result(v_child);
+        PERFORM wft_check(v_result.node_status = 'FAILED' AND v_result.node_result = v_envelope
+                          AND v_result.failure_error = v_slot,
+                          'code-only error: a child output with the error fails the parent node with it: ' || v_slot);
+    END LOOP;
+END $$;
+
+-- A required FAILED node whose stored result does not read ----------------------------------------------------------
+-- The workflow error under a success policy names the cause, as with no policy (Python
+-- tests/unit/test_task_error_stored_decode.py, test_the_workflow_error_of_a_required_task_names_the_cause).
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000e09';
+    v_stored text;
+    v_error json;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
+    FOREACH v_stored IN ARRAY ARRAY[
+        'not json',
+        '[1]',
+        '{"__h_task_result__":true,"ok":null,"err":{"message":"no code"}}'
+    ] LOOP
+        UPDATE horsies_workflow_tasks SET status = 'FAILED', result = v_stored
+        WHERE workflow_id = v_wf AND task_index = 1;
+        v_error := horsies_workflow_failure_error(v_wf, '{"cases":[{"required_indices":[1]}]}')::json;
+        PERFORM wft_check((v_error -> 'error_code' ->> '__builtin_task_code__') = 'RESULT_DESERIALIZATION_ERROR'
+                          AND (v_error ->> 'message') = horsies_workflow_unreadable_result_cause(v_stored)
+                          AND v_error::text = horsies_workflow_failure_error(v_wf, NULL),
+                          'unreadable result: the workflow error of a required FAILED node names the cause: '
+                          || v_stored);
+    END LOOP;
+END $$;

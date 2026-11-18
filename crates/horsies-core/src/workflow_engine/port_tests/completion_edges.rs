@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    advance_parent_of, broker, code, complete_workflow, node, ok, required, seed_node,
+    advance_parent_of, broker, code, complete_workflow, err, node, ok, required, seed_node,
     seed_workflow, shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed,
     ParentLink, WorkflowSeed,
 };
@@ -76,6 +76,51 @@ async fn a_met_success_case_waits_for_a_live_node_that_it_does_not_require() {
     assert_eq!(row.status, "RUNNING");
     assert_eq!(row.completed_at, None);
     db.drop().await;
+}
+
+/// `test_success_policy_subworkflow_node.py::TestEvaluateSuccess::test_the_status_of_a_subworkflow_node_row_decides_the_case`:
+/// a success case that requires a sub-workflow node reads the status of that
+/// node as it reads the status of a task node: COMPLETED meets the case and
+/// the workflow completes; FAILED or SKIPPED does not, and the workflow fails.
+#[tokio::test]
+#[serial]
+async fn the_status_of_a_required_sub_workflow_node_decides_the_success_case() {
+    let pool = shared_pool().await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the output");
+    let failed =
+        serde_json::to_string(&err("CHILD_FAILED", "the child failed")).expect("encode the error");
+    for (status, result, expected) in [
+        ("COMPLETED", Some(done.clone()), "COMPLETED"),
+        ("FAILED", Some(failed), "FAILED"),
+        ("SKIPPED", None, "FAILED"),
+    ] {
+        let workflow_id = seed_workflow(
+            &pool,
+            &WorkflowSeed::running()
+                .policy(serde_json::to_value(required(&[&[0, 1]])).expect("encode the policy")),
+        )
+        .await;
+        seed_node(
+            &pool,
+            &NodeSeed::task(workflow_id, 0, "COMPLETED").result(done.clone()),
+        )
+        .await;
+        let sub_workflow_node =
+            NodeSeed::sub_workflow(workflow_id, 1, status, "tests.port.child.v1", None);
+        let sub_workflow_node = match result {
+            Some(text) => sub_workflow_node.result(text),
+            None => sub_workflow_node,
+        };
+        seed_node(&pool, &sub_workflow_node).await;
+
+        complete(&pool, workflow_id).await;
+
+        assert_eq!(
+            workflow(&pool, workflow_id).await.status,
+            expected,
+            "{status}"
+        );
+    }
 }
 
 /// `test_a_failed_child_gives_its_parent_a_summary_without_output`: the

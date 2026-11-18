@@ -1049,22 +1049,42 @@ async fn run_bounded(client: &Client, sql: &str) -> Result<(), ListenerStartFail
 }
 
 /// Whether a probe runs at this tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProbeDue {
     Now,
     Later,
 }
 
-async fn probe_if_due(shared: &Arc<Shared>, mut up: UpState) -> Link {
-    let notifications = shared.notification_count();
-    let since_probe = up.last_probe.elapsed();
-    let due = match (
-        notifications == up.notifications_at_probe,
+/// Whether a notification arrived since the last probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivitySinceProbe {
+    Seen,
+    NotSeen,
+}
+
+/// The probe rule: after notification activity, a probe once
+/// [`PROBE_AFTER_ACTIVITY`] has passed since the last probe; with no
+/// activity, a probe once [`PROBE_AFTER_SILENCE`] has passed. Pure.
+fn probe_due(activity: ActivitySinceProbe, since_probe: Duration) -> ProbeDue {
+    match (
+        activity,
         since_probe >= PROBE_AFTER_ACTIVITY,
         since_probe >= PROBE_AFTER_SILENCE,
     ) {
-        (false, true, _) | (_, _, true) => ProbeDue::Now,
-        (true, _, false) | (false, false, false) => ProbeDue::Later,
+        (ActivitySinceProbe::Seen, true, _) | (_, _, true) => ProbeDue::Now,
+        (ActivitySinceProbe::NotSeen, _, false) | (ActivitySinceProbe::Seen, false, false) => {
+            ProbeDue::Later
+        }
+    }
+}
+
+async fn probe_if_due(shared: &Arc<Shared>, mut up: UpState) -> Link {
+    let notifications = shared.notification_count();
+    let activity = match notifications == up.notifications_at_probe {
+        true => ActivitySinceProbe::NotSeen,
+        false => ActivitySinceProbe::Seen,
     };
+    let due = probe_due(activity, up.last_probe.elapsed());
     match due {
         ProbeDue::Later => Link::Up(up),
         ProbeDue::Now => match run_bounded(&up.client, PROBE_SQL).await {
@@ -1121,6 +1141,43 @@ mod tests {
         assert_eq!(
             ChannelName::parse("a\0b"),
             Err(ChannelNameError::ContainsNul)
+        );
+    }
+
+    /// Python `test_broker_listener.py::TestHealthMonitor::test_steady_activity_probes_at_most_once_per_interval`:
+    /// notifications that keep arriving start at most one probe per
+    /// [`PROBE_AFTER_ACTIVITY`]; with no notification the probe waits for
+    /// [`PROBE_AFTER_SILENCE`].
+    #[test]
+    fn the_next_probe_follows_activity_or_silence() {
+        let just_under = |bound: Duration| bound - Duration::from_millis(1);
+        assert_eq!(
+            probe_due(ActivitySinceProbe::Seen, Duration::ZERO),
+            ProbeDue::Later
+        );
+        assert_eq!(
+            probe_due(ActivitySinceProbe::Seen, just_under(PROBE_AFTER_ACTIVITY)),
+            ProbeDue::Later
+        );
+        assert_eq!(
+            probe_due(ActivitySinceProbe::Seen, PROBE_AFTER_ACTIVITY),
+            ProbeDue::Now
+        );
+        assert_eq!(
+            probe_due(ActivitySinceProbe::NotSeen, PROBE_AFTER_ACTIVITY),
+            ProbeDue::Later
+        );
+        assert_eq!(
+            probe_due(ActivitySinceProbe::NotSeen, just_under(PROBE_AFTER_SILENCE)),
+            ProbeDue::Later
+        );
+        assert_eq!(
+            probe_due(ActivitySinceProbe::NotSeen, PROBE_AFTER_SILENCE),
+            ProbeDue::Now
+        );
+        assert_eq!(
+            probe_due(ActivitySinceProbe::Seen, PROBE_AFTER_SILENCE),
+            ProbeDue::Now
         );
     }
 
