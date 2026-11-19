@@ -1,5 +1,5 @@
 # app/core/models/app.py
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 from pydantic import BaseModel, model_validator, Field, ConfigDict
 from horsies._catalog.worker_manifest import (
     CLAIM_COUNT_MAX,
@@ -108,7 +108,11 @@ def worker_bound_errors(
 
 
 class AppConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+        extra='forbid',
+    )
 
     queue_mode: QueueMode = QueueMode.DEFAULT
     custom_queues: Optional[List[CustomQueueConfig]] = None
