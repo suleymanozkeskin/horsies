@@ -31,17 +31,18 @@ use crate::db::{ParameterType, TypedStatement};
 /// execution, retention class key, retain rerun input, max retries, good
 /// until, sent at, start kind, start time, start delay in seconds,
 /// fingerprint version, fingerprint, key kind, key digest, key scope
-/// version, key window in microseconds, send kind. The delay is cast to
+/// version, key window in microseconds, send kind, trace kind, trace
+/// carrier text, trace id (`StoredTrace::columns`). The delay is cast to
 /// `integer` by the server, as Python's statement does, so a value outside
 /// the integer range is the server's refusal. The window is made into the
 /// exact `interval` (`$21::bigint * interval '1 microsecond'`); NULL for an
-/// unkeyed send. The trace is `NO_CARRIER`: the send stores no carrier.
+/// unkeyed send.
 pub(crate) static ENQUEUE_TASK: TypedStatement = TypedStatement::new(
     "enqueue_task",
     "SELECT outcome, task_id FROM horsies_enqueue_task(\
      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::integer, $16, $17, \
      'FIRST_RUN', NULL, NULL, $18, $19, $20, $21::bigint * interval '1 microsecond', $22, \
-     'NO_CARRIER', NULL, NULL)",
+     $23, $24, $25)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,
@@ -65,6 +66,9 @@ pub(crate) static ENQUEUE_TASK: TypedStatement = TypedStatement::new(
         ParameterType::Int2,
         ParameterType::Int8,
         ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Bytea,
     ],
 );
 

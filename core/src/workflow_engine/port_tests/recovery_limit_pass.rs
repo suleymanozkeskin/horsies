@@ -1149,6 +1149,9 @@ async fn count_rows_go_with_their_workflow_and_with_a_cascaded_child() {
             terminal_record_retention_hours: Some(24),
             ..RetentionConfig::default()
         },
+        &mut crate::worker::recovery::failure_log::RecoveryFailures::new(
+            crate::telemetry::registry::OptionalCounter::NotRecorded,
+        ),
     )
     .await;
 

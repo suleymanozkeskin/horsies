@@ -1,0 +1,23 @@
+{
+  "form": "trace carrier",
+  "vectors": [
+    {"name": "w3c_traceparent", "carrier": {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "text": "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"},
+    {"name": "w3c_traceparent_and_tracestate", "carrier": {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", "tracestate": "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "text": "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\",\"tracestate\":\"rojo=00f067aa0ba902b7,congo=t61rcWkgMzE\"}"},
+    {"name": "w3c_tracestate_with_a_space", "carrier": {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", "tracestate": "rojo=00f067aa0ba902b7, congo=t61rcWkgMzE"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "text": "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\",\"tracestate\":\"rojo=00f067aa0ba902b7, congo=t61rcWkgMzE\"}"},
+    {"name": "w3c_with_baggage", "carrier": {"baggage": "userId=alice,serverNode=DF%2028", "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "text": "{\"baggage\":\"userId=alice,serverNode=DF%2028\",\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"},
+    {"name": "b3_multi_header", "carrier": {"x-b3-traceid": "80f198ee56343ba864fe8b2a57d3eff7", "x-b3-spanid": "e457b5a2e4d86bd1", "x-b3-sampled": "1"}, "trace_id": "80f198ee56343ba864fe8b2a57d3eff7", "text": "{\"x-b3-sampled\":\"1\",\"x-b3-spanid\":\"e457b5a2e4d86bd1\",\"x-b3-traceid\":\"80f198ee56343ba864fe8b2a57d3eff7\"}"},
+    {"name": "xray_mixed_case_key", "carrier": {"X-Amzn-Trace-Id": "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1"}, "trace_id": "5759e988bd862e3fe1be46a994272793", "text": "{\"X-Amzn-Trace-Id\":\"Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1\"}"},
+    {"name": "keys_in_byte_order", "carrier": {"b": "2", "B": "1", "a": "3"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "text": "{\"B\":\"1\",\"a\":\"3\",\"b\":\"2\"}"},
+    {"name": "quote_and_backslash_escaped", "carrier": {"x-test": "a\"b\\c d/e"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "text": "{\"x-test\":\"a\\\"b\\\\c d/e\"}"},
+    {"name": "empty_value", "carrier": {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", "tracestate": ""}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "text": "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\",\"tracestate\":\"\"}"}
+  ],
+  "refused": [
+    {"name": "key_with_a_space", "carrier": {"trace parent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "refusal": "KeyCharacter"},
+    {"name": "empty_key", "carrier": {"": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "refusal": "KeyLength"},
+    {"name": "value_with_a_tab", "carrier": {"traceparent": "00-a\tb"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "refusal": "ValueCharacter"},
+    {"name": "value_outside_ascii", "carrier": {"baggage": "user=café"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "refusal": "ValueCharacter"},
+    {"name": "nine_keys", "carrier": {"k0": "v", "k1": "v", "k2": "v", "k3": "v", "k4": "v", "k5": "v", "k6": "v", "k7": "v", "k8": "v"}, "trace_id": "0af7651916cd43dd8448eb211c80319c", "refusal": "TooManyKeys"},
+    {"name": "trace_id_of_15_bytes", "carrier": {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}, "trace_id": "0af7651916cd43dd8448eb211c8031", "refusal": "TraceIdLength"},
+    {"name": "trace_id_all_zero", "carrier": {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}, "trace_id": "00000000000000000000000000000000", "refusal": "TraceIdAllZero"}
+  ]
+}

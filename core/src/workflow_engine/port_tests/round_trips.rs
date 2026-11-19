@@ -172,6 +172,7 @@ async fn start_on(
             &child_specs.client_spec(workflow_spec),
             workflow_id,
             chrono::Utc::now(),
+            crate::telemetry::trace_carrier::SendTrace::NoCarrier,
             false,
             child_specs,
         )
