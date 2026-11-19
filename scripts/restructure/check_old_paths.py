@@ -19,6 +19,10 @@ finds:
 - a Python path built from literals that start at such a folder
   (``ROOT / 'crates' / 'horsies-core'``);
 - the module paths ``showcase.acme`` and ``tests.dualrun``;
+- a path or a module path of the cross-client harnesses under their package
+  name before the rename to ``crossclient/`` (``tests/perf/``,
+  ``tests.parity``): a path ``tests/<rest>`` whose ``crossclient/<rest>`` is
+  tracked, in any file, and a module path ``tests.<harness module>``;
 - a path from one old crate folder to another (``../horsies-core``);
 - a name built from an old path (``crates_horsies_agents_skills``).
 
@@ -29,6 +33,9 @@ a ``tests/`` folder of its own.
 Before the scan, the check runs its patterns on planted lines with known
 answers, so that a pattern that matches nothing fails the check instead of
 passing it.
+
+The files of ``HARNESS_KEPT_FILES`` and the lines of ``HARNESS_KEPT_LINES``
+keep their old harness paths, as those of ``move_rules`` keep theirs.
 
 It reads files under <checkout> and runs ``git ls-files``; it writes
 nothing. Exit codes: 0 no finding, 1 a finding or a failed self-test, 2
@@ -41,7 +48,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Final
 
 import move_rules as rules
@@ -89,6 +96,38 @@ OLD_DERIVED_NAME: Final = re.compile(
 
 OLD_MODULE: Final = re.compile(r'(?<![A-Za-z0-9_.])(?:showcase\.acme|tests\.dualrun)\b')
 
+HARNESS_PACKAGE: Final = 'crossclient'
+"""The top-level package of the cross-client harnesses. After the
+restructure they were the top-level package ``tests``, a second package
+with the name of the Python client's ``tests``."""
+
+OLD_HARNESS_PACKAGE: Final = 'tests'
+
+OLD_HARNESS_MODULE: Final = re.compile(
+    r'(?<![A-Za-z0-9_.])tests\.(?:parity|perf|stored_form_vectors|test_stored_form_\w+)\b',
+)
+"""A module path of a harness under the old package name: ``tests.perf``,
+``tests.parity.snapshot``. ``tests.sqlalchemy_url`` and
+``tests.session_database`` are modules of the Python client's ``tests``."""
+
+HARNESS_KEPT_FILES: Final = (
+    rules.KeptFile(
+        'crossclient/perf/releases/**',
+        'patches and steps for the v0.7.0 checkout, where the harnesses are '
+        'the package tests',
+    ),
+)
+"""Files that keep the old harness paths, besides ``move_rules.KEPT_FILES``."""
+
+HARNESS_KEPT_LINES: Final = (
+    rules.KeptLine(
+        'crossclient/perf/test_perf_release_patches.py',
+        "RELEASED_HARNESS_FOLDER: Final = 'tests/perf/'",
+        'the folder of the perf harness in the v0.7.0 checkout',
+    ),
+)
+"""Lines that keep an old harness path, besides ``move_rules.KEPT_LINES``."""
+
 ROOTED_PATH: Final = re.compile(
     r'(?:\$WORKSPACE/|(?<![A-Za-z0-9_./-])\./)'
     r'(?P<path>[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.*-]*)+)',
@@ -127,6 +166,12 @@ def old_path_cited(cited: str, citing_file: str, tree: rules.Tree) -> bool:
     for base in (rules.dirname(citing_file), tree.package_root_of(citing_file)):
         if base and tree.holds(rules.join(base, clean)):
             return False
+    if (
+        len(parts) > 1
+        and parts[0] == OLD_HARNESS_PACKAGE
+        and tree.holds(rules.join(HARNESS_PACKAGE, *parts[1:]))
+    ):
+        return True
     if parts[0] in rules.OLD_FOLDERS_GONE:
         return (len(parts) == 1 and parts[0] in BARE_FOLDERS_FLAGGED) or rules.move_of(
             clean
@@ -167,9 +212,26 @@ def findings_in_line(line: str, citing_file: str, tree: rules.Tree) -> list[str]
         if NEW_CHAIN_HEAD.search(line[: match.start()]) is None
     ]
     found += [match.group(0) for match in OLD_MODULE.finditer(line)]
+    found += [match.group(0) for match in OLD_HARNESS_MODULE.finditer(line)]
     found += [match.group(0) for match in OLD_SIBLING.finditer(line)]
     found += [match.group(0) for match in OLD_DERIVED_NAME.finditer(line)]
     return found
+
+
+def harness_kept_file_rule(path: str) -> rules.KeptFile | None:
+    """The rule of ``HARNESS_KEPT_FILES`` that keeps ``path``, if one does."""
+    for rule in HARNESS_KEPT_FILES:
+        if PurePosixPath(path).full_match(rule.pattern):
+            return rule
+    return None
+
+
+def harness_kept_line_rule(path: str, line: str) -> rules.KeptLine | None:
+    """The rule of ``HARNESS_KEPT_LINES`` that keeps ``line`` of ``path``, if one does."""
+    for rule in HARNESS_KEPT_LINES:
+        if rule.path == path and rule.text in line:
+            return rule
+    return None
 
 
 def findings_in_file(repo: Path, path: str, tree: rules.Tree) -> list[Finding]:
@@ -179,6 +241,7 @@ def findings_in_file(repo: Path, path: str, tree: rules.Tree) -> list[Finding]:
     if (
         rules.is_under(path, rules.TOOL_FOLDER)
         or rules.kept_file_rule(path) is not None
+        or harness_kept_file_rule(path) is not None
     ):
         return []
     if file.is_symlink() or not file.is_file():
@@ -189,7 +252,10 @@ def findings_in_file(repo: Path, path: str, tree: rules.Tree) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for number, line in enumerate(text.splitlines(), start=1):
-        if rules.kept_line_rule(path, line) is not None:
+        if (
+            rules.kept_line_rule(path, line) is not None
+            or harness_kept_line_rule(path, line) is not None
+        ):
             continue
         for cited in findings_in_line(line, path, tree):
             findings.append(
@@ -233,13 +299,19 @@ PLANTED_TREE: Final = rules.Tree.of(
         'core/src/lib.rs',
         'core/derive/Cargo.toml',
         'core/derive/src/lib.rs',
-        'tests/perf/test_perf_statistics.py',
+        'crossclient/__init__.py',
+        'crossclient/perf/test_perf_statistics.py',
+        'crossclient/perf/releases/v0.7.0/harness.patch',
         'core/tests/fixtures/stored_forms/README.md',
         'clients/python/pyproject.toml',
+        'clients/python/tests/__init__.py',
+        'clients/python/tests/sqlalchemy_url.py',
         'clients/python/tests/unit/test_a.py',
         'clients/python/horsies/__init__.py',
-        'tests/parity/runner.py',
-        'tests/parity/snapshot/capture.py',
+        'clients/rust/tests/parity/Cargo.toml',
+        'clients/rust/tests/parity/src/lib.rs',
+        'crossclient/parity/runner.py',
+        'crossclient/parity/snapshot/capture.py',
         'website/src/content/docs/rust/tasks.md',
         'website/src/content/docs/index.md',
     ),
@@ -254,7 +326,8 @@ PLANTED: Final = (
     ('README.md', 'horsies-core-derive = { path = "../horsies-core-derive" }', True),
     ('README.md', 'horsies-core-derive = { path = "derive" }', False),
     ('README.md', 'tests/unit/test_perf_statistics.py', True),
-    ('README.md', 'tests/perf/test_perf_statistics.py', False),
+    ('README.md', 'tests/perf/test_perf_statistics.py', True),
+    ('README.md', 'crossclient/perf/test_perf_statistics.py', False),
     ('README.md', '`python/horsies/core/cli.py`', True),
     ('README.md', 'rust/tests/worker/src/main.rs', True),
     ('README.md', 'uv run horsies check showcase/acme/app.py', True),
@@ -276,16 +349,32 @@ PLANTED: Final = (
     ('README.md', '"clients_rust_horsies_agents_skills_horsies_skill__line88"', False),
     ('README.md', 'horsies = { path = "../horsies" }', False),
     ('README.md', 'core/src/lib.rs and clients/python/horsies/__init__.py', False),
-    ('README.md', 'tests/parity/runner.py', False),
+    ('README.md', 'tests/parity/runner.py', True),
+    ('README.md', 'crossclient/parity/runner.py', False),
     ('README.md', 'tests/dualrun/capture.py', True),
     ('README.md', '  --> $WORKSPACE/crates/horsies/src/workflow/node.rs', True),
     ('README.md', '  --> $WORKSPACE/core/src/lib.rs', False),
     ('README.md', 'Usage: ./rust/scripts/coverage.sh [summary]', True),
     ('README.md', 'Usage: ./core/src/lib.rs', False),
     ('clients/python/tests/unit/test_a.py', 'tests/dualrun/capture.py', True),
-    ('README.md', 'tests/parity/snapshot/capture.py', False),
+    ('README.md', 'tests/parity/snapshot/capture.py', True),
+    ('README.md', 'crossclient/parity/snapshot/capture.py', False),
     ('README.md', 'from tests.dualrun.capture import capture_snapshot', True),
-    ('README.md', 'from tests.parity.snapshot.capture import capture_snapshot', False),
+    ('README.md', 'from tests.parity.snapshot.capture import capture_snapshot', True),
+    ('README.md', 'from crossclient.parity.snapshot.capture import capture_snapshot', False),
+    ('README.md', 'from tests.sqlalchemy_url import sqlalchemy_url', False),
+    ('README.md', 'uv run python -m tests.perf --apply-schema', True),
+    ('README.md', 'uv run python -m crossclient.perf --apply-schema', False),
+    ('README.md', "PYTHON_APP_LOCATOR: Final = 'tests.parity.app:app'", True),
+    ('README.md', "definition_key='tests.parity.snapshot.whole_run.chain.v1'", True),
+    ('README.md', 'from tests.stored_form_vectors import load_form', True),
+    ('README.md', 'tests/__init__.py', True),
+    ('clients/python/tests/unit/test_a.py', 'tests/__init__.py', False),
+    ('clients/python/tests/unit/test_a.py', "'tests/perf/releases/**'", True),
+    ('clients/rust/tests/parity/src/lib.rs', '(`tests/parity/runner.py`)', True),
+    ('README.md', 'clients/rust/tests/parity/src/lib.rs', False),
+    ('README.md', 'tests/perf/releases/v0.7.0/harness.patch', True),
+    ('README.md', 'crossclient/perf/releases/v0.7.0/harness.patch', False),
     ('README.md', 'horsies = { features = ["horsies/web"] }', False),
     ('README.md', 'https://example.com/python/horsies/core', False),
     ('core/src/lib.rs', 'tests/fixtures/stored_forms/README.md', False),
