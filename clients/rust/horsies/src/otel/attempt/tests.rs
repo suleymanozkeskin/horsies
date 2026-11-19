@@ -376,13 +376,3 @@ fn an_attempt_span_with_no_layer_logs_once_that_it_has_no_parent() {
 fn a_worker_child_runs_its_bodies_in_attempt_spans() {
     assert!(matches!(body_scope(), BodyScope::Spans(_)));
 }
-
-/// The directive that `horsies::cli::run` adds parses, and names the
-/// target of the attempt span.
-#[cfg(feature = "cli")]
-#[test]
-fn the_attempt_span_directive_names_its_target() {
-    let directive = attempt_span_directive();
-    assert_eq!(directive.to_string(), ATTEMPT_SPAN_DIRECTIVE);
-    assert!(ATTEMPT_SPAN_DIRECTIVE.starts_with(ATTEMPT_SPAN_TARGET));
-}

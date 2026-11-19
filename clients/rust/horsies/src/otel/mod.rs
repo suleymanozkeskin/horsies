@@ -57,10 +57,8 @@ mod carrier;
 mod send;
 mod tracer;
 
-#[cfg(feature = "cli")]
-pub(crate) use attempt::attempt_span_directive;
+pub use crate::telemetry::ATTEMPT_SPAN_TARGET;
 pub(crate) use attempt::body_scope;
-pub use attempt::ATTEMPT_SPAN_TARGET;
 pub(crate) use send::{TaskSendSpan, WorkflowStartSpan};
 pub use tracer::layer;
 

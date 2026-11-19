@@ -1546,7 +1546,12 @@ unless it starts with "Added".
   the `tracing-opentelemetry` layer on the global tracer provider;
   `horsies::cli::run` adds it to its subscriber, and a binary that installs
   its own subscriber adds it there. Without the feature no OpenTelemetry
-  crate is compiled.
+  crate is compiled, and each task body still runs inside the same
+  `tracing` span `run` (target `horsies::attempt`,
+  `horsies::ATTEMPT_SPAN_TARGET`) with `horsies.task.id`,
+  `horsies.task.name` and `horsies.task.attempt`, so the log records of the
+  body carry them; `horsies::cli::run` keeps that span at every
+  `--loglevel` in both builds.
 - **Added: `cli::run_with_log_format(app, LogFormat::Json)`**: the runner
   and each worker child write one JSON object per log record, with the
   event's fields at the top level and the record's spans with their

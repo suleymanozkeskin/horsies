@@ -28,16 +28,7 @@ use super::{
     ERROR_TYPE_KEY, MESSAGING_DESTINATION_NAME_KEY, MESSAGING_MESSAGE_ID_KEY,
     MESSAGING_OPERATION_TYPE_KEY, MESSAGING_SYSTEM, MESSAGING_SYSTEM_KEY, WORKFLOW_ID_KEY,
 };
-
-/// The `tracing` target of the attempt span of each task body. A filter of
-/// the binary's subscriber passes it at `INFO` so that every attempt has its
-/// span; `horsies::cli::run` adds that directive itself.
-pub const ATTEMPT_SPAN_TARGET: &str = "horsies::attempt";
-
-/// The directive of the filter of `horsies::cli::run` that keeps the
-/// attempt span at every log level.
-#[cfg(feature = "cli")]
-const ATTEMPT_SPAN_DIRECTIVE: &str = "horsies::attempt=info";
+use crate::telemetry::{body_span, ATTEMPT_SPAN_TARGET};
 
 /// `messaging.operation.type` of an attempt.
 const PROCESS_OPERATION: &str = "process";
@@ -52,18 +43,6 @@ const WORKFLOW_ROOT_ID_KEY: &str = "horsies.workflow.root_id";
 /// attempt span.
 pub(crate) fn body_scope() -> BodyScope {
     BodyScope::Spans(Arc::new(AttemptSpans))
-}
-
-/// The filter directive that keeps the attempt span at every log level.
-///
-/// # Panics
-///
-/// Never: the directive is a fixed text that a test parses.
-#[cfg(feature = "cli")]
-pub(crate) fn attempt_span_directive() -> tracing_subscriber::filter::Directive {
-    ATTEMPT_SPAN_DIRECTIVE
-        .parse()
-        .expect("the attempt span directive is a valid filter directive")
 }
 
 /// The attempt spans of a worker child, with the global propagator.
@@ -82,22 +61,17 @@ impl BodySpans for AttemptSpans {
     }
 }
 
-/// The attempt span of `run`, named `run <task_name>`, of kind CONSUMER,
-/// with the parent `parent` (see the module docs). A span that no layer of
+/// The attempt span of `run`: the span of its body ([`body_span`], the
+/// same span that a client without `otel` enters), named `run <task_name>`,
+/// of kind CONSUMER, with the parent `parent` (see the module docs) and the
+/// attributes of the attempt. A span that no layer of
 /// `tracing-opentelemetry` 0.34 records keeps no parent: it reaches no
 /// OpenTelemetry span.
 pub(super) fn attempt_span(run: &BodyRun<'_>, parent: AttemptParent) -> tracing::Span {
+    let span = body_span(run);
     let name = format!("run {}", run.task_name);
-    let span = tracing::info_span!(
-        target: ATTEMPT_SPAN_TARGET,
-        parent: None,
-        "run",
-        otel.name = name.as_str(),
-        otel.kind = "consumer",
-        horsies.task.id = %run.task_id,
-        horsies.task.name = run.task_name,
-        horsies.task.attempt = run.attempt.get(),
-    );
+    let _name = span.record("otel.name", name.as_str());
+    let _kind = span.record("otel.kind", "consumer");
     span.set_attribute(EXECUTION_KEY, run.execution.as_str());
     span.set_attribute(WORKER_ID_KEY, run.worker_id.to_owned());
     span.set_attribute(LabelName::Queue.attribute_key(), run.queue_name.to_owned());

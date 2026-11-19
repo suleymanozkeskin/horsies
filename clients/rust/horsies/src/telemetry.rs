@@ -1,16 +1,22 @@
 //! The telemetry of the client's task sends, workflow starts and task
 //! bodies.
 //!
-//! - With the feature `otel`, the spans and the producer metrics go to the
-//!   user's global OpenTelemetry providers (`horsies::otel`).
-//! - Without it, the client makes no span and records no metric: a send and
-//!   a start carry no trace carrier, a worker child runs its task bodies
-//!   with no span (`BodyScope::NoScope`), and no
-//!   OpenTelemetry crate is compiled.
+//! - In both builds a worker child runs each task body inside one `tracing`
+//!   span ([`body_span`], target [`ATTEMPT_SPAN_TARGET`]) with the fields
+//!   `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so
+//!   each log record of the body carries them.
+//! - With the feature `otel`, that span is the attempt span: it gets its
+//!   OpenTelemetry parent and attributes, and the send spans and the
+//!   producer metrics go to the user's global OpenTelemetry providers
+//!   (`horsies::otel`).
+//! - Without it, the client records no OpenTelemetry span and no metric: a
+//!   send and a start carry no trace carrier, and no OpenTelemetry crate is
+//!   compiled.
 //!
 //! The send paths call the same three items in both builds: `TaskSendSpan`,
 //! `WorkflowStartSpan` and `body_scope`.
 
+use horsies_core::BodyRun;
 use uuid::Uuid;
 
 #[cfg(feature = "otel")]
@@ -18,6 +24,49 @@ pub(crate) use crate::otel::{body_scope, TaskSendSpan, WorkflowStartSpan};
 
 #[cfg(not(feature = "otel"))]
 pub(crate) use untraced::{body_scope, TaskSendSpan, WorkflowStartSpan};
+
+/// The `tracing` target of the span of each task body. A filter of the
+/// binary's subscriber passes it at `INFO` so that every body has its span
+/// and its records carry the task's fields; `horsies::cli::run` adds that
+/// directive itself.
+pub const ATTEMPT_SPAN_TARGET: &str = "horsies::attempt";
+
+/// The directive of the filter of `horsies::cli::run` that keeps the span
+/// of each task body at every log level.
+#[cfg(feature = "cli")]
+const ATTEMPT_SPAN_DIRECTIVE: &str = "horsies::attempt=info";
+
+/// The filter directive that keeps the span of each task body at every log
+/// level.
+///
+/// # Panics
+///
+/// Never: the directive is a fixed text that a test parses.
+#[cfg(feature = "cli")]
+pub(crate) fn attempt_span_directive() -> tracing_subscriber::filter::Directive {
+    ATTEMPT_SPAN_DIRECTIVE
+        .parse()
+        .expect("the attempt span directive is a valid filter directive")
+}
+
+/// The span of the task body of `run`: target [`ATTEMPT_SPAN_TARGET`], level
+/// `INFO`, name `run`, no `tracing` parent. Its fields `horsies.task.id`,
+/// `horsies.task.name` and `horsies.task.attempt` are set, so each log
+/// record of the body carries them. Its fields `otel.name` and `otel.kind`
+/// stay empty unless the OpenTelemetry scope records them; an empty field
+/// is not written in a record.
+pub(crate) fn body_span(run: &BodyRun<'_>) -> tracing::Span {
+    tracing::info_span!(
+        target: ATTEMPT_SPAN_TARGET,
+        parent: None,
+        "run",
+        otel.name = tracing::field::Empty,
+        otel.kind = tracing::field::Empty,
+        horsies.task.id = %run.task_id,
+        horsies.task.name = run.task_name,
+        horsies.task.attempt = run.attempt.get(),
+    )
+}
 
 /// The facts of one task send that its span carries.
 #[derive(Debug, Clone, Copy)]
@@ -42,13 +91,18 @@ pub(crate) enum CallEnd<C> {
     Failed(C),
 }
 
-/// The telemetry of a client built without the feature `otel`: nothing.
+/// The telemetry of a client built without the feature `otel`: the span of
+/// each task body for its log records, and nothing else.
 #[cfg(not(feature = "otel"))]
 mod untraced {
-    use horsies_core::telemetry::trace_carrier::SendTrace;
-    use horsies_core::{BodyScope, TaskSendErrorCode, WorkflowStartErrorCode};
+    use std::sync::Arc;
 
-    use super::{CallEnd, TaskSendSubject, WorkflowStartSubject};
+    use horsies_core::telemetry::trace_carrier::SendTrace;
+    use horsies_core::{
+        BodyOutcome, BodyRun, BodyScope, BodySpans, TaskSendErrorCode, WorkflowStartErrorCode,
+    };
+
+    use super::{body_span, CallEnd, TaskSendSubject, WorkflowStartSubject};
 
     /// A task send with no span.
     #[derive(Debug)]
@@ -88,13 +142,27 @@ mod untraced {
         pub(crate) fn end(self, _end: CallEnd<WorkflowStartErrorCode>) {}
     }
 
-    /// A worker child runs its task bodies with no span.
+    /// A worker child runs each task body inside its [`body_span`].
     pub(crate) fn body_scope() -> BodyScope {
-        BodyScope::NoScope
+        BodyScope::Spans(Arc::new(BodyLogSpans))
+    }
+
+    /// The spans of the task bodies of a child built without `otel`: the
+    /// plain span of each body, for its log records. How the body ended
+    /// is not recorded.
+    struct BodyLogSpans;
+
+    impl BodySpans for BodyLogSpans {
+        fn open(&self, run: &BodyRun<'_>) -> tracing::Span {
+            body_span(run)
+        }
+
+        fn close(&self, _span: &tracing::Span, _end: &BodyOutcome<'_>) {}
     }
 }
 
-/// Without the feature `otel`: no span, no carrier, no body scope.
+/// Without the feature `otel`: no send span, no carrier; each body runs
+/// inside its plain span, whose fields its records carry.
 #[cfg(all(test, not(feature = "otel")))]
 mod tests {
     use horsies_core::telemetry::trace_carrier::SendTrace;
@@ -119,8 +187,94 @@ mod tests {
         start.end(CallEnd::Failed(WorkflowStartErrorCode::EnqueueFailed));
     }
 
+    /// A writer whose bytes go to one shared buffer.
+    #[cfg(feature = "cli")]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(feature = "cli")]
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Without the feature `otel` a body runs inside its plain span, and a
+    /// log record of the body carries the task id and the attempt: the
+    /// text format of a `fmt` layer writes them in the span context of the
+    /// record, and no `otel.*` field.
+    #[cfg(feature = "cli")]
     #[test]
-    fn without_the_otel_feature_a_child_runs_its_bodies_with_no_span() {
-        assert!(matches!(body_scope(), BodyScope::NoScope));
+    fn without_the_otel_feature_a_record_of_the_body_carries_the_task_and_the_attempt() {
+        use std::sync::{Arc, Mutex, PoisonError};
+
+        use horsies_core::{BodyCarrier, BodySpans, Execution, RunWorkflow};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let BodyScope::Spans(spans) = body_scope() else {
+            panic!("a worker child runs its bodies inside a span");
+        };
+        let task_id = Uuid::new_v4();
+        let carrier = BodyCarrier::NoCarrier;
+        let run = BodyRun {
+            task_id,
+            task_name: "app.tasks.charge",
+            queue_name: "payments",
+            attempt: horsies_core::events::AttemptNumber::try_from(3).unwrap(),
+            worker_id: "worker-7",
+            execution: Execution::Isolated,
+            workflow: RunWorkflow::NotInWorkflow,
+            carrier: &carrier,
+        };
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer_buffer = Arc::clone(&buffer);
+        let layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || Captured(Arc::clone(&writer_buffer)));
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            let span = spans.open(&run);
+            span.in_scope(|| tracing::warn!("the card was declined"));
+            spans.close(&span, &horsies_core::BodyOutcome::Returned);
+        });
+        let text = String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let [line] = lines.as_slice() else {
+            panic!("one line per record, not {lines:?}");
+        };
+        assert!(line.contains("the card was declined"), "{line}");
+        assert!(
+            line.contains(&format!("horsies.task.id={task_id}")),
+            "{line}"
+        );
+        assert!(line.contains("horsies.task.attempt=3"), "{line}");
+        assert!(!line.contains("otel."), "{line}");
+    }
+}
+
+/// The filter directive of the runner, in both builds.
+#[cfg(all(test, feature = "cli"))]
+mod directive_tests {
+    use super::*;
+
+    /// The directive that `horsies::cli::run` adds parses, and names the
+    /// target of the span of each body.
+    #[test]
+    fn the_attempt_span_directive_names_its_target() {
+        let directive = attempt_span_directive();
+        assert_eq!(directive.to_string(), ATTEMPT_SPAN_DIRECTIVE);
+        assert!(ATTEMPT_SPAN_DIRECTIVE.starts_with(ATTEMPT_SPAN_TARGET));
     }
 }

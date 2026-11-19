@@ -68,6 +68,7 @@ pub use crate::reads::*;
 pub use crate::scheduler::*;
 pub use crate::send::*;
 pub use crate::task::*;
+pub use crate::telemetry::ATTEMPT_SPAN_TARGET;
 pub use crate::worker::*;
 pub use crate::workflow::*;
 

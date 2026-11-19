@@ -52,19 +52,11 @@ fn install(level: &'static str, format: LogFormat) {
 }
 
 /// The filter of the runner from `filter` (`RUST_LOG` when it is set and
-/// reads, else the level of the command), with the attempt span of each
-/// task body passed at every level: every attempt has its span, and its
-/// records carry the task's fields. Pure.
-#[cfg(feature = "otel")]
+/// reads, else the level of the command), with the span of each task body
+/// passed at every level: every body has its span, and its records carry
+/// the task's fields, with or without the feature `otel`. Pure.
 fn runner_filter(filter: EnvFilter) -> EnvFilter {
-    filter.add_directive(crate::otel::attempt_span_directive())
-}
-
-/// The filter of the runner: `filter` (`RUST_LOG` when it is set and reads,
-/// else the level of the command). Pure.
-#[cfg(not(feature = "otel"))]
-fn runner_filter(filter: EnvFilter) -> EnvFilter {
-    filter
+    filter.add_directive(crate::telemetry::attempt_span_directive())
 }
 
 /// The layer that writes each record to `writer` in `format`:
@@ -216,15 +208,14 @@ mod tests {
         assert_eq!(spans[1]["name"], "charge_card");
     }
 
-    /// The filter of the runner keeps its level; with the feature `otel` it
-    /// also passes the attempt span.
+    /// The filter of the runner keeps its level and passes the span of each
+    /// task body.
     #[test]
     fn the_filter_of_the_runner_keeps_its_level() {
         let filter = runner_filter(EnvFilter::new("warn")).to_string();
         assert!(filter.contains("warn"), "{filter}");
-        #[cfg(feature = "otel")]
         assert!(
-            filter.contains(&crate::otel::attempt_span_directive().to_string()),
+            filter.contains(&crate::telemetry::attempt_span_directive().to_string()),
             "{filter}"
         );
     }
