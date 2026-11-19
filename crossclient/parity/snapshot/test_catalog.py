@@ -110,10 +110,10 @@ def test_baseline_catalog_has_no_shape_defects() -> None:
     assert catalog_defects(BASELINE_CATALOG) == ()
 
 
-def test_baseline_catalog_has_a_rule_for_each_of_260_columns_in_21_tables() -> None:
-    # 258 table columns of migration 1000, plus tableoid of the two partitioned parents.
+def test_baseline_catalog_has_a_rule_for_each_of_265_columns_in_21_tables() -> None:
+    # 263 table columns of migration 1000, plus tableoid of the two partitioned parents.
     assert len(BASELINE_CATALOG.tables) == 21
-    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 260
+    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 265
 
 
 def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
