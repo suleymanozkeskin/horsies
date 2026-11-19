@@ -537,6 +537,24 @@ impl<L: LabelSet> Counter<L> {
     }
 }
 
+/// The counter of a metric in a process that records metrics, or no
+/// counter in a process that records none.
+pub enum OptionalCounter<L> {
+    /// The process records no metric.
+    NotRecorded,
+    /// The counter of the process's registry.
+    Recording(Counter<L>),
+}
+
+impl<L> Clone for OptionalCounter<L> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::NotRecorded => Self::NotRecorded,
+            Self::Recording(counter) => Self::Recording(counter.clone()),
+        }
+    }
+}
+
 /// A gauge of one metric.
 pub struct Gauge<L> {
     family: Arc<Family<GaugeCell>>,
