@@ -94,7 +94,9 @@
     "tests/unit/test_public_api_compare.py",
     "tests/unit/test_public_api_pyright_view.py",
     "tests/unit/test_public_api_runner.py",
-    "tests/unit/test_public_api_snapshot.py"
+    "tests/unit/test_public_api_snapshot.py",
+    "horsies/_catalog/events.py",
+    "tests/unit/test_generated_events.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error",
   "executionEnvironments": [
