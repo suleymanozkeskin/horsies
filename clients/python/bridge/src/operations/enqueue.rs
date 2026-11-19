@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     BrokerError, BrokerOperationError, CheckedSend, EnqueueRefusal, EnqueueRetention, SendKind,
 };
@@ -23,7 +24,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use uuid::Uuid;
 
-use super::arguments::{utc_instant, RerunInputPolicy, StartArgument, StartRule};
+use super::arguments::{utc_instant, RerunInputPolicy, StartArgument, StartRule, TraceArgument};
 use crate::handle::BrokerConnection;
 use crate::records::{BrokerFailure, Outcome};
 
@@ -43,6 +44,7 @@ pub struct EnqueueCommand {
     retention_class_key: String,
     rerun_input: RerunInputPolicy,
     send_kind: SendKind,
+    trace: SendTrace,
 }
 
 /// A frozen send request. `None` for `good_until`, `task_options_json` or
@@ -50,7 +52,8 @@ pub struct EnqueueCommand {
 /// `retention_class_key` is the stored class key (`forever`, or
 /// `standard_<days>d`); the core checks it at the send. `send_kind` is
 /// `FIRST` for the first send of the task id and `REPEAT` for a send retry;
-/// another text raises `ValueError`.
+/// another text raises `ValueError`. `trace` is `NoTraceCarrier` or the
+/// `TraceCarrier` of the send's span.
 #[pyclass(module = "horsies._core", frozen)]
 pub struct EnqueueRequest {
     command: Arc<EnqueueCommand>,
@@ -79,7 +82,8 @@ impl EnqueueRequest {
         idempotency_key,
         retention_class_key,
         rerun_input,
-        send_kind
+        send_kind,
+        trace
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -96,6 +100,7 @@ impl EnqueueRequest {
         retention_class_key: String,
         rerun_input: &str,
         send_kind: &str,
+        trace: TraceArgument<'_>,
     ) -> PyResult<Self> {
         let good_until = match good_until {
             Some(instant) => Some(utc_instant(&instant)?),
@@ -115,6 +120,7 @@ impl EnqueueRequest {
             retention_class_key,
             rerun_input: RerunInputPolicy::parse(rerun_input)?,
             send_kind: send_kind_of(send_kind).map_err(PyValueError::new_err)?,
+            trace: trace.send_trace(),
         };
         Ok(Self {
             command: Arc::new(command),
@@ -159,7 +165,9 @@ pub type SendOutcome = Outcome<Enqueued>;
 /// install (`core/brokers/postgres.py` of the `v0.7.0` package): a refused send
 /// answers `INVALID_INPUT` or `INVALID_TASK_OPTIONS` with no connect and no
 /// statement. Then the schema is installed once per handle; a failed connect
-/// or install is `ENQUEUE_FAILED`, as Python's enqueue reports it. Writes; a
+/// or install is `ENQUEUE_FAILED`, as Python's enqueue reports it. The send
+/// carries the request's trace (`CheckedSend::with_trace`): a carrier that
+/// breaks a bound is not stored and never refuses the send. Writes; a
 /// caller that leaves early sees the outcome as unknown, and a resend of the
 /// same request with the send kind `REPEAT` is safe.
 pub async fn enqueue_operation(
@@ -194,7 +202,7 @@ pub async fn enqueue_operation(
         retention,
         retain_rerun_input,
     ) {
-        Ok(send) => send,
+        Ok(send) => send.with_trace(command.trace.clone()),
         Err(error) => return refused(&command.task_name, error),
     };
     let broker = match connection.initialized_broker().await {

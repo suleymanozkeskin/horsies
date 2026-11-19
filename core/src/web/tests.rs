@@ -1030,12 +1030,12 @@ async fn worker_list_carries_the_slot_health() {
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now(), 'itest-host', 4242, 2, 0, 2,
             ARRAY['default'], '{}'::jsonb, '{\"default\": 3}'::jsonb, '{}'::jsonb,
             0, 0, now(),
-            $2, '{}'::jsonb
+            $2, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(&worker_id)
@@ -1175,12 +1175,12 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now() - interval '10 minutes', 'itest-host', 4242, 2, 0, 2,
             ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, now() - interval '1 hour',
-            '[]'::jsonb, '{}'::jsonb
+            '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(&worker_id)
@@ -1233,12 +1233,12 @@ async fn class_report_answers_with_streams_and_budgets() {
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now(), 'itest-host', 4242, 2, 0, 2,
             ARRAY[$2::text], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, now(), '[]'::jsonb,
-            '{\"SHARED_ASYNC\": {\"capacity\": 8, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb
+            '{\"SHARED_ASYNC\": {\"capacity\": 8, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(&worker_id)

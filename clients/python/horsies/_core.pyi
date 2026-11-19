@@ -460,8 +460,9 @@ class CoreChildHandle:
         """The awaitable form of the method above."""
     @staticmethod
     def from_init(init: InitFrame) -> CoreChildHandle:
-        """The child handle of the child that init boots: the database URL, the connection settings
-        and the pool of the child kind come from the frame and stay in the core. Starts nothing.
+        """The child handle of the task child that init boots: the database URL, the connection
+        settings and the pool of the child kind come from the frame and stay in the core. Starts
+        nothing. The init frame of a handler child raises ValueError: it runs no task.
         """
 
 
@@ -515,13 +516,33 @@ class StartAt:
 
 
 @final
+class NoTraceCarrier:
+    """The send carries no trace carrier: tracing is off, or the propagator wrote no key."""
+    def __init__(self) -> None: ...
+
+
+@final
+class TraceCarrier:
+    """The carrier that the client's propagator injected for the span of a send or a
+    workflow start, and the 16-byte trace id of that span. The core checks its bounds at
+    the send; a carrier that breaks a bound is not stored and never fails the send.
+    """
+    def __init__(self, carrier: dict[str, str], trace_id: bytes) -> None: ...
+    @property
+    def carrier(self) -> dict[str, str]: ...
+    @property
+    def trace_id(self) -> bytes: ...
+
+
+@final
 class EnqueueRequest:
     """One frozen send. None for good_until, task_options_json or idempotency_key
     means no deadline, no options, no key. retention_class_key is 'forever' or
     'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send
     of the task id and REPEAT for a send retry: a task that finished then answers from history.
+    trace is NoTraceCarrier or the TraceCarrier of the send's span.
     """
-    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention_class_key: str, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention_class_key: str, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT'], trace: NoTraceCarrier | TraceCarrier) -> None: ...
     @property
     def task_id(self) -> uuid.UUID: ...
 
@@ -1227,11 +1248,26 @@ class QueueStartsFailed:
 
 @final
 class AttemptStarted:
-    """The row is RUNNING (and, for a workflow task, its node RUNNING), from started_at on the database clock. The start writes no runner beat."""
+    """The row is RUNNING (and, for a workflow task, its node RUNNING), from started_at on the database clock. The start writes no runner beat. workflow is the node that links the task."""
     @property
     def task_id(self) -> uuid.UUID: ...
     @property
     def started_at(self) -> datetime.datetime: ...
+    @property
+    def workflow(self) -> RunWorkflowNode | Literal['NOT_IN_WORKFLOW']: ...
+
+
+@final
+class RunWorkflowNode:
+    """The workflow node that links a started task: the node at node_index of the workflow
+    workflow_id, in the tree whose top-level workflow is root_workflow_id.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_index(self) -> int: ...
+    @property
+    def root_workflow_id(self) -> uuid.UUID: ...
 
 
 @final
@@ -2117,9 +2153,10 @@ class ChildSpecRefused:
 class WorkflowStartRequest:
     """One frozen workflow start. spec_json is the workflow spec data of the spec; spec data
     that the core refuses raises ValueError with the field path. A naive sent_at raises
-    TypeError.
+    TypeError. trace is NoTraceCarrier or the TraceCarrier of the start's span; every row of
+    the tree stores it.
     """
-    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool) -> None: ...
+    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final
@@ -2693,6 +2730,15 @@ class SharedThreadChildKind:
 
 
 @final
+class HandlerChildKind:
+    """A handler child: it runs the event handlers of the app and no task. A handler may
+    send tasks, through a pool of task_send_pool connections.
+    """
+    @property
+    def task_send_pool(self) -> int: ...
+
+
+@final
 class InitFrame:
     """The first frame to a child or to the preload process. The database URL and the
     connection settings stay in the core.
@@ -2704,7 +2750,7 @@ class InitFrame:
     @property
     def process_name(self) -> str: ...
     @property
-    def child_kind(self) -> IsolatedChildKind | SharedAsyncChildKind | SharedThreadChildKind: ...
+    def child_kind(self) -> IsolatedChildKind | SharedAsyncChildKind | SharedThreadChildKind | HandlerChildKind: ...
 
 
 @final
@@ -2719,12 +2765,25 @@ class StoredOptionsRefused:
 
 
 @final
+class StoredTraceCarrier:
+    """The trace carrier that the send stored on the task row: the keys and the values that
+    the propagator of the sender wrote. The child extracts it with the app's propagator.
+    """
+    @property
+    def carrier(self) -> dict[str, str]: ...
+
+
+@final
 class RunFrame:
     """Run one task in an isolated child. The parent holds the deadline."""
     @property
     def task_id(self) -> uuid.UUID: ...
     @property
     def task_name(self) -> str: ...
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def attempt(self) -> int: ...
     @property
     def worker_id(self) -> str: ...
     @property
@@ -2733,6 +2792,8 @@ class RunFrame:
     def orphan_self_heal(self) -> bool: ...
     @property
     def work(self) -> Literal['RUN'] | StoredOptionsRefused: ...
+    @property
+    def trace(self) -> StoredTraceCarrier | Literal['NO_CARRIER']: ...
     @property
     def input(self) -> str: ...
 
@@ -2763,6 +2824,10 @@ class SharedRunFrame:
     @property
     def task_name(self) -> str: ...
     @property
+    def queue_name(self) -> str: ...
+    @property
+    def attempt(self) -> int: ...
+    @property
     def worker_id(self) -> str: ...
     @property
     def claimed_at(self) -> datetime.datetime: ...
@@ -2771,7 +2836,18 @@ class SharedRunFrame:
     @property
     def work(self) -> AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused: ...
     @property
+    def trace(self) -> StoredTraceCarrier | Literal['NO_CARRIER']: ...
+    @property
     def input(self) -> str: ...
+
+
+@final
+class EventsFrame:
+    """Lifecycle events for a handler child, in the order that the core emitted them; events
+    holds the JSON text of each event.
+    """
+    @property
+    def events(self) -> list[str]: ...
 
 
 @final
@@ -2824,8 +2900,8 @@ class FrameTooLarge:
 @final
 class ProtocolNumbers:
     """The protocol version, the exit codes of a child, the spawn request byte, and the bounds
-    that a child applies before it builds a frame: the names of a report of left work, and the
-    bytes of a body.
+    that a child applies before it builds a frame: the names of a report of left work, the
+    bytes of a body, the handlers of a handler child and the characters of a handler name.
     """
     @property
     def protocol_version(self) -> int: ...
@@ -2853,6 +2929,10 @@ class ProtocolNumbers:
     def max_leftover_task_names(self) -> int: ...
     @property
     def max_body_bytes(self) -> int: ...
+    @property
+    def max_event_handlers(self) -> int: ...
+    @property
+    def max_handler_name_chars(self) -> int: ...
 
 
 @final
@@ -2861,7 +2941,7 @@ class FrameReader:
     reader.
     """
     def __init__(self) -> None: ...
-    def feed(self, data: bytes) -> list[InitFrame | RunFrame | SharedRunFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch:
+    def feed(self, data: bytes) -> list[InitFrame | RunFrame | SharedRunFrame | EventsFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch:
         """Take the bytes that arrived and give the whole parent frames they complete, in
         order. A refusal means the channel cannot be read on.
         """
@@ -2929,8 +3009,10 @@ class BootFailedFrame:
 
 @final
 class ResultFrame:
-    """An isolated task ended and left no work on a task loop."""
-    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
+    """An isolated task ended and left no work on a task loop. started_at is the start time
+    that the start write returned, or NOT_REPORTED for a run that stopped before running.
+    """
+    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, started_at: datetime.datetime | Literal['NOT_REPORTED'], rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final
@@ -2938,7 +3020,7 @@ class BodyReturnedFrame:
     """The body of an isolated task returned, and work it started is still on the task
     loop.
     """
-    def __init__(self, *, task_id: uuid.UUID, returned: TaskResult | WorkerFailure, left: LoopHoldsTasks) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, returned: TaskResult | WorkerFailure, started_at: datetime.datetime, left: LoopHoldsTasks) -> None: ...
 
 
 @final
@@ -2955,8 +3037,10 @@ class LeftWorkStuckFrame:
 
 @final
 class SharedResultFrame:
-    """A run of a shared child ended; its seat is free."""
-    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
+    """A run of a shared child ended; its seat is free. started_at is the start time that the
+    start write returned, or NOT_REPORTED for a run that stopped before running.
+    """
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], started_at: datetime.datetime | Literal['NOT_REPORTED'], rss_mb: float | Literal['UNREADABLE'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final
@@ -2982,13 +3066,13 @@ class LeftoverCancelFrame:
     """The body of a run returned before its deadline, and its marked work was alive one
     cancel grace later.
     """
-    def __init__(self, *, dispatch: int, task_id: uuid.UUID, returned: TaskResult | WorkerFailure) -> None: ...
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, returned: TaskResult | WorkerFailure, started_at: datetime.datetime) -> None: ...
 
 
 @final
 class LeftoverStuckFrame:
     """The work a run left after its return did not stop after its cancel rounds."""
-    def __init__(self, *, dispatch: int, task_id: uuid.UUID, work: StuckWork, returned: TaskResult | WorkerFailure) -> None: ...
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, work: StuckWork, returned: TaskResult | WorkerFailure, started_at: datetime.datetime) -> None: ...
 
 
 @final
@@ -2997,6 +3081,22 @@ class LoopBlockedFrame:
     is cut to its bound.
     """
     def __init__(self, *, culprit: BlockingRun | Literal['UNKNOWN'], blocked_ms: int, location: str) -> None: ...
+
+
+@final
+class HandlerCounts:
+    """The cumulative counts of one event handler: errors for which it failed, dropped events
+    that its full queue dropped. The name is 1 to max_handler_name_chars characters.
+    """
+    def __init__(self, *, handler: str, errors: int, dropped: int) -> None: ...
+
+
+@final
+class HandlerStatsFrame:
+    """The counts of each event handler of a handler child since it started, each name once,
+    and its RSS.
+    """
+    def __init__(self, *, handlers: list[HandlerCounts], rss_mb: float | Literal['UNREADABLE']) -> None: ...
 
 
 @final
@@ -3093,7 +3193,7 @@ def core_state() -> Literal['not_started', 'running', 'stopped', 'inherited']:
     """The state of the core in this process. Starts nothing."""
 
 
-def decode_parent_frame(meta: bytes, body: bytes) -> InitFrame | RunFrame | SharedRunFrame | StopFrame | FrameRefused | ParentProtocolMismatch:
+def decode_parent_frame(meta: bytes, body: bytes) -> InitFrame | RunFrame | SharedRunFrame | EventsFrame | StopFrame | FrameRefused | ParentProtocolMismatch:
     """Decode one parent frame from its metadata and its body. Pure."""
 
 
@@ -3104,7 +3204,7 @@ def decode_rerun_write(write: RerunWriteRecord, row: tuple[object, ...]) -> Reru
     """
 
 
-def encode_child_frame(frame: ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame) -> bytes | FrameTooLarge:
+def encode_child_frame(frame: ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame | HandlerStatsFrame) -> bytes | FrameTooLarge:
     """Encode a child frame: its bytes, or FrameTooLarge when it is over a bound of the
     header. Pure.
     """

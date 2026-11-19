@@ -65,6 +65,7 @@ from horsies.core.worker.child_main import (
 )
 from horsies import _core as core
 from horsies.core.worker.child_frames import (
+    AttemptStart,
     BootFailedFrame,
     ChildFrame,
     DeadlineFiredFrame,
@@ -73,6 +74,8 @@ from horsies.core.worker.child_frames import (
     SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
+    StartNotReported,
+    StartReported,
     ThreadSeatWork,
     boot_failed_frame,
 )
@@ -175,10 +178,25 @@ class _DeadlineAt:
 
 @dataclass(frozen=True, slots=True)
 class _Returned:
-    """The task of the run returned, and ``end`` is the end of the run. The
-    run has no deadline left; it ends when its seat ends it."""
+    """The task of the run returned, and ``end`` is the end of the run;
+    ``started`` is the start of its attempt. The run has no deadline left; it
+    ends when its seat ends it."""
 
     end: SeatEnd
+    started: AttemptStart
+
+
+def _start_at_return(returned: ThreadSeatReturn) -> AttemptStart:
+    """The start of a run whose task returned ``returned``: the time of its
+    start write when it set its row RUNNING, else none. A run that timed out
+    keeps the start of its return. Pure."""
+    match returned:
+        case SetRunning(started_at=started_at):
+            return StartReported(started_at)
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart() | DeadlineBeforeStart():
+            return StartNotReported()
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @dataclass(slots=True)
@@ -399,7 +417,7 @@ class ThreadRunTable:
                     assert_never(unreachable)
             run = self._runs[dispatch]
             end = _end_at_return(run, returned)
-            run.state = _Returned(end)
+            run.state = _Returned(end, _start_at_return(returned))
             self._changed.notify_all()
             return _marker_at_return(run, returned, end, self._clock())
 
@@ -413,8 +431,8 @@ class ThreadRunTable:
         with self._lock:
             run = self._runs[dispatch]
             match run.state:
-                case _Returned(end=ResultEnvelope() as result):
-                    run.state = _Returned(end_after_marker(result, marker))
+                case _Returned(end=ResultEnvelope() as result, started=started):
+                    run.state = _Returned(end_after_marker(result, marker), started)
                 case _Returned() | _Deadline.PENDING | _Deadline.FIRED:
                     raise AssertionError(
                         f'run {dispatch} wrote a marker with no finished body',
@@ -429,7 +447,7 @@ class ThreadRunTable:
         with self._lock:
             run = self._runs.pop(dispatch)
             match run.state:
-                case _Returned(end=end):
+                case _Returned(end=end, started=started):
                     pass
                 case _Deadline.PENDING | _Deadline.FIRED:
                     raise AssertionError(
@@ -443,6 +461,7 @@ class ThreadRunTable:
                     dispatch=dispatch,
                     task_id=run.frame.task_id,
                     end=end,
+                    started=started,
                     rss=rss,
                 ),
             )

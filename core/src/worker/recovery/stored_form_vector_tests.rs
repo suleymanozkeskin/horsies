@@ -27,6 +27,9 @@ fn the_stale_crash_result_is_python_s_text() {
     };
     let candidate = StaleCandidate {
         task_id: Uuid::from_u128(1),
+        task_name: "vector.task".to_owned(),
+        queue_name: "default".to_owned(),
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
         retry_count: 0,
         max_retries: 0,
         task_options: None,

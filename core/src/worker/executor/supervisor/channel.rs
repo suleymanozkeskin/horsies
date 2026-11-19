@@ -28,8 +28,9 @@ use tokio::time::Instant;
 use super::exit::{ChildExit, ExitState};
 use super::spawner::{wait_for_exit, ChildId, KillOutcome, SpawnedChild, SpawnerHandle};
 use crate::worker::executor::protocol::{
-    decode_child_frame, encode_parent_frame, ChildFrame, ChildFrameRefusal, FrameEncodeError,
-    FrameOverBound, FrameReader, MalformedFrame, ParentFrame, ProcessId, ReceivedProtocol,
+    decode_child_frame, encode_parent_frame, ChildFrame, ChildFrameRefusal, EncodedFrame,
+    FrameEncodeError, FrameOverBound, FrameReader, MalformedFrame, ParentFrame, ProcessId,
+    ReceivedProtocol,
 };
 
 /// After an EOF, the wait for the child's exit before it is killed.
@@ -144,6 +145,12 @@ impl MailboxBound {
     pub fn for_seats(seats: NonZeroUsize) -> Self {
         let frames = seats.get().saturating_mul(4).saturating_add(2);
         Self(NonZeroUsize::MIN.saturating_add(frames - 1))
+    }
+
+    /// A bound of `frames` frames, for a child that runs no task (the
+    /// handler child).
+    pub fn frames(frames: NonZeroUsize) -> Self {
+        Self(frames)
     }
 
     pub fn get(self) -> usize {
@@ -297,6 +304,19 @@ enum Observed {
     Exited,
     ChannelEnded(ReaderEnd),
     Nothing,
+}
+
+/// Write `encoded` to `writer`: a body up to [`JOINED_WRITE_BODY_BYTES`]
+/// in one write with its header, a larger one in a write of its own, so it
+/// is not copied.
+async fn write_frame(writer: &mut OwnedWriteHalf, encoded: &EncodedFrame<'_>) -> io::Result<()> {
+    match encoded.body().len() <= JOINED_WRITE_BODY_BYTES {
+        true => writer.write_all(&encoded.to_bytes()).await,
+        false => match writer.write_all(encoded.head()).await {
+            Ok(()) => writer.write_all(encoded.body()).await,
+            Err(error) => Err(error),
+        },
+    }
 }
 
 /// Whether the worker killed this child on purpose.
@@ -473,21 +493,26 @@ impl ChildChannel {
     /// larger one in a write of its own, so it is not copied.
     pub async fn send(&mut self, frame: &ParentFrame) -> Result<(), SendFailure> {
         let encoded = encode_parent_frame(frame).map_err(SendFailure::Encode)?;
-        let writer = &mut self.writer;
-        let write = async {
-            match encoded.body().len() <= JOINED_WRITE_BODY_BYTES {
-                true => writer.write_all(&encoded.to_bytes()).await,
-                false => match writer.write_all(encoded.head()).await {
-                    Ok(()) => writer.write_all(encoded.body()).await,
-                    Err(error) => Err(error),
-                },
-            }
-        };
-        match tokio::time::timeout(FRAME_WRITE_BOUND, write).await {
+        match tokio::time::timeout(FRAME_WRITE_BOUND, write_frame(&mut self.writer, &encoded)).await
+        {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(SendFailure::Write(error.kind())),
             Err(_) => Err(SendFailure::TimedOut),
         }
+    }
+
+    /// Send one frame and wait for the socket with no time bound: a child
+    /// that reads slowly is not killed for it. For the handler child, whose
+    /// events may wait. A send that is dropped before it returns may leave
+    /// part of the frame on the socket; the caller then kills the child.
+    ///
+    /// Errors: [`SendFailure::Encode`], [`SendFailure::Write`]. Never
+    /// [`SendFailure::TimedOut`].
+    pub async fn send_unbounded(&mut self, frame: &ParentFrame) -> Result<(), SendFailure> {
+        let encoded = encode_parent_frame(frame).map_err(SendFailure::Encode)?;
+        write_frame(&mut self.writer, &encoded)
+            .await
+            .map_err(|error| SendFailure::Write(error.kind()))
     }
 
     fn observe(&self) -> Observed {

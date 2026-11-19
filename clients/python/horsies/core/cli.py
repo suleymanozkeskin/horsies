@@ -33,7 +33,8 @@ from horsies.core.errors import (
     HorsiesError,
     ValidationReport,
 )
-from horsies.core.logging import get_logger
+from horsies.core.logging import TEXT_LOGS, get_logger
+from horsies.core.models.log_format import JsonLogs, TextLogs
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.tracing import NoTracing, OtelTracing, tracing_label
 from horsies.core.models.worker_profile import (
@@ -356,12 +357,14 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
     return app, var_name, module_name, sys_path_root
 
 
-def setup_logging(loglevel: str) -> None:
-    """Configure logging level globally."""
+def setup_logging(loglevel: str, log_format: TextLogs | JsonLogs = TEXT_LOGS) -> None:
+    """Configure the horsies logging of this process at ``loglevel``, in
+    ``log_format``. A command calls it first with the default format, then
+    with ``AppConfig.log_format`` once it has found the app."""
     from horsies.core.logging import configure_logging
 
     level = getattr(logging, loglevel.upper(), logging.INFO)
-    configure_logging(level)
+    configure_logging(level, log_format=log_format)
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +491,7 @@ def worker_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
+    setup_logging(loglevel, app.config.log_format)
 
     # The profile is chosen before anything starts. AppConfig validation
     # already checked every profile when the app module built the config;
@@ -578,6 +582,7 @@ def scheduler_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
+    setup_logging(loglevel, app.config.log_format)
 
     # Validate schedule config
     if not app.config.schedule:
@@ -709,6 +714,7 @@ def check_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
+    setup_logging(loglevel, app.config.log_format)
 
     # Run phased validation
     live: bool = args.live

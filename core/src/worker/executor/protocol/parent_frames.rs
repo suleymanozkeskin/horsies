@@ -1,9 +1,10 @@
-//! Frames from the worker parent to a child: `init`, `run`, `shared_run`
-//! and `stop`.
+//! Frames from the worker parent to a child: `init`, `run`, `shared_run`,
+//! `events` and `stop`.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -11,17 +12,20 @@ use super::bounds::{
     AsyncSeats, CancelGraceMs, ExecutorThreads, PoolMaxSize, PoolMinSize, TaskSendPool,
     TaskTimeoutMs, ThreadSeats,
 };
+use super::event_batch::{decode_event_batch, EventBatch};
 use super::header::{pack, EncodedFrame, FrameEncodeError, NO_BODY};
 use super::metadata::{
-    check_protocol, no_body, parse_metadata, text_body, Fields, MalformedFrame, ProtocolCheck,
-    ProtocolMismatch,
+    check_protocol, no_body, parse_metadata, text_body, time_text, Fields, MalformedFrame,
+    ProtocolCheck, ProtocolMismatch,
 };
 use super::values::{DispatchNumber, RefusalReason, TaskInputText};
 use super::PROTOCOL_VERSION;
 use crate::broker::OrphanSelfHeal;
+use crate::core::codec::check_json_text;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::{PostgresConfig, PostgresConfigError};
 use crate::core::mask_database_url;
+use crate::events::{AttemptNumber, QueueName, RunTrace, TraceCarrierText};
 
 /// The database URL a child connects with. It holds a password, so it
 /// travels in the init frame (never in argv, which `ps` shows) and its debug
@@ -152,6 +156,15 @@ pub struct SharedThreadChild {
     pub task_send_pool: TaskSendPool,
 }
 
+/// A child that runs the event handlers of the app. It runs no task: it
+/// takes `events` frames and no run frame, and writes nothing to the
+/// database itself. A handler may send tasks, through a pool of
+/// `task_send_pool` connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandlerChild {
+    pub task_send_pool: TaskSendPool,
+}
+
 /// The kind of a child. It decides which frames the child takes after its
 /// ready frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +172,7 @@ pub enum ChildKind {
     Isolated(IsolatedChild),
     SharedAsync(SharedAsyncChild),
     SharedThread(SharedThreadChild),
+    Handler(HandlerChild),
 }
 
 /// How the server sessions of `database_url` are pooled.
@@ -285,6 +299,10 @@ pub enum SharedWork {
 pub struct RunFrame {
     pub task_id: Uuid,
     pub task_name: String,
+    /// The queue of the task row.
+    pub queue_name: QueueName,
+    /// The attempt that the claim runs: the retry count of the row plus 1.
+    pub attempt: AttemptNumber,
     /// The worker that holds the claim. The child fences each write of the
     /// attempt on it and on `claimed_at`.
     pub worker_id: String,
@@ -295,6 +313,9 @@ pub struct RunFrame {
     /// `auto_terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     pub work: IsolatedWork,
+    /// The trace carrier that the send stored on the task row. The child
+    /// extracts it with the app's propagator.
+    pub trace: RunTrace,
     pub input: TaskInputText,
 }
 
@@ -305,12 +326,26 @@ pub struct SharedRunFrame {
     pub dispatch: DispatchNumber,
     pub task_id: Uuid,
     pub task_name: String,
+    /// As [`RunFrame::queue_name`].
+    pub queue_name: QueueName,
+    /// As [`RunFrame::attempt`].
+    pub attempt: AttemptNumber,
     pub worker_id: String,
     pub claimed_at: DateTime<Utc>,
     /// As [`RunFrame::orphan_self_heal`].
     pub orphan_self_heal: OrphanSelfHeal,
     pub work: SharedWork,
+    /// As [`RunFrame::trace`].
+    pub trace: RunTrace,
     pub input: TaskInputText,
+}
+
+/// Lifecycle events for a handler child, in the order that the core emitted
+/// them. Sent only to a handler child. The body is the JSON array of their
+/// wire forms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventsFrame {
+    pub events: EventBatch,
 }
 
 /// A frame from the worker parent to a child.
@@ -319,6 +354,7 @@ pub enum ParentFrame {
     Init(InitFrame),
     Run(RunFrame),
     SharedRun(SharedRunFrame),
+    Events(EventsFrame),
     /// Exit normally. Sent only to a child with no task.
     Stop,
 }
@@ -361,20 +397,27 @@ enum ParentWire<'a> {
     Run {
         task_id: Uuid,
         task_name: &'a str,
+        queue_name: &'a str,
+        attempt: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
         work: IsolatedWorkWire<'a>,
+        trace: TraceWire<'a>,
     },
     SharedRun {
         dispatch: u64,
         task_id: Uuid,
         task_name: &'a str,
+        queue_name: &'a str,
+        attempt: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
         work: SharedWorkWire<'a>,
+        trace: TraceWire<'a>,
     },
+    Events,
     Stop,
 }
 
@@ -451,6 +494,16 @@ enum ChildKindWire {
         pool: PoolWire,
         task_send_pool: u64,
     },
+    Handler {
+        task_send_pool: u64,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TraceWire<'a> {
+    Carrier { text: &'a str },
+    NoCarrier,
 }
 
 #[derive(Serialize)]
@@ -489,12 +542,6 @@ fn self_heal_flag(self_heal: OrphanSelfHeal) -> bool {
         OrphanSelfHeal::On => true,
         OrphanSelfHeal::Off => false,
     }
-}
-
-/// The claim generation as RFC 3339 text with every sub-second digit it
-/// has, so the child fences on the exact value.
-fn claim_time_text(time: &DateTime<Utc>) -> String {
-    time.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
 fn program_wire(program: &ChildProgram) -> ProgramWire<'_> {
@@ -566,6 +613,18 @@ fn child_kind_wire(kind: ChildKind) -> ChildKindWire {
             pool: pool_wire(child.pool),
             task_send_pool: child.task_send_pool.get(),
         },
+        ChildKind::Handler(child) => ChildKindWire::Handler {
+            task_send_pool: child.task_send_pool.get(),
+        },
+    }
+}
+
+fn trace_wire(trace: &RunTrace) -> TraceWire<'_> {
+    match trace {
+        RunTrace::Carrier { text } => TraceWire::Carrier {
+            text: text.as_str(),
+        },
+        RunTrace::NoCarrier => TraceWire::NoCarrier,
     }
 }
 
@@ -630,10 +689,15 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
             &ParentWire::Run {
                 task_id: run.task_id,
                 task_name: &run.task_name,
+                queue_name: run.queue_name.as_str(),
+                attempt: run.attempt.get(),
                 worker_id: &run.worker_id,
-                claimed_at: claim_time_text(&run.claimed_at),
+                // The claim generation keeps every sub-second digit, so the
+                // child fences on the exact value.
+                claimed_at: time_text(&run.claimed_at),
                 orphan_self_heal: self_heal_flag(run.orphan_self_heal),
                 work: isolated_work_wire(&run.work),
+                trace: trace_wire(&run.trace),
             },
             run.input.as_str().as_bytes(),
         ),
@@ -642,13 +706,17 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 dispatch: run.dispatch.get(),
                 task_id: run.task_id,
                 task_name: &run.task_name,
+                queue_name: run.queue_name.as_str(),
+                attempt: run.attempt.get(),
                 worker_id: &run.worker_id,
-                claimed_at: claim_time_text(&run.claimed_at),
+                claimed_at: time_text(&run.claimed_at),
                 orphan_self_heal: self_heal_flag(run.orphan_self_heal),
                 work: shared_work_wire(&run.work),
+                trace: trace_wire(&run.trace),
             },
             run.input.as_str().as_bytes(),
         ),
+        ParentFrame::Events(events) => pack(&ParentWire::Events, events.events.body().as_bytes()),
         ParentFrame::Stop => pack(&ParentWire::Stop, NO_BODY),
     }
 }
@@ -673,6 +741,12 @@ pub fn decode_parent_frame(meta: &[u8], body: Vec<u8>) -> Result<ParentFrame, Pa
         }
         "run" => Ok(ParentFrame::Run(decode_run(&fields, body)?)),
         "shared_run" => Ok(ParentFrame::SharedRun(decode_shared_run(&fields, body)?)),
+        "events" => {
+            fields.only(&["kind"])?;
+            Ok(ParentFrame::Events(EventsFrame {
+                events: decode_event_batch(body)?,
+            }))
+        }
         "stop" => {
             fields.only(&["kind"])?;
             no_body("stop", &body)?;
@@ -850,6 +924,12 @@ fn decode_child_kind(kind: &Fields<'_>) -> Result<ChildKind, MalformedFrame> {
                 task_send_pool: kind.bounded_count("task_send_pool")?,
             }))
         }
+        "handler" => {
+            kind.only(&["kind", "task_send_pool"])?;
+            Ok(ChildKind::Handler(HandlerChild {
+                task_send_pool: kind.bounded_count("task_send_pool")?,
+            }))
+        }
         other => Err(kind.unknown_kind(other)),
     }
 }
@@ -912,23 +992,55 @@ fn decode_shared_work(work: &Fields<'_>) -> Result<SharedWork, MalformedFrame> {
     }
 }
 
+/// The trace carrier of a run: the stored text, at most
+/// [`crate::events::MAX_EVENT_TRACE_CARRIER_CHARS`] characters, which is one
+/// JSON object of texts, the form that the send stores.
+fn decode_trace(trace: &Fields<'_>) -> Result<RunTrace, MalformedFrame> {
+    match trace.kind()? {
+        "carrier" => {
+            trace.only(&["kind", "text"])?;
+            let text: TraceCarrierText = trace.bounded_text("text")?;
+            match is_carrier_object(text.as_str()) {
+                true => Ok(RunTrace::Carrier { text }),
+                false => Err(trace.broken_rule("text", "is not one JSON object of texts")),
+            }
+        }
+        "no_carrier" => {
+            trace.only(&["kind"])?;
+            Ok(RunTrace::NoCarrier)
+        }
+        other => Err(trace.unknown_kind(other)),
+    }
+}
+
+/// Whether `text` is one strict JSON object whose values are texts. Pure.
+fn is_carrier_object(text: &str) -> bool {
+    check_json_text(text).is_ok() && serde_json::from_str::<BTreeMap<String, String>>(text).is_ok()
+}
+
 fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedFrame> {
     fields.only(&[
         "kind",
         "task_id",
         "task_name",
+        "queue_name",
+        "attempt",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
         "work",
+        "trace",
     ])?;
     Ok(RunFrame {
         task_id: fields.task_id("task_id")?,
         task_name: fields.owned_text("task_name")?,
+        queue_name: fields.bounded_text("queue_name")?,
+        attempt: config_count(fields, "attempt")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
         work: decode_isolated_work(&fields.object("work")?)?,
+        trace: decode_trace(&fields.object("trace")?)?,
         input: TaskInputText::new(text_body(body)?),
     })
 }
@@ -939,19 +1051,25 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         "dispatch",
         "task_id",
         "task_name",
+        "queue_name",
+        "attempt",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
         "work",
+        "trace",
     ])?;
     Ok(SharedRunFrame {
         dispatch: fields.dispatch("dispatch")?,
         task_id: fields.task_id("task_id")?,
         task_name: fields.owned_text("task_name")?,
+        queue_name: fields.bounded_text("queue_name")?,
+        attempt: config_count(fields, "attempt")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
         work: decode_shared_work(&fields.object("work")?)?,
+        trace: decode_trace(&fields.object("trace")?)?,
         input: TaskInputText::new(text_body(body)?),
     })
 }

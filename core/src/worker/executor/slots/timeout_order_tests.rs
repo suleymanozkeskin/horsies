@@ -118,6 +118,7 @@ async fn a_second_return_report_kills_the_child_and_keeps_the_first_return() {
                 vec![LeftoverName::cut("_write_after")],
             )
             .unwrap(),
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
         })
     };
     let script = format!(
@@ -585,8 +586,8 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
         TimeoutCancel::NoSignal,
     );
 
-    let first = persist_unreported_attempt(&broker, &command, true).await;
-    let replay = persist_unreported_attempt(&broker, &command, true).await;
+    let first = persist_unreported_attempt(&broker, &command, task.log(), true).await;
+    let replay = persist_unreported_attempt(&broker, &command, task.log(), true).await;
 
     assert_eq!(phase_two_owed(first), PhaseTwoOwed::WithTheStep);
     assert_eq!(phase_two_owed(replay), PhaseTwoOwed::AsAReplay);

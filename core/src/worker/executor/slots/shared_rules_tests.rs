@@ -200,6 +200,9 @@ fn an_async_run_reports_its_stop_in_order() {
         .end_run(SharedResultFrame {
             run,
             end: SeatEnd::TimedOut,
+            started_at: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         })
@@ -268,6 +271,7 @@ fn a_return_with_left_work_keeps_what_it_returned() {
         runs.note_stop_report(&StopReportFrame::LeftoverCancel(LeftoverCancelFrame {
             run,
             returned: returned(),
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
         })),
         Ok(StopStep::Close(CloseReason::LeftoverWork))
     );
@@ -276,6 +280,7 @@ fn a_return_with_left_work_keeps_what_it_returned() {
             run,
             work: stuck_work(),
             returned: returned(),
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
         })),
         Ok(StopStep::Recorded)
     );
@@ -285,6 +290,9 @@ fn a_return_with_left_work_keeps_what_it_returned() {
         runs.end_run(SharedResultFrame {
             run,
             end: SeatEnd::TimedOut,
+            started_at: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+            },
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         })
@@ -296,6 +304,9 @@ fn a_return_with_left_work_keeps_what_it_returned() {
         .end_run(SharedResultFrame {
             run,
             end: SeatEnd::Finished(RunEnd::from(returned())),
+            started_at: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         })
@@ -310,6 +321,9 @@ fn a_refusal_never_ends_at_a_timeout() {
         runs.end_run(SharedResultFrame {
             run: run_ref(1),
             end: SeatEnd::TimedOut,
+            started_at: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+            },
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         })

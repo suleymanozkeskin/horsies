@@ -966,6 +966,7 @@ fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
             ChildKind::Isolated(child) => child.task_send_pool.get(),
             ChildKind::SharedAsync(child) => child.task_send_pool.get(),
             ChildKind::SharedThread(child) => child.task_send_pool.get(),
+            ChildKind::Handler(_) => panic!("a slot pool builds a task child"),
         })
         .collect();
     let [send] = sends.as_slice() else {

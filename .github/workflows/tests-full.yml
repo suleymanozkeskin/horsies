@@ -169,6 +169,78 @@ jobs:
         if: always()
         run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml down -v
 
+  # The files of deploy/ in the containers of
+  # clients/python/tests/fixtures/observability/compose.yaml, which use the
+  # host network: the Collector config exports the series of a worker
+  # endpoint and of `horsies metrics` (both started by the test on the
+  # runner) as OTLP JSON; promtool checks and tests the alert rules;
+  # Prometheus evaluates them and runs each dashboard query; Grafana loads
+  # the dashboard.
+  observability-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      # The Collector image runs as user 10001; its file exporter writes here.
+      - name: Create the folder of the OTLP file
+        run: |
+          mkdir --mode=a+rwx "$RUNNER_TEMP/otlp"
+          echo "HORSIES_OTLP_OUTPUT_DIR=$RUNNER_TEMP/otlp" >> "$GITHUB_ENV"
+
+      - name: Validate the shipped Collector config
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml run --rm --no-deps collector validate --config=/etc/otelcol/collector.yaml
+
+      - name: Check the alert rules
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml run --rm --no-deps --entrypoint promtool prometheus check rules /etc/prometheus/rules/horsies-alerts.yaml
+
+      - name: Unit tests of the alert rules
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml run --rm --no-deps --entrypoint promtool prometheus test rules /etc/prometheus/rules/horsies-alerts.test.yaml
+
+      - name: Start the observability stack
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml up -d --wait
+
+      - name: Observability stack test
+        env:
+          HORSIES_OBSERVABILITY_STACK_TEST: "1"
+          DB_PASSWORD: testpassword
+        run: uv run pytest clients/python/tests/e2e/test_observability_stack.py -v --tb=short
+
+      - name: Logs of the observability stack
+        if: failure()
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml logs --no-color
+
+      - name: Stop the observability stack
+        if: always()
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml down -v
+
   # The core, the extension module crate, the generator, the Rust client, its
   # macros and the examples on each supported Postgres major. The end-to-end
   # crates and the parity runs: rust-e2e. The PgBouncer lane: rust-pgbouncer.
@@ -292,7 +364,7 @@ jobs:
       - name: Test the client with every feature
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
-        run: cargo test -p horsies --features web,tokio-postgres,sqlx
+        run: cargo test -p horsies --features web,tokio-postgres,sqlx,otel
 
   # The showcase with its database tests: ACME_DATABASE_URL turns them on, and
   # they start the acme binary as the worker.

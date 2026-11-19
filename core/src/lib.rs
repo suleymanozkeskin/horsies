@@ -113,8 +113,8 @@ pub use crate::broker::child_writes::{
 pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimRead, ClaimTake, ClaimedRow, QueueStartCheck,
     QueueStarts, ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
-    StartAttempt, StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart,
-    MAX_RELEASED_CLAIMS,
+    RunWorkflow, StartAttempt, StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart,
+    WorkflowNodeIndex, MAX_RELEASED_CLAIMS, MAX_WORKFLOW_NODE_INDEX,
 };
 pub use crate::broker::expiry_and_orphans::{
     OrphanAuditPage, PendingExpiryFailed, PendingExpiryPass, TaskRowEnd, ORPHAN_AUDIT_PAGE_ROWS,
@@ -142,11 +142,12 @@ pub use crate::worker::finalize_batch::{
 // `process_role` first: a process that runs task bodies refuses it.
 pub use crate::worker::executor::child_host::{
     child_command, child_handle_setup, child_mode, child_producer, process_role, run_cancel_signal,
-    run_child_host, spawn_in_run, thread_role, wait_inside_task_message, ChildApp, ChildArgs,
-    ChildArgsError, ChildHandleSetup, ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode,
-    ChildProducer, ChildStartFuture, ChildStartHook, NamedChildStartHook, ProcessRole,
-    RunCancelSignal, RunSignalRefused, RunSpawnRefused, ThreadRole, CHILD_MODE_ARGUMENT,
-    CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
+    run_child_host, spawn_in_run, thread_role, wait_inside_task_message, BodyCarrier, BodyOutcome,
+    BodyRun, BodyScope, BodySpans, ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup,
+    ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture,
+    ChildStartHook, HandlerChildHasNoHandle, NamedChildStartHook, ProcessRole, RunCancelSignal,
+    RunSignalRefused, RunSpawnRefused, ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND,
+    MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the

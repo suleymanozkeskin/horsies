@@ -1,0 +1,66 @@
+name: horsies-observability-tests
+
+# The scrapers of tests/e2e/test_observability_stack.py. The test starts the
+# worker and `horsies metrics` on the host; these containers use the host
+# network, so 127.0.0.1 is the host. Linux only: a Docker host network on
+# macOS is the network of the Docker VM.
+#
+# - collector: deploy/otel-collector/collector.yaml with collector-test.yaml.
+# - prometheus (127.0.0.1:9090): prometheus.yml, with the rules of
+#   deploy/prometheus/. `docker compose run --rm --no-deps --entrypoint
+#   promtool prometheus test rules /etc/prometheus/rules/horsies-alerts.test.yaml`
+#   runs the rule unit tests.
+# - grafana (127.0.0.1:3000): the dashboards of deploy/grafana/ and the
+#   Prometheus data source, with anonymous Viewer access.
+#
+# HORSIES_OTLP_OUTPUT_DIR: a host folder that every user may write
+# (mkdir --mode=a+rwx). The Collector image runs as user 10001.
+
+services:
+  collector:
+    # OpenTelemetry Collector contrib 0.165.0 amd64 manifest. The tag documents the version; the digest pins it.
+    image: docker.io/otel/opentelemetry-collector-contrib:0.165.0@sha256:bda8c1d727effc2f937d2a3470ea3f9ee189b8dd96d2385a2475b0b6f16ec3f8
+    platform: linux/amd64
+    network_mode: host
+    command:
+      - --config=/etc/otelcol/collector.yaml
+      - --config=/etc/otelcol/collector-test.yaml
+    environment:
+      # Required by the otlp_grpc exporter of the shipped config, which the
+      # test pipeline does not use.
+      OTLP_ENDPOINT: 127.0.0.1:4317
+    volumes:
+      - ../../../../../deploy/otel-collector/collector.yaml:/etc/otelcol/collector.yaml:ro
+      - ./collector-test.yaml:/etc/otelcol/collector-test.yaml:ro
+      - ${HORSIES_OTLP_OUTPUT_DIR:?set HORSIES_OTLP_OUTPUT_DIR to a folder that every user may write}:/otlp
+
+  prometheus:
+    # Prometheus v3.16.0 amd64 manifest. The tag documents the version; the digest pins it.
+    image: docker.io/prom/prometheus:v3.16.0@sha256:89c1a644817e9ad70fa2af76c84898e327c1de7063735f962e8313b1e28672c3
+    platform: linux/amd64
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../../../../deploy/prometheus:/etc/prometheus/rules:ro
+
+  grafana:
+    # Grafana 13.2.6 amd64 manifest. The tag documents the version; the digest pins it.
+    image: docker.io/grafana/grafana:13.2.6@sha256:1dd8c8bcad8e1e1993f13b2f2e172276a26d6aa51e725326bb43707339193944
+    platform: linux/amd64
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    volumes:
+      - ./grafana/datasources.yaml:/etc/grafana/provisioning/datasources/horsies.yaml:ro
+      - ./grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/horsies.yaml:ro
+      - ../../../../../deploy/grafana:/var/lib/grafana/dashboards/horsies:ro

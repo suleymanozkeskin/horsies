@@ -794,7 +794,7 @@ SELECT lc_task('00000000-0000-7000-8000-000000000d01', 'CLAIMED');
 SELECT lc_expect(
     'start: a held claim starts; a plain task has no workflow place',
     (SELECT concat_ws('|', outcome, miss_reason, started_at = now(),
-        workflow_id IS NULL AND workflow_task_index IS NULL) FROM horsies_start_attempt(
+        workflow_id IS NULL AND workflow_task_index IS NULL AND root_workflow_id IS NULL) FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000d01', 'w1', now() - interval '1 second', 42, 'host-b', 'worker-42')),
     'STARTED|t|t'
 );
@@ -832,7 +832,8 @@ SELECT lc_expect(
 SELECT lc_expect(
     'start: an absent task is not held, with no start time and no workflow place',
     (SELECT concat_ws('|', outcome, miss_reason,
-        started_at IS NULL AND workflow_id IS NULL AND workflow_task_index IS NULL) FROM horsies_start_attempt(
+        started_at IS NULL AND workflow_id IS NULL AND workflow_task_index IS NULL AND root_workflow_id IS NULL)
+     FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000dff', 'w1', now(), 42, 'h', 'p')),
     'MISSED|NOT_HELD|t'
 );
@@ -872,10 +873,10 @@ SELECT lc_task('00000000-0000-7000-8000-000000000d11', 'CLAIMED', 'w1', TRUE);
 SELECT lc_node('00000000-0000-7000-8000-000000000f11', '00000000-0000-7000-8000-000000000e01', 0, 'ENQUEUED',
                '00000000-0000-7000-8000-000000000d11');
 SELECT lc_expect(
-    'start: a workflow task starts with its node, and returns the workflow id and the node index',
-    (SELECT concat_ws('|', outcome, workflow_id, workflow_task_index) FROM horsies_start_attempt(
+    'start: a workflow task starts with its node, and returns the workflow id, the node index and the root',
+    (SELECT concat_ws('|', outcome, workflow_id, workflow_task_index, root_workflow_id) FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000d11', 'w1', now() - interval '1 second', 42, 'h', 'p')),
-    'STARTED|00000000-0000-7000-8000-000000000e01|0'
+    'STARTED|00000000-0000-7000-8000-000000000e01|0|00000000-0000-7000-8000-000000000e01'
 );
 SELECT lc_expect(
     'start: the node is RUNNING from now',
@@ -898,6 +899,29 @@ SELECT lc_expect(
     (SELECT status || ':' || (now() - started_at)::text FROM horsies_workflow_tasks
      WHERE id = '00000000-0000-7000-8000-000000000f12'),
     'RUNNING:01:00:00'
+);
+-- e04 is a sub-workflow of e01 at its node 1: a task of e04 returns e01 as its root. e05 is a top-level workflow
+-- whose row stores no root: a task of e05 returns e05.
+SELECT lc_workflow('00000000-0000-7000-8000-000000000e04', 'RUNNING');
+UPDATE horsies_workflows
+SET parent_workflow_id = '00000000-0000-7000-8000-000000000e01', parent_task_index = 1, depth = 1,
+    root_workflow_id = '00000000-0000-7000-8000-000000000e01'
+WHERE id = '00000000-0000-7000-8000-000000000e04';
+SELECT lc_task('00000000-0000-7000-8000-000000000d17', 'CLAIMED', 'w1', TRUE);
+SELECT lc_node('00000000-0000-7000-8000-000000000f17', '00000000-0000-7000-8000-000000000e04', 3, 'ENQUEUED',
+               '00000000-0000-7000-8000-000000000d17');
+SELECT lc_workflow('00000000-0000-7000-8000-000000000e05', 'RUNNING');
+UPDATE horsies_workflows SET root_workflow_id = NULL WHERE id = '00000000-0000-7000-8000-000000000e05';
+SELECT lc_task('00000000-0000-7000-8000-000000000d18', 'CLAIMED', 'w1', TRUE);
+SELECT lc_node('00000000-0000-7000-8000-000000000f18', '00000000-0000-7000-8000-000000000e05', 0, 'ENQUEUED',
+               '00000000-0000-7000-8000-000000000d18');
+SELECT lc_expect(
+    'start: a task of a sub-workflow returns the root of its tree; a workflow with no stored root is its own root',
+    (SELECT string_agg(concat_ws('|', right(s.workflow_id::text, 3), s.workflow_task_index,
+        right(s.root_workflow_id::text, 3)), ',' ORDER BY t.id)
+     FROM (VALUES ('00000000-0000-7000-8000-000000000d17'::uuid), ('00000000-0000-7000-8000-000000000d18'::uuid)) t(id)
+     CROSS JOIN LATERAL horsies_start_attempt(t.id, 'w1', now() - interval '1 second', 42, 'h', 'p') s),
+    'e04|3|e01,e05|0|e05'
 );
 SELECT lc_workflow('00000000-0000-7000-8000-000000000e02', 'PAUSED');
 SELECT lc_task('00000000-0000-7000-8000-000000000d13', 'CLAIMED', 'w1', TRUE);
@@ -1370,6 +1394,17 @@ SELECT lc_expect(
     (SELECT count(*)::text FROM horsies_stale_running_scan('BEAT_AGE', 60000, 600000, NULL, NULL, 2)),
     '2'
 );
+UPDATE horsies_tasks SET trace_carrier = '{"traceparent":"00-000102030405060708090a0b0c0d0e0f-0001020304050607-01"}',
+    trace_id = decode('000102030405060708090a0b0c0d0e0f', 'hex')
+WHERE id = '00000000-0000-7000-8000-000000003002';
+SELECT lc_expect(
+    'stale scan: the task name, the queue and the stored trace id of each candidate',
+    (SELECT string_agg(concat_ws('|', right(task_id::text, 4), task_name, queue_name,
+        coalesce(encode(trace_id, 'hex'), 'none')), ',' ORDER BY task_id)
+     FROM horsies_stale_running_scan('BEAT_AGE', 60000, 600000, NULL, NULL, 100)
+     WHERE task_id::text LIKE '%300_'),
+    '3001|lc.task|q_stale|none,3002|lc.task|q_stale|000102030405060708090a0b0c0d0e0f,3005|lc.task|q_stale|none'
+);
 SELECT lc_expect_sqlstate('stale scan: a batch of 0', $q$SELECT * FROM horsies_stale_running_scan('BEAT_AGE', 1, 1, NULL, NULL, 0)$q$, '22023');
 SELECT lc_expect_sqlstate('stale scan: a batch over 10000', $q$SELECT * FROM horsies_stale_running_scan('BEAT_AGE', 1, 1, NULL, NULL, 10001)$q$,
     '22023');
@@ -1586,16 +1621,26 @@ INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid
     ('00000000-0000-7000-8000-000000004002', 'w1', 'claimer', now(), 'host-a', 7),
     ('00000000-0000-7000-8000-000000004003', 'w1', 'claimer', now() - interval '20 minutes', 'host-a', 7);
 -- Every row outside this case is out of reach: the other CLAIMED rows are younger than 5 minutes.
+CREATE TEMP TABLE lc_requeued AS
+    SELECT r.* FROM horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 2) AS r;
 SELECT lc_expect(
     'requeue: the batch bound',
-    horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 2)::text,
+    (SELECT count(*)::text FROM lc_requeued),
     '2'
 );
 SELECT lc_expect(
     'requeue: the next batch takes the rest, then a short batch ends the pass',
-    horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 10)::text || ',' || horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 10)::text,
+    (SELECT count(*) FROM horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 10))::text || ','
+        || (SELECT count(*) FROM horsies_requeue_stale_claims('BEAT_AGE', 300000, NULL, NULL, 10))::text,
     '2,0'
 );
+SELECT lc_expect(
+    'requeue: each returned row names a requeued row, its task name and its queue',
+    (SELECT string_agg(concat_ws('|', t.status, r.task_name, r.queue_name), ',')
+     FROM lc_requeued r JOIN horsies_tasks t ON t.id = r.task_id),
+    'PENDING|lc.task|q_lc,PENDING|lc.task|q_lc'
+);
+DROP TABLE lc_requeued;
 SELECT lc_expect(
     'requeue: silent claims go back; a beaten claim, a fresh claim and an orphan stay',
     (SELECT string_agg(right(id::text, 4) || ':' || status, ',' ORDER BY id) FROM horsies_tasks
@@ -1885,9 +1930,9 @@ SELECT lc_expect_sqlstate('stale attempt: no evidence', $q$SELECT * FROM horsies
 
 SELECT lc_expect(
     'requeue OWNER_GONE: the batch bound, the rest, then a short batch',
-    horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 1)::text || ','
-        || horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 10)::text || ','
-        || horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 10)::text,
+    (SELECT count(*) FROM horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 1))::text || ','
+        || (SELECT count(*) FROM horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 10))::text || ','
+        || (SELECT count(*) FROM horsies_requeue_stale_claims('OWNER_GONE', NULL, 'L-b', now(), 10))::text,
     '1,1,0'
 );
 SELECT lc_expect(
@@ -2259,6 +2304,13 @@ SELECT lc_expect(
         || '00000000-0000-7000-8000-000000009011|APPLIED|EXPIRE_PENDING|PENDING|t|text'
 );
 SELECT lc_expect(
+    'expire pending: each row names the task name and the queue of the moved row',
+    (SELECT string_agg(concat_ws('|', right(task_id::text, 4), task_name, queue_name), ',' ORDER BY position)
+     FROM lc_expired
+     WHERE task_id IN ('00000000-0000-7000-8000-000000009011', '00000000-0000-7000-8000-000000009012')),
+    '9012|lc.task|q_lc,9011|lc.task|q_lc'
+);
+SELECT lc_expect(
     'expire pending: a row not due stays PENDING',
     (SELECT status FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000009013'),
     'PENDING'
@@ -2311,6 +2363,12 @@ SELECT lc_expect(
     (SELECT concat_ws('|', outcome, terminalization_kind, observed_status, pg_typeof(observed_worker_id)::text)
      FROM lc_swept WHERE task_id = '00000000-0000-7000-8000-000000009031'),
     'APPLIED|CANCEL_ORPHAN_SWEEP|PENDING|text'
+);
+SELECT lc_expect(
+    'orphan sweep: each row names the task name and the queue of the moved row',
+    (SELECT concat_ws('|', task_name, queue_name) FROM lc_swept
+     WHERE task_id = '00000000-0000-7000-8000-000000009031'),
+    'lc.task|q_lc'
 );
 SELECT lc_expect(
     'orphan sweep: a workflow task with a runnable node stays live',

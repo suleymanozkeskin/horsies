@@ -292,7 +292,7 @@ const KNOWN_SITES: &[Known] = &[
     },
     Known {
         file: "core/src/core/lifecycle/outcomes.rs",
-        item: "decode_outcome_row",
+        item: "raw_outcome_row",
         kind: SiteKind::RowDecoderField,
         count: 1,
         allowed: Allowed::NotUserValue("the guard evidence of an outcome row"),

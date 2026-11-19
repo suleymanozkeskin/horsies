@@ -212,6 +212,9 @@ CREATE TABLE horsies_worker_states (
     worker_started_at timestamp with time zone NOT NULL,
     slots_down jsonb NOT NULL,
     class_capacity jsonb NOT NULL,
+    -- The telemetry of the worker: {"endpoint": {"state": "off" | "binding" | "serving" | "down", ...}}, the state of
+    -- its metrics endpoint (core/src/worker/metrics_endpoint.rs, telemetry_json).
+    telemetry jsonb NOT NULL,
     CONSTRAINT horsies_worker_states_counts_valid CHECK (
         processes >= 0
         AND max_claim_batch >= 0

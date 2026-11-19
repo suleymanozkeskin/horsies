@@ -16,6 +16,7 @@ import pytest
 from pydantic import BaseModel, field_validator
 from pydantic_core import PydanticCustomError
 
+from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON, serialize_error_payload
 from horsies.core.codec.json_value import JsonValue, StrictJsonError
@@ -149,6 +150,7 @@ def _make_app(
     app.config.resend_on_transient_err = resend_on_transient_err
     app.config.payload = payload_policy or PayloadPolicy()
     app.are_sends_suppressed.return_value = suppress_sends
+    app.send_telemetry.return_value = NO_SEND_TELEMETRY
     app.validate_queue_name.return_value = 'default'
     return app
 

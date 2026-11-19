@@ -560,6 +560,7 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
         &crate::test_support::child_specs::TestChildSpecs::empty(),
         Phase2Work {
             task_id: Uuid::new_v4(),
+            log: crate::worker::executor::slots::AttemptLog::FIRST_UNTRACED,
             queue_name: "default".to_owned(),
             is_workflow_task: true,
             capacity_notified: true,

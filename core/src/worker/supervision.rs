@@ -239,7 +239,7 @@ mod tests {
             config,
             crate::core::RetentionConfig::default(),
             new_reaper_health(),
-            crate::telemetry::registry::OptionalCounter::NotRecorded,
+            crate::telemetry::worker::WorkerTelemetry::Off,
             cancel.clone(),
         );
         run_loop_death_case("reaper", cancel, handle).await;
@@ -285,6 +285,8 @@ mod tests {
                 max_claim_per_worker: 1,
             },
             Utc::now(),
+            crate::worker::metrics_endpoint::WorkerEndpoint::NoMetricsEndpoint,
+            crate::worker::executor::handler_child::HandlerChildView::off(),
             cancel.clone(),
         );
         run_loop_death_case("worker-state", cancel, handle).await;

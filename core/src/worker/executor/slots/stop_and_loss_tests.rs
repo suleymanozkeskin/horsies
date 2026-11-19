@@ -70,6 +70,9 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
             .end_run(SharedResultFrame {
                 run,
                 end: SeatEnd::TimedOut,
+                started_at: crate::events::AttemptStart::Reported {
+                    started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                },
                 rss: RssReading::Unreadable,
                 child: ChildAfterFrame::ServesOn,
             })

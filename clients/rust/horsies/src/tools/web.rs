@@ -211,7 +211,7 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
             TRUSTED_HEADER_WARNING.replace("{header}", &args.trusted_header)
         );
     }
-    crate::cli::logging::install_logs(args.loglevel.child_level());
+    crate::cli::logging::install_logs(args.loglevel.child_level(), crate::cli::LogFormat::Text);
     let config = resolve_config(&config_source(args))?;
     let app = Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)
         .map_err(WebError::ConfigInvalid)?;

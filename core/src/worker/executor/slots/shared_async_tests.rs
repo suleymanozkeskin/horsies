@@ -441,6 +441,7 @@ async fn a_shared_child_that_ends_itself_gets_no_next_run() {
         end: SeatEnd::Finished(RunEnd::StoppedBeforeRunning(
             StopReason::OwnershipUnconfirmed,
         )),
+        started_at: crate::events::AttemptStart::NotReported,
         rss: RssReading::Unreadable,
         child: ChildAfterFrame::EndsItself,
     });

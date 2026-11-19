@@ -41,22 +41,27 @@ import horsies._core as core
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker import child_main, child_runner, shared_child, shared_lifecycle
 from horsies.core.worker.child_frames import (
+    AttemptStart,
     RssUnreadable,
     SeatTimedOut,
     SharedResultFrame,
+    StartNotReported,
+    StartReported,
 )
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     CoreStoppedAfterBody,
     CoreStoppedBeforeStart,
+    EncodedResult,
     MarkerDone,
     MarkerMetStoppedCore,
     ResultEnvelope,
-    SetRunning,
+    ResultSucceeded,
     StoppedBeforeRunning,
 )
 from horsies.core.worker.task_loop import TaskLoop
 from tests.fixtures.core_frames import run_frame
+from tests.fixtures.run_return import STARTED, STARTED_AT, set_running
 
 pytestmark = [pytest.mark.unit]
 
@@ -324,14 +329,15 @@ class TestTheEndOfABody:
     )
     def test_every_other_outcome_is_encoded(self, out: TaskResult[Any, TaskError]) -> None:
         task = object()
+        encoded = EncodedResult(ResultEnvelope(ENVELOPE), ResultSucceeded())
         with patch.object(
             child_runner,
             '_encode_task_outcome',
-            return_value=ResultEnvelope(ENVELOPE),
+            return_value=encoded,
         ) as encode:
             ended = child_runner.encoded_body_end('task', task, out)
 
-        assert ended == ResultEnvelope(ENVELOPE)
+        assert ended == encoded
         encode.assert_called_once_with('task', task, out)
 
     def test_an_interrupted_body_ends_the_child_with_no_report(
@@ -340,7 +346,7 @@ class TestTheEndOfABody:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with pytest.raises(_Exited) as exited:
-            child_runner.set_running_or_end_child(TASK_ID, BodyInterrupted(_stopped()))
+            child_runner.set_running_or_end_child(TASK_ID, STARTED, BodyInterrupted(_stopped()))
 
         assert exited.value.code == child_main.CORE_STOPPED_EXIT_CODE
         assert exits == ['logging.shutdown']
@@ -351,8 +357,8 @@ class TestTheEndOfABody:
 
     def test_a_result_sets_running(self, exits: list[str]) -> None:
         assert child_runner.set_running_or_end_child(
-            TASK_ID, ResultEnvelope(ENVELOPE)
-        ) == SetRunning(ResultEnvelope(ENVELOPE))
+            TASK_ID, STARTED, ResultEnvelope(ENVELOPE)
+        ) == set_running(ResultEnvelope(ENVELOPE))
         assert exits == []
 
 
@@ -430,7 +436,7 @@ class TestTheReportOfAnIsolatedRun:
             child_main._report_run(
                 _RecordingSocket(metas, bodies),  # pyright: ignore[reportArgumentType]
                 frame,
-                SetRunning(ResultEnvelope(ENVELOPE)),
+                set_running(ResultEnvelope(ENVELOPE)),
                 TaskLoop(),
                 mark_finalizing,
             )
@@ -447,7 +453,17 @@ class TestTheReportOfAnIsolatedRun:
 
 
 def _shared_result(end: Any) -> SharedResultFrame:
-    return SharedResultFrame(dispatch=7, task_id=TASK_UUID, end=end, rss=RssUnreadable())
+    """The result frame of run 7 with ``end``, and the start that fits it:
+    none for a stop before running and for a timeout, else ``STARTED_AT``."""
+    started: AttemptStart
+    match end:
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart() | SeatTimedOut():
+            started = StartNotReported()
+        case _:
+            started = StartReported(STARTED_AT)
+    return SharedResultFrame(
+        dispatch=7, task_id=TASK_UUID, end=end, started=started, rss=RssUnreadable(),
+    )
 
 
 class TestTheEndAfterAWrittenFrame:

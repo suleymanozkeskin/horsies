@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::{QueueLabel, TaskLabel, TelemetryOn, WorkerTelemetry};
 use crate::broker::claims::{ClaimRead, ClaimedRow};
-use crate::events::{self, AttemptPlaced, ClaimReleased, Event, TaskClaimed};
+use crate::events::{self, AttemptPlaced, ClaimReleased, TaskClaimed};
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::worker::executor::slots::dispatch::attempt_of;
 use crate::worker::executor::slots::{
@@ -105,35 +105,31 @@ impl TelemetryOn {
             (self.queue_label(&row.queue_name), row.execution),
             queue_wait,
         );
-        let _emitted = self.emit(|| {
-            Event::TaskClaimed(TaskClaimed {
-                at: row.read.wall,
-                task_id: row.id,
-                task_name: events::TaskName::cut(&row.task_name),
-                queue: events::QueueName::cut(&row.queue_name),
-                execution: row.execution,
-                attempt: attempt_of(row.retry_count),
-                priority: row.priority,
-                queue_wait,
-            })
+        let _emitted = self.emit(|| TaskClaimed {
+            at: row.read.wall,
+            task_id: row.id,
+            task_name: events::TaskName::cut(&row.task_name),
+            queue: events::QueueName::cut(&row.queue_name),
+            execution: row.execution,
+            attempt: attempt_of(row.retry_count),
+            priority: row.priority,
+            queue_wait,
         });
     }
 
     fn placed(&self, task: &ClaimedTask, read: ClaimRead, placed: &Placed) {
         let slot_wait = placed.at.saturating_duration_since(read.at);
         let _recorded = self.metrics.slot_wait.observe((task.execution,), slot_wait);
-        let _emitted = self.emit(|| {
-            Event::AttemptPlaced(AttemptPlaced {
-                at: placed.wall,
-                task_id: task.task_id,
-                task_name: events::TaskName::cut(&task.task_name),
-                queue: events::QueueName::cut(&task.queue_name),
-                execution: task.execution,
-                attempt: task.retry.attempt(),
-                child_kind: placed.child_kind,
-                child_pid: placed.child_pid,
-                slot_wait,
-            })
+        let _emitted = self.emit(|| AttemptPlaced {
+            at: placed.wall,
+            task_id: task.task_id,
+            task_name: events::TaskName::cut(&task.task_name),
+            queue: events::QueueName::cut(&task.queue_name),
+            execution: task.execution,
+            attempt: task.retry.attempt(),
+            child_kind: placed.child_kind,
+            child_pid: placed.child_pid,
+            slot_wait,
         });
     }
 
@@ -145,14 +141,12 @@ impl TelemetryOn {
         reason: ReleaseReason,
     ) {
         let _recorded = self.metrics.claims_released.add((reason,), 1);
-        let _emitted = self.emit(|| {
-            Event::ClaimReleased(ClaimReleased {
-                at: chrono::Utc::now(),
-                task_id,
-                task_name: events::TaskName::cut(task_name),
-                queue: events::QueueName::cut(queue_name),
-                reason,
-            })
+        let _emitted = self.emit(|| ClaimReleased {
+            at: chrono::Utc::now(),
+            task_id,
+            task_name: events::TaskName::cut(task_name),
+            queue: events::QueueName::cut(queue_name),
+            reason,
         });
     }
 }
