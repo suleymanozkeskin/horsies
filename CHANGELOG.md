@@ -60,8 +60,11 @@ before you upgrade a 0.7 deployment.
   makes the attempt span a child of the send span; `LinkedToSend()` starts a
   trace with a link to it. Attributes: `messaging.system`,
   `messaging.operation.type`, `messaging.operation.name`,
-  `messaging.message.id`, `horsies.task.id`, `horsies.task.name`,
-  `horsies.task.execution`, `horsies.worker.id`. A task error sets the
+  `messaging.message.id`, `messaging.destination.name` (the queue),
+  `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt` (from 1),
+  `horsies.task.execution`, `horsies.queue`, `horsies.worker.id`, and, for
+  a task that a workflow node links, `horsies.workflow.id` and
+  `horsies.workflow.node` (the index of the node). A task error sets the
   status ERROR and `error.type` to its code, and the live exception that it
   keeps is recorded on the span. Set the SDK of a child in
   `on_child_process_start`. At its stop a child flushes the tracer provider

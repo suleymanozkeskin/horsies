@@ -14,8 +14,11 @@ This module imports `opentelemetry`. `attempt_spans_of` imports it only for
   that holds no valid span, gives a span with no parent.
 - Attributes: `messaging.system`, `messaging.operation.type` (`process`),
   `messaging.operation.name` (`run`), `messaging.message.id`,
-  `horsies.task.id`, `horsies.task.name`, `horsies.task.execution`,
-  `horsies.worker.id`.
+  `messaging.destination.name` (the queue), `horsies.task.id`,
+  `horsies.task.name`, `horsies.task.attempt` (from 1),
+  `horsies.task.execution`, `horsies.queue`, `horsies.worker.id`; for a task
+  that a workflow node links, `horsies.workflow.id` and
+  `horsies.workflow.node` (the index of the node).
 - Status: unset when the envelope holds the task's value; ERROR with
   `error.type` = the error code when it holds a task error. The live
   exception that the task error keeps is recorded on the span first. A body
@@ -52,7 +55,13 @@ from horsies.core.telemetry.attempt_span import (
     ScopeRaised,
     SpansFlushed,
 )
-from horsies.core.worker.child_frames import NoTraceCarrier, StoredTraceCarrier
+from horsies.core.worker.child_frames import (
+    InWorkflow,
+    NotInWorkflow,
+    NoTraceCarrier,
+    RunWorkflow,
+    StoredTraceCarrier,
+)
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     NothingRaised,
@@ -78,11 +87,16 @@ MESSAGING_SYSTEM_KEY: Final = 'messaging.system'
 MESSAGING_OPERATION_TYPE_KEY: Final = 'messaging.operation.type'
 MESSAGING_OPERATION_NAME_KEY: Final = 'messaging.operation.name'
 MESSAGING_MESSAGE_ID_KEY: Final = 'messaging.message.id'
+MESSAGING_DESTINATION_NAME_KEY: Final = 'messaging.destination.name'
 ERROR_TYPE_KEY: Final = 'error.type'
 TASK_ID_KEY: Final = 'horsies.task.id'
 TASK_NAME_KEY: Final = 'horsies.task.name'
+TASK_ATTEMPT_KEY: Final = 'horsies.task.attempt'
 TASK_EXECUTION_KEY: Final = 'horsies.task.execution'
+QUEUE_KEY: Final = 'horsies.queue'
 WORKER_ID_KEY: Final = 'horsies.worker.id'
+WORKFLOW_ID_KEY: Final = 'horsies.workflow.id'
+WORKFLOW_NODE_KEY: Final = 'horsies.workflow.node'
 
 TRACE_ID_HEX_DIGITS: Final = 32
 SPAN_ID_HEX_DIGITS: Final = 16
@@ -214,11 +228,27 @@ def attempt_attributes(subject: AttemptSubject) -> dict[str, AttributeValue]:
         MESSAGING_OPERATION_TYPE_KEY: PROCESS_OPERATION_TYPE,
         MESSAGING_OPERATION_NAME_KEY: RUN_OPERATION_NAME,
         MESSAGING_MESSAGE_ID_KEY: subject.task_id,
+        MESSAGING_DESTINATION_NAME_KEY: subject.queue_name,
         TASK_ID_KEY: subject.task_id,
         TASK_NAME_KEY: subject.task_name,
+        TASK_ATTEMPT_KEY: subject.attempt,
         TASK_EXECUTION_KEY: subject.execution.value,
+        QUEUE_KEY: subject.queue_name,
         WORKER_ID_KEY: subject.worker_id,
+        **workflow_attributes(subject.workflow),
     }
+
+
+def workflow_attributes(workflow: RunWorkflow) -> dict[str, AttributeValue]:
+    """The workflow attributes of an attempt span: the workflow id and the
+    node index for a task that a node links, none otherwise. Pure."""
+    match workflow:
+        case InWorkflow(workflow_id=workflow_id, node_index=node_index):
+            return {WORKFLOW_ID_KEY: str(workflow_id), WORKFLOW_NODE_KEY: node_index}
+        case NotInWorkflow():
+            return {}
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def span_ids_of(span: Span) -> SpanIds | NoSpanIds:

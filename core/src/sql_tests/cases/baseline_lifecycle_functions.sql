@@ -722,6 +722,12 @@ SELECT lc_expect(
     'c02|10|t|{"traceparent":"c02"}|' || repeat('c2', 16) || ',c01|50|t|none|none,c06|90|t|none|none'
 );
 SELECT lc_expect(
+    'claim: a plain task returns no workflow node',
+    (SELECT string_agg(concat_ws('|', right(id::text, 3), workflow_id IS NULL AND workflow_task_index IS NULL), ',')
+     FROM lc_claimed),
+    'c02|t,c01|t,c06|t'
+);
+SELECT lc_expect(
     'claim: the result columns have built-in types',
     (SELECT pg_typeof(id)::text || ',' || pg_typeof(claimed_at)::text FROM lc_claimed LIMIT 1),
     'uuid,timestamp with time zone'
@@ -784,6 +790,26 @@ SELECT lc_expect(
         'wb', '["q_budget"]'::jsonb, '{}'::jsonb, '{}'::jsonb, FALSE, '{"ISOLATED": 1, "SHARED_ASYNC": 2}'::jsonb,
         '{"ISOLATED": "ISOLATED", "SHARED_ASYNC": "SHARED_ASYNC"}'::jsonb, 0, 10, 10, NULL, 45000, '[]'::jsonb)),
     '0'
+);
+
+-- The queue q_claim_wf holds a workflow task whose node has index 3 in workflow cf01, and a workflow task that no node
+-- links.
+SELECT lc_task('00000000-0000-7000-8000-00000000cf11', 'PENDING', 'w1', TRUE);
+SELECT lc_task('00000000-0000-7000-8000-00000000cf12', 'PENDING', 'w1', TRUE);
+UPDATE horsies_tasks SET queue_name = 'q_claim_wf'
+WHERE id IN ('00000000-0000-7000-8000-00000000cf11', '00000000-0000-7000-8000-00000000cf12');
+SELECT lc_workflow('00000000-0000-7000-8000-00000000cf01', 'RUNNING');
+SELECT lc_node('00000000-0000-7000-8000-00000000cf21', '00000000-0000-7000-8000-00000000cf01', 3, 'ENQUEUED',
+               '00000000-0000-7000-8000-00000000cf11');
+SELECT lc_expect(
+    'claim: a workflow task returns the workflow id and the index of its node; one that no node links returns none',
+    (SELECT string_agg(concat_ws('|', right(id::text, 3), is_workflow_task, coalesce(workflow_id::text, 'none'),
+        coalesce(workflow_task_index::text, 'none')), ',' ORDER BY id)
+     FROM horsies_claim(
+        'wf', '["q_claim_wf"]'::jsonb, '{}'::jsonb, '{}'::jsonb, FALSE, '{"ISOLATED": 5}'::jsonb,
+        '{"ISOLATED": "ISOLATED"}'::jsonb, 0, 5, 5, NULL, 45000, '[]'::jsonb)
+     WHERE row_kind = 'CLAIMED'),
+    'f11|t|00000000-0000-7000-8000-00000000cf01|3,f12|t|none|none'
 );
 
 ------------------------------------------------------------------------------------------------------------------------

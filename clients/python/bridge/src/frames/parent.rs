@@ -14,7 +14,7 @@ use horsies_core::events::RunTrace;
 use horsies_core::frame_protocol::{
     ChildKind, ChildLogLevel, ChildPool, ChildProgram, EventsFrame, InitFrame, IsolatedWork,
     MalformedFrame, ParentFrame, ParentFrameRefusal, ProtocolMismatch, ReceivedProtocol, RunFrame,
-    SharedRunFrame, SharedWork, StoredOptionsRefusal, PROTOCOL_VERSION,
+    RunWorkflow, SharedRunFrame, SharedWork, StoredOptionsRefusal, PROTOCOL_VERSION,
 };
 use horsies_core::OrphanSelfHeal;
 use pyo3::prelude::*;
@@ -118,11 +118,23 @@ pub struct TraceCarrier {
     carrier: BTreeMap<String, String>,
 }
 
+/// The workflow node that links the task of a run, as the claim read it:
+/// the node at `node_index` of the workflow `workflow_id`.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+pub struct RunWorkflowNode {
+    workflow_id: Uuid,
+    node_index: u64,
+}
+
 /// Run one task in an isolated child. The parent holds the deadline.
 #[pyclass(module = "horsies._core", name = "RunFrame", frozen, get_all)]
 pub struct RunFrameRecord {
     task_id: Uuid,
     task_name: String,
+    /// The queue of the task row.
+    queue_name: String,
+    /// The attempt that the claim runs, from 1: the retry count plus 1.
+    attempt: u32,
     worker_id: String,
     /// The claim generation; each write of the attempt is fenced on it.
     claimed_at: DateTime<Utc>,
@@ -132,6 +144,8 @@ pub struct RunFrameRecord {
     orphan_self_heal: bool,
     /// `'RUN'`, or `StoredOptionsRefused`.
     work: Py<PyAny>,
+    /// `RunWorkflowNode`, or `'NOT_IN_WORKFLOW'`.
+    workflow: Py<PyAny>,
     /// `TraceCarrier`, or `'NO_CARRIER'`.
     trace: Py<PyAny>,
     /// The JSON text of the task input.
@@ -159,12 +173,18 @@ pub struct SharedRunFrameRecord {
     dispatch: u64,
     task_id: Uuid,
     task_name: String,
+    /// As `RunFrame.queue_name`.
+    queue_name: String,
+    /// As `RunFrame.attempt`.
+    attempt: u32,
     worker_id: String,
     claimed_at: DateTime<Utc>,
     /// As `RunFrame.orphan_self_heal`.
     orphan_self_heal: bool,
     /// `AsyncTaskWork`, `ThreadTaskWork` or `StoredOptionsRefused`.
     work: Py<PyAny>,
+    /// `RunWorkflowNode`, or `'NOT_IN_WORKFLOW'`.
+    workflow: Py<PyAny>,
     /// `TraceCarrier`, or `'NO_CARRIER'`.
     trace: Py<PyAny>,
     input: Py<PyString>,
@@ -369,6 +389,21 @@ fn trace_object(py: Python<'_>, trace: RunTrace) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// The workflow node of a run frame.
+fn workflow_object(py: Python<'_>, workflow: RunWorkflow) -> PyResult<Py<PyAny>> {
+    match workflow {
+        RunWorkflow::NotInWorkflow => "NOT_IN_WORKFLOW".into_py_any(py),
+        RunWorkflow::InWorkflow {
+            workflow_id,
+            node_index,
+        } => RunWorkflowNode {
+            workflow_id,
+            node_index: node_index.get(),
+        }
+        .into_py_any(py),
+    }
+}
+
 fn events_object(py: Python<'_>, events: &EventsFrame) -> PyResult<Py<PyAny>> {
     EventsFrameRecord {
         events: events.events.events().map(str::to_owned).collect(),
@@ -390,10 +425,13 @@ fn run_object(py: Python<'_>, run: RunFrame) -> PyResult<Py<PyAny>> {
     RunFrameRecord {
         task_id: run.task_id,
         task_name: run.task_name,
+        queue_name: run.queue_name.into_string(),
+        attempt: run.attempt.get(),
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),
         work: isolated_work_object(py, run.work)?,
+        workflow: workflow_object(py, run.workflow)?,
         trace: trace_object(py, run.trace)?,
         input,
     }
@@ -406,10 +444,13 @@ fn shared_run_object(py: Python<'_>, run: SharedRunFrame) -> PyResult<Py<PyAny>>
         dispatch: run.dispatch.get(),
         task_id: run.task_id,
         task_name: run.task_name,
+        queue_name: run.queue_name.into_string(),
+        attempt: run.attempt.get(),
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),
         work: shared_work_object(py, run.work)?,
+        workflow: workflow_object(py, run.workflow)?,
         trace: trace_object(py, run.trace)?,
         input,
     }
@@ -431,6 +472,7 @@ pub fn add_parent_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ThreadTaskWork>()?;
     module.add_class::<SharedRunFrameRecord>()?;
     module.add_class::<TraceCarrier>()?;
+    module.add_class::<RunWorkflowNode>()?;
     module.add_class::<EventsFrameRecord>()?;
     module.add_class::<StopFrameRecord>()?;
     module.add_class::<FrameRefused>()?;

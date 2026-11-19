@@ -37,7 +37,7 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
-from horsies.core.worker.child_frames import NoTraceCarrier
+from horsies.core.worker.child_frames import NotInWorkflow, NoTraceCarrier
 from horsies.core.worker.child_runner import RunTheTask
 from horsies.core.worker.run_return import StartedRunning
 from tests.fixtures.run_return import wire_of
@@ -475,6 +475,9 @@ def _run_child(
                 claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
+                workflow=NotInWorkflow(),
                 trace=NoTraceCarrier(),
             )
         )

@@ -61,7 +61,7 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.task_decorator import TaskBodyKind
 from horsies.core.models.boot_failure import AppLoadFailed
 from horsies.core.worker.task_loop import AsyncTaskPresence, LoopOpen, TaskLoop
-from horsies.core.worker.child_frames import BootFailedFrame, NoTraceCarrier
+from horsies.core.worker.child_frames import BootFailedFrame, NotInWorkflow, NoTraceCarrier
 from horsies.core.worker.child_main import boot_app
 from horsies.core.worker.child_runner import (
     RunTheTask,
@@ -877,6 +877,9 @@ def _run_entry_defaults() -> dict[str, Any]:
         'claimed_at': CLAIMED_AT,
         'task_loop': TaskLoop(),
         'orphan_self_heal': True,
+        'queue_name': 'default',
+        'attempt': 1,
+        'workflow': NotInWorkflow(),
         'trace': NoTraceCarrier(),
     }
 

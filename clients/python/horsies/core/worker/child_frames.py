@@ -7,7 +7,8 @@ The parent frames come from the core as its classes: ``core.InitFrame``,
 init frame keeps the database URL and the connection settings in the core;
 the child builds its core handle from it (``CoreChildHandle.from_init``). A
 task child takes no ``core.EventsFrame``: only a handler child does. The
-trace carrier of a run frame reads with ``run_trace_of``.
+trace carrier of a run frame reads with ``run_trace_of``, its workflow node
+with ``run_workflow_of``.
 
 The frames that a child sends are the frozen values of this module. Child
 code builds and matches them; ``encode_child_frame`` and
@@ -126,6 +127,40 @@ def run_trace_of(trace: core.TraceCarrier | Literal['NO_CARRIER']) -> RunTrace:
             return NoTraceCarrier()
         case core.TraceCarrier(carrier=carrier):
             return StoredTraceCarrier(carrier=MappingProxyType(dict(carrier)))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class InWorkflow:
+    """The node at ``node_index`` of the workflow ``workflow_id`` links the
+    task of the run, as the claim read it."""
+
+    workflow_id: uuid.UUID
+    node_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class NotInWorkflow:
+    """No workflow node links the task of the run: a task of a send or a
+    schedule, or a workflow task whose node is gone (its start then
+    misses)."""
+
+
+type RunWorkflow = InWorkflow | NotInWorkflow
+"""The workflow node of a run."""
+
+
+def run_workflow_of(
+    workflow: core.RunWorkflowNode | Literal['NOT_IN_WORKFLOW'],
+) -> RunWorkflow:
+    """The workflow node of a run frame (``core.RunFrame.workflow``,
+    ``core.SharedRunFrame.workflow``), frozen. Pure."""
+    match workflow:
+        case 'NOT_IN_WORKFLOW':
+            return NotInWorkflow()
+        case core.RunWorkflowNode(workflow_id=workflow_id, node_index=node_index):
+            return InWorkflow(workflow_id=workflow_id, node_index=node_index)
         case _ as unreachable:
             assert_never(unreachable)
 

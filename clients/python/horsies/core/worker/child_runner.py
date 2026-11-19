@@ -84,7 +84,9 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.worker.child_frames import (
     PROTOCOL_NUMBERS,
     RunTrace,
+    RunWorkflow,
     run_trace_of,
+    run_workflow_of,
     stored_refusal_of,
 )
 from horsies.core.worker.child_main import end_child_after_core_refusal
@@ -1623,8 +1625,11 @@ def shared_attempt_subject(
     return AttemptSubject(
         task_id=str(frame.task_id),
         task_name=frame.task_name,
+        queue_name=frame.queue_name,
+        attempt=frame.attempt,
         worker_id=frame.worker_id,
         execution=execution,
+        workflow=run_workflow_of(frame.workflow),
         trace=run_trace_of(frame.trace),
     )
 
@@ -1639,6 +1644,9 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     claimed_at: datetime,
     task_loop: TaskLoop,
     orphan_self_heal: bool,
+    queue_name: str,
+    attempt: int,
+    workflow: RunWorkflow,
     trace: RunTrace,
 ) -> RunReturn:
     """Run one task in an isolated child, up to its result.
@@ -1655,7 +1663,8 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
 
     The steps after the RUNNING update run inside the attempt span of the
     run, whose parent the send's carrier ``trace`` gives
-    (``_run_isolated_after_running``).
+    (``_run_isolated_after_running``). ``queue_name``, ``attempt`` and
+    ``workflow`` come with the run from the worker, for the span.
 
     ``orphan_self_heal`` comes with the run from the worker (the app's
     ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``): with it, the
@@ -1711,8 +1720,11 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
             AttemptSubject(
                 task_id=task_id,
                 task_name=task_name,
+                queue_name=queue_name,
+                attempt=attempt,
                 worker_id=master_worker_id,
                 execution=Execution.ISOLATED,
+                workflow=workflow,
                 trace=trace,
             ),
         ),

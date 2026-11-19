@@ -22,9 +22,9 @@ import textwrap
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Protocol
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -73,8 +73,11 @@ from horsies.core.telemetry.attempt_span import (
 )
 from horsies.core.worker import child_main, child_runner, shared_runner, thread_runner
 from horsies.core.worker.child_frames import (
+    InWorkflow,
+    NotInWorkflow,
     NoTraceCarrier,
     RunTrace,
+    RunWorkflow,
     StoredTraceCarrier,
     ThreadSeatWork,
 )
@@ -93,8 +96,11 @@ from horsies.core.worker.run_return import (
 from horsies.core.worker.task_loop import ExecutorShutDown, TaskLoop
 from tests.fixtures.core_frames import (
     NO_CARRIER,
+    NOT_IN_WORKFLOW,
+    QUEUE_NAME,
     async_work,
     carrier_trace,
+    in_workflow,
     init_frame,
     run_frame,
     shared_run_frame,
@@ -105,6 +111,7 @@ from tests.fixtures.run_return import STARTED
 pytestmark = [pytest.mark.unit]
 
 TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000a15')
+WORKFLOW_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-00000000f015')
 WORKER_ID: Final = 'worker-1'
 BODY_LOGGER: Final = 'horsies.test_attempt_span'
 SCENARIO_TIMEOUT_S: Final = 5.0
@@ -260,7 +267,12 @@ def _send_carrier(traced: _Traced) -> tuple[dict[str, object], ReadableSpan]:
     return carrier_trace(carrier), traced.one('send')
 
 
-def _run_isolated(task_name: str, trace_meta: dict[str, object], task_loop: TaskLoop) -> RunReturn:
+def _run_isolated(
+    task_name: str,
+    trace_meta: dict[str, object],
+    task_loop: TaskLoop,
+    workflow: dict[str, object] = NOT_IN_WORKFLOW,
+) -> RunReturn:
     with (
         patch.object(
             child_runner,
@@ -270,19 +282,32 @@ def _run_isolated(task_name: str, trace_meta: dict[str, object], task_loop: Task
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)),
     ):
         return child_main.run_child_task(
-            run_frame(task_id=TASK_ID, task_name=task_name, trace=trace_meta),
+            run_frame(
+                task_id=TASK_ID,
+                task_name=task_name,
+                attempt=2,
+                workflow=workflow,
+                trace=trace_meta,
+            ),
             init_frame(),
             task_loop,
         )
 
 
-def _run_seat(task_name: str, trace_meta: dict[str, object], task_loop: TaskLoop) -> RunReturn:
+def _run_seat(
+    task_name: str,
+    trace_meta: dict[str, object],
+    task_loop: TaskLoop,
+    workflow: dict[str, object] = NOT_IN_WORKFLOW,
+) -> RunReturn:
     _ = task_loop
     frame = shared_run_frame(
         dispatch=1,
         task_id=TASK_ID,
         task_name=task_name,
         work=async_work(10_000, 1_000),
+        attempt=2,
+        workflow=workflow,
         trace=trace_meta,
     )
     with (
@@ -304,6 +329,7 @@ def _run_thread_seat(
     task_name: str,
     trace_meta: dict[str, object],
     task_loop: TaskLoop,
+    workflow: dict[str, object] = NOT_IN_WORKFLOW,
 ) -> RunReturn:
     """Run on a thread of its own, as a seat thread does."""
     _ = task_loop
@@ -312,6 +338,8 @@ def _run_thread_seat(
         task_id=TASK_ID,
         task_name=task_name,
         work=thread_work(10_000),
+        attempt=2,
+        workflow=workflow,
         trace=trace_meta,
     )
     returned: list[RunReturn] = []
@@ -335,12 +363,26 @@ def _run_thread_seat(
     return returned[0]
 
 
+class _PlaceRun(Protocol):
+    """Runs a task at one body place, from the trace and the workflow of its
+    run frame."""
+
+    def __call__(
+        self,
+        task_name: str,
+        trace_meta: dict[str, object],
+        task_loop: TaskLoop,
+        workflow: dict[str, object] = ...,
+        /,
+    ) -> RunReturn: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _Place:
     """A body place, the task it runs, and the class of its child."""
 
     task_name: str
-    run: Callable[[str, dict[str, object], TaskLoop], RunReturn]
+    run: _PlaceRun
     execution: Execution
 
 
@@ -393,11 +435,32 @@ class TestTheSpanOfEachPlace:
             'messaging.operation.type': 'process',
             'messaging.operation.name': 'run',
             'messaging.message.id': str(TASK_ID),
+            'messaging.destination.name': QUEUE_NAME,
             'horsies.task.id': str(TASK_ID),
             'horsies.task.name': place.task_name,
+            'horsies.task.attempt': 2,
             'horsies.task.execution': place.execution.value,
+            'horsies.queue': QUEUE_NAME,
             'horsies.worker.id': WORKER_ID,
         }
+
+    @pytest.mark.parametrize('place', PLACES)
+    def test_the_attempt_span_of_a_workflow_task_names_its_workflow_and_node(
+        self,
+        place: _Place,
+        traced: _Traced,
+        task_loop: TaskLoop,
+    ) -> None:
+        trace_meta, _ = _send_carrier(traced)
+
+        returned = place.run(place.task_name, trace_meta, task_loop, in_workflow(WORKFLOW_ID, 4))
+
+        assert isinstance(returned, SetRunning), returned
+        attributes = dict(traced.one(f'run {place.task_name}').attributes or {})
+        assert attributes['horsies.workflow.id'] == str(WORKFLOW_ID)
+        assert attributes['horsies.workflow.node'] == 4
+        assert attributes['horsies.task.attempt'] == 2
+        assert attributes['horsies.queue'] == QUEUE_NAME
 
     @pytest.mark.parametrize('place', PLACES)
     def test_a_span_of_the_body_nests_under_the_attempt_span(
@@ -515,14 +578,50 @@ class TestTheStatusOfTheSpan:
         assert (attempt.attributes or {})['error.type'] == 'WORKER_RESOLUTION_ERROR'
 
 
-def _subject(trace_value: RunTrace = NoTraceCarrier()) -> AttemptSubject:
+def _subject(
+    trace_value: RunTrace = NoTraceCarrier(),
+    workflow: RunWorkflow = NotInWorkflow(),
+) -> AttemptSubject:
     return AttemptSubject(
         task_id=str(TASK_ID),
         task_name='task',
+        queue_name='emails',
+        attempt=1,
         worker_id=WORKER_ID,
         execution=Execution.ISOLATED,
+        workflow=workflow,
         trace=trace_value,
     )
+
+
+class TestTheAttributesOfASubject:
+    """``attempt_attributes``: the attributes of the span of an attempt."""
+
+    def test_a_task_that_no_node_links_has_no_workflow_attribute(self) -> None:
+        assert attempt_otel.attempt_attributes(_subject()) == {
+            'messaging.system': 'horsies',
+            'messaging.operation.type': 'process',
+            'messaging.operation.name': 'run',
+            'messaging.message.id': str(TASK_ID),
+            'messaging.destination.name': 'emails',
+            'horsies.task.id': str(TASK_ID),
+            'horsies.task.name': 'task',
+            'horsies.task.attempt': 1,
+            'horsies.task.execution': 'ISOLATED',
+            'horsies.queue': 'emails',
+            'horsies.worker.id': WORKER_ID,
+        }
+
+    def test_a_workflow_task_has_the_workflow_id_and_the_node_index(self) -> None:
+        workflow = InWorkflow(workflow_id=WORKFLOW_ID, node_index=0)
+        attributes = attempt_otel.attempt_attributes(_subject(workflow=workflow))
+        assert attributes['horsies.workflow.id'] == str(WORKFLOW_ID)
+        assert attributes['horsies.workflow.node'] == 0
+        assert attempt_otel.workflow_attributes(workflow) == {
+            'horsies.workflow.id': str(WORKFLOW_ID),
+            'horsies.workflow.node': 0,
+        }
+        assert attempt_otel.workflow_attributes(NotInWorkflow()) == {}
 
 
 class TestTheEndOfEachOutcome:
@@ -617,14 +716,17 @@ class TestTracingOff:
                 run_in_attempt_span, use_attempt_spans,
             )
             from horsies.core.worker import child_main, shared_runner, thread_runner
-            from horsies.core.worker.child_frames import NoTraceCarrier
+            from horsies.core.worker.child_frames import NotInWorkflow, NoTraceCarrier
             from horsies.core.worker.run_return import (
                 EncodedResult, ResultEnvelope, ResultSucceeded,
             )
 
             use_attempt_spans(attempt_spans_of(NoTracing()))
             returned = run_in_attempt_span(
-                AttemptSubject('t', 'task', 'w', Execution.ISOLATED, NoTraceCarrier()),
+                AttemptSubject(
+                    task_id='t', task_name='task', queue_name='q', attempt=1, worker_id='w',
+                    execution=Execution.ISOLATED, workflow=NotInWorkflow(), trace=NoTraceCarrier(),
+                ),
                 lambda: EncodedResult(ResultEnvelope('{}'), ResultSucceeded()),
             )
             assert returned == ResultEnvelope('{}'), returned
@@ -659,7 +761,16 @@ class TestSharedAsyncSeats:
             return _ok_steps()
 
         def subject(name: str) -> AttemptSubject:
-            return AttemptSubject(name, name, WORKER_ID, Execution.SHARED_ASYNC, NoTraceCarrier())
+            return AttemptSubject(
+                task_id=name,
+                task_name=name,
+                queue_name=QUEUE_NAME,
+                attempt=1,
+                worker_id=WORKER_ID,
+                execution=Execution.SHARED_ASYNC,
+                workflow=NotInWorkflow(),
+                trace=NoTraceCarrier(),
+            )
 
         async def two_seats() -> None:
             async with asyncio.timeout(SCENARIO_TIMEOUT_S):

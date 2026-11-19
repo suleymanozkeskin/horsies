@@ -84,6 +84,7 @@ from horsies.core.worker.child_frames import (
     boot_failed_frame,
     encode_child_frame,
     run_trace_of,
+    run_workflow_of,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.run_return import (
@@ -1130,6 +1131,9 @@ def run_child_task(
         claimed_at=frame.claimed_at,
         task_loop=task_loop,
         orphan_self_heal=frame.orphan_self_heal,
+        queue_name=frame.queue_name,
+        attempt=frame.attempt,
+        workflow=run_workflow_of(frame.workflow),
         trace=run_trace_of(frame.trace),
     )
 

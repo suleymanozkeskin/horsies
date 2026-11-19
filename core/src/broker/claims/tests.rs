@@ -47,6 +47,8 @@ fn claimed_wire(n: u128) -> ClaimWireRow {
         max_retries: Some(3),
         trace_carrier: None,
         trace_id: None,
+        workflow_id: None,
+        workflow_task_index: None,
         priority: Some(40),
         enqueued_at: Some(due()),
         short_by: None,
@@ -87,6 +89,7 @@ fn claimed_rows_come_in_claim_order_with_no_short_take() {
             max_retries: 3,
             trace: crate::events::RunTrace::NoCarrier,
             trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+            workflow: RunWorkflow::NotInWorkflow,
             priority: Priority::try_from(40).unwrap(),
             enqueued_at: due(),
             read,
@@ -222,6 +225,52 @@ fn rows_the_claim_never_returns_are_a_defect() {
                 ..short_wire(1)
             }],
         ),
+        (
+            "short_with_a_workflow_id",
+            vec![ClaimWireRow {
+                workflow_id: Some(WORKFLOW_ID),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "short_with_a_node_index",
+            vec![ClaimWireRow {
+                workflow_task_index: Some(0),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "claimed_with_a_workflow_id_and_no_node_index",
+            vec![ClaimWireRow {
+                workflow_id: Some(WORKFLOW_ID),
+                ..claimed_wire(1)
+            }],
+        ),
+        (
+            "claimed_with_a_node_index_and_no_workflow_id",
+            vec![ClaimWireRow {
+                workflow_task_index: Some(0),
+                ..claimed_wire(1)
+            }],
+        ),
+        (
+            "claimed_with_a_negative_node_index",
+            vec![ClaimWireRow {
+                workflow_id: Some(WORKFLOW_ID),
+                workflow_task_index: Some(-1),
+                ..claimed_wire(1)
+            }],
+        ),
+        (
+            "claimed_with_a_node_index_past_the_spec_bound",
+            vec![ClaimWireRow {
+                workflow_id: Some(WORKFLOW_ID),
+                workflow_task_index: Some(
+                    i32::try_from(MAX_WORKFLOW_NODE_INDEX + 1).expect("the bound fits an i32"),
+                ),
+                ..claimed_wire(1)
+            }],
+        ),
         ("short_by_zero", vec![short_wire(0)]),
         ("short_by_negative", vec![short_wire(-1)]),
         (
@@ -335,6 +384,70 @@ fn a_stored_carrier_over_its_bound_claims_with_no_carrier() {
 
     assert_eq!(pass.claimed.len(), 1);
     assert_eq!(pass.claimed[0].trace, RunTrace::NoCarrier);
+}
+
+/// The workflow of the claimed rows of these tests.
+const WORKFLOW_ID: Uuid = Uuid::from_u128(0xf001);
+
+/// The workflow id and the node index of a claimed workflow task reach the
+/// claimed row as its node, the largest index included; a row with neither
+/// (`NULL`) claims with no node.
+#[test]
+fn a_claimed_row_carries_the_node_that_links_it() {
+    let largest = i32::try_from(MAX_WORKFLOW_NODE_INDEX).expect("the bound fits an i32");
+    let pass = decode_claim_pass(
+        vec![
+            ClaimWireRow {
+                is_workflow_task: Some(true),
+                workflow_id: Some(WORKFLOW_ID),
+                workflow_task_index: Some(3),
+                ..claimed_wire(1)
+            },
+            claimed_wire(2),
+            ClaimWireRow {
+                is_workflow_task: Some(true),
+                workflow_id: Some(WORKFLOW_ID),
+                workflow_task_index: Some(largest),
+                ..claimed_wire(3)
+            },
+        ],
+        read(),
+    )
+    .expect("claimed rows with and without a node read");
+
+    assert_eq!(
+        pass.claimed[0].workflow,
+        RunWorkflow::InWorkflow {
+            workflow_id: WORKFLOW_ID,
+            node_index: WorkflowNodeIndex::new(3).expect("3 is a node index"),
+        }
+    );
+    assert_eq!(pass.claimed[1].workflow, RunWorkflow::NotInWorkflow);
+    assert_eq!(
+        pass.claimed[2].workflow,
+        RunWorkflow::InWorkflow {
+            workflow_id: WORKFLOW_ID,
+            node_index: WorkflowNodeIndex::new(MAX_WORKFLOW_NODE_INDEX)
+                .expect("the largest node index"),
+        }
+    );
+}
+
+/// A workflow task that no node links (both columns `NULL`) claims with no
+/// node: its start misses with `NODE_NOT_LINKED`.
+#[test]
+fn a_workflow_task_that_no_node_links_claims_with_no_node() {
+    let pass = decode_claim_pass(
+        vec![ClaimWireRow {
+            is_workflow_task: Some(true),
+            ..claimed_wire(1)
+        }],
+        read(),
+    )
+    .expect("a workflow task with no node reads");
+
+    assert!(pass.claimed[0].is_workflow_task);
+    assert_eq!(pass.claimed[0].workflow, RunWorkflow::NotInWorkflow);
 }
 
 // --- claim pass arguments -----------------------------------------------------

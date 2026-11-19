@@ -20,6 +20,11 @@
 //! - The run frames (`run`, `shared_run`) carry `trace`: the trace carrier
 //!   that the send stored on the task row (`carrier` with its text, one JSON
 //!   object of texts), or `no_carrier`.
+//! - The run frames carry the facts of the attempt span of the child:
+//!   `queue_name`, `attempt` (the retry count of the row plus 1, from 1),
+//!   and `workflow`: `in_workflow` with the `workflow_id` and the
+//!   `node_index` of the node that links the task, as the claim read it, or
+//!   `not_in_workflow`.
 //! - The frames that end a run carry `started_at`, the time that the start
 //!   write returned to the child. `result` and `shared_result` carry
 //!   `reported` with the time, or `not_reported` for a run that stopped
@@ -77,12 +82,13 @@ mod tests;
 
 pub use bounds::{
     AsyncSeats, CancelGraceMs, ExecutorThreads, PoolMaxSize, PoolMinSize, TaskSendPool,
-    TaskTimeoutMs, ThreadSeats, MAX_BLOCKED_WHERE_CHARS, MAX_BOOT_DETAIL_CHARS,
+    TaskTimeoutMs, ThreadSeats, WorkflowNodeIndex, MAX_BLOCKED_WHERE_CHARS, MAX_BOOT_DETAIL_CHARS,
     MAX_BOOT_ERROR_NAME_CHARS, MAX_CANCEL_GRACE_MS, MAX_CHILD_POOL_CONNECTIONS,
     MAX_EVENTS_PER_FRAME, MAX_EVENT_HANDLERS, MAX_EVENT_WIRE_BYTES, MAX_EXECUTOR_THREADS,
     MAX_FAILURE_DETAIL_CHARS, MAX_HANDLER_NAME_CHARS, MAX_LEFTOVER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES, MAX_PRELOAD_REASON_CHARS, MAX_REFUSAL_REASON_CHARS,
-    MAX_SEATS_PER_SHARED_ASYNC_CHILD, MAX_SEATS_PER_SHARED_THREAD_CHILD, MIN_CANCEL_GRACE_MS,
+    MAX_SEATS_PER_SHARED_ASYNC_CHILD, MAX_SEATS_PER_SHARED_THREAD_CHILD, MAX_WORKFLOW_NODE_INDEX,
+    MIN_CANCEL_GRACE_MS,
 };
 pub use child_frames::{
     decode_child_frame, encode_child_frame, BodyEnd, BodyReturnedFrame, BootFailedFrame,
@@ -107,8 +113,9 @@ pub use metadata::{ExpectedType, MalformedFrame, ProtocolMismatch, ReceivedProto
 pub use parent_frames::{
     decode_parent_frame, encode_parent_frame, ChildConnection, ChildKind, ChildLogLevel, ChildPool,
     ChildProgram, DatabaseUrl, EventsFrame, HandlerChild, InitFrame, IsolatedChild, IsolatedWork,
-    ParentFrame, ParentFrameRefusal, PythonProgram, RunFrame, ServerSessions, SharedAsyncChild,
-    SharedRunFrame, SharedThreadChild, SharedWork, StoredOptionsRefusal, TaskKind,
+    ParentFrame, ParentFrameRefusal, PythonProgram, RunFrame, RunWorkflow, ServerSessions,
+    SharedAsyncChild, SharedRunFrame, SharedThreadChild, SharedWork, StoredOptionsRefusal,
+    TaskKind,
 };
 pub use preload_frames::{
     decode_preload_frame, encode_preload_frame, PreloadFrame, SPAWN_REQUEST_BYTE,

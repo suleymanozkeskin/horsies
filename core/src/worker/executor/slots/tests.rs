@@ -49,6 +49,7 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
         options: options(stored),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -835,11 +836,14 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
     encode_parent_frame(&ParentFrame::Run(RunFrame {
         task_id: claimed.task_id,
         task_name: claimed.task_name.clone(),
+        queue_name: crate::events::QueueName::cut(&claimed.queue_name),
+        attempt: claimed.retry.attempt(),
         worker_id: "worker-1".to_owned(),
         claimed_at: claimed.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
+        workflow: claimed.workflow,
         trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()
