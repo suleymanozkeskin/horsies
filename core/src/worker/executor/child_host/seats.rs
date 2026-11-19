@@ -40,11 +40,12 @@ use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 
-use super::panic::{CatchPanic, PanicRecord};
+use super::body_scope::{BodyOutcome, OpenBody};
+use super::panic::PanicRecord;
 use super::rss::read_rss;
 use super::run::{
-    kind_mismatch_end, mark_finalizing, prepare, refusal_end, result_end, run_blocking_body,
-    start_attempt, HostContext, Prepared, RunFacts, Started,
+    async_body_in, kind_mismatch_end, mark_finalizing, prepare, refusal_end, result_end,
+    run_blocking_body, start_attempt, HostContext, Prepared, RunFacts, Started,
 };
 use super::run_work::{
     left_report, millis_since, stuck_report, Alive, PollsNow, RoundsEnd, RunPolls, RunScope,
@@ -53,7 +54,7 @@ use super::run_work::{
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
-use crate::events::AttemptStart;
+use crate::events::{AttemptStart, RunTrace};
 use crate::worker::executor::protocol::{
     BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildAfterFrame, ChildFrame, DispatchNumber,
     FailureDetail, IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
@@ -62,6 +63,7 @@ use crate::worker::executor::protocol::{
     SharedRunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskTimeoutMs,
     LOOP_BLOCK_LIMIT,
 };
+use crate::Execution;
 
 /// How often the poll watch reads the polls in progress.
 const POLL_WATCH_INTERVAL: Duration = Duration::from_millis(250);
@@ -146,7 +148,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         claimed_at,
         orphan_self_heal,
         work,
-        trace: _,
+        trace,
         input,
     } = run;
     let facts = RunFacts {
@@ -170,7 +172,11 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         IsolatedWork::Run => match prepare(&context.app, &facts.task_name, &input) {
             Prepared::Ended(end) => end,
             Prepared::Body { task, input } => {
-                result_end(isolated_body(&scope, &facts.task_name, task, input).await)
+                let body = context
+                    .app
+                    .body_scope
+                    .open(&facts, Execution::Isolated, &trace);
+                result_end(isolated_body(&scope, &facts.task_name, task, input, body).await)
             }
         },
     };
@@ -188,29 +194,33 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
     }
 }
 
-/// The body of an isolated run. An async body runs inside the run, so the
-/// work it starts with `spawn_in_run` belongs to the run. A blocking body
-/// runs on a blocking thread of the runtime. A panic of either is
-/// `UNHANDLED_EXCEPTION` with its record.
-async fn isolated_body(
+/// The body of an isolated run, inside the span of its open body scope
+/// `body`, which it closes with what the body returned. An async body runs
+/// inside the run, so the work it starts with `spawn_in_run` belongs to the
+/// run. A blocking body runs on a blocking thread of the runtime. A panic
+/// of either is `UNHANDLED_EXCEPTION` with its record. The parent ends a
+/// run past its timeout by killing the child, so the scope never sees a
+/// timeout here.
+pub(super) async fn isolated_body(
     scope: &RunScope,
     task_name: &str,
     task: RegisteredTask,
     input: Vec<u8>,
+    body: OpenBody,
 ) -> RawTaskResult {
-    match task {
-        RegisteredTask::Async { task, meta } => {
-            let body = CatchPanic::new(async move { task.execute(&input).await });
-            joined_result(
-                task_name,
-                meta.module,
-                scope.spawn_body(task_name, body).await,
-            )
-        }
+    let span = body.span();
+    let result = match task {
+        RegisteredTask::Async { task, meta } => joined_result(
+            task_name,
+            meta.module,
+            scope
+                .spawn_body(task_name, async_body_in(task, input, span))
+                .await,
+        ),
         RegisteredTask::Blocking { task, meta } => {
             let name = task_name.to_owned();
             let thread = tokio::task::spawn_blocking(move || {
-                run_blocking_body(&task, &input, &name, meta.module)
+                run_blocking_body(&task, &input, &name, meta.module, &span)
             });
             match thread.await {
                 Ok(result) => result,
@@ -222,7 +232,9 @@ async fn isolated_body(
                 )),
             }
         }
-    }
+    };
+    body.close(&BodyOutcome::of_result(&result));
+    result
 }
 
 /// The body returned with work alive (Python `_report_run`,
@@ -393,6 +405,7 @@ async fn async_seat(
                         run_ref,
                         facts: &facts,
                         input: &run.input,
+                        trace: &run.trace,
                         started_at,
                     };
                     async_body(&context, &watch, body, timeout, grace).await
@@ -417,7 +430,7 @@ async fn async_seat(
 }
 
 /// What the async body of task `task_name` (defined in `module`) ended
-/// with. Its panic is caught in its poll ([`CatchPanic`]) and is
+/// with. Its panic is caught in its poll (`CatchPanic`) and is
 /// `UNHANDLED_EXCEPTION` with its record. A join error means the body ended
 /// with no result (the runtime shut down): `UNHANDLED_EXCEPTION`.
 fn joined_result(
@@ -436,14 +449,20 @@ fn joined_result(
 }
 
 /// The facts of one run on a seat after its start: its reference, its
-/// facts, its input and the time that its start write returned.
+/// facts, its input, its stored trace and the time that its start write
+/// returned.
 struct SeatBody<'a> {
     run_ref: RunRef,
     facts: &'a RunFacts,
     input: &'a TaskInputText,
+    trace: &'a RunTrace,
     started_at: DateTime<Utc>,
 }
 
+/// The body of a shared async run, inside the span of its body scope. The
+/// scope is closed with what the body returned, or with `TimedOut` at the
+/// deadline: the body may run on in the cancel grace, and the span ends
+/// when the body ends or is dropped.
 async fn async_body(
     context: &HostContext,
     watch: &PollWatch,
@@ -455,6 +474,7 @@ async fn async_body(
         run_ref,
         facts,
         input,
+        trace,
         started_at,
     } = body;
     let (task, module, input): (Arc<dyn AsyncTaskFn>, TaskModule, Vec<u8>) =
@@ -475,16 +495,23 @@ async fn async_body(
             }
         };
     let scope = RunScope::timed(watch.register(run_ref));
-    let body = CatchPanic::new(async move { task.execute(&input).await });
+    let open = context
+        .app
+        .body_scope
+        .open(facts, Execution::SharedAsync, trace);
+    let body = async_body_in(task, input, open.span());
     let mut handle = scope.spawn_body(&facts.task_name, body);
     let deadline = tokio::time::sleep(Duration::from_millis(timeout.get()));
     tokio::pin!(deadline);
     let outcome = tokio::select! {
         joined = &mut handle => {
-            let end = result_end(joined_result(&facts.task_name, module, joined));
+            let result = joined_result(&facts.task_name, module, joined);
+            open.close(&BodyOutcome::of_result(&result));
+            let end = result_end(result);
             after_return(context, run_ref, &scope, end, grace, started_at).await
         }
         () = &mut deadline => {
+            open.close(&BodyOutcome::TimedOut);
             // The body runs on: it sees the signal and has the grace to end.
             scope.fire_cancel();
             context.writer.send(ChildFrame::DeadlineFired(run_ref)).await;
@@ -763,9 +790,9 @@ fn thread_seat(
         Started::Running { started_at } => {
             let end = match work {
                 ThreadSeatWork::Refusal(refusal) => SeatEnd::Finished(refusal_end(&refusal)),
-                ThreadSeatWork::Task { timeout } => {
-                    thread_body(context, runtime, run_ref, &facts, &run.input, timeout)
-                }
+                ThreadSeatWork::Task { timeout } => thread_body(
+                    context, runtime, run_ref, &facts, &run.input, &run.trace, timeout,
+                ),
             };
             runtime.block_on(mark_finalizing(context, &facts));
             (end, AttemptStart::Reported { started_at })
@@ -822,12 +849,17 @@ impl DeadlineGate {
     }
 }
 
+/// The body of a shared thread run on the seat thread, inside the span of
+/// its body scope. The scope is closed with what the body returned, or with
+/// `TimedOut` when the deadline came first: a thread cannot be stopped, so
+/// the body returns before the scope closes either way.
 fn thread_body(
     context: &HostContext,
     runtime: &tokio::runtime::Handle,
     run_ref: RunRef,
     facts: &RunFacts,
     input: &TaskInputText,
+    trace: &RunTrace,
     timeout: TaskTimeoutMs,
 ) -> SeatEnd {
     let (task, module, input) = match prepare(&context.app, &facts.task_name, input) {
@@ -850,13 +882,21 @@ fn thread_body(
             writer.send(ChildFrame::DeadlineFired(run_ref)).await;
         }
     });
-    let result = run_blocking_body(&task, &input, &facts.task_name, module);
+    let open = context
+        .app
+        .body_scope
+        .open(facts, Execution::SharedThread, trace);
+    let result = run_blocking_body(&task, &input, &facts.task_name, module, &open.span());
     match gate.finish() {
         GateEnd::Returned => {
             timer.abort();
+            open.close(&BodyOutcome::of_result(&result));
             SeatEnd::Finished(result_end(result))
         }
         // The deadline came first: what the body returned is dropped.
-        GateEnd::Fired => SeatEnd::TimedOut,
+        GateEnd::Fired => {
+            open.close(&BodyOutcome::TimedOut);
+            SeatEnd::TimedOut
+        }
     }
 }

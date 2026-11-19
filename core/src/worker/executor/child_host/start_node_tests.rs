@@ -43,6 +43,7 @@ fn context(pool: TestPool) -> (HostContext, UnixStream) {
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
             family: crate::ClientFamily::Rust,
+            body_scope: super::BodyScope::NoScope,
         }),
         pid: 1,
         writer,

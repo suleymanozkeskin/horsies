@@ -27,7 +27,7 @@ use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
 use crate::worker::executor::protocol::StopReason;
 
-const WORKER_ID: &str = "start-attempt-worker";
+pub(super) const WORKER_ID: &str = "start-attempt-worker";
 const OTHER_WORKER_ID: &str = "start-attempt-other-worker";
 const PID: i32 = 4242;
 
@@ -58,6 +58,7 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
             family: crate::ClientFamily::Rust,
+            body_scope: super::BodyScope::NoScope,
         }),
         pid: PID,
         writer,
@@ -101,7 +102,7 @@ async fn one_connection_child_broker() -> PostgresBroker {
 
 /// A CLAIMED plain row held by [`WORKER_ID`]; `good_until` passed when
 /// `expired`. Returns the id and the claim generation.
-async fn seed_claimed(pool: &TestPool, expired: bool) -> (Uuid, DateTime<Utc>) {
+pub(super) async fn seed_claimed(pool: &TestPool, expired: bool) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
     let generation = sql::query_scalar(
         "INSERT INTO horsies_tasks (
@@ -155,7 +156,7 @@ async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
         .expect("read the live row")
 }
 
-async fn remove_task(pool: &TestPool, task_id: Uuid) {
+pub(super) async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",

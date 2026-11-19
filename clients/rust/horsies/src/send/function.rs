@@ -16,6 +16,10 @@
 //! (`child_producer`), whose pool the worker sizes; anywhere else through
 //! the app's handle.
 //!
+//! With the feature `otel`, the database calls of a send run inside one
+//! span, and each call hands the core the trace carrier of that span
+//! (`crate::telemetry`).
+//!
 //! A send in a process that was forked without `exec` after the core's
 //! process runtime started panics (`process_state::refuse_in_a_fork`): a
 //! fork is a state of the process, never a send result, as Python's sends
@@ -30,9 +34,10 @@ use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::WholeSeconds;
+use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
-    child_producer, mint_task_id, ChildProducer, Execution, FailureCause, PayloadPolicy,
-    RetentionConfig, SendKind, TaskOptions, TaskSendError, TaskSendPayload,
+    child_producer, mint_task_id, CheckedSend, ChildProducer, Execution, FailureCause,
+    PayloadPolicy, RetentionConfig, SendKind, TaskOptions, TaskSendError, TaskSendPayload,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -42,6 +47,7 @@ use super::options::{send_retention, TaskSendOptions};
 use crate::app::SendSuppression;
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
+use crate::telemetry::{CallEnd, TaskSendSpan, TaskSendSubject};
 use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
@@ -436,7 +442,9 @@ where
 
     /// Enqueue `payload` as `task_id`, and resend a retryable
     /// `ENQUEUE_FAILED` when the app asks for it. Every call after the first
-    /// is `SendKind::Repeat`.
+    /// is `SendKind::Repeat`. Every call runs inside the one span of the send
+    /// and carries its trace carrier (feature `otel`; without it, no span
+    /// and no carrier).
     ///
     /// # Panics
     ///
@@ -454,13 +462,24 @@ where
             false => 0,
         };
         let handle = self.context.send_handle();
+        let span = TaskSendSpan::open(&TaskSendSubject {
+            task_id,
+            task_name: &payload.task_name,
+            queue_name: &payload.queue_name,
+        });
+        let trace = span.trace();
         let handle_ref: &CoreHandle = &handle;
         let payload_ref = &payload;
-        let stored_id = send_with_resends(resends, first, move |kind| {
-            enqueue_once(handle_ref, task_id, payload_ref, kind)
+        let trace_ref = &trace;
+        let sent = send_with_resends(resends, first, move |kind| {
+            enqueue_once(handle_ref, task_id, payload_ref, trace_ref, kind)
         })
-        .await?;
-        Ok(TaskHandle::new(stored_id, Arc::clone(&handle)))
+        .await;
+        span.end(match &sent {
+            Ok(_) => CallEnd::Succeeded,
+            Err(error) => CallEnd::Failed(error.code()),
+        });
+        Ok(TaskHandle::new(sent?, Arc::clone(&handle)))
     }
 
     fn validation_failed(&self, message: String) -> TaskSendError {
@@ -517,37 +536,40 @@ fn resend_wait(resend: u32) -> Duration {
 }
 
 /// One enqueue through `handle`, which installs the schema once per handle
-/// first. A failed connect or install, and every enqueue error, maps to the
-/// send catalog by the core's one rule.
+/// first: the core's check of the send (`CheckedSend::check`, with the
+/// handle's default for keeping the rerun input), the trace carrier
+/// `trace`, then the write. A failed connect or install, and every enqueue
+/// error, maps to the send catalog by the core's one rule. A carrier that
+/// breaks a bound of the core is not stored and never refuses the send.
 async fn enqueue_once(
     handle: &CoreHandle,
     task_id: Uuid,
     payload: &TaskSendPayload,
+    trace: &SendTrace,
     kind: SendKind,
 ) -> Result<Uuid, TaskSendError> {
-    let broker = handle
-        .initialized_broker()
-        .await
-        .map_err(|error| send_error_from_enqueue(task_id, payload.clone(), &error))?;
-    broker
-        .enqueue(
-            &payload.task_name,
-            &payload.input_json,
-            &payload.queue_name,
-            payload.priority,
-            Some(payload.sent_at),
-            None,
-            payload.good_until,
-            payload.task_options.as_deref(),
-            Some(task_id),
-            payload.enqueue_delay_seconds,
-            payload.idempotency_key.as_deref(),
-            payload.retention,
-            None,
-            kind,
-        )
-        .await
-        .map_err(|error| send_error_from_enqueue(task_id, payload.clone(), &error))
+    let refused = |error: horsies_core::BrokerError| {
+        send_error_from_enqueue(task_id, payload.clone(), &error)
+    };
+    let broker = handle.initialized_broker().await.map_err(refused)?;
+    let send = CheckedSend::check(
+        &payload.task_name,
+        &payload.input_json,
+        &payload.queue_name,
+        payload.priority,
+        Some(payload.sent_at),
+        None,
+        payload.good_until,
+        payload.task_options.as_deref(),
+        Some(task_id),
+        payload.enqueue_delay_seconds,
+        payload.idempotency_key.as_deref(),
+        payload.retention,
+        handle.manifest().send.retain_rerun_input_default,
+    )
+    .map_err(refused)?
+    .with_trace(trace.clone());
+    broker.enqueue_checked(&send, kind).await.map_err(refused)
 }
 
 /// The stored options text of a send (Python `_serialize_options_for_send`,

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::args::{ChildArgs, CHILD_MODE_ARGUMENT};
+use super::body_scope::BodyScope;
 use super::link::{read_frame, start_control_thread, write_frame, FrameWriter, ReadEnd};
 use super::panic::{install_panic_hook, CatchPanic};
 use super::producer::{publish_child_producer, task_send_manifest, task_send_pool_of};
@@ -75,6 +76,9 @@ pub struct ChildApp {
     /// The client family of the binary: the child's broker writes as it and
     /// checks it before its first write.
     pub family: ClientFamily,
+    /// What the child does around each task body: nothing, or the span that
+    /// the client opens for the run ([`super::BodySpans`]).
+    pub body_scope: BodyScope,
 }
 
 /// What a child does with the log level of its init frame (the worker's
