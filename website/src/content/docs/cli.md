@@ -144,6 +144,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 | `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
 | `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
+| `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule. Without it the id shows as text |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**

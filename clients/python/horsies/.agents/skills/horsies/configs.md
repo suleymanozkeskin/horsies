@@ -1103,7 +1103,7 @@ horsies check <module> [--live] [--loglevel LEVEL]
 ### `horsies web`
 
 ```bash
-horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--loglevel INFO]
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--loglevel INFO]
 horsies web --database-url "postgresql://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
 ```
 

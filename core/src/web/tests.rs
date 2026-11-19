@@ -43,6 +43,7 @@ use super::spa::{
     inject, runtime_config_json, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig,
 };
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
+use super::trace_link::{TraceLink, TraceLinkTemplate};
 
 /// A policy of the router tests that allows reads and actions.
 struct AllowAll;
@@ -511,6 +512,42 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
     );
     assert_eq!(body["detail"][0]["input"], "0");
     assert_eq!(body["detail"][0]["ctx"], serde_json::json!({"ge": 1}));
+}
+
+/// `/api/meta` reports the template of the trace link, or null when the
+/// page shows the trace id as text.
+#[tokio::test]
+async fn the_meta_reports_the_trace_link_template_or_null() {
+    const TEMPLATE: &str = "https://grafana.example.com/explore?traceId={trace_id}";
+    let schema = status(SchemaState::Match, Some(crate::expected_schema_version()));
+    let mut linked = test_state(
+        lazy_pool(),
+        Arc::new(AllowAll),
+        fixed_probe(schema),
+        true,
+        MemoryAssets::standard(),
+    );
+    linked.ui_config.trace_link =
+        TraceLink::Template(TraceLinkTemplate::parse(TEMPLATE).expect("the template is valid"));
+    let plain = test_router(Arc::new(AllowAll), schema, true);
+
+    let linked_meta = json(
+        build_router(linked)
+            .oneshot(request(Method::GET, "/api/meta"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let plain_meta = json(
+        plain
+            .oneshot(request(Method::GET, "/api/meta"))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(linked_meta["trace_link_template"], TEMPLATE);
+    assert_eq!(plain_meta["trace_link_template"], serde_json::Value::Null);
 }
 
 #[tokio::test]

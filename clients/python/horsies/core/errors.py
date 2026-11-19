@@ -116,6 +116,8 @@ class ErrorCode(str, Enum):
     # AppConfig.tracing is OtelTracing and the OpenTelemetry API
     # (horsies[otel]) is not installed.
     CONFIG_OTEL_API_MISSING = 'HRS-220'
+    # A trace link template of the monitoring page that the core refuses.
+    CONFIG_INVALID_TRACE_LINK = 'HRS-221'
 
     # Registry (HRS-300-HRS-399)
     TASK_NOT_REGISTERED = 'HRS-300'

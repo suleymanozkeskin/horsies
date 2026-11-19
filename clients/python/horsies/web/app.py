@@ -17,12 +17,22 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Final, Literal, assert_never
+from typing import (
+    Annotated,
+    Any,
+    AsyncGenerator,
+    ClassVar,
+    Final,
+    Literal,
+    Self,
+    Union,
+    assert_never,
+)
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from horsies import __version__
 from horsies._core import (
@@ -34,8 +44,10 @@ from horsies._core import (
     MonitoringHandler,
     MonitoringRequest,
     MonitoringResponse,
+    trace_link_refusal,
 )
 from horsies.core.app import Horsies
+from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.web.auth import INTENT_HEADER, MonitoringAuthPolicy
 from horsies.web.schema import SchemaState
 
@@ -51,6 +63,72 @@ type Verdict = Literal['ALLOWED', 'REFUSED']
 """The answer of one call of the user's policy."""
 
 
+TRACE_ID_PLACEHOLDER: Final = '{trace_id}'
+"""The placeholder of a trace link template that the page fills with the 32
+hex digits of a task's trace id."""
+
+
+class TraceLinkTemplate(BaseModel):
+    """The link of a task's trace id in the task detail of the page: an
+    ``http`` or ``https`` URL with one ``{trace_id}``, at most 2,048 bytes of
+    printable ASCII with no space, for example
+    ``https://grafana.example.com/explore?traceId={trace_id}``.
+
+    The core checks the template (``horsies._core.trace_link_refusal``); a
+    template that it refuses raises ``ConfigurationError`` (``HRS-221``) with
+    the rule that does not hold.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['trace_link_template'] = 'trace_link_template'
+    template: str
+
+    @model_validator(mode='after')
+    def check_template(self) -> Self:
+        match trace_link_refusal(self.template):
+            case None:
+                return self
+            case str() as refusal:
+                raise ConfigurationError(
+                    message='invalid trace link template',
+                    code=ErrorCode.CONFIG_INVALID_TRACE_LINK,
+                    notes=[refusal],
+                    help_text=(
+                        'use an http or https URL with one '
+                        f'{TRACE_ID_PLACEHOLDER}, for example '
+                        f'https://grafana.example.com/explore?traceId={TRACE_ID_PLACEHOLDER}'
+                    ),
+                )
+
+
+class NoTraceLink(BaseModel):
+    """The task detail shows the trace id as text."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['no_trace_link'] = 'no_trace_link'
+
+
+TraceLinkSetting = Annotated[
+    Union[TraceLinkTemplate, NoTraceLink],
+    Field(discriminator='kind'),
+]
+"""The trace link of the page."""
+
+
+def trace_link_template_text(setting: TraceLinkTemplate | NoTraceLink) -> str | None:
+    """The template text that the core handler takes, or ``None`` for
+    ``NoTraceLink``. Pure."""
+    match setting:
+        case TraceLinkTemplate(template=template):
+            return template
+        case NoTraceLink():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class MonitoringUIConfig(BaseModel):
     """Adopter-facing customization of the served page.
 
@@ -58,9 +136,14 @@ class MonitoringUIConfig(BaseModel):
     points at overrides any design token the app ships. Overriding CSS custom
     properties is the entire customization contract — there is no build-time
     theming.
+
+    ``trace_link`` is the link of a task's trace id in the task detail
+    (``TraceLinkTemplate``), or ``NoTraceLink`` (the default) for the id as
+    text.
     """
 
     custom_css_url: str | None = None
+    trace_link: TraceLinkSetting = Field(default_factory=NoTraceLink)
 
 
 class MetaResponse(BaseModel):
@@ -72,7 +155,8 @@ class MetaResponse(BaseModel):
     policy verdict. A schema the tool cannot write through forces actions off
     for everyone and names itself in ``actions_disabled_reason``.
     ``schema_state`` is the probe's verdict itself, so a client never derives
-    it from the version numbers.
+    it from the version numbers. ``trace_link_template`` is the template of
+    the trace link of a task detail, or ``None`` for the trace id as text.
     """
 
     horsies_version: str
@@ -84,6 +168,7 @@ class MetaResponse(BaseModel):
     schema_compatible: bool
     schema_state: SchemaState
     actions_disabled_reason: str | None
+    trace_link_template: str | None
 
 
 class MonitoringEvents:
@@ -295,6 +380,7 @@ def create_monitoring_app(
         broker._core_handle,  # pyright: ignore[reportPrivateUsage]
         actions_enabled=actions_enabled,
         custom_css_url=ui_config.custom_css_url,
+        trace_link_template=trace_link_template_text(ui_config.trace_link),
         client_version=__version__,
         heartbeat_ms=EVENT_HEARTBEAT_MS,
     )
