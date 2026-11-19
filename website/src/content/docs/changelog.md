@@ -121,8 +121,12 @@ before you upgrade a 0.7 deployment.
   the span that sent the task, from the time the task reached its child to
   the time the end reached the worker, with status ERROR, `error.type` = the
   code, the attributes of the span of a child and
-  `horsies.span.source = "worker"`. The span of a workflow task has no
-  `horsies.workflow.*` attributes: the worker does not know the node.
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id, with one read of the core bounded at 1 s
+  for a connection and 1 s for the statement, only for such an attempt, and
+  the span gets `horsies.workflow.id`, `horsies.workflow.node` and
+  `horsies.workflow.root_id`; a read that fails leaves them out, and the
+  handler child counts and logs it.
   `OtelTracing(worker_ended_spans=...)` takes the new `WorkerEndedSpans`:
   `MAKE_SPANS` (the default), with which the worker starts its handler child
   also when the app has no handler, or `NO_SPANS`. Set the tracer provider

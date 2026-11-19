@@ -24,6 +24,7 @@ import logging
 import socket
 import threading
 import time
+import uuid
 import warnings
 from collections.abc import Callable, Coroutine, Iterator
 from pathlib import Path
@@ -38,6 +39,8 @@ from pydantic import SecretStr
 
 from horsies import _core as core
 from horsies._catalog import events
+from horsies._catalog.broker import BrokerErrorCode
+from horsies._catalog.broker_errors import BrokerOperationFailed
 from horsies.core.app import Horsies
 from horsies.core.event_handlers import EventHandler
 from horsies.core.models.app import AppConfig
@@ -49,6 +52,7 @@ from horsies.core.telemetry.attempt_span import StopFlush
 from horsies.core.telemetry.ended_attempt_span import (
     NO_ENDED_ATTEMPT_SPANS,
     EndedAttemptSpans,
+    NodeReadFailed,
     OtelEndedAttemptSpans,
 )
 from horsies.core.types.result import Err, Ok, Result
@@ -63,6 +67,7 @@ from horsies.core.worker.child_frames import (
 from horsies.core.worker.child_main import ParentFrameReader, read_python_init_frame
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.handler_child import (
+    AppNodeReader,
     EventDispatch,
     HandlerInbox,
     InboxClosed,
@@ -1105,3 +1110,76 @@ def test_a_stats_frame_holds_each_handler_once_in_order() -> None:
     assert [counts.handler for counts in frame.handlers] == [
         handler.name for handler in handlers
     ]
+
+
+class _NodeHandle:
+    """The core handle of a broker: its node read answers ``outcome``, or
+    raises it when it is an exception."""
+
+    def __init__(self, outcome: object) -> None:
+        self.outcome = outcome
+        self.task_ids: list[uuid.UUID] = []
+
+    def task_workflow_node(self, task_id: uuid.UUID) -> object:
+        self.task_ids.append(task_id)
+        match self.outcome:
+            case BaseException() as raised:
+                raise raised
+            case answer:
+                return answer
+
+
+class _NodeBroker:
+    def __init__(self, handle: _NodeHandle) -> None:
+        self._core_handle = handle
+
+
+class _NodeApp:
+    """An app whose ``get_broker`` gives ``broker``, or raises it."""
+
+    def __init__(self, broker: _NodeBroker | Exception) -> None:
+        self.broker = broker
+
+    def get_broker(self) -> _NodeBroker:
+        match self.broker:
+            case Exception() as raised:
+                raise raised
+            case broker:
+                return broker
+
+
+def _reader_of(app: _NodeApp) -> AppNodeReader:
+    return AppNodeReader(cast('Horsies', app))
+
+
+class TestTheNodeReaderOfTheApp:
+    """``AppNodeReader``: the node read through the core handle of the app's
+    broker. A linked node and no node are the bridge's own classes, which
+    the build round's end-to-end test reads through a real worker."""
+
+    TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000a17')
+
+    def test_a_failed_read_names_its_code_and_its_message(self) -> None:
+        failed = BrokerOperationFailed(
+            code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+            message='task_workflow_node failed: the pool is closed',
+            retryable=True,
+            exception=RuntimeError('the pool is closed'),
+        )
+        handle = _NodeHandle(failed)
+
+        read = _reader_of(_NodeApp(_NodeBroker(handle))).read(self.TASK_ID)
+
+        assert read == NodeReadFailed(
+            detail='TASK_INFO_QUERY_FAILED: task_workflow_node failed: the pool is closed',
+        )
+        assert handle.task_ids == [self.TASK_ID]
+
+    def test_a_call_that_raises_or_a_broker_that_is_not_built_is_a_failed_read(self) -> None:
+        raising = _reader_of(_NodeApp(_NodeBroker(_NodeHandle(TimeoutError('call bound')))))
+        no_broker = _reader_of(_NodeApp(RuntimeError('broker init failed')))
+
+        assert raising.read(self.TASK_ID) == NodeReadFailed(detail='TimeoutError: call bound')
+        assert no_broker.read(self.TASK_ID) == NodeReadFailed(
+            detail='RuntimeError: broker init failed',
+        )

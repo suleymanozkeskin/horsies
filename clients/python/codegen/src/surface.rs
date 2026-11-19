@@ -295,6 +295,8 @@ const TASK_INFO_PARAMETERS: &[StubParameter] = &[
     keyword("include_attempts", "bool"),
 ];
 
+const TASK_WORKFLOW_NODE_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
+
 const CORE_CHILD_HANDLE_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
     keyword("kept_open", "int"),
@@ -421,6 +423,8 @@ const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOpe
 const SEND_OUTCOME: &str = "Enqueued | BrokerCoreEnqueueError";
 const TASK_INFO_OUTCOME: &str =
     "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+const TASK_WORKFLOW_NODE_OUTCOME: &str =
+    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | BrokerOperationFailed";
 const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
@@ -933,6 +937,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         parameters: TASK_INFO_PARAMETERS,
         returns: TypeText::FutureOf(TASK_INFO_OUTCOME),
         doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "task_workflow_node",
+        parameters: TASK_WORKFLOW_NODE_PARAMETERS,
+        returns: TypeText::Plain(TASK_WORKFLOW_NODE_OUTCOME),
+        doc: "The workflow node that links one task. One bounded statement; no schema step.",
     },
     StubFunction {
         name: "raw_result_record",
@@ -1532,6 +1542,24 @@ const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
         name: "TaskInfoNotFound",
         doc: "Neither the live table nor the task history holds the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskWorkflowNodeLinked",
+        doc: "The node at node_index of the workflow workflow_id links the task; root_workflow_id is the top-level workflow of its tree.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("node_index", "int"),
+            property("root_workflow_id", "uuid.UUID"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskWorkflowNodeNotLinked",
+        doc: "No workflow node links the task now.",
         constructor: Constructor::NoConstructor,
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],

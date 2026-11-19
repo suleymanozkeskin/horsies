@@ -64,6 +64,7 @@ use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::task_lists::{
     expired_tasks_operation, stale_tasks_operation, stale_threshold,
 };
+use crate::operations::task_workflow_node::task_workflow_node_operation;
 use crate::operations::worker_connections::check_worker_connections_operation;
 use crate::operations::worker_ping::{ping_request, ping_wait_bound, ping_workers_operation};
 use crate::operations::worker_reads::{
@@ -1278,6 +1279,23 @@ impl CoreHandle {
             "CoreHandle.task_info",
             CallKind::Read,
             task_info_operation(self.connection(), task_id, parts),
+        )
+    }
+
+    /// The workflow node that links the task `task_id`:
+    /// `TaskWorkflowNodeLinked`, `TaskWorkflowNodeNotLinked`, or the
+    /// generated broker error class with `TASK_INFO_QUERY_FAILED`. One
+    /// bounded statement of the core (`TASK_WORKFLOW_NODE_READ_END`); no
+    /// schema step. The handler child reads it for the span of an attempt
+    /// of a workflow task that the worker ended.
+    fn task_workflow_node(&self, py: Python<'_>, task_id: Uuid) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.task_workflow_node",
+            CallKind::Read,
+            task_workflow_node_operation(self.connection(), task_id),
         )
     }
 

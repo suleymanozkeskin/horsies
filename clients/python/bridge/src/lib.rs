@@ -285,6 +285,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
+    module.add_class::<operations::task_workflow_node::TaskWorkflowNodeLinked>()?;
+    module.add_class::<operations::task_workflow_node::TaskWorkflowNodeNotLinked>()?;
     module.add_class::<operations::monitoring_reads::TaskListQuery>()?;
     module.add_class::<operations::monitoring_reads::TaskFacetsQuery>()?;
     module.add_class::<operations::monitoring_reads::TaskStatsQuery>()?;

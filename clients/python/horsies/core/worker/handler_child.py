@@ -20,7 +20,9 @@ Boot, before the ready frame:
    thread per handler. An ``async def`` handler gets an event loop of its
    own, which its thread runs.
 4. Choose the spans of the attempts that the worker ended from
-   ``AppConfig.tracing`` (``ended_attempt_spans_of``).
+   ``AppConfig.tracing`` (``ended_attempt_spans_of``), with the node reader
+   of the app (``AppNodeReader``): the workflow node of a workflow task
+   whose attempt the worker ended is read through the core, at its event.
 5. Start the control thread, which reads the frames of the worker.
 
 After the ready frame:
@@ -60,12 +62,14 @@ import os
 import socket
 import threading
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies import _core as core
 from horsies._catalog import events
+from horsies._catalog.broker_errors import BrokerOperationFailed
 from horsies._catalog.events import AnyEvent
 from horsies.core.event_handlers import EventHandler, HandlerChildStartHook, HandlerKind
 from horsies.core.logging import get_logger
@@ -77,6 +81,9 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.telemetry.ended_attempt_span import (
     EndedAttemptSpans,
+    NodeNotLinked,
+    NodeRead,
+    NodeReadFailed,
     ended_attempt_spans_of,
     flush_ended_attempt_spans_at_stop,
     make_ended_attempt_span,
@@ -110,6 +117,7 @@ from horsies.core.worker.child_runner import (
     import_app_for_child,
     log_level_of,
 )
+from horsies.core.worker.run_return import InWorkflow
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -410,6 +418,55 @@ class RunningHandler:
             _failure_text(failure),
             exc_info=traceback,
         )
+
+
+def node_read_of(
+    outcome: core.TaskWorkflowNodeLinked
+    | core.TaskWorkflowNodeNotLinked
+    | BrokerOperationFailed,
+) -> NodeRead:
+    """The node read of the outcome of ``CoreHandle.task_workflow_node``.
+    Pure."""
+    match outcome:
+        case BrokerOperationFailed(code=code, message=message):
+            return NodeReadFailed(detail=f'{code.value}: {message}')
+        case core.TaskWorkflowNodeLinked(
+            workflow_id=workflow_id,
+            node_index=node_index,
+            root_workflow_id=root_workflow_id,
+        ):
+            return InWorkflow(
+                workflow_id=workflow_id,
+                node_index=node_index,
+                root_workflow_id=root_workflow_id,
+            )
+        case core.TaskWorkflowNodeNotLinked():
+            return NodeNotLinked()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+class AppNodeReader:
+    """Reads the workflow node of a task through the core handle of the
+    app's broker (``CoreHandle.task_workflow_node``: one bounded statement,
+    no schema step). The broker is built at the first read, so a child
+    whose worker ends no attempt of a workflow task builds none."""
+
+    def __init__(self, app: Horsies) -> None:
+        self._app: Final = app
+
+    def read(self, task_id: uuid.UUID) -> NodeRead:
+        """The node that links ``task_id``. A broker that cannot be built
+        and a call that the bridge refuses or ends at its bound
+        (``CoreCallTimedOut``, ``CoreStopped``) are ``NodeReadFailed``."""
+        try:
+            handle = self._app.get_broker()._core_handle
+            outcome = handle.task_workflow_node(task_id)
+        except Exception as exc:
+            # The broker construction raises HorsiesError; the bridge call
+            # raises its call errors. Each is a failed read of this span.
+            return NodeReadFailed(detail=f'{type(exc).__name__}: {exc}')
+        return node_read_of(outcome)
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,7 +835,7 @@ def serve_handler_child(
         case Err(failed):
             fail_boot(sock, failed)
     stopped = threading.Event()
-    ended_spans = ended_attempt_spans_of(app.config.tracing)
+    ended_spans = ended_attempt_spans_of(app.config.tracing, AppNodeReader(app))
     dispatch = EventDispatch(running, ended_spans)
     match start_handler_control_thread(reader, dispatch, stopped):
         case Ok():

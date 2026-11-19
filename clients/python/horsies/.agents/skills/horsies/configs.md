@@ -296,8 +296,11 @@ default) the handler child makes the span of each attempt that the worker
 ended (a timeout kill `TASK_TIMEOUT`, a blocked-loop kill, a lost child
 `WORKER_CRASHED`), whose child span never ended: `run <task_name>`, CONSUMER,
 parent from the stored carrier, start at the placement, status ERROR with
-`error.type`, `horsies.span.source = "worker"`, no `horsies.workflow.*`
-attributes. The worker then starts the handler child also with no handler;
+`error.type`, `horsies.span.source = "worker"`. For a workflow task the
+handler child reads the node by the task id (one bounded core read, only for
+these attempts) and sets `horsies.workflow.*`; a failed read leaves them out
+and is counted and logged. The worker then starts the handler child also
+with no handler;
 set the tracer provider in `on_handler_child_start`. `NO_SPANS` turns it off.
 
 `on_shared_async_child_start` rules: the call must return a coroutine, read

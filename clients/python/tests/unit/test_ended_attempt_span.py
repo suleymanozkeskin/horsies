@@ -51,9 +51,14 @@ from horsies.core.telemetry.ended_attempt_span import (
     EndedSpanMade,
     EndedSpanRaised,
     EndedSpansOff,
+    EndedWorkflow,
+    NodeNotLinked,
+    NodeRead,
+    NodeReadFailed,
     NoEndedAttemptSpans,
     NotEndedByWorker,
     OtelEndedAttemptSpans,
+    WorkflowNotKnown,
     ended_attempt_spans_of,
     flush_ended_attempt_spans_at_stop,
     make_ended_attempt_span,
@@ -62,7 +67,7 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_frames import NoTraceCarrier, StoredTraceCarrier
 from horsies.core.worker.core_run import WorkerLaunch, worker_manifest_json
 from horsies.core.worker.handler_child import EventDispatch, decode_event_text
-from horsies.core.worker.run_return import NotInWorkflow
+from horsies.core.worker.run_return import InWorkflow, NotInWorkflow
 from horsies.core.worker_manifest import worker_ended_spans_manifest
 
 pytestmark = [pytest.mark.unit]
@@ -78,6 +83,27 @@ ENDED_NANOS: Final = 1_700_000_030_500_654_321
 """When the end reached the worker: the `at` of the event (nanoseconds)."""
 RUN_NANOS: Final = 30_500_000_000
 SPAN_NAME: Final = f'run {TASK_NAME}'
+WORKFLOW_ID: Final = uuid.UUID('0192f6a1-7b3c-7d4e-8f00-00000000f007')
+ROOT_WORKFLOW_ID: Final = uuid.UUID('0192f6a1-7b3c-7d4e-8f00-00000000f001')
+
+
+class _StubNodes:
+    """A node reader that gives `answer` and records each task id that it
+    read."""
+
+    def __init__(self, answer: NodeRead) -> None:
+        self.answer = answer
+        self.reads: list[uuid.UUID] = []
+
+    def read(self, task_id: uuid.UUID) -> NodeRead:
+        self.reads.append(task_id)
+        return self.answer
+
+
+def _no_reads() -> _StubNodes:
+    """A node reader for the tests of plain tasks: it answers a failure, and
+    the tests check that nothing read it."""
+    return _StubNodes(NodeReadFailed(detail='a plain task reads no node'))
 
 
 def _to_microsecond(nanos: int) -> int:
@@ -98,13 +124,18 @@ class _Traced:
     def named(self, name: str) -> list[ReadableSpan]:
         return [span for span in self.spans() if span.name == name]
 
-    def recorder(self, parentage: ChildOfSend | LinkedToSend) -> OtelEndedAttemptSpans:
+    def recorder(
+        self,
+        parentage: ChildOfSend | LinkedToSend,
+        nodes: _StubNodes | None = None,
+    ) -> OtelEndedAttemptSpans:
         return OtelEndedAttemptSpans(
             recorder=OtelEndedAttemptRecorder(
                 tracer=self.provider.get_tracer('horsies'),
                 parentage=parentage,
                 provider_flush=lambda _timeout_millis: SpansFlushed(),
             ),
+            nodes=_no_reads() if nodes is None else nodes,
         )
 
     def send_carrier(self) -> tuple[str, ReadableSpan]:
@@ -317,12 +348,16 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
         assert span.context.trace_id != send.context.trace_id
         assert [link.context.span_id for link in span.links] == [send.context.span_id]
 
-    def test_a_workflow_task_has_no_workflow_attribute_and_stays_in_the_trace(
+    def test_a_workflow_task_killed_at_its_timeout_gets_the_attributes_of_its_node(
         self,
         traced: _Traced,
     ) -> None:
         carrier, send = traced.send_carrier()
-        EventDispatch((), traced.recorder(ChildOfSend())).dispatch(
+        nodes = _StubNodes(
+            InWorkflow(workflow_id=WORKFLOW_ID, node_index=4, root_workflow_id=ROOT_WORKFLOW_ID),
+        )
+        spans = traced.recorder(ChildOfSend(), nodes)
+        EventDispatch((), spans).dispatch(
             [
                 _ended_text(
                     reason=TIMEOUT_KILL.reason,
@@ -335,10 +370,74 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
             ],
         )
 
+        made = traced.named(SPAN_NAME)
+        assert len(made) == 1
+        span = made[0]
+        assert send.context is not None and span.context is not None
+        assert span.parent is not None and span.parent.span_id == send.context.span_id
+        assert dict(span.attributes or {}) == {
+            **_expected_attributes(TIMEOUT_KILL),
+            'horsies.workflow.id': str(WORKFLOW_ID),
+            'horsies.workflow.node': 4,
+            'horsies.workflow.root_id': str(ROOT_WORKFLOW_ID),
+        }
+        assert nodes.reads == [TASK_ID]
+        assert spans.read_failures.count == 0
+
+    @pytest.mark.parametrize(
+        ('answer', 'failures'),
+        [(NodeReadFailed(detail='TASK_INFO_QUERY_FAILED: the pool is closed'), 1), (NodeNotLinked(), 0)],
+        ids=['failed_read', 'no_node'],
+    )
+    def test_a_node_that_is_not_read_gives_workflow_not_known_and_a_failed_read_counts(
+        self,
+        traced: _Traced,
+        answer: NodeRead,
+        failures: int,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        carrier, send = traced.send_carrier()
+        nodes = _StubNodes(answer)
+        spans = traced.recorder(ChildOfSend(), nodes)
+        event = _event(
+            _ended_text(
+                reason=TIMEOUT_KILL.reason,
+                code=TIMEOUT_KILL.code,
+                execution=TIMEOUT_KILL.execution,
+                child_kind=TIMEOUT_KILL.child_kind,
+                trace_wire=['Carrier', carrier],
+                workflow='WORKFLOW_NOT_KNOWN',
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger='horsies.telemetry'):
+            step = make_ended_attempt_span(spans, event)
+
+        assert step == EndedSpanMade(workflow=WorkflowNotKnown())
         span = traced.named(SPAN_NAME)[0]
         assert send.context is not None and span.context is not None
-        assert not [key for key in (span.attributes or {}) if key.startswith('horsies.workflow')]
+        assert dict(span.attributes or {}) == _expected_attributes(TIMEOUT_KILL)
         assert span.context.trace_id == send.context.trace_id
+        assert spans.read_failures.count == failures
+        logged = [r for r in caplog.records if str(TASK_ID) in r.getMessage()]
+        assert len(logged) == failures
+
+    def test_a_plain_task_reads_no_node(self, traced: _Traced) -> None:
+        nodes = _no_reads()
+        spans = traced.recorder(ChildOfSend(), nodes)
+        event = _event(
+            _ended_text(
+                reason=CRASH.reason,
+                code=CRASH.code,
+                execution=CRASH.execution,
+                child_kind=CRASH.child_kind,
+                trace_wire=['NoCarrier'],
+            ),
+        )
+
+        assert make_ended_attempt_span(spans, event) == EndedSpanMade(workflow=NotInWorkflow())
+        assert nodes.reads == []
+        assert spans.read_failures.count == 0
 
     def test_an_end_that_the_child_reported_or_not_known_and_other_events_make_no_span(
         self,
@@ -380,14 +479,16 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
 class TestNoSpans:
     def test_no_spans_and_no_tracing_choose_no_span(self) -> None:
         assert (
-            ended_attempt_spans_of(OtelTracing(worker_ended_spans=WorkerEndedSpans.NO_SPANS))
+            ended_attempt_spans_of(
+                OtelTracing(worker_ended_spans=WorkerEndedSpans.NO_SPANS), _no_reads()
+            )
             == NO_ENDED_ATTEMPT_SPANS
         )
-        assert ended_attempt_spans_of(NoTracing()) == NO_ENDED_ATTEMPT_SPANS
+        assert ended_attempt_spans_of(NoTracing(), _no_reads()) == NO_ENDED_ATTEMPT_SPANS
 
     def test_make_spans_is_the_default_of_otel_tracing(self) -> None:
         assert OtelTracing().worker_ended_spans == WorkerEndedSpans.MAKE_SPANS
-        assert isinstance(ended_attempt_spans_of(OtelTracing()), OtelEndedAttemptSpans)
+        assert isinstance(ended_attempt_spans_of(OtelTracing(), _no_reads()), OtelEndedAttemptSpans)
         assert (
             OtelTracing.model_validate({'worker_ended_spans': 'NO_SPANS'}).worker_ended_spans
             == WorkerEndedSpans.NO_SPANS
@@ -481,9 +582,13 @@ class TestNoSpans:
             )
             from horsies.core.worker.handler_child import decode_event_text
 
+            class NoReads:
+                def read(self, task_id):
+                    raise AssertionError('spans off read no node')
+
             event = decode_event_text({wire!r}).unwrap()
             for tracing in (NoTracing(), OtelTracing(worker_ended_spans=WorkerEndedSpans.NO_SPANS)):
-                spans = ended_attempt_spans_of(tracing)
+                spans = ended_attempt_spans_of(tracing, NoReads())
                 print(make_ended_attempt_span(spans, event))
                 print(flush_ended_attempt_spans_at_stop(spans))
             print(sorted(m for m in sys.modules if m.split('.')[0] == 'opentelemetry'))
@@ -517,8 +622,9 @@ class _RaisingRecorder:
         self,
         ended: events.AttemptEnded,
         decided: events.AttemptEndDecidedByWorker,
+        workflow: EndedWorkflow,
     ) -> None:
-        del ended, decided
+        del ended, decided, workflow
         self.calls += 1
         raise RuntimeError('the exporter is gone')
 
@@ -541,7 +647,7 @@ class TestARecorderThatRaises:
             ended_attempt_span._RecorderFailureLog(),
         )
         recorder = _RaisingRecorder()
-        spans: EndedAttemptSpans = OtelEndedAttemptSpans(recorder=recorder)
+        spans: EndedAttemptSpans = OtelEndedAttemptSpans(recorder=recorder, nodes=_no_reads())
         event = _event(
             _ended_text(
                 reason=CRASH.reason,
@@ -612,4 +718,6 @@ class TestTheFactsOfTheSpan:
                 trace_wire=['NoCarrier'],
             ),
         )
-        assert make_ended_attempt_span(traced.recorder(ChildOfSend()), event) == EndedSpanMade()
+        assert make_ended_attempt_span(traced.recorder(ChildOfSend()), event) == EndedSpanMade(
+            workflow=NotInWorkflow()
+        )

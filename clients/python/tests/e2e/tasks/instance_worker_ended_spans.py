@@ -27,6 +27,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.tracing import OtelTracing
+from horsies.core.models.workflow import TaskNode
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -94,6 +95,17 @@ def healthcheck() -> TaskResult[str, TaskError]:
 def sleeper() -> TaskResult[str, TaskError]:
     time.sleep(60)
     return TaskResult(ok='woke')
+
+
+# One node of the sleeper: the worker kills it at its timeout, and the
+# handler child reads its node for the span.
+node_sleeper = TaskNode(fn=sleeper)
+
+spec_sleeper = app.workflow(
+    name='e2e_worker_ended_spans_flow',
+    tasks=[node_sleeper],
+    definition_key='tests.e2e.tasks.instance_worker_ended_spans.flow.v1',
+)
 
 
 app.discover_tasks(['tests.e2e.tasks.instance_worker_ended_spans'])

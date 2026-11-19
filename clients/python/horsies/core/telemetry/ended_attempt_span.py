@@ -20,6 +20,18 @@ from `AppConfig.tracing` (`ended_attempt_spans_of`):
   (`horsies.core.telemetry.ended_attempt_otel`) makes the span with the
   OpenTelemetry API.
 
+The worker does not know the workflow node of a workflow task: the start
+write of the child read it, and the event carries `WORKFLOW_NOT_KNOWN`. For
+such an attempt the handler child reads the node by the task id with one
+bounded read of the core (`WorkflowNodeReader`, `CoreHandle.task_workflow_node`),
+so the span has the workflow attributes of the span of a child. A read that
+fails, or that finds no node, leaves the span with no workflow attribute
+(`WorkflowNotKnown`); a failed read is counted (`NodeReadFailures`) and
+logged, the first and then one per `NODE_READ_FAILURE_LOG_EVERY`. The read
+runs on the control thread of the handler child, within
+`TASK_WORKFLOW_NODE_READ_END` of the core (12 s at most, 2 s when the
+cancel of a statement past its bound is answered).
+
 Telemetry never stops the handler child: a recorder (the user's SDK) that
 raises is logged once per process, and the event still goes to the handlers.
 `flush_ended_attempt_spans_at_stop` flushes the spans at the stop of the
@@ -31,7 +43,8 @@ This module imports no `opentelemetry` module.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from typing import Final, Protocol, assert_never
 
 from horsies._catalog.events import AnyEvent, AttemptEndDecidedByWorker, AttemptEnded
@@ -49,6 +62,7 @@ from horsies.core.telemetry.attempt_span import (
     StopFlush,
     bounded_flush,
 )
+from horsies.core.worker.run_return import InWorkflow, NotInWorkflow
 
 _logger = get_logger('telemetry')
 
@@ -60,13 +74,91 @@ threads get `HANDLER_DRAIN_S` (2 s): 2 s + 1 s and the last stats frame
 stay under 10 s."""
 
 
+NODE_READ_FAILURE_LOG_EVERY: Final = 1_000
+"""After the first failed node read, one log line per this many."""
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowNotKnown:
+    """A workflow node links the task, and the handler child has no node for
+    it: the read failed, or it found no node. The span has no workflow
+    attribute."""
+
+
+type EndedWorkflow = InWorkflow | NotInWorkflow | WorkflowNotKnown
+"""The workflow node of the task of an attempt that the worker ended, for
+its span."""
+
+
+@dataclass(frozen=True, slots=True)
+class NodeNotLinked:
+    """No workflow node links the task now: its workflow was deleted."""
+
+
+@dataclass(frozen=True, slots=True)
+class NodeReadFailed:
+    """The node read failed: `detail` names the cause."""
+
+    detail: str
+
+
+type NodeRead = InWorkflow | NodeNotLinked | NodeReadFailed
+"""What one node read gave."""
+
+
+class WorkflowNodeReader(Protocol):
+    """Reads the workflow node of a task by its id."""
+
+    def read(self, task_id: uuid.UUID) -> NodeRead:
+        """The node that links `task_id`, within the bound of the read. Never
+        raises: a failure is `NodeReadFailed`."""
+        ...
+
+
+class NodeReadFailures:
+    """The count of the failed node reads of this child. The control thread
+    records; any thread reads."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    @property
+    def count(self) -> int:
+        """The failed reads since the child started."""
+        with self._lock:
+            return self._count
+
+    def record(self, task_id: uuid.UUID, detail: str) -> None:
+        """Count one failed read of the node of `task_id`, and log it: the
+        first, then one line per `NODE_READ_FAILURE_LOG_EVERY`."""
+        with self._lock:
+            self._count += 1
+            count = self._count
+        if count == 1 or count % NODE_READ_FAILURE_LOG_EVERY == 0:
+            _logger.warning(
+                'The workflow node of task %s was not read for the span of its '
+                'attempt that the worker ended (%d failed reads so far): %s. '
+                'The span has no workflow attribute.',
+                task_id,
+                count,
+                detail,
+            )
+
+
 class EndedAttemptSpanRecorder(Protocol):
     """Makes the spans of the attempts that the worker ended, and flushes
     them."""
 
-    def make(self, ended: AttemptEnded, decided: AttemptEndDecidedByWorker) -> None:
+    def make(
+        self,
+        ended: AttemptEnded,
+        decided: AttemptEndDecidedByWorker,
+        workflow: EndedWorkflow,
+    ) -> None:
         """Make and end the span of the attempt of `ended`, whose end is
-        `decided`. May raise: the caller logs it."""
+        `decided` and whose workflow node is `workflow`. May raise: the
+        caller logs it."""
         ...
 
     def flush(self, timeout_millis: int) -> ProviderFlush:
@@ -83,9 +175,13 @@ class NoEndedAttemptSpans:
 
 @dataclass(frozen=True, slots=True)
 class OtelEndedAttemptSpans:
-    """A span for each attempt that the worker ended, through `recorder`."""
+    """A span for each attempt that the worker ended, through `recorder`;
+    the node of a workflow task through `nodes`, with its failed reads
+    counted in `read_failures`."""
 
     recorder: EndedAttemptSpanRecorder
+    nodes: WorkflowNodeReader
+    read_failures: NodeReadFailures = field(default_factory=NodeReadFailures)
 
 
 type EndedAttemptSpans = NoEndedAttemptSpans | OtelEndedAttemptSpans
@@ -95,10 +191,14 @@ NO_ENDED_ATTEMPT_SPANS: Final = NoEndedAttemptSpans()
 """The choice of `NoTracing` and of `WorkerEndedSpans.NO_SPANS`."""
 
 
-def ended_attempt_spans_of(tracing: OtelTracing | NoTracing) -> EndedAttemptSpans:
+def ended_attempt_spans_of(
+    tracing: OtelTracing | NoTracing,
+    nodes: WorkflowNodeReader,
+) -> EndedAttemptSpans:
     """The spans of the attempts that the worker ended under `tracing`, the
     setting that gives the `worker_ended_spans` of the worker manifest
-    (`worker_ended_spans_of`). `MAKE_SPANS` imports the OpenTelemetry API
+    (`worker_ended_spans_of`), reading the node of a workflow task through
+    `nodes`. `MAKE_SPANS` imports the OpenTelemetry API
     (`horsies.core.telemetry.ended_attempt_otel`), which the config check
     found installed; `NO_SPANS` and `NoTracing` import nothing."""
     match tracing:
@@ -116,12 +216,18 @@ def ended_attempt_spans_of(tracing: OtelTracing | NoTracing) -> EndedAttemptSpan
                 otel_ended_attempt_recorder,
             )
 
-            return OtelEndedAttemptSpans(recorder=otel_ended_attempt_recorder(parentage))
+            return OtelEndedAttemptSpans(
+                recorder=otel_ended_attempt_recorder(parentage),
+                nodes=nodes,
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class EndedSpanMade:
-    """The recorder made and ended the span of the attempt."""
+    """The recorder made and ended the span of the attempt, with the
+    workflow node `workflow`."""
+
+    workflow: EndedWorkflow
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +262,7 @@ def make_ended_attempt_span(spans: EndedAttemptSpans, event: AnyEvent) -> EndedS
     match spans:
         case NoEndedAttemptSpans():
             return EndedSpansOff()
-        case OtelEndedAttemptSpans(recorder=recorder):
+        case OtelEndedAttemptSpans() as otel:
             pass
         case _ as unreachable:
             assert_never(unreachable)
@@ -165,12 +271,40 @@ def make_ended_attempt_span(spans: EndedAttemptSpans, event: AnyEvent) -> EndedS
             pass
         case _:
             return NotEndedByWorker()
+    workflow = ended_workflow_of(ended, decided, otel.nodes, otel.read_failures)
     try:
-        recorder.make(ended, decided)
+        otel.recorder.make(ended, decided, workflow)
     except Exception as failure:
         _RECORDER_FAILURES.report(failure)
         return EndedSpanRaised(exception=failure)
-    return EndedSpanMade()
+    return EndedSpanMade(workflow=workflow)
+
+
+def ended_workflow_of(
+    ended: AttemptEnded,
+    decided: AttemptEndDecidedByWorker,
+    nodes: WorkflowNodeReader,
+    read_failures: NodeReadFailures,
+) -> EndedWorkflow:
+    """The workflow node of the attempt of `ended`: `NotInWorkflow` for a
+    plain task, with no read; for a workflow task, the node that `nodes`
+    reads, or `WorkflowNotKnown` when the read failed (counted in
+    `read_failures`) or found no node."""
+    match decided.workflow:
+        case 'NOT_IN_WORKFLOW':
+            return NotInWorkflow()
+        case 'WORKFLOW_NOT_KNOWN':
+            pass
+    match nodes.read(ended.task_id):
+        case InWorkflow() as node:
+            return node
+        case NodeNotLinked():
+            return WorkflowNotKnown()
+        case NodeReadFailed(detail=detail):
+            read_failures.record(ended.task_id, detail)
+            return WorkflowNotKnown()
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def flush_ended_attempt_spans_at_stop(spans: EndedAttemptSpans) -> StopFlush:

@@ -19,12 +19,13 @@ never ended:
 - Status ERROR with `error.type` = the error code of the attempt row
   (`TASK_TIMEOUT`, `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`,
   `WORKER_CRASHED`).
-- The attributes of the span of a child (`attempt_otel.run_attributes`),
-  with the kind of the child as `horsies.task.execution`, and
-  `horsies.span.source` = `worker`. The worker does not know the workflow
-  node of a workflow task (`WORKFLOW_NOT_KNOWN`): the span has no
-  `horsies.workflow.*` attribute; the carrier still places it in the trace
-  of the workflow start.
+- The attributes of the span of a child (`attempt_otel.run_attributes` and
+  `attempt_otel.workflow_attributes`), with the kind of the child as
+  `horsies.task.execution`, and `horsies.span.source` = `worker`. The
+  workflow node of a workflow task is the one that the handler child read
+  (`ended_attempt_span.ended_workflow_of`); with `WorkflowNotKnown` the span
+  has no `horsies.workflow.*` attribute, and the carrier still places it in
+  the trace of the workflow start.
 
 Spans that the task code made inside the killed attempt and that were
 exported keep the id of the lost span as their parent: a trace shows them
@@ -66,9 +67,12 @@ from horsies.core.telemetry.attempt_otel import (
     mark_error,
     place_attempt,
     run_attributes,
+    workflow_attributes,
 )
 from horsies.core.telemetry.attempt_span import ProviderFlush
+from horsies.core.telemetry.ended_attempt_span import EndedWorkflow, WorkflowNotKnown
 from horsies.core.worker.child_frames import NoTraceCarrier, RunTrace, StoredTraceCarrier
+from horsies.core.worker.run_return import InWorkflow, NotInWorkflow
 
 _logger = get_logger('telemetry')
 
@@ -108,9 +112,14 @@ class OtelEndedAttemptRecorder:
         self._parentage = parentage
         self._provider_flush = provider_flush
 
-    def make(self, ended: AttemptEnded, decided: AttemptEndDecidedByWorker) -> None:
-        """Make and end the span of the attempt of `ended` (see the module
-        doc)."""
+    def make(
+        self,
+        ended: AttemptEnded,
+        decided: AttemptEndDecidedByWorker,
+        workflow: EndedWorkflow,
+    ) -> None:
+        """Make and end the span of the attempt of `ended`, whose workflow
+        node is `workflow` (see the module doc)."""
         placed = place_attempt(
             context_of_trace(run_trace_of_event(ended.task_id, decided.trace)),
             self._parentage,
@@ -119,7 +128,7 @@ class OtelEndedAttemptRecorder:
             f'{RUN_OPERATION_NAME} {ended.task_name}',
             context=placed.parent,
             kind=SpanKind.CONSUMER,
-            attributes=ended_attempt_attributes(ended, decided),
+            attributes=ended_attempt_attributes(ended, decided, workflow),
             links=placed.links,
             start_time=unix_nanos(decided.placed_at),
         )
@@ -134,10 +143,11 @@ class OtelEndedAttemptRecorder:
 def ended_attempt_attributes(
     ended: AttemptEnded,
     decided: AttemptEndDecidedByWorker,
+    workflow: EndedWorkflow,
 ) -> dict[str, AttributeValue]:
     """The attributes of the span of the attempt of `ended`: the attributes
-    of the span of a child, with no workflow attribute, and
-    `horsies.span.source`. Pure."""
+    of the span of a child, the workflow attributes of `workflow` (none with
+    `WorkflowNotKnown`), and `horsies.span.source`. Pure."""
     return {
         **run_attributes(
             task_id=str(ended.task_id),
@@ -147,8 +157,22 @@ def ended_attempt_attributes(
             execution=decided.child_kind,
             worker_id=decided.worker_id,
         ),
+        **ended_workflow_attributes(workflow),
         SPAN_SOURCE_KEY: WORKER_SPAN_SOURCE,
     }
+
+
+def ended_workflow_attributes(workflow: EndedWorkflow) -> dict[str, AttributeValue]:
+    """The workflow attributes of `workflow`: those of the span of a child
+    for a node that was read, none for a plain task and for
+    `WorkflowNotKnown`. Pure."""
+    match workflow:
+        case InWorkflow() | NotInWorkflow():
+            return workflow_attributes(workflow)
+        case WorkflowNotKnown():
+            return {}
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @dataclass(frozen=True, slots=True)
