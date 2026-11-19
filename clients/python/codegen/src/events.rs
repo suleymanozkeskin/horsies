@@ -816,6 +816,7 @@ mod tests {
         python_base: PythonEnumBase::StrEnum,
         doc: "",
         members: &[CatalogMember {
+            name: "TASK_TIMEOUT",
             value: "TASK_TIMEOUT",
             doc: "",
         }],

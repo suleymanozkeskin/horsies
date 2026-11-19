@@ -729,6 +729,15 @@ before you upgrade a 0.7 deployment.
   stops (its health state `failed`) now counts as a failure of
   `partition_coverage` and logs by the same rule; before, it wrote no line.
 
+- **`ErrorCode` is generated from the core.** The core `ErrorCode` is the
+  one list of the `HRS-nnn` codes: each code with its member name and its
+  short text, the member docstring. `horsies-codegen` renders it as
+  `horsies._catalog.error_codes.ErrorCode`, which `horsies.ErrorCode` and
+  `horsies.core.errors.ErrorCode` re-export. Every code keeps its number
+  and its member name; the members are in code order. New member:
+  `WORKFLOW_UNREGISTERED_TASK` (`HRS-302`), which the core had and Python
+  did not. No check raises it.
+
 ### Fixed
 
 - **The schema install creates the history leaves of the current day, so a
@@ -1579,6 +1588,24 @@ unless it starts with "Added".
   and each worker child write one JSON object per log record, with the
   event's fields at the top level and the record's spans with their
   fields. `cli::run(app)` keeps the text format.
+- **`ErrorCode` holds every `HRS-nnn` code of both clients.** New
+  variants, with the numbers that the Python client already used:
+  `WorkflowArgsFromTypeMismatch` (`HRS-024`), `WorkflowInvalidId`
+  (`HRS-032`), `WorkflowInvalidDefinitionConfig` (`HRS-033`),
+  `WorkflowNaiveGoodUntil` (`HRS-035`), `TaskPredecoratedNotSupported`
+  (`HRS-104`), `TaskStrictSignatureViolation` (`HRS-105`),
+  `TaskSharedAsyncRequiresAsyncDef` (`HRS-107`),
+  `TaskSharedThreadRequiresDef` (`HRS-108`),
+  `TaskSharedExecutionRequiresTimeout` (`HRS-109`),
+  `TaskCancelGraceRequiresSharedAsync` (`HRS-110`),
+  `TaskCancelGraceOutOfRange` (`HRS-111`), `ConfigInvalidExceptionMapper`
+  (`HRS-209`), `ModuleExecError` (`HRS-210`), `ConfigInvalidChildHook`
+  (`HRS-214`), `ConfigInvalidKeepalive` (`HRS-215`), `ConfigOtelApiMissing`
+  (`HRS-220`) and `ConfigInvalidTraceLink` (`HRS-221`). The Rust client
+  raises none of them. An exhaustive `match` on `ErrorCode` needs the new
+  arms. `is_workflow_error`, `is_task_error`, `is_config_error` and
+  `is_registry_error` follow `category()`: `is_registry_error()` of
+  `WorkflowUnregisteredTask` (`HRS-302`) is now `true`.
 
 ## 0.7.0 — 2026-11-15
 
