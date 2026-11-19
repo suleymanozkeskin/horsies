@@ -68,6 +68,7 @@ from horsies.core.errors import (
     WorkflowValidationError,
 )
 import inspect
+import logging
 import os
 import threading
 import types
@@ -434,10 +435,10 @@ class Horsies:
         # The pool that get_broker() opens. A worker child sets its
         # task-send pool before it imports task modules.
         self._broker_pool: _ConfigBrokerPool | _TaskSendBrokerPool = _ConfigBrokerPool()
-        self.tasks: TaskRegistry[
-            'TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]'
-        ] = TaskRegistry()
-        self.logger = get_logger('app')
+        self.tasks: 'TaskRegistry[TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]]' = (
+            TaskRegistry()
+        )
+        self.logger: logging.Logger = get_logger('app')
         self._discovered_task_modules: list[str] = []
         self._workflow_builders: list[_WorkflowBuilderMeta] = []
         # When True, task sends/schedules are suppressed (used during import/discovery)
