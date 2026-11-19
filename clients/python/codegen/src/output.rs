@@ -317,11 +317,11 @@ mod tests {
         // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
         // one file per constant module, error_detail.py, one file per new
         // type, one file per error module, one file per exception-class
-        // module, events.py, _core.pyi
+        // module, events.py, producer_metrics.py, _core.pyi
         assert_eq!(
             files.len(),
             modules.len()
-                + 7
+                + 8
                 + CONSTANT_MODULES.len()
                 + 1
                 + TEXT_NEW_TYPES.len()
