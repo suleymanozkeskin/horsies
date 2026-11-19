@@ -720,9 +720,35 @@ def check_command(args: argparse.Namespace) -> None:
         print(report.format_rust_style(), file=sys.stderr)
         sys.exit(1)
     else:
-        task_count = len(app.list_tasks())
-        print(f'ok: all validations passed\n  {task_count} task(s) registered')
+        print(
+            check_passed_text(
+                task_count=len(app.list_tasks()),
+                declared_error_codes=app.declared_error_codes(),
+            ),
+        )
         sys.exit(0)
+
+
+def check_passed_text(
+    *,
+    task_count: int,
+    declared_error_codes: Mapping[str, tuple[str, ...]],
+) -> str:
+    """The success text of `horsies check`: the task count, then the
+    declared error codes of each task that declares some, in task name
+    order, or `none`. The Rust client prints the same text
+    (`CheckPassed`'s `Display`). Pure."""
+    lines = ['ok: all validations passed', f'  {task_count} task(s) registered']
+    match len(declared_error_codes):
+        case 0:
+            lines.append('  declared error codes: none')
+        case _:
+            lines.append('  declared error codes:')
+            lines.extend(
+                f'    {task_name}: {", ".join(codes)}'
+                for task_name, codes in sorted(declared_error_codes.items())
+            )
+    return '\n'.join(lines)
 
 
 def get_docs_command(args: argparse.Namespace) -> None:

@@ -31,6 +31,19 @@ before you upgrade a 0.7 deployment.
   `ForkedAfterCoreStart` and `CoreStopped` (raised). Import them from
   `horsies`. They are defined in `horsies.core.brokers.enqueue_task` and in
   the extension `horsies._core`.
+- **`@app.task(..., error_codes=...)` declares a task's own error codes.**
+  It takes an `Enum` class (its member values) or a tuple of strings; the
+  default is `()`. The declared codes are the values of the task's
+  `error_code` metric label besides the built-in codes and `undeclared`;
+  another user code still works everywhere and counts as `undeclared` in
+  that label only. The task function keeps them in `task_error_codes`,
+  `Horsies.declared_error_codes()` returns them by task name, and the
+  success text of `horsies check` lists them under `declared error codes:`.
+  The decorator refuses a value that is neither an `Enum` class nor a tuple
+  (`HRS-102`), a code that is empty, not `UPPER_SNAKE_CASE` or an exception
+  class name (`HRS-112`, new `TASK_INVALID_ERROR_CODE`), a built-in code or
+  `WORKFLOW_STOPPED` (`HRS-212`), and a code given twice (`HRS-113`, new
+  `TASK_DUPLICATE_ERROR_CODE`).
 
 ### Changed
 

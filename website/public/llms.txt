@@ -28,6 +28,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - @app.task("name", queue_name="q", retry_policy=...) -> decorator (CUSTOM mode)
 - @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
 - @app.task("name", default_unhandled_error_code="MY_ERROR") -> override default error code
+- @app.task("name", error_codes=ChargeCode) or error_codes=("CARD_DECLINED",) -> declares the task's own codes (an Enum class: its member values; or a tuple of str; default ()); they are the values of the task's error_code metric label besides the built-in codes and `undeclared`; task_function.task_error_codes keeps them; refusals: not an Enum class or a tuple HRS-102, not UPPER_SNAKE_CASE HRS-112, built-in or WORKFLOW_STOPPED HRS-212, repeated HRS-113
 - app.workflow(name, tasks, on_error, output, success_policy, *, definition_key) -> WorkflowSpec (definition_key is required; a WorkflowDefinition class supplies it)
 - @app.workflow_builder(cases=[...]) -> decorator; registers a WorkflowSpec builder for `horsies check` validation
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import
@@ -572,7 +573,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Returns list[HorsiesError]; empty = all passed
 - Errors are collected within each phase; check returns early before later phases when earlier phases fail
 - Worker and scheduler also run check() at startup before accepting work
-- On success: prints "ok: all validations passed" with task count
+- On success: prints "ok: all validations passed" with task count, then "declared error codes:" with one line per declaring task ("<task>: CODE, CODE"), or "declared error codes: none"
 - On failure: prints Rust-style ValidationReport to stderr, exits with code 1
 
 ### Error Types and Reporting
@@ -630,6 +631,8 @@ Task definition (HRS-100-HRS-199):
 - HRS-109 TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT (SHARED_ASYNC or SHARED_THREAD without timeout_ms)
 - HRS-110 TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC (cancel_grace_ms with a class other than SHARED_ASYNC)
 - HRS-111 TASK_CANCEL_GRACE_OUT_OF_RANGE (cancel_grace_ms outside 100 to 10000 ms)
+- HRS-112 TASK_INVALID_ERROR_CODE (an error_codes entry is empty, not UPPER_SNAKE_CASE, or an exception class name)
+- HRS-113 TASK_DUPLICATE_ERROR_CODE (an error_codes entry is given twice)
 Config/broker (HRS-200-HRS-299):
 <!-- members: ErrorCode part -->
 - HRS-200 CONFIG_INVALID_QUEUE_MODE
@@ -644,7 +647,7 @@ Config/broker (HRS-200-HRS-299):
 - HRS-209 CONFIG_INVALID_EXCEPTION_MAPPER
 - HRS-210 MODULE_EXEC_ERROR
 - HRS-211 BROKER_INIT_FAILED
-- HRS-212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code)
+- HRS-212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code; an error_codes entry is a built-in code or WORKFLOW_STOPPED)
 - HRS-213 CONFIG_INVALID_BROKER_POOL
 - HRS-214 CONFIG_INVALID_CHILD_HOOK
 - HRS-215 CONFIG_INVALID_KEEPALIVE
