@@ -38,7 +38,7 @@ pub struct CustomQueueConfig {
 /// names over 63 bytes, and `"task_queue_"` is 11, leaving 52 for the name. A
 /// longer name makes every INSERT for that queue fail with an opaque trigger
 /// error (C18).
-const MAX_QUEUE_NAME_BYTES: usize = 52;
+pub(crate) const MAX_QUEUE_NAME_BYTES: usize = 52;
 
 /// Validation error for CustomQueueConfig.
 #[derive(Debug, Clone, thiserror::Error)]
