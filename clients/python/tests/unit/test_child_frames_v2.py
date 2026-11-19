@@ -51,6 +51,7 @@ from horsies.core.worker.child_frames import (
     MAX_EVENT_HANDLERS,
     MAX_HANDLER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES,
+    NO_SPAN_READS,
     BlockingRun,
     BodyReturnedFrame,
     BootFailedFrame,
@@ -74,6 +75,7 @@ from horsies.core.worker.child_frames import (
     RunStuckFrame,
     SeatTimedOut,
     SharedResultFrame,
+    SpanReadCounts,
     StartNotReported,
     StartReported,
     StoredTraceCarrier,
@@ -1122,6 +1124,7 @@ class TestVersionThreeChildFrames:
                     HandlerCounts(handler='app.handlers.on_claim', errors=0, dropped=3),
                     HandlerCounts(handler='app.handlers.on_end', errors=2, dropped=0),
                 ),
+                span_reads=SpanReadCounts(read_failed=4, not_read=1),
                 rss=RssMb(40.5),
             ),
         )
@@ -1132,12 +1135,22 @@ class TestVersionThreeChildFrames:
                     {'handler': 'app.handlers.on_claim', 'errors': 0, 'dropped': 3},
                     {'handler': 'app.handlers.on_end', 'errors': 2, 'dropped': 0},
                 ],
+                'span_read_failed': 4,
+                'span_not_read': 1,
                 'rss_mb': 40.5,
             },
         )
         assert encode_child_frame(
-            HandlerStatsFrame(handlers=(), rss=RssUnreadable()),
-        ) == framed({'kind': 'handler_stats', 'handlers': [], 'rss_mb': None})
+            HandlerStatsFrame(handlers=(), span_reads=NO_SPAN_READS, rss=RssUnreadable()),
+        ) == framed(
+            {
+                'kind': 'handler_stats',
+                'handlers': [],
+                'span_read_failed': 0,
+                'span_not_read': 0,
+                'rss_mb': None,
+            },
+        )
 
     @pytest.mark.parametrize(
         'frame',
@@ -1175,6 +1188,7 @@ class TestVersionThreeChildFrames:
             pytest.param(
                 HandlerStatsFrame(
                     handlers=(HandlerCounts(handler='', errors=0, dropped=0),),
+                    span_reads=NO_SPAN_READS,
                     rss=RssMb(1.0),
                 ),
                 id='an-empty-handler-name',
@@ -1186,6 +1200,7 @@ class TestVersionThreeChildFrames:
                             handler='h' * (MAX_HANDLER_NAME_CHARS + 1), errors=0, dropped=0,
                         ),
                     ),
+                    span_reads=NO_SPAN_READS,
                     rss=RssMb(1.0),
                 ),
                 id='a-handler-name-over-its-bound',
@@ -1196,6 +1211,7 @@ class TestVersionThreeChildFrames:
                         HandlerCounts(handler='a', errors=0, dropped=0),
                         HandlerCounts(handler='a', errors=1, dropped=0),
                     ),
+                    span_reads=NO_SPAN_READS,
                     rss=RssMb(1.0),
                 ),
                 id='a-handler-counted-twice',
@@ -1206,6 +1222,7 @@ class TestVersionThreeChildFrames:
                         HandlerCounts(handler=f'h{n}', errors=0, dropped=0)
                         for n in range(MAX_EVENT_HANDLERS + 1)
                     ),
+                    span_reads=NO_SPAN_READS,
                     rss=RssMb(1.0),
                 ),
                 id='too-many-handlers',
