@@ -70,6 +70,9 @@ pub(crate) enum ChildLaunchRefused {
 ///   ([`task_records`]).
 /// - `profile`: the `--profile` value of the start.
 /// - `child_launch`: from [`rust_child_launch`].
+/// - `handlers` and `worker_ended_spans`: the Rust client registers no
+///   event handler and makes no worker-ended span, so the worker starts no
+///   handler child (`NO_HANDLERS`, `NO_SPANS`).
 ///
 /// Errors: [`ManifestBoundRefused`] for the first value outside its
 /// manifest bound, in this order: the claim values (`prefetch_buffer`,
@@ -103,6 +106,8 @@ pub(crate) fn worker_manifest(
         resilience,
         payload,
         tasks: task_records(tasks),
+        handlers: wire::EventHandlers::NoHandlers,
+        worker_ended_spans: wire::WorkerEndedSpans::NoSpans,
         child_launch,
     })
 }
