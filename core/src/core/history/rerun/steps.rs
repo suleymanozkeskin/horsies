@@ -549,6 +549,7 @@ fn prepare_write(
         .expect("a checked window of at most 30 days fits an i64 count of microseconds");
     let key = EnqueueKey::of(facts.idempotency_key_digest, window_micros);
     let (key_kind, key_scope_version, key_window_micros) = key.columns();
+    let (trace_kind, trace_carrier, trace_id) = command.trace().columns();
     let values = vec![
         StatementValue::Uuid(new_task_id),
         StatementValue::Text(source.task_name),
@@ -573,6 +574,13 @@ fn prepare_write(
             }),
         key_scope_version.map_or(StatementValue::Null(CallerType::Int2), StatementValue::Int2),
         key_window_micros.map_or(StatementValue::Null(CallerType::Int8), StatementValue::Int8),
+        StatementValue::Text(trace_kind.to_owned()),
+        trace_carrier.map_or(StatementValue::Null(CallerType::Text), |text| {
+            StatementValue::Text(text.to_owned())
+        }),
+        trace_id.map_or(StatementValue::Null(CallerType::Bytea), |id| {
+            StatementValue::Bytea(id.to_vec())
+        }),
     ];
     let statement = CallerStatement::new(&RERUN_ENQUEUE, values, &RERUN_WRITE_COLUMNS)
         .expect("the rerun write values follow the declared parameters of its statement");

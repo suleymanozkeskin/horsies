@@ -29,6 +29,7 @@ encoder, and the Python tests check that it still does.
 | `error_data.json` | Library errors with `data`, as stored |
 | `task_options.json` | Task options text (`task_options` column) |
 | `workflow_spec_data.json` | Workflow spec data, the text a client sends the core at a workflow start |
+| `trace_carrier.json` | Trace carrier text (`trace_carrier` column of `horsies_tasks` and `horsies_workflows`) |
 
 ## Rows
 
@@ -314,6 +315,25 @@ reads each text into its spec and each refused text at its field path
 `members_of_every_kind` with its DSL. That one (`args_from`, workflow context,
 encoded options, a sub-workflow node) is read by the core test; the Rust DSL
 writes those members with the same keys, in the same order.
+
+## Trace carrier (`trace_carrier.json`)
+
+The map that a client's OpenTelemetry propagator wrote at a send or a
+workflow start, stored as one JSON object: the keys in byte order, no
+whitespace, each value a JSON string in which only `"` and `\` are escaped.
+The keys keep their case (the X-Ray propagator writes and reads
+`X-Amzn-Trace-Id`). For every carrier that the check accepts, the text equals
+Python's `json.dumps(carrier, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False)`: the check leaves only printable ASCII.
+
+Rows: `vectors` (`name`, `carrier`, `trace_id` as hex, `text`) and `refused`
+(`name`, `carrier`, `trace_id`, `refusal`: the `CarrierRefusal` variant). A
+refused carrier is not an error of the send: the row stores no carrier.
+
+- Core: the one encoder. `check_carrier` checks the bounds and
+  `carrier_text` writes the text (`core/src/telemetry/trace_carrier.rs`).
+- Python and the Rust client: no encoder. Each hands the core the map and
+  the trace id of the producer span, so neither has a test of this file.
 
 ## Findings
 

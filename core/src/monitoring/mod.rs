@@ -8,6 +8,7 @@
 mod actions;
 mod errors;
 mod execution_classes;
+pub mod fleet;
 mod function_rows;
 mod history_window;
 mod models;

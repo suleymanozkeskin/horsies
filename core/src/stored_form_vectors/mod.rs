@@ -9,6 +9,7 @@ pub(crate) mod error_data;
 pub(crate) mod result_envelope;
 mod task_input;
 mod task_options;
+mod trace_carrier;
 mod workflow_spec_data;
 
 use serde_json::Value;

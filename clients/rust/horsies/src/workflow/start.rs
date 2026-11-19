@@ -15,6 +15,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::handle::CoreHandle;
+use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     child_producer, ChildProducer, ClientStartError, ClientStartOutcome, StartRefusalCause,
     WorkflowError, WorkflowStartError,
@@ -128,6 +129,7 @@ impl WorkflowStarter {
                 &client,
                 workflow_id,
                 Utc::now(),
+                SendTrace::NoCarrier,
                 self.workflows.config().resend_on_transient_err,
                 &*self.workflows,
             )

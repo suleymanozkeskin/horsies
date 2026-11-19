@@ -24,6 +24,7 @@ use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{
     send_error_from_enqueue, TaskSendError, TaskSendErrorCode, TaskSendPayload,
 };
+use crate::telemetry::trace_carrier::{PropagatedTrace, SendTrace, MAX_TRACE_CARRIER_KEYS};
 use crate::test_support::sql::{self, TestPool};
 use crate::test_support::{migrated_database_url, migrated_pool};
 
@@ -539,5 +540,85 @@ async fn the_row_stores_the_sent_input_text_byte_for_byte() {
             .expect("read the stored input");
         assert_eq!(stored, input);
     }
+    remove_task_name(&pool, &task_name).await;
+}
+
+/// The trace pair that the row of `task_id` stores.
+async fn stored_trace_pair(pool: &TestPool, task_id: Uuid) -> (Option<String>, Option<Vec<u8>>) {
+    sql::query_as("SELECT trace_carrier, trace_id FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the trace pair of the task row")
+}
+
+/// The checked send of `task_name` under a fresh id, with `trace`.
+async fn send_traced(broker: &PostgresBroker, task_name: &str, trace: SendTrace) -> Uuid {
+    let send = crate::broker::CheckedSend::check(
+        task_name,
+        "{}",
+        "default",
+        50,
+        Some(Utc::now()),
+        None,
+        None,
+        None,
+        Some(new_task_id()),
+        None,
+        None,
+        EnqueueRetention::Forever,
+        false,
+    )
+    .expect("the send is checked")
+    .with_trace(trace);
+    broker
+        .enqueue_checked(&send, SendKind::First)
+        .await
+        .expect("the send is enqueued")
+}
+
+/// A send with a carrier stores the canonical text and the trace id; a send
+/// with no carrier and a send whose carrier breaks a bound store neither,
+/// and both are enqueued.
+#[tokio::test]
+#[serial]
+async fn a_send_stores_its_checked_carrier_and_a_carrier_over_a_bound_stores_none() {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let task_name = unique_task_name("trace_carrier");
+    let trace_id: Vec<u8> = (1..=16).collect();
+    let propagated = |carrier: Vec<(String, String)>| {
+        SendTrace::Propagated(PropagatedTrace {
+            carrier: carrier.into_iter().collect(),
+            trace_id: trace_id.clone(),
+        })
+    };
+
+    let traced = send_traced(
+        &broker,
+        &task_name,
+        propagated(vec![
+            ("traceparent".to_owned(), "00-0102-03-01".to_owned()),
+            ("tracestate".to_owned(), "a=1".to_owned()),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        stored_trace_pair(&pool, traced).await,
+        (
+            Some("{\"traceparent\":\"00-0102-03-01\",\"tracestate\":\"a=1\"}".to_owned()),
+            Some(trace_id.clone())
+        )
+    );
+
+    let untraced = send_traced(&broker, &task_name, SendTrace::NoCarrier).await;
+    assert_eq!(stored_trace_pair(&pool, untraced).await, (None, None));
+
+    let over = (0..=MAX_TRACE_CARRIER_KEYS)
+        .map(|index| (format!("k{index}"), "v".to_owned()))
+        .collect();
+    let refused = send_traced(&broker, &task_name, propagated(over)).await;
+    assert_eq!(stored_trace_pair(&pool, refused).await, (None, None));
+
     remove_task_name(&pool, &task_name).await;
 }
