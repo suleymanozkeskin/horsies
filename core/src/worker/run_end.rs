@@ -39,7 +39,8 @@ pub enum WorkerBootCause {
     /// One attempt of the database start did not end within its bound, and
     /// no retry was left.
     StartTimedOut,
-    /// A database error that can clear, after the last retry of the start.
+    /// A database error that can clear, or the partition coverage gate held
+    /// by another process, after the last retry of the start.
     DatabaseUnavailable,
     /// A database error that does not clear on a retry.
     DatabaseRefused,
@@ -171,6 +172,7 @@ fn boot_cause(error: &WorkerError) -> WorkerBootCause {
         },
         WorkerError::Config(_) => WorkerBootCause::ConfigRefused,
         WorkerError::StartTimedOut { .. } => WorkerBootCause::StartTimedOut,
+        WorkerError::CoverageGateBusy { .. } => WorkerBootCause::DatabaseUnavailable,
         WorkerError::PlacementRefused(_) => WorkerBootCause::PlacementRefused,
         WorkerError::SpawnerStart(_) => WorkerBootCause::SpawnerStartFailed,
         WorkerError::PreloadRefused { .. } => WorkerBootCause::PreloadRefused,
@@ -228,6 +230,13 @@ mod tests {
                     bound: std::time::Duration::from_secs(30),
                 },
                 WorkerBootCause::StartTimedOut,
+            ),
+            (
+                WorkerError::CoverageGateBusy {
+                    waited: std::time::Duration::from_millis(1_500),
+                    attempts: 4,
+                },
+                WorkerBootCause::DatabaseUnavailable,
             ),
             (
                 WorkerError::ChildHookFailed,

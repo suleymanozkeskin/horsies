@@ -91,6 +91,7 @@ RENAMED: Final[dict[str, str]] = {
     'open_ended_start_and_predicate_render_one_pinned_text': 'core::history::partitions::catalog::open_ended_leaf_sql_tests::open_ended_predicate_renders_one_pinned_text',
     'manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_attached_set': 'core::history::partitions::tests::manifest_excludes_absent_probes_and_keeps_the_complete_attached_set',
     'guard_probe_set_is_standard_horizon_plus_the_open_ended_leaf': 'core::history::partitions::tests::guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf',
+    'busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent': 'core::history::partitions::tests::busy_coverage_gate_makes_startup_wait_when_current_heartbeat_is_absent',
     'fifteen_commands_fifteen_kinds': 'core::lifecycle::tests::eleven_commands_eleven_kinds',
     'display_codes': 'core::task::error::tests::display_codes_and_errors',
     'serialize_retry_options_emits_timeout_ms_alone': 'core::task::options::tests::stored_options_text_emits_timeout_ms_alone',

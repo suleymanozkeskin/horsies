@@ -48,8 +48,9 @@ impl WorkerProcess {
     /// Installs the schema through the handle of `showcase` (its first read
     /// runs the migrations and the coverage pass), then starts the worker.
     /// A worker start that finds the partition coverage gate held by another
-    /// process, with no heartbeat leaf for the present instant, is refused;
-    /// on a new database the first send of the test would hold that gate.
+    /// process, with no heartbeat leaf for the present instant, waits with
+    /// its backoff; on a new database the first send of the test would hold
+    /// that gate.
     pub async fn start(showcase: &ShowcaseApp) -> Self {
         let _ping = showcase
             .app

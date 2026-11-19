@@ -629,6 +629,13 @@ before you upgrade a 0.7 deployment.
   creates the leaf. It was `23514` (`no partition of relation
   "horsies_task_history" found for row`), not retryable.
 
+- **A first worker start on a new database next to a producer no longer
+  fails.** When another process holds the partition coverage gate and no
+  heartbeat leaf covers the present instant, the start logs one info line
+  and tries again with the resilience backoff. A gate that is still held
+  after `db_retry_max_attempts` fails the start with `DATABASE_UNAVAILABLE`.
+  0.7 refused the start at once.
+
 - **A stored retry policy that does not validate fails the task at claim.**
   The task fails with `WORKER_SERIALIZATION_ERROR`, its body does not run,
   and it does not retry. 0.7 ran the task and retried it with default

@@ -1496,7 +1496,7 @@ async fn run_reaper_pass(
                     }),
                     CoverageOutcome::Failed(failed) => serde_json::json!({
                         "state": "failed",
-                        "stage": failed.stage,
+                        "stage": failed.stage.as_str(),
                         "class_key": failed.class_key,
                         "refusal": failed.refusal,
                         "heartbeat_covered_now": failed.heartbeat_covered_now,
