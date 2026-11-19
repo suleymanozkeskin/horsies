@@ -167,7 +167,7 @@ const KNOWN_SITES: &[Known] = &[
     },
     Known {
         file: "core/src/broker/class_coverage_reads.rs",
-        item: "PostgresBroker::coverage_row",
+        item: "coverage_row_from",
         kind: SiteKind::RowDecoderField,
         count: 2,
         allowed: Allowed::NotUserValue(
@@ -310,6 +310,27 @@ const KNOWN_SITES: &[Known] = &[
         kind: SiteKind::ValueDeserialize,
         count: 1,
         allowed: Allowed::NotUserValue("the code of an error"),
+    },
+    Known {
+        file: "core/src/monitoring/fleet/decode.rs",
+        item: "LiveSlotsEntry",
+        kind: SiteKind::DeserializeField,
+        count: 1,
+        allowed: Allowed::NotUserValue("the down slots of a live worker"),
+    },
+    Known {
+        file: "core/src/monitoring/fleet/decode.rs",
+        item: "oldest_pending_row",
+        kind: SiteKind::RowDecoderField,
+        count: 1,
+        allowed: Allowed::NotUserValue("the pending heads of the fleet read"),
+    },
+    Known {
+        file: "core/src/monitoring/fleet/decode.rs",
+        item: "workers_row",
+        kind: SiteKind::RowDecoderField,
+        count: 2,
+        allowed: Allowed::NotUserValue("the live workers and the rows in flight of the fleet read"),
     },
     Known {
         file: "core/src/worker/execution.rs",
