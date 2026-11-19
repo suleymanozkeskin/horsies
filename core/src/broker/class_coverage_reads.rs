@@ -6,6 +6,10 @@
 //! one `now()`.
 //! Both reads run on the main core pool; the reaper's fleet check
 //! ([`read_class_coverage`]) runs the same statement there as reserved work.
+//! The fleet state read (`crate::monitoring::fleet`) runs the fleet check
+//! statement ([`class_coverage_statement`]) with its own time bound, and
+//! decodes its reads of the live snapshots, the rows in flight and the
+//! pending heads with the part decoders of this module.
 //! The parts come back as JSON arrays in one row. Every part is bounded by a
 //! named limit; a part that returns more than its limit refuses the read
 //! instead of answering in part.
@@ -27,13 +31,15 @@ use crate::broker::class_coverage::{
     class_coverage, class_report, live_worker, refused, ClassCoverage, ClassReadRefused,
     ClassReport, LiveWorker, StreamHead,
 };
-use crate::broker::core_rows::{column, one_row};
+use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
-use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
+use crate::db::{
+    BoundStatement, CheckoutClass, ParameterType, Row, StatementBound, TypedStatement,
+};
 
 /// The most snapshot rows inside the live window that a read takes. A worker
 /// writes `WORKER_STATE_LIVE_WINDOW_S` / snapshot interval rows into the
@@ -49,13 +55,13 @@ pub const PENDING_STREAM_LIMIT: usize = 3_000;
 pub const PENDING_HEAD_LIMIT: usize = 10_000;
 
 /// The live window in seconds, as the statements take it (`$1`).
-const LIVE_WINDOW_SECONDS: f64 = WORKER_STATE_LIVE_WINDOW_S as f64;
+pub(crate) const LIVE_WINDOW_SECONDS: f64 = WORKER_STATE_LIVE_WINDOW_S as f64;
 
 /// Each bounded part reads one row past its limit, so a part at its limit
 /// and a part past it are told apart.
-const LIVE_SNAPSHOT_READ_LIMIT: i64 = LIVE_SNAPSHOT_ROW_LIMIT as i64 + 1;
-const PENDING_STREAM_READ_LIMIT: i64 = PENDING_STREAM_LIMIT as i64 + 1;
-const PENDING_HEAD_READ_LIMIT: i64 = PENDING_HEAD_LIMIT as i64 + 1;
+pub(crate) const LIVE_SNAPSHOT_READ_LIMIT: i64 = LIVE_SNAPSHOT_ROW_LIMIT as i64 + 1;
+pub(crate) const PENDING_STREAM_READ_LIMIT: i64 = PENDING_STREAM_LIMIT as i64 + 1;
+pub(crate) const PENDING_HEAD_READ_LIMIT: i64 = PENDING_HEAD_LIMIT as i64 + 1;
 
 /// The fleet check in one statement. `$1` the live window in seconds, `$2`
 /// the snapshot row limit + 1, `$3` the stream limit + 1.
@@ -205,11 +211,11 @@ static CLASS_REPORT: TypedStatement =
 
 /// The row of [`CLASS_COVERAGE_SQL`].
 #[derive(Debug)]
-struct CoverageRow {
-    checked_at: DateTime<Utc>,
-    recent_rows: i64,
-    live: Value,
-    streams: Value,
+pub(crate) struct CoverageRow {
+    pub(crate) checked_at: DateTime<Utc>,
+    pub(crate) recent_rows: i64,
+    pub(crate) live: Value,
+    pub(crate) streams: Value,
 }
 
 /// The row of [`CLASS_REPORT_SQL`].
@@ -285,26 +291,14 @@ impl PostgresBroker {
     /// Errors: [`BrokerError::PoolSettings`], [`BrokerError::Statement`],
     /// [`BrokerError::RowDecode`].
     async fn coverage_row(&self, class: CheckoutClass) -> Result<CoverageRow, BrokerError> {
-        let statement = &CLASS_COVERAGE;
-        let bound = statement
-            .bind()
-            .value(&LIVE_WINDOW_SECONDS)
-            .value(&LIVE_SNAPSHOT_READ_LIMIT)
-            .value(&PENDING_STREAM_READ_LIMIT)
-            .finish();
+        let bound = class_coverage_statement();
         let open = self.core_pools_for_read()?;
-        self.statement_log().log(statement);
+        self.statement_log().log(&CLASS_COVERAGE);
         let rows = open
             .main()
             .query(class, &bound, StatementBound::ConnectionTimeouts)
             .await?;
-        let row = one_row(rows, statement)?;
-        Ok(CoverageRow {
-            checked_at: column(&row, statement, "checked_at")?,
-            recent_rows: column(&row, statement, "recent_rows")?,
-            live: column(&row, statement, "live")?,
-            streams: column(&row, statement, "streams")?,
-        })
+        Ok(coverage_row_from(rows)?)
     }
 
     /// The row of [`CLASS_REPORT_SQL`], read on the main core pool. Reads
@@ -330,6 +324,32 @@ impl PostgresBroker {
             in_flight: column(&row, statement, "in_flight")?,
         })
     }
+}
+
+/// [`CLASS_COVERAGE_SQL`] bound with the live window, the snapshot row limit
+/// + 1 and the stream limit + 1. Pure.
+pub(crate) fn class_coverage_statement() -> BoundStatement<'static> {
+    CLASS_COVERAGE
+        .bind()
+        .value(&LIVE_WINDOW_SECONDS)
+        .value(&LIVE_SNAPSHOT_READ_LIMIT)
+        .value(&PENDING_STREAM_READ_LIMIT)
+        .finish()
+}
+
+/// The row of [`CLASS_COVERAGE_SQL`] from the rows of its statement. Pure.
+///
+/// Errors: [`RowDecodeError::NoRow`] when the statement returned no row;
+/// [`RowDecodeError::Column`] for a column that does not decode.
+pub(crate) fn coverage_row_from(rows: Vec<Row>) -> Result<CoverageRow, RowDecodeError> {
+    let statement = &CLASS_COVERAGE;
+    let row = one_row(rows, statement)?;
+    Ok(CoverageRow {
+        checked_at: column(&row, statement, "checked_at")?,
+        recent_rows: column(&row, statement, "recent_rows")?,
+        live: column(&row, statement, "live")?,
+        streams: column(&row, statement, "streams")?,
+    })
 }
 
 /// The fleet check of [`PostgresBroker::get_class_coverage`] for the reaper,
@@ -361,7 +381,7 @@ fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> BrokerOperat
 
 /// The fleet check from its statement row, checked in Python's order: the
 /// snapshot bound, each live snapshot's budgets, the stream bound.
-fn coverage_from_row(row: CoverageRow) -> Result<ClassCoverage, ClassReadRefused> {
+pub(crate) fn coverage_from_row(row: CoverageRow) -> Result<ClassCoverage, ClassReadRefused> {
     let workers = live_workers(row.recent_rows, row.live)?;
     let streams = pending_streams(row.streams)?;
     class_coverage(row.checked_at, &workers, streams)
@@ -377,7 +397,10 @@ fn report_from_row(row: ReportRow) -> Result<ClassReport, ClassReadRefused> {
     class_report(row.checked_at, &workers, heads, &in_flight)
 }
 
-fn live_workers(recent_rows: i64, live: Value) -> Result<Vec<LiveWorker>, ClassReadRefused> {
+pub(crate) fn live_workers(
+    recent_rows: i64,
+    live: Value,
+) -> Result<Vec<LiveWorker>, ClassReadRefused> {
     if recent_rows > LIVE_SNAPSHOT_ROW_LIMIT as i64 {
         return Err(refused(format!(
             "more than {LIVE_SNAPSHOT_ROW_LIMIT} worker snapshots are inside the live window \
@@ -411,7 +434,7 @@ fn pending_streams(streams: Value) -> Result<Vec<(String, Execution)>, ClassRead
         .collect())
 }
 
-fn pending_heads(heads: Value) -> Result<Vec<StreamHead>, ClassReadRefused> {
+pub(crate) fn pending_heads(heads: Value) -> Result<Vec<StreamHead>, ClassReadRefused> {
     let entries: Vec<(String, String, DateTime<Utc>)> = decoded_part("heads", heads)?;
     if entries.len() > PENDING_HEAD_LIMIT {
         return Err(refused(format!(
@@ -430,7 +453,7 @@ fn pending_heads(heads: Value) -> Result<Vec<StreamHead>, ClassReadRefused> {
 
 /// The rows each live worker holds, per class. The statement groups by
 /// (worker, class), so each key comes once.
-fn in_flight_rows(
+pub(crate) fn in_flight_rows(
     in_flight: Value,
 ) -> Result<BTreeMap<(String, Execution), u64>, ClassReadRefused> {
     let entries: Vec<(String, String, u64)> = decoded_part("in_flight", in_flight)?;
@@ -443,7 +466,10 @@ fn in_flight_rows(
 /// One JSON part of a class read row. A part of another shape refuses the
 /// read and names the part: a stored value that does not decode (for example
 /// a `NULL` queue name in a snapshot's `queues`).
-fn decoded_part<T: DeserializeOwned>(part: &str, value: Value) -> Result<T, ClassReadRefused> {
+pub(crate) fn decoded_part<T: DeserializeOwned>(
+    part: &str,
+    value: Value,
+) -> Result<T, ClassReadRefused> {
     serde_json::from_value(value).map_err(|error| {
         refused(format!(
             "the {part} part of the read did not decode: {error}"
@@ -455,7 +481,7 @@ fn decoded_part<T: DeserializeOwned>(part: &str, value: Value) -> Result<T, Clas
 /// CHECK on the three class names (`horsies_tasks_execution_known`), so
 /// another value is a defect of the schema, and the read panics with the
 /// value.
-fn stored_execution(value: &str) -> Execution {
+pub(crate) fn stored_execution(value: &str) -> Execution {
     Execution::from_stored(value).unwrap_or_else(|| {
         panic!(
             "horsies_tasks.execution holds {value:?}; its CHECK admits only the three class names"
