@@ -15,6 +15,7 @@ use crate::broker::ClearableBootCause;
 use crate::catalog::CodeEnum;
 use crate::core::boot_failure::ShortageErrno;
 use crate::core::config::bounded::BoundedU32;
+use crate::core::config::queue::MAX_QUEUE_NAME_BYTES;
 use crate::core::config::worker_profile::{
     MAX_ISOLATED_CHILDREN, MAX_SHARED_ASYNC_CHILDREN, MAX_SHARED_THREAD_CHILDREN,
 };
@@ -22,6 +23,7 @@ use crate::core::{
     BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
 };
 use crate::telemetry::labels::ReleaseReason;
+use crate::telemetry::trace_carrier::MAX_TRACE_CARRIER_BYTES;
 use crate::worker::executor::protocol::{BoundedText, ProcessId};
 use crate::worker::executor::slots::dispatch::NotRunCause;
 use crate::worker_manifest::MAX_QUEUE_PRIORITY;
@@ -30,18 +32,18 @@ use crate::worker_manifest::MAX_QUEUE_PRIORITY;
 /// `varchar(255)`.
 pub const MAX_EVENT_TASK_NAME_CHARS: usize = 255;
 
-/// The most characters of a queue name. A queue name has at most 52 bytes
-/// (the check `horsies_tasks_queue_name_length`), so at most 52 characters.
-pub const MAX_EVENT_QUEUE_NAME_CHARS: usize = 52;
+/// The most characters of a queue name: its byte bound. A character has at
+/// least one byte, so every queue name fits in an event.
+pub const MAX_EVENT_QUEUE_NAME_CHARS: usize = MAX_QUEUE_NAME_BYTES;
 
 /// The most characters of a user error code that an event carries. A longer
 /// code is [`AttemptErrorCode::UserOverBound`].
 pub const MAX_EVENT_USER_CODE_CHARS: usize = 128;
 
-/// The most characters of a stored trace carrier that an event carries. The
-/// bound that the send puts on a stored carrier must not pass this one, so
-/// that every stored carrier fits in an event.
-pub const MAX_EVENT_TRACE_CARRIER_CHARS: usize = 2048;
+/// The most characters of a stored trace carrier that an event carries: the
+/// byte bound of the stored text. A character has at least one byte, so every
+/// stored carrier fits in an event.
+pub const MAX_EVENT_TRACE_CARRIER_CHARS: usize = MAX_TRACE_CARRIER_BYTES;
 
 /// The largest attempt number. The retry count of a row is a Postgres
 /// `integer` from 0, and the attempt is the retry count plus 1.
