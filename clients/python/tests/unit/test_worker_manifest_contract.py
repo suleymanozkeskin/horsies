@@ -84,6 +84,7 @@ from horsies.core.worker_manifest import (
     CurrentDirectoryUnreadable,
     LeftOutEntry,
     MainModuleLocator,
+    TaskFacts,
     child_argv,
     child_sys_path,
     current_interpreter_flags,
@@ -1203,8 +1204,11 @@ class TestDocument:
             config,
             profile='batch',
             tasks={
-                'app.tasks.add': Execution.ISOLATED,
-                'app.tasks.fetch': Execution.SHARED_ASYNC,
+                'app.tasks.add': TaskFacts(execution=Execution.ISOLATED, error_codes=()),
+                'app.tasks.fetch': TaskFacts(
+                    execution=Execution.SHARED_ASYNC,
+                    error_codes=('RATE_LIMITED', 'NOT_FOUND'),
+                ),
             },
             child_launch=_launch(),
             idempotency_reservation_window=WINDOW,
@@ -1219,8 +1223,11 @@ class TestDocument:
         assert document['manifest_version'] == wire.MANIFEST_VERSION
         assert document['profile'] == {'kind': 'NAMED', 'name': 'batch'}
         assert document['tasks'] == {
-            'app.tasks.add': 'ISOLATED',
-            'app.tasks.fetch': 'SHARED_ASYNC',
+            'app.tasks.add': {'execution': 'ISOLATED', 'error_codes': []},
+            'app.tasks.fetch': {
+                'execution': 'SHARED_ASYNC',
+                'error_codes': ['RATE_LIMITED', 'NOT_FOUND'],
+            },
         }
         assert document['send'] == {
             'retain_rerun_input_default': False,

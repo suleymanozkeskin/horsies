@@ -4,8 +4,8 @@
 //! every worker profile of the app with the profile that the start asks for,
 //! the queues and claim settings of the app, the recovery, retention,
 //! resilience and payload settings of the worker's loops (`sections`), the
-//! execution class of each registered task, and how a child and the preload
-//! process start. The client resolves its user config (Pydantic in Python)
+//! execution class and the declared error codes of each registered task,
+//! and how a child and the preload process start. The client resolves its user config (Pydantic in Python)
 //! into it; the core picks and checks the profile
 //! ([`select_worker_profile`]), so one resolver serves every client.
 //!
@@ -37,13 +37,13 @@ use crate::core::config::worker_profile::{
     SharedThreadSeats, SharedThreadSetting, TaskCount, TaskLimitSetting, WorkerProfile,
     MAX_DRAIN_TIMEOUT, MAX_TASK_LIMIT,
 };
-use crate::core::task::Execution;
+use crate::core::task::{DeclaredErrorCodes, Execution};
 use crate::core::PostgresConfig;
 use crate::manifest::{
     parse_manifest, DatabaseUrl, ManifestRefused, PoolRecycle, SendManifest, SessionDatabase,
     WholeSeconds,
 };
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, PythonItem, PythonValue};
 
 /// The one worker manifest version this core reads.
 pub const WORKER_MANIFEST_VERSION: u32 = 1;
@@ -262,10 +262,30 @@ pub struct WorkerManifest {
     pub retention: RetentionManifest,
     pub resilience: ResilienceManifest,
     pub payload: PayloadManifest,
-    /// The execution class of each task that the worker registered, by task
-    /// name.
-    pub tasks: BTreeMap<String, Execution>,
+    /// The facts of each task that the worker registered, by task name.
+    pub tasks: BTreeMap<String, TaskManifest>,
     pub child_launch: ChildLaunchManifest,
+}
+
+/// The facts of one registered task.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct TaskManifest {
+    /// How a worker runs the task.
+    pub execution: Execution,
+    /// The user error codes that the task declares, each once: the values
+    /// of its `error_code` metric label besides the built-in codes and
+    /// `undeclared` (`error_code_label`). Empty when it declares none. The
+    /// parser refuses a code that fails the code-text rule, the name of a
+    /// built-in code and a repeated code (`DeclaredErrorCodes::parse`).
+    pub error_codes: DeclaredErrorCodes,
+}
+
+/// The declared codes of a task are a tuple of code texts in Python.
+impl ManifestValue for DeclaredErrorCodes {
+    const PYTHON: PythonValue = PythonValue::List(PythonItem::Str);
 }
 
 /// The connection settings of a worker. The pool of the worker process
