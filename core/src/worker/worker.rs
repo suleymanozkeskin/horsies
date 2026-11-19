@@ -67,6 +67,7 @@ use crate::worker::liveness::{
     liveness_connect_plan, start_liveness_lock, LivenessRule, LivenessStartError,
     StartedLivenessLock,
 };
+use crate::worker::metrics_endpoint::WorkerEndpoint;
 use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_boot};
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartCount};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
@@ -917,6 +918,9 @@ pub struct Worker {
     /// The metrics and the events of the lifecycle points; off unless the
     /// host turns it on.
     telemetry: WorkerTelemetry,
+    /// The metrics endpoint of `--metrics-listen`; none unless the host
+    /// turns it on.
+    endpoint: WorkerEndpoint,
 }
 
 impl Worker {
@@ -967,6 +971,7 @@ impl Worker {
             on_started: OnStarted::Nothing,
             serving: AtomicBool::new(false),
             telemetry: WorkerTelemetry::Off,
+            endpoint: WorkerEndpoint::NoMetricsEndpoint,
         })
     }
 
@@ -978,6 +983,42 @@ impl Worker {
     /// This worker with `telemetry` at its lifecycle points.
     pub fn with_telemetry(self, telemetry: WorkerTelemetry) -> Self {
         Self { telemetry, ..self }
+    }
+
+    /// This worker with `telemetry` at its lifecycle points and a metrics
+    /// endpoint on `address` that serves the registry of `telemetry`
+    /// (`--metrics-listen HOST:PORT`).
+    ///
+    /// The run starts the endpoint thread first and stops it last, after
+    /// the drain. A bind that fails never stops the worker: the thread binds
+    /// again with the slot backoff, and the snapshot shows the endpoint
+    /// down with its cause. `GET /livez` and `GET /readyz` answer once the
+    /// address is bound (`crate::worker::probes`).
+    #[cfg(feature = "metrics-endpoint")]
+    pub fn with_metrics_endpoint(
+        self,
+        address: crate::telemetry::listen::ListenAddress,
+        telemetry: Arc<crate::telemetry::worker::TelemetryOn>,
+    ) -> Self {
+        let endpoint = crate::worker::metrics_endpoint::ListenEndpoint::new(
+            address,
+            Arc::clone(telemetry.registry()),
+        );
+        Self {
+            telemetry: WorkerTelemetry::On(telemetry),
+            endpoint: WorkerEndpoint::Listen(Arc::new(endpoint)),
+            ..self
+        }
+    }
+
+    /// The facts of the `horsies.worker.info` series of this worker: the
+    /// version of the core, the profile, the worker id.
+    pub fn worker_facts(&self) -> crate::telemetry::registry::WorkerFacts {
+        crate::telemetry::registry::WorkerFacts {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            profile: self.profile.name.clone(),
+            worker_id: self.worker_id.clone(),
+        }
     }
 
     /// This worker stopped by `stop`: a request through it, also one made
@@ -1243,7 +1284,19 @@ impl Worker {
     /// the service loops, the pools with the profile's drain timeout, the
     /// outcome writes and the finalize batcher, the runner heartbeats last,
     /// then the spawner thread.
+    ///
+    /// With a metrics endpoint (`Worker::with_metrics_endpoint`), its
+    /// thread starts before every step and stops after the last one, so the
+    /// probes answer during the start and the last scrape sees the drain.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        let endpoint = self.endpoint.start();
+        let ended = self.run_steps().await;
+        endpoint.stop().await;
+        ended
+    }
+
+    /// The steps of [`Worker::run`], from the memory fit to the stop.
+    async fn run_steps(&self) -> Result<(), WorkerError> {
         // Machine facts of the profile: a warning, never a refusal (Python
         // `_log_memory_fit`, before the schema step).
         let _logged = log_memory_fit_at_boot(&self.profile);
@@ -1501,6 +1554,7 @@ impl Worker {
             if self.cancel.is_cancelled() {
                 return None;
             }
+            self.endpoint.claim_turn_within(Duration::ZERO);
             reap_finished(writes);
             let pass = self
                 .claim_and_dispatch(&steps, children, writer, writes, hold)
@@ -1529,9 +1583,11 @@ impl Worker {
                         "Worker loop error: {error}. Retrying in {delay:.1}s (attempt {})",
                         claim_backoff.attempts(),
                     );
+                    let wait = Duration::from_secs_f64(delay);
+                    self.endpoint.claim_turn_within(wait);
                     tokio::select! {
                         _ = self.cancel.cancelled() => return None,
-                        _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+                        _ = tokio::time::sleep(wait) => {}
                     }
                     continue;
                 }
@@ -1545,6 +1601,7 @@ impl Worker {
                     return Some(error);
                 }
             }
+            self.endpoint.claim_turn_within(poll_interval);
             match wait_for_claim_wake(
                 &self.cancel,
                 &self.capacity_released,
@@ -1694,6 +1751,12 @@ impl Worker {
             };
         // The start ended: the first generation is in, and no claim ran.
         self.serving.store(true, Ordering::Release);
+        #[cfg(feature = "metrics-endpoint")]
+        self.endpoint
+            .claiming(|| crate::worker::probes::ServingFacts {
+                board: Arc::clone(children.board()),
+                lock: liveness.hold_view(),
+            });
         match &self.on_started {
             OnStarted::Nothing => {}
             OnStarted::Call(hook) => hook().await,
@@ -1710,6 +1773,7 @@ impl Worker {
         let fatal_claim_error = self
             .claim_loop(&children, &writer, &mut writes, &mut hold, &claim_wakes)
             .await;
+        self.endpoint.stopping();
 
         // Stop the claim loop and every service loop on every exit path,
         // including a fatal claim error that broke the loop without a prior
@@ -1819,6 +1883,7 @@ impl Worker {
             children.view(),
             ClaimColumns::of_profile(&self.profile.profile),
             Utc::now(),
+            self.endpoint.clone(),
             self.cancel.clone(),
         );
         // Runner heartbeats: one fenced statement per interval for every
@@ -5829,6 +5894,9 @@ mod claim_config_tests;
 
 #[cfg(test)]
 mod live_worker_tests;
+
+#[cfg(all(test, feature = "metrics-endpoint"))]
+mod metrics_endpoint_tests;
 
 #[cfg(test)]
 mod start_tests;

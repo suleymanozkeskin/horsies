@@ -195,12 +195,12 @@ mod p7_maintenance_tests {
                 max_claim_batch, max_claim_per_worker, queues,
                 queue_priorities, queue_max_concurrency, recovery_config,
                 tasks_running, tasks_claimed, worker_started_at,
-                slots_down, class_capacity
+                slots_down, class_capacity, telemetry
              ) VALUES ($1, NOW() - INTERVAL '48 hours', 'host', 1, 1,
                        1, 1, '{default}',
                        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
                        0, 0, NOW() - INTERVAL '48 hours',
-                       '[]'::jsonb, '{}'::jsonb)",
+                       '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off')))",
         )
         .bind(&worker_id)
         .execute(&pool)

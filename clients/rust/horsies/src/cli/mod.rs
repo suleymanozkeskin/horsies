@@ -20,6 +20,10 @@
 //! mode argument first and serves the child. Every line of `main` before
 //! `run` runs in each child too.
 //!
+//! The logs go to stderr as text. [`run_with_log_format`] with
+//! [`LogFormat::Json`] writes one JSON object per record instead, in the
+//! runner and in each child.
+//!
 //! Exit codes: 0 on an operator stop (`SIGTERM`, `SIGINT`) and on a passing
 //! check; 1 on any other end; 2 for arguments that do not parse or a
 //! removed flag; a child exits with the code of `ChildHostExit`.
@@ -46,16 +50,39 @@ use crate::{
 /// The exit status of an argument error, as argparse and clap give it.
 const USAGE_EXIT: u8 = 2;
 
+/// The format of the log records of the runner and of the worker's
+/// children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    /// One line of text per record, with ANSI color on a terminal. The
+    /// format of [`run`].
+    Text,
+    /// One JSON object per line: `timestamp`, `level`, `target`, the fields
+    /// of the event at the top level (`message` among them), `span` (the
+    /// innermost span, with its name and fields) and `spans` (every span of
+    /// the record, outermost first).
+    Json,
+}
+
 /// Run the command of this process's arguments for `app`, or serve as a
 /// worker child: see the module docs. Blocks the calling thread until the
 /// command ends, so call it from a plain `fn main`; inside a tokio runtime
-/// it prints why and returns exit status 1.
+/// it prints why and returns exit status 1. The logs are text
+/// ([`LogFormat::Text`]).
 pub fn run(app: Horsies) -> ExitCode {
+    run_with_log_format(app, LogFormat::Text)
+}
+
+/// [`run`] with the logs in `format`. `main` runs in each worker child
+/// too, so the children log in the same format.
+pub fn run_with_log_format(app: Horsies, format: LogFormat) -> ExitCode {
     match crate::child_mode() {
         ChildMode::Child(args) => {
             return app.serve_child_with_logs(
                 args,
-                ChildLogSetup::Install(Box::new(logging::install_child_logs)),
+                ChildLogSetup::Install(Box::new(move |level| {
+                    logging::install_child_logs(level, format);
+                })),
             )
         }
         ChildMode::BadArguments(error) => {
@@ -83,7 +110,7 @@ pub fn run(app: Horsies) -> ExitCode {
             return ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(USAGE_EXIT));
         }
     };
-    run_command(app, cli.command)
+    run_command(app, cli.command, format)
 }
 
 /// The commands of the runner.
@@ -158,11 +185,12 @@ impl LogLevel {
     }
 }
 
-/// Install the logs, then run `command`. Returns the exit status.
-fn run_command(mut app: Horsies, command: Command) -> ExitCode {
+/// Install the logs in `format`, then run `command`. Returns the exit
+/// status.
+fn run_command(mut app: Horsies, command: Command, format: LogFormat) -> ExitCode {
     match command {
         Command::Worker { profile, loglevel } => {
-            logging::install_logs(loglevel.child_level());
+            logging::install_logs(loglevel.child_level(), format);
             let start = match profile {
                 Some(name) => WorkerStart::profile(name).with_log_level(loglevel.child_level()),
                 None => WorkerStart::without_profile(loglevel.child_level()),
@@ -170,12 +198,12 @@ fn run_command(mut app: Horsies, command: Command) -> ExitCode {
             block_on_process_runtime(app.run_worker(start)).map_or(ExitCode::FAILURE, worker_exit)
         }
         Command::Scheduler { loglevel } => {
-            logging::install_logs(loglevel.child_level());
+            logging::install_logs(loglevel.child_level(), format);
             app.set_role(AppRole::Scheduler);
             block_on_process_runtime(app.run_scheduler()).map_or(ExitCode::FAILURE, scheduler_exit)
         }
         Command::Check { live, loglevel } => {
-            logging::install_logs(loglevel.child_level());
+            logging::install_logs(loglevel.child_level(), format);
             let checked = match live {
                 false => app.check(),
                 true => match block_on_process_runtime(app.check_live()) {
@@ -186,7 +214,7 @@ fn run_command(mut app: Horsies, command: Command) -> ExitCode {
             check_exit(checked)
         }
         Command::Metrics { listen, loglevel } => {
-            logging::install_logs(loglevel.child_level());
+            logging::install_logs(loglevel.child_level(), format);
             block_on_process_runtime(metrics::serve(&app, &listen))
                 .map_or(ExitCode::FAILURE, metrics_exit)
         }

@@ -32,6 +32,9 @@ mod reads;
 mod scheduler;
 mod send;
 mod task;
+// The spans and producer metrics of the sends, the starts and the task
+// bodies: `otel` with the feature, nothing without it.
+mod telemetry;
 mod worker;
 mod workflow;
 
@@ -40,6 +43,8 @@ pub mod blocking;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod monitoring;
+#[cfg(feature = "otel")]
+pub mod otel;
 pub mod rerun;
 #[cfg(feature = "web")]
 pub mod web;
@@ -63,6 +68,7 @@ pub use crate::reads::*;
 pub use crate::scheduler::*;
 pub use crate::send::*;
 pub use crate::task::*;
+pub use crate::telemetry::ATTEMPT_SPAN_TARGET;
 pub use crate::worker::*;
 pub use crate::workflow::*;
 

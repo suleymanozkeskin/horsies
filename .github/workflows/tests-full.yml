@@ -364,7 +364,7 @@ jobs:
       - name: Test the client with every feature
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
-        run: cargo test -p horsies --features web,tokio-postgres,sqlx
+        run: cargo test -p horsies --features web,tokio-postgres,sqlx,otel
 
   # The showcase with its database tests: ACME_DATABASE_URL turns them on, and
   # they start the acme binary as the worker.

@@ -17,13 +17,13 @@ async fn seed_snapshot(pool: &TestPool, worker_id: &str, slots_down: &str, class
             max_claim_batch, max_claim_per_worker, cluster_wide_cap, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, memory_usage_mb, memory_percent, cpu_percent,
-            children_memory_mb, worker_started_at, slots_down, class_capacity
+            children_memory_mb, worker_started_at, slots_down, class_capacity, telemetry
          ) VALUES (
             $1, NOW(), 'itest-host', 4242, 2,
             2, 2, NULL, ARRAY['default'],
             '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, NULL, NULL, NULL,
-            NULL, NOW(), $2::jsonb, $3::jsonb
+            NULL, NOW(), $2::jsonb, $3::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
          )",
     )
     .bind(worker_id)

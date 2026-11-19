@@ -18,6 +18,7 @@ use crate::broker::child_writes::{
     WriteDeadline, CHILD_STATEMENT_BOUND, FINALIZING_MARKER_BOUND, FINALIZING_MARKER_END,
     START_ATTEMPT_END,
 };
+use crate::broker::claims::RunWorkflow;
 use crate::broker::{OrphanSelfHeal, PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
 use crate::core::registry::task::TaskRegistry;
@@ -27,7 +28,7 @@ use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
 use crate::worker::executor::protocol::StopReason;
 
-const WORKER_ID: &str = "start-attempt-worker";
+pub(super) const WORKER_ID: &str = "start-attempt-worker";
 const OTHER_WORKER_ID: &str = "start-attempt-other-worker";
 const PID: i32 = 4242;
 
@@ -58,6 +59,7 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
             family: crate::ClientFamily::Rust,
+            body_scope: super::BodyScope::NoScope,
         }),
         pid: PID,
         writer,
@@ -101,7 +103,7 @@ async fn one_connection_child_broker() -> PostgresBroker {
 
 /// A CLAIMED plain row held by [`WORKER_ID`]; `good_until` passed when
 /// `expired`. Returns the id and the claim generation.
-async fn seed_claimed(pool: &TestPool, expired: bool) -> (Uuid, DateTime<Utc>) {
+pub(super) async fn seed_claimed(pool: &TestPool, expired: bool) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
     let generation = sql::query_scalar(
         "INSERT INTO horsies_tasks (
@@ -141,6 +143,8 @@ fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
     RunFacts {
         task_id,
         task_name: "app.tasks.start".to_owned(),
+        queue_name: crate::events::QueueName::cut("default"),
+        attempt: crate::events::AttemptNumber::SMALLEST,
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -155,7 +159,7 @@ async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
         .expect("read the live row")
 }
 
-async fn remove_task(pool: &TestPool, task_id: Uuid) {
+pub(super) async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",
@@ -362,7 +366,13 @@ async fn a_start_reports_the_started_at_that_it_wrote() {
             .await
             .expect("read the started_at of the row");
     match started {
-        Started::Running { started_at } => assert_eq!(started_at, written),
+        Started::Running {
+            started_at,
+            workflow,
+        } => {
+            assert_eq!(started_at, written);
+            assert_eq!(workflow, RunWorkflow::NotInWorkflow);
+        }
         Started::Stopped(reason) => panic!("a held claim starts, not {reason:?}"),
     }
     remove_task(&pool, task_id).await;

@@ -18,7 +18,7 @@
 //!   backstops, placement and recycle.
 
 pub mod board;
-mod booting;
+pub(crate) mod booting;
 pub mod budgets;
 pub mod defects;
 pub mod dispatch;

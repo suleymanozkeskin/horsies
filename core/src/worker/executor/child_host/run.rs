@@ -2,27 +2,31 @@
 //! result envelope, the finalizing marker. The order is Python's (executor
 //! design, section 4.8): start, user code, encode, marker, frame.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
+use tracing::instrument::Instrumented;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::host::ChildApp;
 use super::link::FrameWriter;
-use super::panic::{catch_body_panic, panic_error};
+use super::panic::{catch_body_panic, panic_error, CatchPanic};
 use super::role::as_blocking_body;
 use crate::broker::child_writes::{WriteDeadline, PRE_START_CONFIRM_ATTEMPTS};
 use crate::broker::claims::{
     release_claims_within, start_attempt as start_statement, ReleaseBatch, ReleaseClaims,
-    ReleaseOutcome, ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
+    ReleaseOutcome, ReleasePlacement, RunWorkflow, StartAttempt, StartMiss, StartOutcome,
 };
 use crate::broker::workflow_stop_before_start::stop_before_start;
 use crate::broker::{BrokerError, OrphanSelfHeal, PostgresBroker, PrestartExpiry, StopBeforeStart};
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
-use crate::core::task::fn_trait::{RegisteredTask, TaskModule};
+use crate::core::task::fn_trait::{RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
+use crate::events::{AttemptNumber, QueueName};
 use crate::worker::execution::{
     build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark,
 };
@@ -40,11 +44,15 @@ pub(super) struct HostContext {
     pub(super) writer: FrameWriter,
 }
 
-/// The facts of one run that every write fences on.
+/// The facts of one run, from its run frame: the task, the claim that every
+/// write fences on (`worker_id`, `claimed_at`), and the queue and the
+/// attempt that the span of its body names.
 #[derive(Debug, Clone)]
 pub(super) struct RunFacts {
     pub(super) task_id: Uuid,
     pub(super) task_name: String,
+    pub(super) queue_name: QueueName,
+    pub(super) attempt: AttemptNumber,
     pub(super) worker_id: String,
     pub(super) claimed_at: DateTime<Utc>,
     /// Whether the stop before start cancels the task when no node links it
@@ -55,9 +63,11 @@ pub(super) struct RunFacts {
 /// How the start write ended.
 pub(super) enum Started {
     /// The row is RUNNING; `started_at` is the time that the start write
-    /// returned (the database clock).
+    /// returned (the database clock), and `workflow` the node that links
+    /// the task, read with the node row that the start locked.
     Running {
         started_at: DateTime<Utc>,
+        workflow: RunWorkflow,
     },
     Stopped(StopReason),
 }
@@ -117,7 +127,15 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
             Err(error) => Err(error),
         };
         let missed = match outcome {
-            Ok(StartOutcome::Started { started_at, .. }) => return Started::Running { started_at },
+            Ok(StartOutcome::Started {
+                started_at,
+                workflow,
+            }) => {
+                return Started::Running {
+                    started_at,
+                    workflow,
+                }
+            }
             Ok(StartOutcome::Missed(miss)) => {
                 after_missed_start(context, facts, miss, deadline).await
             }
@@ -472,18 +490,30 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
 }
 
 /// The body of blocking task `task_name` (defined in `module`) on the
-/// calling thread. A panic is `UNHANDLED_EXCEPTION` with its record
-/// ([`panic_error`]).
+/// calling thread, inside `span` (the span of the run's body scope). A
+/// panic is `UNHANDLED_EXCEPTION` with its record ([`panic_error`]).
 pub(super) fn run_blocking_body(
     task: &Arc<dyn crate::core::task::fn_trait::BlockingTaskFn>,
     input: &[u8],
     task_name: &str,
     module: TaskModule,
+    span: &tracing::Span,
 ) -> TaskResult<Vec<u8>> {
-    match catch_body_panic(|| as_blocking_body(|| task.execute(input))) {
+    match span.in_scope(|| catch_body_panic(|| as_blocking_body(|| task.execute(input)))) {
         Ok(result) => result,
         Err(record) => TaskResult::Err(panic_error(task_name, module, record)),
     }
+}
+
+/// The async body of `task` on `input`, polled inside `span` (the span of
+/// the run's body scope). A panic is caught in the poll that panicked
+/// ([`CatchPanic`]); the caller maps it.
+pub(super) fn async_body_in(
+    task: Arc<dyn crate::core::task::fn_trait::AsyncTaskFn>,
+    input: Vec<u8>,
+    span: tracing::Span,
+) -> CatchPanic<Instrumented<impl Future<Output = RawTaskResult> + Send>> {
+    CatchPanic::new(async move { task.execute(&input).await }.instrument(span))
 }
 
 /// The end of a task whose kind does not fit the seat it reached: an async
