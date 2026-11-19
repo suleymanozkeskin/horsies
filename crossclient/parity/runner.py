@@ -521,8 +521,9 @@ def _start_processes(
 
     The first worker starts alone, and the others start once its log shows
     `WORKER_READY_LINE`: on a fresh database a worker whose startup coverage
-    meets the coverage gate of another starting worker refuses its boot
-    (`coverage_gate_busy`), on both clients. The others start together,
+    meets the coverage gate of another starting worker waits for the gate
+    with its start backoff (`coverage_gate_busy`), on both clients. The
+    others start together,
     and the scheduler starts once each of them logged `WORKER_READY_LINE`
     too. A worker that does not get ready ends the start with
     `WorkerNotReady`."""

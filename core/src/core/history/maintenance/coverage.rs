@@ -49,9 +49,34 @@ pub struct CoverageEnsured {
     pub absent_leaves: Vec<String>,
 }
 
+/// The step at which a coverage pass stopped ([`CoverageEnsureFailed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageFailureStage {
+    /// A gated pass found the coverage gate held by another pass, and the
+    /// probe after it found the set damaged. The pass repaired nothing.
+    CoverageGateBusy,
+    /// The registered retention classes were not conformant after the
+    /// registration was written.
+    VerifyRegistration,
+    /// A leaf of the repair failed, or the final probe still found damage.
+    EnsureLeafCoverage,
+}
+
+impl CoverageFailureStage {
+    /// The stage as the outcome record of a client names it, for example
+    /// `coverage_gate_busy`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CoverageGateBusy => "coverage_gate_busy",
+            Self::VerifyRegistration => "verify_registration",
+            Self::EnsureLeafCoverage => "ensure_leaf_coverage",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageEnsureFailed {
-    pub stage: &'static str,
+    pub stage: CoverageFailureStage,
     pub class_key: Option<String>,
     pub refusal: String,
     pub heartbeat_covered_now: bool,
@@ -73,9 +98,18 @@ impl CoverageOutcome {
     }
 }
 
+/// The verdict of the startup coverage ([`startup_verdict`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupCoverageOutcome {
+    /// A heartbeat leaf covers the present instant: the start goes on.
     Ready(CoverageOutcome),
+    /// Another pass holds the coverage gate, and no heartbeat leaf covers
+    /// the present instant. The condition can clear: the other pass creates
+    /// the leaves and releases the gate, so the start runs the gated pass
+    /// again after a backoff.
+    GateBusy(CoverageEnsureFailed),
+    /// No heartbeat leaf covers the present instant, for any other cause:
+    /// the start is refused.
     Refused(CoverageOutcome),
 }
 
@@ -332,7 +366,7 @@ async fn repair_under_coverage_gate(
             return Ok(ensured_from_probe(busy_probe));
         }
         return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
-            stage: "coverage_gate_busy",
+            stage: CoverageFailureStage::CoverageGateBusy,
             class_key: busy_probe.first_damaged_class_key(),
             refusal: "another worker owns the partition coverage gate".to_owned(),
             heartbeat_covered_now: busy_probe.heartbeat_covered_now,
@@ -492,7 +526,7 @@ async fn repair_registration(
         return Ok(RegistrationStep::Healthy(probe));
     }
     Ok(RegistrationStep::Refused(CoverageEnsureFailed {
-        stage: "verify_registration",
+        stage: CoverageFailureStage::VerifyRegistration,
         class_key: None,
         refusal: "registered retention class shape is not conformant".to_owned(),
         heartbeat_covered_now: probe.heartbeat_covered_now,
@@ -565,7 +599,7 @@ fn failed_repair(final_probe: CoverageProbe, failures: &[String]) -> CoverageEns
         false => failures.join("; "),
     };
     CoverageEnsureFailed {
-        stage: "ensure_leaf_coverage",
+        stage: CoverageFailureStage::EnsureLeafCoverage,
         class_key: final_probe.first_damaged_class_key(),
         refusal,
         heartbeat_covered_now: final_probe.heartbeat_covered_now,
@@ -598,11 +632,22 @@ async fn final_coverage_probe(
 
 /// Whether a startup may go on after `outcome`: only when a heartbeat leaf
 /// covers the present instant (Python `ensure_startup_coverage_in_database`).
-/// Pure.
+/// With no such leaf, a pass that found the coverage gate busy
+/// ([`CoverageFailureStage::CoverageGateBusy`]) is `GateBusy`, and every
+/// other outcome is `Refused`. Pure.
 pub fn startup_verdict(outcome: CoverageOutcome) -> StartupCoverageOutcome {
-    match outcome.heartbeat_covered_now() {
-        true => StartupCoverageOutcome::Ready(outcome),
-        false => StartupCoverageOutcome::Refused(outcome),
+    match (outcome.heartbeat_covered_now(), outcome) {
+        (true, outcome) => StartupCoverageOutcome::Ready(outcome),
+        (
+            false,
+            CoverageOutcome::Failed(
+                failed @ CoverageEnsureFailed {
+                    stage: CoverageFailureStage::CoverageGateBusy,
+                    ..
+                },
+            ),
+        ) => StartupCoverageOutcome::GateBusy(failed),
+        (false, outcome) => StartupCoverageOutcome::Refused(outcome),
     }
 }
 
@@ -650,7 +695,7 @@ mod gate_rule_tests {
     fn the_startup_verdict_follows_the_present_heartbeat_coverage() {
         let failed = |covered: bool| {
             CoverageOutcome::Failed(CoverageEnsureFailed {
-                stage: "ensure_leaf_coverage",
+                stage: CoverageFailureStage::EnsureLeafCoverage,
                 class_key: Some("standard_30d".to_owned()),
                 refusal: "1 class(es) failed".to_owned(),
                 heartbeat_covered_now: covered,
@@ -665,6 +710,46 @@ mod gate_rule_tests {
             startup_verdict(failed(false)),
             StartupCoverageOutcome::Refused(CoverageOutcome::Failed(_))
         ));
+    }
+
+    /// A busy coverage gate with no present heartbeat leaf is `GateBusy`;
+    /// with that leaf it is `Ready`. Every other failed stage with no present
+    /// heartbeat leaf stays `Refused`.
+    #[test]
+    fn a_busy_gate_with_no_present_heartbeat_leaf_is_the_gate_busy_verdict() {
+        let failed = |stage: CoverageFailureStage, covered: bool| {
+            CoverageOutcome::Failed(CoverageEnsureFailed {
+                stage,
+                class_key: None,
+                refusal: "a refusal".to_owned(),
+                heartbeat_covered_now: covered,
+                absent_leaves: Vec::new(),
+            })
+        };
+        assert!(matches!(
+            startup_verdict(failed(CoverageFailureStage::CoverageGateBusy, false)),
+            StartupCoverageOutcome::GateBusy(CoverageEnsureFailed {
+                stage: CoverageFailureStage::CoverageGateBusy,
+                heartbeat_covered_now: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            startup_verdict(failed(CoverageFailureStage::CoverageGateBusy, true)),
+            StartupCoverageOutcome::Ready(CoverageOutcome::Failed(_))
+        ));
+        for stage in [
+            CoverageFailureStage::VerifyRegistration,
+            CoverageFailureStage::EnsureLeafCoverage,
+        ] {
+            assert!(
+                matches!(
+                    startup_verdict(failed(stage, false)),
+                    StartupCoverageOutcome::Refused(CoverageOutcome::Failed(_))
+                ),
+                "{stage:?}"
+            );
+        }
     }
 }
 

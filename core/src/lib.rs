@@ -85,8 +85,8 @@ pub use crate::broker::wait_limit::{BoundedWait, WaitLimit, WaitLimitRefused, MA
 pub use crate::broker::{CoveragePassError, PrunePassError};
 pub use crate::core::history::errors::HistoryError;
 pub use crate::core::history::maintenance::coverage::{
-    CoverageEnsureFailed, CoverageEnsured, CoverageOutcome, CoverageRequest, CoverageSerialization,
-    HistoryCoverage,
+    CoverageEnsureFailed, CoverageEnsured, CoverageFailureStage, CoverageOutcome, CoverageRequest,
+    CoverageSerialization, HistoryCoverage,
 };
 pub use crate::core::history::maintenance::pruning::{PrunePass, PruneReach};
 pub use crate::core::history::periods::RetentionDays;

@@ -31,7 +31,7 @@ use crate::core::history::heartbeats::partitioning::{
 };
 use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage_in_pool, ensure_periodic_coverage_in_pool,
-    ensure_startup_coverage_in_pool, CoverageOutcome, StartupCoverageOutcome,
+    ensure_startup_coverage_in_pool, CoverageFailureStage, CoverageOutcome, StartupCoverageOutcome,
 };
 use crate::core::history::maintenance::pruning::{
     prune_expired_partitions, prune_expired_partitions_within, sweep_counts_toward_bound,
@@ -1536,7 +1536,7 @@ async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() 
     let StartupCoverageOutcome::Ready(CoverageOutcome::Failed(failure)) = startup else {
         panic!("current heartbeat coverage must keep non-owner startup ready");
     };
-    assert_eq!(failure.stage, "coverage_gate_busy");
+    assert_eq!(failure.stage, CoverageFailureStage::CoverageGateBusy);
     assert!(failure.heartbeat_covered_now);
     holder
         .rollback()
@@ -1599,7 +1599,7 @@ async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
     let CoverageOutcome::Failed(failure) = gated else {
         panic!("a gated pass under a busy gate repairs nothing: {gated:?}");
     };
-    assert_eq!(failure.stage, "coverage_gate_busy");
+    assert_eq!(failure.stage, CoverageFailureStage::CoverageGateBusy);
     let periodic = ensure_periodic_coverage_in_pool(
         &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
@@ -1626,9 +1626,11 @@ async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
     database.drop().await;
 }
 
+/// A busy coverage gate with no current heartbeat leaf is the transient
+/// `GateBusy` verdict, which the worker start retries, not a refusal.
 #[tokio::test]
 #[serial]
-async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
+async fn busy_coverage_gate_makes_startup_wait_when_current_heartbeat_is_absent() {
     let database = TestDatabase::create_with_connections(4).await;
     let mut holder = database
         .pool
@@ -1654,10 +1656,10 @@ async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
     )
     .await
     .expect("check cold startup under a busy coverage gate");
-    let StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) = startup else {
-        panic!("missing current heartbeat coverage must refuse startup");
+    let StartupCoverageOutcome::GateBusy(failure) = startup else {
+        panic!("a busy gate with no current heartbeat leaf must be GateBusy: {startup:?}");
     };
-    assert_eq!(failure.stage, "coverage_gate_busy");
+    assert_eq!(failure.stage, CoverageFailureStage::CoverageGateBusy);
     assert!(!failure.heartbeat_covered_now);
     holder
         .rollback()

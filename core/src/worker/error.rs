@@ -34,6 +34,24 @@ pub enum WorkerError {
     #[error("worker start attempt did not finish within {bound:?}")]
     StartTimedOut { bound: std::time::Duration },
 
+    /// The last attempt of the worker start found the partition coverage
+    /// gate held by another process, with no heartbeat leaf for the present
+    /// instant, and the retry budget of the start
+    /// (`WorkerResilienceConfig::db_retry_max_attempts`) was spent. `waited`
+    /// is the time from the first attempt of the start to this error, and
+    /// `attempts` counts the attempts. Retryable: the other process creates
+    /// the leaves and releases the gate.
+    #[error(
+        "the partition coverage gate (coverage_gate_busy) is still held by another process, \
+         and no heartbeat leaf covers the present instant, after the worker start waited {} ms \
+         over {attempts} attempts",
+        .waited.as_millis()
+    )]
+    CoverageGateBusy {
+        waited: std::time::Duration,
+        attempts: u64,
+    },
+
     /// The runner heartbeats failed closed: no beat landed within half of
     /// `running_stale_threshold_ms`. The watchdog killed every child that
     /// held a task and stopped the worker (Python `RunnerHeartbeatLostError`).
@@ -115,6 +133,7 @@ impl WorkerError {
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
             Self::StartTimedOut { .. } => true,
+            Self::CoverageGateBusy { .. } => true,
             Self::RunnerHeartbeatLost { .. } => false,
             Self::PlacementRefused(_)
             | Self::SpawnerStart(_)

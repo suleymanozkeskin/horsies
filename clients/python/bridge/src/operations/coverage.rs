@@ -276,7 +276,7 @@ pub struct CoverageEnsureFailedRecord {
 impl From<CoverageEnsureFailed> for CoverageEnsureFailedRecord {
     fn from(failed: CoverageEnsureFailed) -> Self {
         Self {
-            stage: failed.stage.to_owned(),
+            stage: failed.stage.as_str().to_owned(),
             class_key: failed.class_key,
             refusal: failed.refusal,
             heartbeat_covered_now: failed.heartbeat_covered_now,
@@ -361,7 +361,7 @@ pub async fn ensure_partition_coverage_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerError, HistoryError};
+    use horsies_core::{BrokerError, CoverageFailureStage, HistoryError};
 
     use super::*;
 
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(record.absent_leaves, vec!["gone_leaf".to_owned()]);
 
         let failed = outcome_record(Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
-            stage: "coverage_gate_busy",
+            stage: CoverageFailureStage::CoverageGateBusy,
             class_key: Some("standard_30d".to_owned()),
             refusal: "another worker owns the partition coverage gate".to_owned(),
             heartbeat_covered_now: false,

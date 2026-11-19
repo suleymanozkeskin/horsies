@@ -187,14 +187,14 @@ impl PostgresBroker {
             }
             CoverageOutcome::Failed(failed) => {
                 tracing::warn!(
-                    stage = failed.stage,
+                    stage = failed.stage.as_str(),
                     class_key = ?failed.class_key,
                     refusal = %failed.refusal,
                     absent_leaves = ?failed.absent_leaves,
                     "the schema install's coverage pass stopped at {}: {}; a terminal write \
                      whose leaf is missing fails with SQLSTATE 55H01 until a later pass \
                      creates it",
-                    failed.stage,
+                    failed.stage.as_str(),
                     failed.refusal,
                 );
             }

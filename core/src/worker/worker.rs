@@ -184,6 +184,64 @@ enum StartOutcome {
     StopRequested,
 }
 
+/// How one attempt of the database start steps ([`Worker::start_database`])
+/// ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabaseStart {
+    /// A heartbeat leaf covers the present instant: the worker goes on.
+    Ready,
+    /// The startup coverage found the coverage gate held by another process,
+    /// and no heartbeat leaf for the present instant
+    /// ([`StartupCoverageOutcome::GateBusy`]). The start tries again after a
+    /// backoff.
+    CoverageGateBusy,
+}
+
+/// Why an attempt of the database start did not start the worker, when the
+/// start can try again.
+#[derive(Debug)]
+enum StartRetryCause {
+    /// [`DatabaseStart::CoverageGateBusy`].
+    CoverageGateBusy,
+    /// A retryable error, or an attempt over [`START_ATTEMPT_TIMEOUT`]
+    /// ([`WorkerError::StartTimedOut`]). Boxed: the error is large, and this
+    /// value lives only for one retry.
+    Failed(Box<WorkerError>),
+}
+
+impl StartRetryCause {
+    /// The error of the start when no retry is left. `waited` is the time
+    /// since the first attempt, and `attempts` counts the attempts.
+    fn into_final_error(self, waited: Duration, attempts: u64) -> WorkerError {
+        match self {
+            Self::CoverageGateBusy => WorkerError::CoverageGateBusy { waited, attempts },
+            Self::Failed(error) => *error,
+        }
+    }
+
+    /// The one log line of a retry: an info line for the busy coverage gate,
+    /// which another process holds while it creates the leaves; an error line
+    /// for an error. `attempt` counts the retries so far.
+    fn log_retry(&self, wait: Duration, attempt: u64) {
+        match self {
+            Self::CoverageGateBusy => tracing::info!(
+                attempt,
+                retry_in_ms = wait.as_millis(),
+                "Worker start waits for the partition coverage gate: another process creates \
+                 the history partitions (coverage_gate_busy). Trying again in {} ms",
+                wait.as_millis(),
+            ),
+            Self::Failed(error) => tracing::error!(
+                %error,
+                attempt,
+                delay_s = format!("{:.1}", wait.as_secs_f64()),
+                "Worker start failed: {error}. Retrying in {:.1}s (attempt {attempt})",
+                wait.as_secs_f64(),
+            ),
+        }
+    }
+}
+
 fn compute_ordered_queues(
     queues: &[String],
     queue_priorities: &std::collections::HashMap<String, i32>,
@@ -1033,7 +1091,13 @@ impl Worker {
     /// Authorize the schema, check the client family, and ensure the
     /// partition coverage of the current period: the database steps of the
     /// worker start. It does not retry.
-    async fn start_database(&self) -> Result<(), WorkerError> {
+    ///
+    /// Outcomes: `Ready` when a heartbeat leaf covers the present instant;
+    /// `CoverageGateBusy` when the startup coverage found the coverage gate
+    /// held by another process and no such leaf. Errors: the schema, family
+    /// and coverage errors of the broker; [`WorkerError::Config`] for every
+    /// other startup coverage refusal (not retryable).
+    async fn start_database(&self) -> Result<DatabaseStart, WorkerError> {
         self.broker.ensure_schema_initialized().await?;
         // The startup coverage and the reaper's partition maintenance are the
         // worker's maintenance writes. The handle checks its client family
@@ -1053,53 +1117,53 @@ impl Worker {
         match startup_verdict(coverage) {
             StartupCoverageOutcome::Ready(outcome) => {
                 tracing::info!(outcome = ?outcome, "task-history startup coverage ready");
+                Ok(DatabaseStart::Ready)
             }
-            StartupCoverageOutcome::Refused(outcome) => {
-                return Err(WorkerError::Config(format!(
-                    "task-history startup coverage refused: {outcome:?}"
-                )));
-            }
+            StartupCoverageOutcome::GateBusy(_busy) => Ok(DatabaseStart::CoverageGateBusy),
+            StartupCoverageOutcome::Refused(outcome) => Err(WorkerError::Config(format!(
+                "task-history startup coverage refused: {outcome:?}"
+            ))),
         }
-        Ok(())
     }
 
     /// Run [`Worker::start_database`] with each attempt bounded at
-    /// [`START_ATTEMPT_TIMEOUT`]. A timed-out attempt and a retryable error
-    /// are retried with the resilience backoff; a refusal, or a retryable
-    /// error after the retry budget, is returned. A stop request during a
-    /// backoff wait ends the start without an error.
+    /// [`START_ATTEMPT_TIMEOUT`]. A busy coverage gate, a timed-out attempt
+    /// and a retryable error are retried with the resilience backoff, each
+    /// wait with one log line ([`StartRetryCause::log_retry`]). A refusal is
+    /// returned at once. After the retry budget, a retryable error is
+    /// returned, and a busy gate is [`WorkerError::CoverageGateBusy`]. A stop
+    /// request during a backoff wait ends the start without an error.
     async fn start_database_with_resilience(&self) -> Result<StartOutcome, WorkerError> {
         let mut backoff = RetryBackoff::from_config(&self.app_config.resilience);
+        let first_attempt = std::time::Instant::now();
         loop {
-            let error =
-                match tokio::time::timeout(START_ATTEMPT_TIMEOUT, self.start_database()).await {
-                    Ok(Ok(())) => return Ok(StartOutcome::Started),
-                    Ok(Err(error)) if !error.is_retryable() => return Err(error),
-                    Ok(Err(error)) => error,
-                    Err(_elapsed) => WorkerError::StartTimedOut {
-                        bound: START_ATTEMPT_TIMEOUT,
-                    },
-                };
+            let cause = match tokio::time::timeout(START_ATTEMPT_TIMEOUT, self.start_database())
+                .await
+            {
+                Ok(Ok(DatabaseStart::Ready)) => return Ok(StartOutcome::Started),
+                Ok(Ok(DatabaseStart::CoverageGateBusy)) => StartRetryCause::CoverageGateBusy,
+                Ok(Err(error)) if !error.is_retryable() => return Err(error),
+                Ok(Err(error)) => StartRetryCause::Failed(Box::new(error)),
+                Err(_elapsed) => StartRetryCause::Failed(Box::new(WorkerError::StartTimedOut {
+                    bound: START_ATTEMPT_TIMEOUT,
+                })),
+            };
             if !backoff.can_retry() {
+                // The first attempt and one attempt after each retry wait.
+                let attempts = backoff.attempts() + 1;
+                let error = cause.into_final_error(first_attempt.elapsed(), attempts);
                 tracing::error!(
                     %error,
-                    attempts = backoff.attempts(),
-                    "Worker start failed after {} attempts: {error}",
-                    backoff.attempts(),
+                    attempts,
+                    "Worker start failed after {attempts} attempts: {error}",
                 );
                 return Err(error);
             }
-            let delay = backoff.next_delay_seconds();
-            tracing::error!(
-                %error,
-                attempt = backoff.attempts(),
-                delay_s = format!("{:.1}", delay),
-                "Worker start failed: {error}. Retrying in {delay:.1}s (attempt {})",
-                backoff.attempts(),
-            );
+            let wait = Duration::from_secs_f64(backoff.next_delay_seconds());
+            cause.log_retry(wait, backoff.attempts());
             tokio::select! {
                 _ = self.cancel.cancelled() => return Ok(StartOutcome::StopRequested),
-                _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+                _ = tokio::time::sleep(wait) => {}
             }
         }
     }
@@ -5026,25 +5090,67 @@ mod tests {
         database.drop().await;
     }
 
-    /// A startup coverage that finds the coverage gate held by another
-    /// session, with no current heartbeat leaf, refuses the start: no
-    /// coverage, no runtime loop, no claim.
+    /// The first words of the info line of a start that waits for the
+    /// coverage gate ([`StartRetryCause::log_retry`]).
+    const GATE_WAIT_LINE: &str = "Worker start waits for the partition coverage gate";
+
+    /// Takes the coverage gate in the transaction of `holder`, as the gated
+    /// pass of another process does. The gate is held until the transaction
+    /// ends.
+    async fn hold_coverage_gate(holder: &mut sql::TestTransaction<'_>) {
+        let held: bool = sql::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(
+                 hashtextextended('horsies:partition-coverage:v1', 1601)
+             )",
+        )
+        .fetch_one(&mut **holder)
+        .await
+        .expect("hold the coverage gate");
+        assert!(held, "the coverage gate is free before the test holds it");
+    }
+
+    /// Takes the creation locks of the heartbeat leaves of the current UTC
+    /// hour and of the next one in the transaction of `holder`, so a leaf
+    /// creation for either hour answers `Busy` while the transaction lasts.
+    /// The next hour keeps the test valid when the hour turns during it.
+    async fn hold_current_heartbeat_leaf_locks(holder: &mut sql::TestTransaction<'_>) {
+        use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_LOCK_KEY_FUNCTION};
+        use chrono::{Duration as ChronoDuration, Timelike};
+
+        let now: chrono::DateTime<Utc> = sql::query_scalar("SELECT statement_timestamp()")
+            .fetch_one(&mut **holder)
+            .await
+            .expect("read the database time");
+        let hour = now
+            .with_minute(0)
+            .and_then(|value| value.with_second(0))
+            .and_then(|value| value.with_nanosecond(0))
+            .expect("truncate to the hour");
+        for lower in [hour, hour + ChronoDuration::hours(1)] {
+            sql::query(&format!(
+                "SELECT pg_advisory_xact_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
+            ))
+            .bind(HEARTBEAT_CLASS_KEY)
+            .bind(lower)
+            .execute(&mut **holder)
+            .await
+            .expect("hold the creation lock of a current heartbeat leaf");
+        }
+    }
+
+    /// A startup coverage refusal other than the busy coverage gate refuses
+    /// the start at once, not retryable: here another session holds the
+    /// creation locks of the current heartbeat leaves, so the leaf creation
+    /// answers `Busy` and no heartbeat leaf covers the present instant. No
+    /// runtime loop starts: no worker state, no heartbeat, no claim.
     #[tokio::test]
     #[serial]
     async fn a_start_refused_at_the_coverage_step_starts_no_runtime_loop() {
         let database = FreshDatabase::create().await;
         database.record_family("RUST").await;
         let pending = insert_pending_task(&database.pool).await;
-        let mut holder = database.pool.begin().await.expect("begin gate holder");
-        let held: bool = sql::query_scalar(
-            "SELECT pg_try_advisory_xact_lock(
-                 hashtextextended('horsies:partition-coverage:v1', 1601)
-             )",
-        )
-        .fetch_one(&mut *holder)
-        .await
-        .expect("hold the coverage gate");
-        assert!(held);
+        let mut holder = database.pool.begin().await.expect("begin leaf lock holder");
+        hold_current_heartbeat_leaf_locks(&mut holder).await;
         let before = start_facts(&database.pool, pending).await;
         let worker = start_test_worker(
             PostgresBroker::from_test_url(database.pool.url(), crate::ClientFamily::Rust),
@@ -5056,6 +5162,166 @@ mod tests {
         assert!(
             matches!(&error, WorkerError::Config(detail) if detail.contains("startup coverage refused")),
             "{error:?}"
+        );
+        assert!(!error.is_retryable());
+        let after = start_facts(&database.pool, pending).await;
+        assert_eq!(after.worker_states, before.worker_states);
+        assert_eq!(after.heartbeats, before.heartbeats);
+        assert_eq!(after.pending_status, "PENDING");
+        assert_eq!(after.pending_claimed_by, None);
+        holder.rollback().await.expect("release the leaf locks");
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// A start that finds the coverage gate held by another session, with
+    /// no current heartbeat leaf, waits with the resilience backoff and logs
+    /// one info line that names the cause. The other session then releases
+    /// the gate; the next attempt takes it, creates the current heartbeat
+    /// leaf, and the start ends `Started` with no error line.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_that_finds_the_coverage_gate_held_starts_once_the_gate_is_released() {
+        use crate::core::config::WorkerResilienceConfig;
+        use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG};
+
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        let mut holder = database.pool.begin().await.expect("begin gate holder");
+        hold_coverage_gate(&mut holder).await;
+        let worker = worker_with_config(
+            PostgresBroker::from_test_url(database.pool.url(), crate::ClientFamily::Rust),
+            AppConfig {
+                // A wait of at least 0.75 s gives the release time to land
+                // before the second attempt.
+                resilience: WorkerResilienceConfig {
+                    db_retry_initial_ms: 1_000,
+                    db_retry_max_ms: 1_000,
+                    db_retry_max_attempts: 3,
+                    notify_poll_interval_ms: 100,
+                },
+                ..test_app_config(database.config_url.clone())
+            },
+        );
+        let capture = crate::test_support::LogCapture::new();
+        let guard = capture.set_default();
+        let release_after_the_first_wait = async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while capture
+                .lines_starting(tracing::Level::INFO, GATE_WAIT_LINE)
+                .is_empty()
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the start did not wait for the gate"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            holder.rollback().await.expect("release the coverage gate");
+        };
+
+        let (started, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(
+                worker.start_database_with_resilience(),
+                release_after_the_first_wait
+            )
+        })
+        .await
+        .expect("the start ends within the bound");
+        drop(guard);
+
+        assert_eq!(
+            started.expect("the start ends without an error"),
+            StartOutcome::Started
+        );
+        let waits = capture.lines_starting(tracing::Level::INFO, GATE_WAIT_LINE);
+        assert_eq!(waits.len(), 1, "{waits:?}");
+        assert!(
+            waits[0]
+                .message
+                .contains("another process creates the history partitions"),
+            "{waits:?}"
+        );
+        assert!(
+            capture
+                .lines_starting(tracing::Level::ERROR, "Worker start failed")
+                .is_empty(),
+            "{:?}",
+            capture.events()
+        );
+        let current_heartbeat_leaves: i64 = sql::query_scalar(&format!(
+            "SELECT count(*) FROM {LEAF_CATALOG}
+             WHERE class_key = $1
+               AND lower_anchor <= statement_timestamp()
+               AND upper_anchor > statement_timestamp()"
+        ))
+        .bind(HEARTBEAT_CLASS_KEY)
+        .fetch_one(&database.pool)
+        .await
+        .expect("read the current heartbeat leaf");
+        assert_eq!(current_heartbeat_leaves, 1);
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// A start whose coverage gate another session holds through the whole
+    /// retry budget, with no current heartbeat leaf, is refused with
+    /// `WorkerError::CoverageGateBusy`: the error names the busy gate, the
+    /// time waited and the attempts. Each retry wait logs one info line. No
+    /// coverage, no runtime loop, no claim.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_whose_coverage_gate_stays_held_past_the_budget_is_refused() {
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        let pending = insert_pending_task(&database.pool).await;
+        let mut holder = database.pool.begin().await.expect("begin gate holder");
+        hold_coverage_gate(&mut holder).await;
+        let before = start_facts(&database.pool, pending).await;
+        let worker = start_test_worker(
+            PostgresBroker::from_test_url(database.pool.url(), crate::ClientFamily::Rust),
+            database.config_url.clone(),
+        );
+        let capture = crate::test_support::LogCapture::new();
+        let guard = capture.set_default();
+        let run_started = std::time::Instant::now();
+
+        let error = refused_run(&worker).await;
+        let run_took = run_started.elapsed();
+        drop(guard);
+
+        let WorkerError::CoverageGateBusy { waited, attempts } = &error else {
+            panic!("a gate held past the budget is CoverageGateBusy: {error:?}");
+        };
+        // `test_app_config`: one retry, after a wait of at least 0.1 s.
+        assert_eq!(*attempts, 2);
+        assert!(
+            *waited >= Duration::from_millis(100) && *waited <= run_took,
+            "{waited:?} of {run_took:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("partition coverage gate (coverage_gate_busy)")
+                && message.contains(&format!("waited {} ms over 2 attempts", waited.as_millis())),
+            "{message}"
+        );
+        assert!(error.is_retryable());
+        assert_eq!(
+            capture
+                .lines_starting(tracing::Level::INFO, GATE_WAIT_LINE)
+                .len(),
+            1
+        );
+        assert_eq!(
+            capture
+                .lines_starting(
+                    tracing::Level::ERROR,
+                    "Worker start failed after 2 attempts: the partition coverage gate"
+                )
+                .len(),
+            1,
+            "{:?}",
+            capture.events()
         );
         assert_eq!(start_facts(&database.pool, pending).await, before);
         holder.rollback().await.expect("release the coverage gate");
@@ -5095,10 +5361,11 @@ mod tests {
         .expect("connect broker with a separate session pool");
         let worker = start_test_worker(broker, main_url);
 
-        worker
+        let started = worker
             .start_database()
             .await
             .expect("the database start uses only the session pool");
+        assert_eq!(started, DatabaseStart::Ready);
     }
 
     /// The URL of database `database` on the server of `url`.
