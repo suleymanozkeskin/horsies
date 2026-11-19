@@ -760,6 +760,30 @@ pub(crate) mod tests {
         InputField::raw("amount")
     }
 
+    /// The task of `a_node_before_the_registration_of_its_task_is_hrs_302`.
+    /// No test registers it.
+    #[horsies::task("node_before_register_probe")]
+    async fn node_before_register_probe(
+        order_id: u32,
+    ) -> Result<u32, horsies::TaskError<std::convert::Infallible>> {
+        Ok(order_id)
+    }
+
+    #[test]
+    fn a_node_before_the_registration_of_its_task_is_hrs_302() {
+        let refused = match node_before_register_probe::node() {
+            Ok(_node) => panic!("node() before register gave a node"),
+            Err(refused) => refused,
+        };
+        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnregisteredTask));
+        assert!(
+            refused
+                .message
+                .contains("task 'node_before_register_probe' is not registered in this process"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn set_input_stores_the_encoded_object_in_field_order() {
         let node = task_node::<u32, ChargeInput>("charge")

@@ -91,7 +91,8 @@ generates the module `validate_order`:
 
 - `send`, `schedule` and `with_options` before `register` in the process
   return `TaskSendError::ValidationFailed`, which names the task.
-  `node()` before `register` returns a `HorsiesError`.
+  `node()` before `register` returns a `HorsiesError` with `HRS-302`
+  (`ErrorCode::WorkflowUnregisteredTask`).
 - `register` checks the codes of the code type (`UserErrorCode::CODES`):
   a built-in or reserved name is `HRS-212`; a code that is empty, not
   `UPPER_SNAKE_CASE` or an exception class name is `HRS-112`; a code given

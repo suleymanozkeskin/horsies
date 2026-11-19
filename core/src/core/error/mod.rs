@@ -2,6 +2,8 @@ pub mod diagnostic;
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::CodeEnum;
+
 /// Error category corresponding to Python's exception subclass hierarchy.
 ///
 /// Python has four exception subclasses of `HorsiesError`:
@@ -14,13 +16,13 @@ use serde::{Deserialize, Serialize};
 /// type-level discrimination via `match error.category()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCategory {
-    /// Workflow validation errors (HRS-001-HRS-018). Maps to Python's `WorkflowValidationError`.
+    /// Workflow validation errors (HRS-001-HRS-099). Maps to Python's `WorkflowValidationError`.
     Workflow,
-    /// Task definition errors (HRS-100-HRS-103). Maps to Python's `TaskDefinitionError`.
+    /// Task definition errors (HRS-100-HRS-199). Maps to Python's `TaskDefinitionError`.
     Task,
-    /// Configuration/broker errors (HRS-200-HRS-207). Maps to Python's `ConfigurationError`.
+    /// Configuration/broker errors (HRS-200-HRS-299). Maps to Python's `ConfigurationError`.
     Config,
-    /// Registry errors (HRS-300-HRS-301). Maps to Python's `RegistryError`.
+    /// Registry errors (HRS-300-HRS-399). Maps to Python's `RegistryError`.
     Registry,
 }
 
@@ -38,168 +40,293 @@ impl std::fmt::Display for ErrorCategory {
 /// Error codes for startup/validation errors.
 ///
 /// Organized by category:
-/// - HRS-001–HRS-099: Workflow validation
-/// - HRS-100–HRS-199: Task definition
-/// - HRS-200–HRS-299: Config/broker
-/// - HRS-300–HRS-399: Registry
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// - HRS-001-HRS-099: Workflow validation
+/// - HRS-100-HRS-199: Task definition
+/// - HRS-200-HRS-299: Config/broker
+/// - HRS-300-HRS-399: Registry
+///
+/// HRS-023 and HRS-106 are retired and are not used again.
+///
+/// This enum is the one list of the codes of both clients. `horsies-codegen`
+/// renders it as `horsies._catalog.error_codes.ErrorCode`, the Python
+/// `ErrorCode`: the member name is the variant name in SCREAMING_SNAKE_CASE,
+/// the value is the `HRS-nnn` code, and the docstring is the variant doc.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::CodeCatalog,
+)]
+#[code_catalog(module = "error_codes", base = "str_enum")]
 pub enum ErrorCode {
-    // Workflow validation (HRS-001–HRS-099)
+    // Workflow validation (HRS-001-HRS-099)
+    /// The workflow has no name.
+    #[code_catalog(value = "HRS-001")]
     WorkflowNoName,
+    /// The workflow has no nodes.
+    #[code_catalog(value = "HRS-002")]
     WorkflowNoNodes,
+    /// A node id reference is not valid, or `key()` is called on a node with
+    /// no `node_id`.
+    #[code_catalog(value = "HRS-003")]
     WorkflowInvalidNodeId,
+    /// Two nodes have the same node id.
+    #[code_catalog(value = "HRS-004")]
     WorkflowDuplicateNodeId,
+    /// The workflow has no root node.
+    #[code_catalog(value = "HRS-005")]
     WorkflowNoRootTasks,
+    /// A dependency is not valid.
+    #[code_catalog(value = "HRS-006")]
     WorkflowInvalidDependency,
+    /// The dependencies of the workflow make a cycle.
+    #[code_catalog(value = "HRS-007")]
     WorkflowCycleDetected,
+    /// An `args_from` reference is not valid.
+    #[code_catalog(value = "HRS-008")]
     WorkflowInvalidArgsFrom,
+    /// A `workflow_ctx_from` reference is not valid.
+    #[code_catalog(value = "HRS-009")]
     WorkflowInvalidCtxFrom,
+    /// The workflow context parameter is missing.
+    #[code_catalog(value = "HRS-010")]
     WorkflowCtxParamMissing,
+    /// The output of the workflow is not valid.
+    #[code_catalog(value = "HRS-011")]
     WorkflowInvalidOutput,
+    /// The success policy is not valid.
+    #[code_catalog(value = "HRS-012")]
     WorkflowInvalidSuccessPolicy,
+    /// The join setting is not valid.
+    #[code_catalog(value = "HRS-013")]
     WorkflowInvalidJoin,
+    /// The queue of a node is not resolved.
+    #[code_catalog(value = "HRS-014")]
     WorkflowUnresolvedQueue,
+    /// The priority of a node is not resolved.
+    #[code_catalog(value = "HRS-015")]
     WorkflowUnresolvedPriority,
+    /// A workflow definition or spec has no `definition_key`.
+    #[code_catalog(value = "HRS-016")]
     WorkflowNoDefinitionKey,
+    /// Two workflow definitions have the same `definition_key`.
+    #[code_catalog(value = "HRS-017")]
     WorkflowDuplicateDefinitionKey,
+    /// A sub-workflow has no app reference.
+    #[code_catalog(value = "HRS-018")]
     WorkflowSubworkflowAppMissing,
+    /// A node input or an `args_from` names a key that the task or the child
+    /// workflow does not take.
+    #[code_catalog(value = "HRS-019")]
     WorkflowInvalidKwargKey,
+    /// A node does not give a required parameter of its task or child
+    /// workflow.
+    #[code_catalog(value = "HRS-020")]
     WorkflowMissingRequiredParams,
     /// A node's input object and its `args_from` name the same member.
+    #[code_catalog(value = "HRS-021")]
     WorkflowKwargsArgsFromOverlap,
     /// A sub-workflow node gives params to a child workflow whose definition
     /// takes none.
+    #[code_catalog(value = "HRS-022")]
     WorkflowSubworkflowParamsRequireBuildWith,
+    /// The result type of an `args_from` source does not match the type of
+    /// the parameter that it fills.
+    #[code_catalog(value = "HRS-024")]
+    WorkflowArgsFromTypeMismatch,
+    /// The type of the output node does not match the output type of the
+    /// workflow spec.
+    #[code_catalog(value = "HRS-025")]
     WorkflowOutputTypeMismatch,
     /// A node's input is positional (not a JSON object) while the node takes
     /// `args_from` or `workflow_ctx_from` members, which merge only into an
     /// object.
+    #[code_catalog(value = "HRS-026")]
     WorkflowPositionalArgsNotSupported,
+    /// A workflow builder with parameters has no check cases.
+    #[code_catalog(value = "HRS-027")]
     WorkflowCheckCasesRequired,
+    /// A check case of a workflow builder is not valid.
+    #[code_catalog(value = "HRS-028")]
     WorkflowCheckCaseInvalid,
+    /// A workflow builder raised an exception or returned no workflow spec,
+    /// or `build_with()` returned a spec that the call did not build.
+    #[code_catalog(value = "HRS-029")]
     WorkflowCheckBuilderException,
+    /// A function returns a workflow spec and is not decorated as a workflow
+    /// builder.
+    #[code_catalog(value = "HRS-030")]
     WorkflowCheckUndecoratedBuilder,
     /// A node's static input does not encode, or does not read back with the
     /// input type of its task or child workflow.
+    #[code_catalog(value = "HRS-031")]
     WorkflowKwargsNotSerializable,
+    /// A given `workflow_id` is not a UUID.
+    #[code_catalog(value = "HRS-032")]
+    WorkflowInvalidId,
+    /// A `WorkflowDefinition` class defines `Meta`, or sets `config` to a
+    /// value that is not a `WorkflowDefinitionConfig`.
+    #[code_catalog(value = "HRS-033")]
+    WorkflowInvalidDefinitionConfig,
     /// A node's priority is outside 1 to 100.
+    #[code_catalog(value = "HRS-034")]
     WorkflowInvalidPriority,
+    /// A node sets a `good_until` with no time zone.
+    #[code_catalog(value = "HRS-035")]
+    WorkflowNaiveGoodUntil,
     /// A nesting of sub-workflows passes the depth limit for certain.
+    #[code_catalog(value = "HRS-036")]
     WorkflowSubworkflowDepthLimit,
     /// A sub-workflow includes its own definition with the same params, and
     /// no node between the two waits for other nodes.
+    #[code_catalog(value = "HRS-037")]
     WorkflowSubworkflowSelfNesting,
     /// A workflow spec has more than `MAX_WORKFLOW_NODES` (10,000) nodes.
+    #[code_catalog(value = "HRS-038")]
     WorkflowTooManyNodes,
 
-    // Task definition (HRS-100–HRS-199)
+    // Task definition (HRS-100-HRS-199)
+    /// The task function has no return type.
+    #[code_catalog(value = "HRS-100")]
     TaskNoReturnType,
+    /// The return type of the task function is not a task result.
+    #[code_catalog(value = "HRS-101")]
     TaskInvalidReturnType,
+    /// A task option is not valid.
+    #[code_catalog(value = "HRS-102")]
     TaskInvalidOptions,
+    /// The queue of the task is not valid.
+    #[code_catalog(value = "HRS-103")]
     TaskInvalidQueue,
+    /// The task function is pre-decorated: it has a `__wrapped__` chain.
+    #[code_catalog(value = "HRS-104")]
+    TaskPredecoratedNotSupported,
+    /// The task signature fails the strict check: a parameter that is not
+    /// keyword-only, a type that is not allowed, or a return type that is not
+    /// `TaskResult[OkT, TaskError]`.
+    #[code_catalog(value = "HRS-105")]
+    TaskStrictSignatureViolation,
+    /// `execution=SHARED_ASYNC` on a function defined with `def`.
+    #[code_catalog(value = "HRS-107")]
+    TaskSharedAsyncRequiresAsyncDef,
+    /// `execution=SHARED_THREAD` on a function defined with `async def`.
+    #[code_catalog(value = "HRS-108")]
+    TaskSharedThreadRequiresDef,
+    /// `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms`.
+    #[code_catalog(value = "HRS-109")]
+    TaskSharedExecutionRequiresTimeout,
+    /// `cancel_grace_ms` with an execution class other than `SHARED_ASYNC`.
+    #[code_catalog(value = "HRS-110")]
+    TaskCancelGraceRequiresSharedAsync,
+    /// `cancel_grace_ms` outside 100 to 10,000 ms.
+    #[code_catalog(value = "HRS-111")]
+    TaskCancelGraceOutOfRange,
     /// A code that a task declares fails the code-text rule: it is empty,
     /// not `UPPER_SNAKE_CASE`, or the name of an exception class. A
-    /// reserved name or the name of a built-in code is
-    /// `CheckReservedCodeCollision`.
+    /// reserved name or the name of a built-in code is HRS-212.
+    #[code_catalog(value = "HRS-112")]
     TaskInvalidErrorCode,
     /// A task declares one error code more than once.
+    #[code_catalog(value = "HRS-113")]
     TaskDuplicateErrorCode,
 
-    // Config/broker (HRS-200–HRS-299)
+    // Config/broker (HRS-200-HRS-299)
+    /// The queue mode or the custom queue list is not valid.
+    #[code_catalog(value = "HRS-200")]
     ConfigInvalidQueueMode,
+    /// The cluster capacity is not valid.
+    #[code_catalog(value = "HRS-201")]
     ConfigInvalidClusterCap,
+    /// The prefetch setting is not valid.
+    #[code_catalog(value = "HRS-202")]
     ConfigInvalidPrefetch,
+    /// The broker URL is not valid, or the broker connectivity check failed.
+    #[code_catalog(value = "HRS-203")]
     BrokerInvalidUrl,
-    /// A broker config names a pool field that 0.7.0 moved to the worker
-    /// profile.
-    ConfigInvalidBrokerPool,
+    /// The recovery config is not valid.
+    #[code_catalog(value = "HRS-204")]
     ConfigInvalidRecovery,
+    /// The schedule config is not valid.
+    #[code_catalog(value = "HRS-205")]
     ConfigInvalidSchedule,
+    /// The CLI arguments are not valid.
+    #[code_catalog(value = "HRS-206")]
     CliInvalidArgs,
+    /// The worker locator is not valid.
+    #[code_catalog(value = "HRS-207")]
     WorkerInvalidLocator,
+    /// The resilience config is not valid.
+    #[code_catalog(value = "HRS-208")]
     ConfigInvalidResilience,
-    /// A worker profile that AppConfig validation refuses.
+    /// An exception mapper is not valid.
+    #[code_catalog(value = "HRS-209")]
+    ConfigInvalidExceptionMapper,
+    /// A module raised an error while it was imported.
+    #[code_catalog(value = "HRS-210")]
+    ModuleExecError,
+    /// The broker failed to start.
+    #[code_catalog(value = "HRS-211")]
+    BrokerInitFailed,
+    /// A config value or a declared task code is a built-in code or a
+    /// reserved name.
+    #[code_catalog(value = "HRS-212")]
+    CheckReservedCodeCollision,
+    /// A pool value of a broker config is outside its range, or the config
+    /// names a pool field that 0.7.0 moved to the worker profile.
+    #[code_catalog(value = "HRS-213")]
+    ConfigInvalidBrokerPool,
+    /// A child start hook is not callable, or it is an async function.
+    #[code_catalog(value = "HRS-214")]
+    ConfigInvalidChildHook,
+    /// A TCP keepalive value or the TCP user timeout is outside its range.
+    #[code_catalog(value = "HRS-215")]
+    ConfigInvalidKeepalive,
+    /// The retention config is not valid.
+    #[code_catalog(value = "HRS-216")]
+    ConfigInvalidRetention,
+    /// The live check was called from a blocking call on a thread that runs
+    /// an event loop or a tokio runtime: the live phases did not run.
+    #[code_catalog(value = "HRS-217")]
+    CheckLiveAsyncContext,
+    /// A worker profile that the app config validation refuses.
+    #[code_catalog(value = "HRS-218")]
     ConfigInvalidWorkerProfile,
-    /// `check --live`: one worker of a profile needs more Postgres
+    /// The live check: one worker of a profile needs more Postgres
     /// connections than the server has usable slots, or the server limit
     /// could not be read.
+    #[code_catalog(value = "HRS-219")]
     CheckWorkerConnections,
-    /// `check --live` from a blocking call on a thread that runs an event
-    /// loop or a tokio runtime: the live phases did not run.
-    CheckLiveAsyncContext,
-    BrokerInitFailed,
-    CheckReservedCodeCollision,
-    ConfigInvalidRetention,
+    /// The app config asks for OpenTelemetry tracing, and the OpenTelemetry
+    /// API (`horsies[otel]`) is not installed.
+    #[code_catalog(value = "HRS-220")]
+    ConfigOtelApiMissing,
+    /// A trace link template of the monitoring page that the core refuses.
+    #[code_catalog(value = "HRS-221")]
+    ConfigInvalidTraceLink,
 
-    // Registry (HRS-300–HRS-399)
+    // Registry (HRS-300-HRS-399)
+    /// The task is not registered.
+    #[code_catalog(value = "HRS-300")]
     TaskNotRegistered,
+    /// Two tasks have the same name.
+    #[code_catalog(value = "HRS-301")]
     TaskDuplicateName,
+    /// A workflow node names a task that is not registered in this process.
+    /// The Rust client refuses `<task>::node()` before
+    /// `<task>::register(&mut app)` with it.
+    #[code_catalog(value = "HRS-302")]
     WorkflowUnregisteredTask,
 }
 
 impl ErrorCode {
-    /// Numeric code string (e.g. "HRS-001").
+    /// Numeric code string (e.g. "HRS-001"): the catalog value of the code.
     pub fn as_code_str(&self) -> &'static str {
-        match self {
-            Self::WorkflowNoName => "HRS-001",
-            Self::WorkflowNoNodes => "HRS-002",
-            Self::WorkflowInvalidNodeId => "HRS-003",
-            Self::WorkflowDuplicateNodeId => "HRS-004",
-            Self::WorkflowNoRootTasks => "HRS-005",
-            Self::WorkflowInvalidDependency => "HRS-006",
-            Self::WorkflowCycleDetected => "HRS-007",
-            Self::WorkflowInvalidArgsFrom => "HRS-008",
-            Self::WorkflowInvalidCtxFrom => "HRS-009",
-            Self::WorkflowCtxParamMissing => "HRS-010",
-            Self::WorkflowInvalidOutput => "HRS-011",
-            Self::WorkflowInvalidSuccessPolicy => "HRS-012",
-            Self::WorkflowInvalidJoin => "HRS-013",
-            Self::WorkflowUnresolvedQueue => "HRS-014",
-            Self::WorkflowUnresolvedPriority => "HRS-015",
-            Self::WorkflowNoDefinitionKey => "HRS-016",
-            Self::WorkflowDuplicateDefinitionKey => "HRS-017",
-            Self::WorkflowSubworkflowAppMissing => "HRS-018",
-            Self::WorkflowInvalidKwargKey => "HRS-019",
-            Self::WorkflowMissingRequiredParams => "HRS-020",
-            Self::WorkflowKwargsArgsFromOverlap => "HRS-021",
-            Self::WorkflowSubworkflowParamsRequireBuildWith => "HRS-022",
-            Self::WorkflowOutputTypeMismatch => "HRS-025",
-            Self::WorkflowPositionalArgsNotSupported => "HRS-026",
-            Self::WorkflowCheckCasesRequired => "HRS-027",
-            Self::WorkflowCheckCaseInvalid => "HRS-028",
-            Self::WorkflowCheckBuilderException => "HRS-029",
-            Self::WorkflowCheckUndecoratedBuilder => "HRS-030",
-            Self::WorkflowKwargsNotSerializable => "HRS-031",
-            Self::WorkflowInvalidPriority => "HRS-034",
-            Self::WorkflowSubworkflowDepthLimit => "HRS-036",
-            Self::WorkflowSubworkflowSelfNesting => "HRS-037",
-            Self::WorkflowTooManyNodes => "HRS-038",
-            Self::TaskNoReturnType => "HRS-100",
-            Self::TaskInvalidReturnType => "HRS-101",
-            Self::TaskInvalidOptions => "HRS-102",
-            Self::TaskInvalidQueue => "HRS-103",
-            Self::TaskInvalidErrorCode => "HRS-112",
-            Self::TaskDuplicateErrorCode => "HRS-113",
-            Self::ConfigInvalidQueueMode => "HRS-200",
-            Self::ConfigInvalidClusterCap => "HRS-201",
-            Self::ConfigInvalidPrefetch => "HRS-202",
-            Self::BrokerInvalidUrl => "HRS-203",
-            Self::ConfigInvalidBrokerPool => "HRS-213",
-            Self::ConfigInvalidRecovery => "HRS-204",
-            Self::ConfigInvalidSchedule => "HRS-205",
-            Self::CliInvalidArgs => "HRS-206",
-            Self::WorkerInvalidLocator => "HRS-207",
-            Self::ConfigInvalidResilience => "HRS-208",
-            Self::ConfigInvalidWorkerProfile => "HRS-218",
-            Self::CheckWorkerConnections => "HRS-219",
-            Self::CheckLiveAsyncContext => "HRS-217",
-            Self::BrokerInitFailed => "HRS-211",
-            Self::CheckReservedCodeCollision => "HRS-212",
-            Self::ConfigInvalidRetention => "HRS-216",
-            Self::TaskNotRegistered => "HRS-300",
-            Self::TaskDuplicateName => "HRS-301",
-            Self::WorkflowUnregisteredTask => "HRS-302",
-        }
+        CodeEnum::wire_value(self)
     }
 }
 
@@ -232,6 +359,7 @@ impl ErrorCode {
             | Self::WorkflowMissingRequiredParams
             | Self::WorkflowKwargsArgsFromOverlap
             | Self::WorkflowSubworkflowParamsRequireBuildWith
+            | Self::WorkflowArgsFromTypeMismatch
             | Self::WorkflowOutputTypeMismatch
             | Self::WorkflowPositionalArgsNotSupported
             | Self::WorkflowCheckCasesRequired
@@ -239,7 +367,10 @@ impl ErrorCode {
             | Self::WorkflowCheckBuilderException
             | Self::WorkflowCheckUndecoratedBuilder
             | Self::WorkflowKwargsNotSerializable
+            | Self::WorkflowInvalidId
+            | Self::WorkflowInvalidDefinitionConfig
             | Self::WorkflowInvalidPriority
+            | Self::WorkflowNaiveGoodUntil
             | Self::WorkflowSubworkflowDepthLimit
             | Self::WorkflowSubworkflowSelfNesting
             | Self::WorkflowTooManyNodes => ErrorCategory::Workflow,
@@ -248,6 +379,13 @@ impl ErrorCode {
             | Self::TaskInvalidReturnType
             | Self::TaskInvalidOptions
             | Self::TaskInvalidQueue
+            | Self::TaskPredecoratedNotSupported
+            | Self::TaskStrictSignatureViolation
+            | Self::TaskSharedAsyncRequiresAsyncDef
+            | Self::TaskSharedThreadRequiresDef
+            | Self::TaskSharedExecutionRequiresTimeout
+            | Self::TaskCancelGraceRequiresSharedAsync
+            | Self::TaskCancelGraceOutOfRange
             | Self::TaskInvalidErrorCode
             | Self::TaskDuplicateErrorCode => ErrorCategory::Task,
 
@@ -255,18 +393,24 @@ impl ErrorCode {
             | Self::ConfigInvalidClusterCap
             | Self::ConfigInvalidPrefetch
             | Self::BrokerInvalidUrl
-            | Self::ConfigInvalidBrokerPool
             | Self::ConfigInvalidRecovery
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::ConfigInvalidResilience
-            | Self::ConfigInvalidWorkerProfile
-            | Self::CheckWorkerConnections
-            | Self::CheckLiveAsyncContext
+            | Self::ConfigInvalidExceptionMapper
+            | Self::ModuleExecError
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
-            | Self::ConfigInvalidRetention => ErrorCategory::Config,
+            | Self::ConfigInvalidBrokerPool
+            | Self::ConfigInvalidChildHook
+            | Self::ConfigInvalidKeepalive
+            | Self::ConfigInvalidRetention
+            | Self::CheckLiveAsyncContext
+            | Self::ConfigInvalidWorkerProfile
+            | Self::CheckWorkerConnections
+            | Self::ConfigOtelApiMissing
+            | Self::ConfigInvalidTraceLink => ErrorCategory::Config,
 
             Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
                 ErrorCategory::Registry
@@ -274,85 +418,24 @@ impl ErrorCode {
         }
     }
 
-    /// Returns true if this is a workflow validation error (HRS-001-HRS-018).
+    /// Returns true if this is a workflow validation error (HRS-001-HRS-099).
     pub fn is_workflow_error(&self) -> bool {
-        matches!(
-            self,
-            Self::WorkflowNoName
-                | Self::WorkflowNoNodes
-                | Self::WorkflowInvalidNodeId
-                | Self::WorkflowDuplicateNodeId
-                | Self::WorkflowNoRootTasks
-                | Self::WorkflowInvalidDependency
-                | Self::WorkflowCycleDetected
-                | Self::WorkflowInvalidArgsFrom
-                | Self::WorkflowInvalidCtxFrom
-                | Self::WorkflowCtxParamMissing
-                | Self::WorkflowInvalidOutput
-                | Self::WorkflowInvalidSuccessPolicy
-                | Self::WorkflowInvalidJoin
-                | Self::WorkflowUnresolvedQueue
-                | Self::WorkflowUnresolvedPriority
-                | Self::WorkflowNoDefinitionKey
-                | Self::WorkflowDuplicateDefinitionKey
-                | Self::WorkflowSubworkflowAppMissing
-                | Self::WorkflowInvalidKwargKey
-                | Self::WorkflowMissingRequiredParams
-                | Self::WorkflowKwargsArgsFromOverlap
-                | Self::WorkflowSubworkflowParamsRequireBuildWith
-                | Self::WorkflowOutputTypeMismatch
-                | Self::WorkflowPositionalArgsNotSupported
-                | Self::WorkflowCheckCasesRequired
-                | Self::WorkflowCheckCaseInvalid
-                | Self::WorkflowCheckBuilderException
-                | Self::WorkflowCheckUndecoratedBuilder
-                | Self::WorkflowKwargsNotSerializable
-                | Self::WorkflowInvalidPriority
-                | Self::WorkflowSubworkflowDepthLimit
-                | Self::WorkflowSubworkflowSelfNesting
-                | Self::WorkflowTooManyNodes
-        )
+        self.category() == ErrorCategory::Workflow
     }
 
-    /// Returns true if this is a task definition error (HRS-100-HRS-103).
+    /// Returns true if this is a task definition error (HRS-100-HRS-199).
     pub fn is_task_error(&self) -> bool {
-        matches!(
-            self,
-            Self::TaskNoReturnType
-                | Self::TaskInvalidReturnType
-                | Self::TaskInvalidOptions
-                | Self::TaskInvalidQueue
-                | Self::TaskInvalidErrorCode
-                | Self::TaskDuplicateErrorCode
-        )
+        self.category() == ErrorCategory::Task
     }
 
-    /// Returns true if this is a configuration error (HRS-200-HRS-207).
+    /// Returns true if this is a configuration error (HRS-200-HRS-299).
     pub fn is_config_error(&self) -> bool {
-        matches!(
-            self,
-            Self::ConfigInvalidQueueMode
-                | Self::ConfigInvalidClusterCap
-                | Self::ConfigInvalidPrefetch
-                | Self::BrokerInvalidUrl
-                | Self::ConfigInvalidBrokerPool
-                | Self::ConfigInvalidRecovery
-                | Self::ConfigInvalidSchedule
-                | Self::CliInvalidArgs
-                | Self::WorkerInvalidLocator
-                | Self::ConfigInvalidResilience
-                | Self::ConfigInvalidWorkerProfile
-                | Self::CheckWorkerConnections
-                | Self::CheckLiveAsyncContext
-                | Self::BrokerInitFailed
-                | Self::CheckReservedCodeCollision
-                | Self::ConfigInvalidRetention
-        )
+        self.category() == ErrorCategory::Config
     }
 
-    /// Returns true if this is a registry error (HRS-300-HRS-301).
+    /// Returns true if this is a registry error (HRS-300-HRS-399).
     pub fn is_registry_error(&self) -> bool {
-        matches!(self, Self::TaskNotRegistered | Self::TaskDuplicateName)
+        self.category() == ErrorCategory::Registry
     }
 }
 
@@ -590,50 +673,60 @@ mod tests {
         assert_eq!(err.notes.len(), 3);
     }
 
+    // --- ErrorCode catalog tests ---
+
+    /// Each code is `HRS-` and three digits, and its hundred is the range of
+    /// its category: 0 workflow, 1 task, 2 config, 3 registry.
+    #[test]
+    fn every_code_is_three_digits_in_the_range_of_its_category() {
+        for code in <ErrorCode as CodeEnum>::VARIANTS {
+            let text = code.as_code_str();
+            let digits = text
+                .strip_prefix("HRS-")
+                .unwrap_or_else(|| panic!("{code:?}: {text} does not start with HRS-"));
+            assert!(
+                digits.len() == 3 && digits.chars().all(|digit| digit.is_ascii_digit()),
+                "{code:?}: {text}"
+            );
+            let hundred = match code.category() {
+                ErrorCategory::Workflow => '0',
+                ErrorCategory::Task => '1',
+                ErrorCategory::Config => '2',
+                ErrorCategory::Registry => '3',
+            };
+            assert!(
+                digits.starts_with(hundred),
+                "{code:?}: {text} is outside the range of {}",
+                code.category()
+            );
+        }
+    }
+
+    /// Each code has its short text: the docstring of its Python member.
+    #[test]
+    fn every_code_has_its_short_text() {
+        for member in <ErrorCode as CodeEnum>::CATALOG.members {
+            assert!(
+                !member.doc.trim().is_empty(),
+                "{} ({}) has no doc",
+                member.name,
+                member.value
+            );
+        }
+    }
+
+    /// HRS-302 is a registry code for `category()` and for
+    /// `is_registry_error()` alike.
+    #[test]
+    fn the_unregistered_workflow_task_code_is_a_registry_error() {
+        let code = ErrorCode::WorkflowUnregisteredTask;
+        assert_eq!(code.as_code_str(), "HRS-302");
+        assert_eq!(code.category(), ErrorCategory::Registry);
+        assert!(code.is_registry_error());
+        assert!(!code.is_workflow_error());
+    }
+
     // --- ErrorCode category helper tests ---
-
-    /// Python `clients/python/horsies/core/errors.py`: `HRS-021` is
-    /// `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` and `HRS-026` is
-    /// `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; `HRS-032` is
-    /// `WORKFLOW_INVALID_ID`, which the core does not raise.
-    #[test]
-    fn the_input_codes_have_python_meanings() {
-        assert_eq!(
-            ErrorCode::WorkflowKwargsArgsFromOverlap.as_code_str(),
-            "HRS-021"
-        );
-        assert_eq!(
-            ErrorCode::WorkflowPositionalArgsNotSupported.as_code_str(),
-            "HRS-026"
-        );
-        for code in [
-            ErrorCode::WorkflowKwargsArgsFromOverlap,
-            ErrorCode::WorkflowPositionalArgsNotSupported,
-        ] {
-            assert_eq!(code.category(), ErrorCategory::Workflow, "{code}");
-            assert!(code.is_workflow_error(), "{code}");
-        }
-    }
-
-    /// Python `clients/python/horsies/core/errors.py`: the codes of the workflow
-    /// builder checks of a client, with Python's numbers.
-    #[test]
-    fn the_workflow_builder_codes_have_python_numbers() {
-        for (code, text) in [
-            (
-                ErrorCode::WorkflowSubworkflowParamsRequireBuildWith,
-                "HRS-022",
-            ),
-            (ErrorCode::WorkflowKwargsNotSerializable, "HRS-031"),
-            (ErrorCode::WorkflowInvalidPriority, "HRS-034"),
-            (ErrorCode::WorkflowSubworkflowDepthLimit, "HRS-036"),
-            (ErrorCode::WorkflowSubworkflowSelfNesting, "HRS-037"),
-        ] {
-            assert_eq!(code.as_code_str(), text);
-            assert_eq!(code.category(), ErrorCategory::Workflow, "{code}");
-            assert!(code.is_workflow_error(), "{code}");
-        }
-    }
 
     #[test]
     fn workflow_code_is_workflow_error_only() {
@@ -695,11 +788,10 @@ mod tests {
         assert_eq!(ErrorCode::TaskInvalidQueue.category(), ErrorCategory::Task);
     }
 
-    /// Python `clients/python/horsies/core/errors.py`: `HRS-112` is
-    /// `TASK_INVALID_ERROR_CODE` and `HRS-113` is
-    /// `TASK_DUPLICATE_ERROR_CODE`.
+    /// HRS-112 and HRS-113, the refusals of a declared code, are task
+    /// codes.
     #[test]
-    fn the_declared_code_refusals_are_task_codes_with_python_numbers() {
+    fn the_declared_code_refusals_are_task_codes() {
         for (code, text) in [
             (ErrorCode::TaskInvalidErrorCode, "HRS-112"),
             (ErrorCode::TaskDuplicateErrorCode, "HRS-113"),
