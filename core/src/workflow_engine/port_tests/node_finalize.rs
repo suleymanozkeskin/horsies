@@ -197,7 +197,9 @@ async fn finalize_on(
             phase_two: form,
             ..
         } => Some((*capacity_notified, *form)),
-        FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused => None,
+        FinalizeOutcome::Retried { .. } | FinalizeOutcome::Finalized | FinalizeOutcome::Refused => {
+            None
+        }
     };
     if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
@@ -223,7 +225,7 @@ fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
         }) => format!(
             "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
-        Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
+        Ok(FinalizeOutcome::Retried { .. }) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
         Ok(FinalizeOutcome::Refused) => "Refused".to_owned(),
         Err(error) => format!("Err({error})"),

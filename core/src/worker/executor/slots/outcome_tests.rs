@@ -142,7 +142,7 @@ async fn an_unconfirmed_start_releases_the_claim_at_once() {
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let row = snapshot(&pool, task_id).await;
     assert_eq!(row["status"], "PENDING");
     assert_eq!(row["execution"], "SHARED_THREAD");
@@ -298,7 +298,7 @@ async fn a_result_that_is_json_but_not_an_envelope_fails_the_task_as_a_serializa
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let (status, error_code, retry_count, stored) = history_result(&pool, task_id)
         .await
         .expect("the task moved to history");
@@ -357,7 +357,7 @@ async fn an_oversized_result_is_logged_once_and_written() {
     )
     .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let warnings: Vec<CapturedEvent> =
         capture.lines_starting(tracing::Level::WARN, "payload size guardrail");
     assert_eq!(warnings.len(), 1, "{warnings:?}");

@@ -129,8 +129,16 @@ async fn plain_successes_settle_through_the_batcher() {
         writer.settle(&second, reported_value()),
     );
 
-    assert_eq!(first_settled, Settlement::Written);
-    assert_eq!(second_settled, Settlement::Written);
+    assert!(
+        matches!(first_settled, Settlement::Written(_)),
+        "{:?}",
+        first_settled
+    );
+    assert!(
+        matches!(second_settled, Settlement::Written(_)),
+        "{:?}",
+        second_settled
+    );
     for task in [&first, &second] {
         assert_eq!(live_status(&pool, task.task_id).await, None);
         assert_eq!(
@@ -308,7 +316,7 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
 
     assert_eq!(settled.len(), every_task.len());
     for (task_id, settlement) in &settled {
-        assert_eq!(*settlement, Settlement::Written, "{task_id}");
+        assert!(matches!(*settlement, Settlement::Written(_)), "{task_id}");
     }
     for task in &every_task {
         assert_eq!(live_status(&pool, task.task_id).await, None);
@@ -362,10 +370,8 @@ async fn a_plain_success_settle_is_one_round_trip() {
     )));
     let warm_up = claimed_now();
     seed_running(&pool, warm_up.task_id, WORKER, warm_up.claimed_at).await;
-    assert_eq!(
-        writer.settle(&warm_up, reported_value()).await,
-        Settlement::Written
-    );
+    let warmed = writer.settle(&warm_up, reported_value()).await;
+    assert!(matches!(warmed, Settlement::Written(_)), "{warmed:?}");
     let task = claimed_now();
     seed_running(&pool, task.task_id, WORKER, task.claimed_at).await;
 
@@ -373,7 +379,7 @@ async fn a_plain_success_settle_is_one_round_trip() {
     let settled = writer.settle(&task, reported_value()).await;
     let round_trips = proxy.round_trips();
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(round_trips, 1);
     assert_eq!(live_status(&pool, task.task_id).await, None);
     assert_eq!(

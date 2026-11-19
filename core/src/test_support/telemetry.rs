@@ -10,7 +10,7 @@ use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues};
 use crate::telemetry::registry::{
     ProcessFacts, Registry, RegistryLabels, SampleValue, WorkerFacts,
 };
-use crate::telemetry::worker::{EventQueue, TelemetryOn, WorkerTelemetry};
+use crate::telemetry::worker::{DeclaredCodesByTask, EventQueue, TelemetryOn, WorkerTelemetry};
 
 /// The most events that a test reads at once.
 const MOST_TEST_EVENTS: NonZeroUsize = match NonZeroUsize::new(4_096) {
@@ -61,10 +61,16 @@ pub(crate) struct WatchedTelemetry {
 }
 
 impl WatchedTelemetry {
+    /// On a worker registry with no declared name.
     pub(crate) fn new() -> Self {
-        let registry = worker_registry();
+        Self::with(worker_registry(), DeclaredCodesByTask::none())
+    }
+
+    /// On `registry`, with the declared codes `codes`.
+    pub(crate) fn with(registry: Arc<Registry>, codes: DeclaredCodesByTask) -> Self {
         let (on, queue) = TelemetryOn::with_event_queue(
             Arc::clone(&registry),
+            codes,
             crate::telemetry::worker::EVENT_QUEUE_CAPACITY,
         )
         .expect("the telemetry of a worker registry");
