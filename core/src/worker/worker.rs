@@ -2041,6 +2041,7 @@ impl Worker {
             Utc::now(),
             self.endpoint.clone(),
             handler_child,
+            self.telemetry.clone(),
             self.cancel.clone(),
         );
         // Runner heartbeats: one fenced statement per interval for every
