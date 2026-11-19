@@ -41,7 +41,7 @@ async fn three_error_codes_cross_the_worker() {
     };
     let showcase = build_app_for_url(settings.sqlx_url(), SchemaMode::MigrateAndValidate)
         .expect("the showcase app");
-    let _worker = support::WorkerProcess::start();
+    let _worker = support::WorkerProcess::start(&showcase).await;
 
     let bundle_id = id_for(tuning::PROMOTION_BUNDLE_BUG_RATE, "bundle-bug", None);
     let size_id = id_for(
